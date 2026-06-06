@@ -1,0 +1,7 @@
+from: markdown+mark
+filters:
+  - formatting/format_layout_item.lua
+  - formatting/format_reviewer_note.lua
+resource-path: 
+  - /home/jeremy/Workspace/Tools/pandoc/references
+reference-doc: reference.docx

@@ -1,0 +1,10 @@
+writer: markdown
+template: content
+filters:
+  - identity/provenance_capture.lua
+  - identity/build_hint_from_inputfile.lua
+  - identity/build_file_slug.lua
+  - io/emit_ndjson.lua
+
+
+

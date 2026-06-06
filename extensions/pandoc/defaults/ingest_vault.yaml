@@ -1,0 +1,20 @@
+# import_vault.yaml
+# Clean default for importing legacy docx/odt files into provisional markdown notes.
+
+from: docx+styles
+to: markdown+yaml_metadata_block+pipe_tables+fenced_divs+bracketed_spans+strikeout
+standalone: true
+
+# For normal vault import, accept tracked changes and do not import Word comments.
+track-changes: accept
+
+# Optional. Adjust or remove depending on whether legacy files contain useful images.
+extract-media: assets/imported-media
+
+filters:
+  - import/inject_provisional_slug.lua
+  - import/import_source_meta.lua
+  - import/normalize_legacy_styles.lua
+  - import/strip_word_junk.lua
+  - import/normalize_whitespace.lua
+  - import/normalize_headings.lua

@@ -1,0 +1,6 @@
+writer: plain
+filters:
+    - emit/emit_ndjson.lua
+
+
+

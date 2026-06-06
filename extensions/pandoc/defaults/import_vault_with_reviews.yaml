@@ -1,0 +1,19 @@
+# import_vault_with_reviews.yaml
+# Inspection default for legacy files where tracked changes/comments matter.
+# This is intentionally noisier than import_vault.yaml.
+
+from: docx+styles
+to: markdown+yaml_metadata_block+pipe_tables+fenced_divs+bracketed_spans+footnotes+strikeout
+standalone: true
+
+track-changes: all
+extract-media: assets/imported-media
+
+filters:
+  - inject_provisional_slug.lua
+  - import_source_meta.lua
+  - track_changes_to_notes.lua
+  - normalize_legacy_styles.lua
+  - strip_word_junk.lua
+  - normalize_whitespace.lua
+  - normalize_headings.lua
