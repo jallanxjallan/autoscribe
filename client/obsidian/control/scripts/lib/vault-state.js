@@ -1,0 +1,66 @@
+const fs = require('fs');
+const path = require('path');
+const { execFileSync } = require('child_process');
+
+function vaultRoot(app) {
+  const root = app?.vault?.adapter?.basePath;
+  if (!root) throw new Error('This query requires a filesystem-backed Obsidian vault.');
+  return root;
+}
+
+function autoscribeRoot() {
+  return path.join(process.env.HOME || '', '.local/share/autoscribe/obsidian/vaults');
+}
+
+function safeReadJson(file, fallback = null) {
+  try { return JSON.parse(fs.readFileSync(file, 'utf8')); }
+  catch { return fallback; }
+}
+
+function writeJson(file, data) {
+  fs.mkdirSync(path.dirname(file), { recursive: true });
+  fs.writeFileSync(file, JSON.stringify(data, null, 2) + '\n', 'utf8');
+}
+
+function statInfo(file) {
+  try {
+    const s = fs.statSync(file);
+    return { exists: true, size: s.size, mtime_ms: s.mtimeMs, mtime: s.mtime.toISOString() };
+  } catch {
+    return { exists: false, size: null, mtime_ms: null, mtime: null };
+  }
+}
+
+function relpath(root, file) {
+  return path.relative(root, file).split(path.sep).join('/');
+}
+
+function git(args, cwd) {
+  try {
+    return execFileSync('git', args, { cwd, encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'] }).trim();
+  } catch {
+    return '';
+  }
+}
+
+function gitFileState(root, abspath) {
+  const rel = relpath(root, abspath);
+  const statusText = git(['status', '--porcelain', '--', rel], root);
+  const commit = git(['log', '-n', '1', '--format=%H', '--', rel], root) || null;
+  const short_commit = commit ? commit.slice(0, 12) : null;
+  return {
+    repo_state: statusText ? 'dirty' : 'clean',
+    git_status: statusText || '',
+    git_commit: commit,
+    short_commit,
+    has_prior_commit: Boolean(commit),
+  };
+}
+
+function workflowDir(app, name) {
+  const root = vaultRoot(app);
+  const key = path.basename(root).toLowerCase().replace(/[^a-z0-9]+/g, '-');
+  return path.join(autoscribeRoot(), key, 'workflow', name);
+}
+
+module.exports = { vaultRoot, autoscribeRoot, safeReadJson, writeJson, statInfo, relpath, gitFileState, workflowDir };

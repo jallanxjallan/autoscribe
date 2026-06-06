@@ -1,0 +1,49 @@
+# Obsidian vault-local state
+# These files change during normal use and should not be treated as project history.
+.obsidian/workspace.json
+.obsidian/workspaces.json
+.obsidian/workspace-mobile.json
+.obsidian/cache/
+.trash/
+
+# Community plugin packages
+# Keep plugin configuration, but ignore installed plugin code/assets.
+.obsidian/plugins/*
+!.obsidian/plugins/*/
+.obsidian/plugins/*/*
+!.obsidian/plugins/*/data.json
+
+# Local symlink mount points
+# Targets are versioned in their own repositories.
+# The create/update shell helpers may append additional discovered symlinks here.
+/_control
+/instructions/globals
+
+# Dropbox conflict debris
+# Prevent Dropbox-generated conflict files from entering Git history.
+*conflicted copy*
+*case conflict*
+*.dropbox.attr
+.dropbox
+.dropbox.cache/
+
+# Python/runtime noise from helper scripts
+__pycache__/
+*.py[cod]
+*$py.class
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+
+# Node/runtime noise from helper scripts
+node_modules/
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+
+# OS/editor noise
+.DS_Store
+Thumbs.db
+*~
+*.swp
+*.swo

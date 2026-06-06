@@ -1,0 +1,139 @@
+{
+  "quickadd:runQuickAdd": [],
+  "quickadd:choice:d4f2869c-c4f7-4892-8f89-74bc6f5dd78f": [
+    {
+      "modifiers": [
+        "Alt",
+        "Shift"
+      ],
+      "key": "N"
+    }
+  ],
+  "templater:create-new-note-from-template": [],
+  "templater:replace-in-file-templater": [],
+  "templater:insert-templater": [
+    {
+      "modifiers": [
+        "Alt",
+        "Shift"
+      ],
+      "key": "T"
+    }
+  ],
+  "workspace:toggle-pin": [
+    {
+      "modifiers": [
+        "Alt",
+        "Shift"
+      ],
+      "key": "P"
+    }
+  ],
+  "editor:insert-callout": [
+    {
+      "modifiers": [
+        "Mod",
+        "Shift"
+      ],
+      "key": "C"
+    }
+  ],
+  "editor:toggle-comments": [
+    {
+      "modifiers": [
+        "Mod",
+        "Shift"
+      ],
+      "key": "M"
+    }
+  ],
+  "editor:toggle-highlight": [
+    {
+      "modifiers": [
+        "Mod",
+        "Shift"
+      ],
+      "key": "H"
+    }
+  ],
+  "app:toggle-left-sidebar": [
+    {
+      "modifiers": [],
+      "key": "F9"
+    }
+  ],
+  "editor:toggle-strikethrough": [
+    {
+      "modifiers": [
+        "Mod",
+        "Shift"
+      ],
+      "key": "S"
+    }
+  ],
+  "quickadd:choice:e2d3d7b6-9c94-406e-b0e8-09cfd7cb1b73": [
+    {
+      "modifiers": [
+        "Alt",
+        "Shift"
+      ],
+      "key": "T"
+    }
+  ],
+  "quickadd:choice:5c4b5b1a-89cb-47f2-83da-c78d3f9f5370": [
+    {
+      "modifiers": [],
+      "key": "F3"
+    }
+  ],
+  "editor:toggle-fold-properties": [
+    {
+      "modifiers": [],
+      "key": "F8"
+    }
+  ],
+  "app:toggle-right-sidebar": [
+    {
+      "modifiers": [
+        "Shift"
+      ],
+      "key": "F9"
+    }
+  ],
+  "app:go-back": [
+    {
+      "modifiers": [
+        "Alt",
+        "Shift"
+      ],
+      "key": "ArrowLeft"
+    }
+  ],
+  "app:go-forward": [
+    {
+      "modifiers": [
+        "Alt",
+        "Shift"
+      ],
+      "key": "ArrowRight"
+    }
+  ],
+  "quickadd:choice:f6b103ee-91f0-4a63-a827-d9a4f9fd955e": [
+    {
+      "modifiers": [],
+      "key": "F3"
+    }
+  ],
+  "quickadd:choice:caebd934-84e0-43ed-bcfe-c9a2d44231f0": [
+    {
+      "modifiers": [],
+      "key": "F3"
+    }
+  ],
+  "quickadd:choice:a6c33ed6-42b1-4348-98a9-d86092e73b43": [
+    {
+      "modifiers": [],
+      "key": "F3"
+    }
+  ]
+}
