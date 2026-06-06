@@ -53,7 +53,7 @@ open-vault() {
 
 push-vault() {
   emulate -L zsh
-  _vault_node_script "vault/push-vault" "$@"
+  _vault_node_script "git/push-vault" "$@"
 }
 
 update-vault() {
@@ -73,7 +73,7 @@ Obsidian vault commands:
 
   create-vault     Initialize a new managed Obsidian vault from the control/template assets
   open-vault       Open the active or selected vault in Obsidian
-  push-vault       Push committed vault changes to the consolidated Studio remote
+  push-vault       Push committed vault changes to the configured vault remote
   update-vault     Update an Obsidian vault from the template/control assets
   update-core      Update shared core/control assets
 

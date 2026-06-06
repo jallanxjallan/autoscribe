@@ -12,7 +12,6 @@ _OBSIDIAN_FRONTEND_COMMANDS=(
   'upload-instructions:uploading/upload-instructions'
   'upload-plans:uploading/upload-plans'
   'upload-prompts:uploading/upload-prompts'
-  'enqueue-prompts:uploading/enqueue-prompts-command'
 
   'writeback:writing/writeback'
   'writenew:writing/writenew'
@@ -34,7 +33,7 @@ cli() {
   shift
 
   case "$command_name" in
-    create-vault|upload-instructions|upload-plans|upload-prompts|enqueue-prompts|writeback|writenew)
+    create-vault|upload-instructions|upload-plans|upload-prompts|writeback|writenew)
       "$command_name" "$@"
       ;;
     config)
@@ -65,8 +64,7 @@ Vault creation:
 AutoScribe upload/enqueue:
   upload-instructions             Upload dirty ins/gbl/cxt/spc files as NDJSON
   upload-plans                    Upload dirty plan.* files as NDJSON
-  upload-prompts                  Emit selected prompt records as NDJSON
-  enqueue-prompts                 Emit selected prompt call records from enqueue manifest
+  upload-prompts                  Emit selected run-manifest prompt records as NDJSON
 
 AutoScribe result writing:
   writeback                       Replace bodies of matching existing vault files

@@ -164,17 +164,12 @@ function runPandocUpload({ cwd = process.cwd(), input, defaults, metadata = {} }
     throw new Error('runPandocUpload requires input');
   }
 
-  const pandocDataDir = process.env.OBSIDIAN_PANDOC_DATA_DIR;
-  if (!pandocDataDir) {
-    throw new Error('OBSIDIAN_PANDOC_DATA_DIR is not set');
-  }
-
+  
   const metadataParts = metadataCommandParts(metadata);
 
   try {
     const args = [
-      '--data-dir',
-      pandocDataDir,
+      
       ...defaultsArgs(defaults),
       ...metadataParts.args,
       '--output=/dev/null',
