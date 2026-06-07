@@ -42,8 +42,8 @@ def load_catalog() -> dict[str, Any]:
         raise TypeError(f"registry catalog registries must be an object: {path}")
 
     for name in DEFAULT_REGISTRIES:
-        value = registries.setdefault(name, {})
-        if not isinstance(value, dict):
+        records = registries.setdefault(name, {})
+        if not isinstance(records, dict):
             raise TypeError(f"registry catalog section must be an object: {name}")
 
     catalog.setdefault("schema_version", 1)
@@ -61,10 +61,11 @@ def save_catalog(catalog: dict[str, Any]) -> Path:
 
 
 def list_registered_components(registry: str) -> dict[str, dict[str, Any]]:
+    clean_registry = _clean_registry_name(registry)
     catalog = load_catalog()
-    records = catalog.get("registries", {}).get(registry, {})
+    records = catalog.get("registries", {}).get(clean_registry, {})
     if not isinstance(records, dict):
-        raise TypeError(f"registry catalog section must be an object: {registry}")
+        raise TypeError(f"registry catalog section must be an object: {clean_registry}")
     return {str(key): dict(value) for key, value in records.items()}
 
 
@@ -74,10 +75,8 @@ def upsert_registered_component(
     key: str,
     record: dict[str, Any],
 ) -> Path:
-    clean_registry = _clean_name(registry, label="registry")
-    clean_key = key.strip()
-    if not clean_key:
-        raise ValueError("registry component key cannot be empty")
+    clean_registry = _clean_registry_name(registry)
+    clean_key = _require_component_key(key)
 
     catalog = load_catalog()
     registries = catalog.setdefault("registries", {})
@@ -92,10 +91,8 @@ def upsert_registered_component(
 
 
 def remove_registered_component(*, registry: str, key: str) -> bool:
-    clean_registry = _clean_name(registry, label="registry")
-    clean_key = key.strip()
-    if not clean_key:
-        raise ValueError("registry component key cannot be empty")
+    clean_registry = _clean_registry_name(registry)
+    clean_key = _require_component_key(key)
 
     catalog = load_catalog()
     records = catalog.get("registries", {}).get(clean_registry, {})
@@ -108,13 +105,19 @@ def remove_registered_component(*, registry: str, key: str) -> bool:
     return existed
 
 
-def _clean_name(value: str, *, label: str) -> str:
+def _clean_registry_name(value: str) -> str:
     name = value.strip()
-    if not name:
-        raise ValueError(f"{label} name cannot be empty")
-    if any(part.startswith("_") or not part.isidentifier() for part in name.split("_")):
-        raise ValueError(f"invalid {label} name: {value!r}")
+    if name not in DEFAULT_REGISTRIES:
+        allowed = ", ".join(DEFAULT_REGISTRIES)
+        raise ValueError(f"unknown registry {value!r}; expected one of: {allowed}")
     return name
+
+
+def _require_component_key(value: str) -> str:
+    key = value.strip()
+    if not key:
+        raise ValueError("registry component key cannot be empty")
+    return key
 
 
 __all__ = [

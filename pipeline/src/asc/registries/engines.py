@@ -3,8 +3,6 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Any, Protocol
 
-from asc.models.control.driver import DriverRecord
-from asc.models.control.instruction import InstructionRecord
 from asc.registries.extensions import load_engine_call
 
 
@@ -13,52 +11,41 @@ class EngineCall(Protocol):
         self,
         *,
         prompt: str,
-        driver: DriverRecord,
-        instructions: list[InstructionRecord],
-    ) -> dict[str, Any]: ...
-
-
-class CallEngine(Protocol):
-    def make_call(
-        self,
-        *,
-        prompt: str,
-        instructions: list[InstructionRecord],
+        instructions: list[Any] | None = None,
         step_args: dict[str, Any] | None = None,
     ) -> dict[str, Any]: ...
 
 
 @dataclass(frozen=True)
 class RegisteredEngine:
-    driver: DriverRecord
+    """Thin wrapper around a runtime engine make_call callable."""
+
+    component: str
     engine_call: EngineCall
 
     def make_call(
         self,
         *,
         prompt: str,
-        instructions: list[InstructionRecord],
+        instructions: list[Any] | None = None,
         step_args: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
-        driver = self.driver
-
-        if step_args:
-            driver = self.driver.model_copy(
-                update={"args": {**dict(self.driver.args), **step_args}}
-            )
-
         return self.engine_call(
             prompt=prompt,
-            driver=driver,
-            instructions=instructions,
+            instructions=list(instructions or []),
+            step_args=dict(step_args or {}),
         )
 
 
-def build_engine(*, driver: DriverRecord) -> CallEngine:
+def build_engine(component: str) -> RegisteredEngine:
+    clean_component = component.strip()
+    if not clean_component:
+        raise ValueError("engine component cannot be empty")
+
     return RegisteredEngine(
-        driver=driver,
-        engine_call=load_engine_call(driver.client),
+        component=clean_component,
+        engine_call=load_engine_call(clean_component),
     )
 
 
-__all__ = ["CallEngine", "RegisteredEngine", "build_engine"]
+__all__ = ["EngineCall", "RegisteredEngine", "build_engine"]

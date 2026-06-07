@@ -30,26 +30,41 @@ MODEL_CONTRACTS: dict[str, ModelContractRef] = {
     "input:prompt": ModelContractRef(
         group="input",
         name="prompt",
-        import_paths=("asc.models.uploaded.record.UploadedRecord",),
-        purpose="Typed NDJSON prompt records consumed by enqueue.",
-    ),
-    "input:driver": ModelContractRef(
-        group="input",
-        name="driver",
-        import_paths=("asc.models.control.driver.DriverRecord",),
-        purpose="Typed NDJSON driver control records consumed by control upload.",
+        import_paths=(
+            "asc.models.uploaded.record.UploadedRecord",
+            "asc.models.uploaded.prompt.PromptRecord",
+        ),
+        purpose="Typed prompt records consumed by enqueue.",
     ),
     "input:instruction": ModelContractRef(
         group="input",
         name="instruction",
         import_paths=("asc.models.control.instruction.InstructionRecord",),
-        purpose="Typed NDJSON instruction control records consumed by control upload.",
+        purpose="Typed instruction control records consumed by control upload.",
     ),
-    "input:job": ModelContractRef(
+    "input:plan": ModelContractRef(
         group="input",
-        name="job",
-        import_paths=("asc.models.control.job.JobRecord",),
-        purpose="Typed NDJSON job control records consumed by control upload.",
+        name="plan",
+        import_paths=("asc.models.control.plan.PlanRecord",),
+        purpose="Typed plan control records consumed by control upload.",
+    ),
+    "runtime:call": ModelContractRef(
+        group="runtime",
+        name="call",
+        import_paths=("asc.models.runtime.call.CallRecord",),
+        purpose="Runtime call record materialized by enqueue.",
+    ),
+    "runtime:step": ModelContractRef(
+        group="runtime",
+        name="step",
+        import_paths=("asc.models.runtime.step.RuntimeStepRecord",),
+        purpose="Runtime atomic step record consumed by workers.",
+    ),
+    "runtime:content": ModelContractRef(
+        group="runtime",
+        name="content",
+        import_paths=("asc.models.runtime.content.RuntimeContentRecord",),
+        purpose="Runtime content record consumed and produced by workers.",
     ),
     "export:pending-export": ModelContractRef(
         group="export",
@@ -71,8 +86,6 @@ MODEL_CONTRACTS: dict[str, ModelContractRef] = {
     ),
 }
 
-# Friendly legacy spellings for CLI convenience only. These do not change stream
-# type values or emitted contracts.
 CONTRACT_ALIASES: dict[str, str] = {
     "export:pending": "export:pending-export",
     "export:update": "export:export-update",
@@ -80,7 +93,6 @@ CONTRACT_ALIASES: dict[str, str] = {
 
 
 def available_contracts() -> dict[str, dict[str, Any]]:
-    """Return registered contract aliases without importing their models."""
     return {
         key: {
             "group": ref.group,
@@ -121,7 +133,6 @@ def resolve_model(model_ref: str) -> type[BaseModel]:
         candidate_paths = (canonical_ref,)
 
     errors: list[str] = []
-
     for import_path in candidate_paths:
         try:
             obj = import_object(import_path)
@@ -221,7 +232,6 @@ def contract_for_model(
     config = getattr(model_type, "model_config", {}) or {}
 
     fields: list[dict[str, Any]] = []
-
     for name, field_info in model_type.model_fields.items():
         fields.append(
             {
@@ -258,9 +268,17 @@ def contract_for_ref(model_ref: str) -> dict[str, Any]:
     ref = MODEL_CONTRACTS.get(canonical_ref)
     return contract_for_model(
         model_type,
-        alias=canonical_ref if ref else None,
+        alias=canonical_ref,
         purpose=ref.purpose if ref else "",
     )
+
+
+def contracts_for_group(group: str) -> dict[str, dict[str, Any]]:
+    return {
+        key: contract_for_ref(key)
+        for key, ref in sorted(MODEL_CONTRACTS.items())
+        if ref.group == group
+    }
 
 
 def format_contract_text(contract: Mapping[str, Any]) -> str:
@@ -327,13 +345,17 @@ def format_contract_text(contract: Mapping[str, Any]) -> str:
 
 __all__ = [
     "CONTRACT_ALIASES",
-    "ContractResolutionError",
     "MODEL_CONTRACTS",
+    "ContractResolutionError",
     "ModelContractRef",
+    "annotation_to_string",
     "available_contracts",
     "canonical_contract_ref",
     "contract_for_model",
     "contract_for_ref",
     "format_contract_text",
+    "contracts_for_group",
+    "import_object",
+    "input_names_for_field",
     "resolve_model",
 ]
