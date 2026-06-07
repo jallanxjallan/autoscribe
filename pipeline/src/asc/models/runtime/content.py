@@ -28,7 +28,7 @@ def runtime_content_key(
     clean_domain = redis_key_segment_text(domain, "domain")
     clean_identity = redis_key_segment_text(identity, "identity")
     clean_position = _positive_position(position)
-    return f"{clean_domain}:{clean_identity}:content:{clean_position}"
+    return f"{clean_domain}:{clean_identity}:content.{clean_position}"
 
 
 class RuntimeContentRef(BaseModel):
@@ -43,8 +43,7 @@ class RuntimeContentRef(BaseModel):
 
 
 class RuntimeContentRecord(RedisModel):
-    namespace: ClassVar[str] = "runtime"
-    domain: ClassVar[str] = namespace
+    domain: ClassVar[str] = "runtime"
     kind: ClassVar[str] = "content"
 
     model_config = ConfigDict(extra="ignore")

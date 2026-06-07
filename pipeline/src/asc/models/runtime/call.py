@@ -10,83 +10,55 @@ from asc.redis.model_base import RedisModel
 
 
 class RuntimeCallRecord(RedisModel):
-    """
-    Redis-persisted runtime call anchor for one uploaded prompt record.
+    """Redis-persisted runtime call anchor for one uploaded prompt/chunk.
 
-    The uploaded NDJSON row is preserved in raw_record for custody/export, but
-    execution reads prompt text from the runtime content chain, not from the call
-    record. Enqueue seeds content position 1 from source_content before workers
-    run.
+    The call owns the uploaded prompt row as raw_json. Executable text begins in
+    the runtime content chain at position 1.
     """
 
     model_config = ConfigDict(extra="ignore")
 
-    domain: ClassVar[str] = "call"
-    kind: ClassVar[str] = "record"
+    domain: ClassVar[str] = "runtime"
+    kind: ClassVar[str] = "call"
 
     type: Literal["runtime-call"] = "runtime-call"
     identity: str
-    identifier: str
+    plan: str
+    plan_key: str
     plan_slug: str
-    raw_record: dict[str, Any] = Field(default_factory=dict)
+    raw_json: dict[str, Any]
     created_at: int = Field(default_factory=timestamp)
 
     @model_validator(mode="before")
     @classmethod
-    def materialize_from_prompt_row(cls, value: object) -> object:
-        if not isinstance(value, Mapping):
+    def normalize_shape(cls, value: object) -> object:
+        if not isinstance(value, dict):
             return value
-
         normalized = dict(value)
+        if "raw_json" not in normalized and "raw_record" in normalized:
+            normalized["raw_json"] = normalized["raw_record"]
+        return normalized
 
-        # Already-persisted runtime records are loaded as-is.
-        if normalized.get("type") == "runtime-call":
-            return normalized
-
-        raw_record = dict(normalized)
-
-        record_type = plain_non_empty_string(raw_record.get("type"), "type")
-        if record_type != "prompt":
-            raise ValueError(f"runtime call requires type='prompt', got {record_type!r}")
-
-        # The stream/upload gatekeeper also checks these global fields. The
-        # runtime model repeats the check so direct enqueue_record() calls cannot
-        # bypass the persisted-record contract.
-        identifier = plain_non_empty_string(raw_record.get("identifier"), "identifier")
-        plan_slug = slug_like_text(raw_record.get("plan_slug"), "plan_slug")
-        plain_non_empty_string(raw_record.get("content"), "content")
-
-        return {
-            "type": "runtime-call",
-            "identity": normalized.get("identity"),
-            "identifier": identifier,
-            "plan_slug": plan_slug,
-            "raw_record": raw_record,
-            "created_at": normalized.get("created_at", timestamp()),
-        }
-
-    @field_validator("identity", mode="before")
+    @field_validator("identity", "plan", mode="before")
     @classmethod
     def validate_identity(cls, value: object) -> str:
         return redis_key_segment_text(value, "identity")
 
-    @field_validator("identifier", mode="before")
-    @classmethod
-    def validate_identifier(cls, value: object) -> str:
-        return plain_non_empty_string(value, "identifier")
-
     @field_validator("plan_slug", mode="before")
     @classmethod
     def validate_plan_slug(cls, value: object) -> str:
-        return slug_like_text(value, "plan_slug")
+        return slug_like_text(value)
 
-    @field_validator("raw_record", mode="before")
+    @field_validator("plan_key", mode="before")
     @classmethod
-    def validate_raw_record(cls, value: object) -> dict[str, Any]:
-        if value is None:
-            return {}
-        if not isinstance(value, Mapping):
-            raise ValueError("raw_record must be an object")
+    def validate_plan_key(cls, value: object) -> str:
+        return plain_non_empty_string(value, "plan_key")
+
+    @field_validator("raw_json", mode="before")
+    @classmethod
+    def validate_raw_json(cls, value: object) -> dict[str, Any]:
+        if not isinstance(value, dict):
+            raise ValueError("raw_json must be an object")
         return dict(value)
 
     @classmethod
@@ -95,8 +67,17 @@ class RuntimeCallRecord(RedisModel):
         *,
         identity: str,
         raw_record: Mapping[str, Any],
+        plan: str,
+        plan_key: str,
     ) -> "RuntimeCallRecord":
-        return cls(identity=identity, **dict(raw_record))
+        plan_slug = _plan_slug_from_record(raw_record)
+        return cls(
+            identity=identity,
+            plan=plan,
+            plan_key=plan_key,
+            plan_slug=plan_slug,
+            raw_json=dict(raw_record),
+        )
 
     @property
     def call_identity(self) -> str:
@@ -104,9 +85,29 @@ class RuntimeCallRecord(RedisModel):
 
     @property
     def source_content(self) -> str:
-        """Return the uploaded source text used to seed content position 1."""
+        return _content_from_record(self.raw_json)
 
-        return plain_non_empty_string(self.raw_record.get("content"), "raw_record.content")
+    @property
+    def prompt_slug(self) -> str | None:
+        for key in ("identifier", "slug", "prompt_slug"):
+            value = self.raw_json.get(key)
+            if isinstance(value, str) and value.strip():
+                return value.strip()
+        return None
+
+
+def _plan_slug_from_record(record: Mapping[str, Any]) -> str:
+    value = record.get("plan_slug")
+    if value is None:
+        raise ValueError("prompt record must include plan_slug")
+    return slug_like_text(value)
+
+
+def _content_from_record(record: Mapping[str, Any]) -> str:
+    value = record.get("content")
+    if value is None:
+        value = record.get("payload_content")
+    return plain_non_empty_string(value, "content")
 
 
 CallRecord = RuntimeCallRecord
