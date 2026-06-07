@@ -8,11 +8,12 @@ REDIS_URL = "redis://127.0.0.1:6379/0"
 SQL_LEDGER_PATH = Path("/home/jeremy/.local/share/autoscribe/db/ledger.sql")
 # External runtime components live outside the AutoScribe source tree.
 # Keep this deliberately hard-coded for the local development workflow.
-AUTOSCRIBE_EXTENSIONS_ROOT = Path("/home/jeremy/Workspace/Tools/extensions").resolve()
+AUTOSCRIBE_EXTENSIONS_ROOT = Path("/home/jeremy/AutoScribe/extensions").resolve()
 
-# Packages expected directly under AUTOSCRIBE_EXTENSIONS_ROOT.
-AUTOSCRIBE_ENGINE_PACKAGES = ("autoscribe_engines",)
-AUTOSCRIBE_SCRIPT_PACKAGES = ("autoscribe_scripts",)
+AUTOSCRIBE_ENGINE_PACKAGES = ("engines",)
+AUTOSCRIBE_SCRIPT_PACKAGES = ("scripts",)
+
+
 
 
 
