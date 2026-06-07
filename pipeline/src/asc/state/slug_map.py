@@ -3,75 +3,46 @@ from __future__ import annotations
 from typing import Literal, overload
 
 from asc.redis.index_base import FixedRedisHashIndex
-from asc.redis.key_builder import build_key
 
 
-STATE_NAMESPACE = "state"
-CONTROL_DOMAIN = STATE_NAMESPACE  # compatibility alias
-SLUGMAP_SEGMENT = "slugmap"
-SLUGMAP_KIND = SLUGMAP_SEGMENT  # compatibility alias
-SLUGMAP_IDENTITY = "global"
+SLUGMAP_KEY = "state:global:slugmap"
 
 
-def _require_single_segment(value: object, *, field_name: str) -> str:
+def _segment(value: object, field_name: str) -> str:
     if not isinstance(value, str):
         raise TypeError(f"{field_name} must be a string")
-    value = value.strip()
-    if not value:
-        raise ValueError(f"{field_name} must be a non-empty string")
-    if ":" in value:
+    text = value.strip()
+    if not text:
+        raise ValueError(f"{field_name} must be non-empty")
+    if ":" in text:
         raise ValueError(f"{field_name} must not contain ':'")
-    return value
+    return text
 
 
 class SlugMap(FixedRedisHashIndex):
-    KEY = build_key(STATE_NAMESPACE, SLUGMAP_IDENTITY, SLUGMAP_SEGMENT)
+    KEY = SLUGMAP_KEY
 
     @overload
     def resolve_identity(self, slug: str, *, require: Literal[True]) -> str: ...
 
     @overload
-    def resolve_identity(
-        self,
-        slug: str,
-        *,
-        require: Literal[False] = False,
-    ) -> str | None: ...
+    def resolve_identity(self, slug: str, *, require: Literal[False] = False) -> str | None: ...
 
     def resolve_identity(self, slug: str, *, require: bool = False) -> str | None:
-        slug = _require_single_segment(slug, field_name="slug")
-        return self.resolve_pointer(
-            slug,
-            require=require,
-            missing_label="slugmap",
-        )
+        return self.resolve_pointer(_segment(slug, "slug"), require=require, missing_label="slugmap")
 
-    def bind_slug(
-        self,
-        slug: str,
-        identity: str,
-        *,
-        overwrite: bool = False,
-    ) -> str:
-        slug = _require_single_segment(slug, field_name="slug")
-        identity = _require_single_segment(identity, field_name="identity")
-        return self.bind_pointer(
-            slug,
-            identity,
-            overwrite=overwrite,
-            collision_label="slug",
-        )
+    def bind_slug(self, slug: str, identity: str, *, overwrite: bool = False) -> str:
+        return self.bind_pointer(_segment(slug, "slug"), _segment(identity, "identity"), overwrite=overwrite, collision_label="slug")
 
     def has_slug(self, slug: str) -> bool:
-        slug = _require_single_segment(slug, field_name="slug")
-        return self.has_pointer(slug)
+        return self.has_pointer(_segment(slug, "slug"))
 
 
 _SLUGMAP = SlugMap()
 
 
 def slugmap_hash_key() -> str:
-    return SlugMap.KEY
+    return SLUGMAP_KEY
 
 
 @overload
@@ -94,15 +65,4 @@ def has_slug(slug: str) -> bool:
     return _SLUGMAP.has_slug(slug)
 
 
-__all__ = [
-    "STATE_NAMESPACE",
-    "CONTROL_DOMAIN",
-    "SLUGMAP_SEGMENT",
-    "SLUGMAP_KIND",
-    "SLUGMAP_IDENTITY",
-    "SlugMap",
-    "bind_slug",
-    "has_slug",
-    "resolve_identity",
-    "slugmap_hash_key",
-]
+__all__ = ["SLUGMAP_KEY", "SlugMap", "bind_slug", "has_slug", "resolve_identity", "slugmap_hash_key"]
