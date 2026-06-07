@@ -1,0 +1,1 @@
+"""AutoScribe CLI package."""

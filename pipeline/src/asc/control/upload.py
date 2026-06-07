@@ -5,21 +5,19 @@ from collections.abc import Iterable, Mapping
 from dataclasses import dataclass, field
 from typing import Any, TextIO, TypeVar
 
-from pydantic import BaseModel, ValidationError
+from pydantic import ValidationError
 
-from asc.models.control.driver import DriverRecord
 from asc.models.control.instruction import InstructionRecord
 from asc.models.control.plan import PlanRecord
 from asc.redis.model_base import RedisModel
 from asc.state.control_slugmap import ControlSlugMap
 from asc.streams.ndjson import NdjsonParseError, iter_ndjson_records
 
-ControlRecord = DriverRecord | InstructionRecord | PlanRecord
+ControlRecord = InstructionRecord | PlanRecord
 ControlModel = type[ControlRecord]
 TControl = TypeVar("TControl", bound=RedisModel)
 
 CONTROL_MODELS: dict[str, ControlModel] = {
-    "driver": DriverRecord,
     "instruction": InstructionRecord,
     "plan": PlanRecord,
 }
@@ -30,10 +28,6 @@ class UploadReport:
     record_count: int = 0
     skipped_count: int = 0
     by_type: dict[str, int] = field(default_factory=dict)
-
-
-def upload_drivers_stream(source: TextIO) -> UploadReport:
-    return upload_typed_control_stream(source, expected_type="driver")
 
 
 def upload_instructions_stream(source: TextIO) -> UploadReport:
@@ -53,11 +47,11 @@ def upload_typed_control_stream(
     """
     Upload one explicitly targeted control stream.
 
-    The command chooses the target model.  The NDJSON `type` field is retained
-    only as a guard so a driver stream cannot accidentally be sent to the
-    instruction or plan upload endpoint.
+    The command chooses the target model. The NDJSON `type` field is retained
+    only as a guard so one upload endpoint cannot accidentally consume another
+    control type.
 
-    Bad records are reported to stderr and skipped.  This keeps producer output
+    Bad records are reported to stderr and skipped. This keeps producer output
     streams clean and lets one damaged control file avoid poisoning the whole
     upload run.
     """
@@ -156,6 +150,7 @@ def _record_label(record: RedisModel, *, fallback: str) -> str:
         return description.strip().splitlines()[0].strip() or fallback
 
     return fallback
+
 
 __all__ = [
     "CONTROL_MODELS",

@@ -9,7 +9,6 @@ from asc.control.list import list_control_slugs
 from asc.control.snapshot import build_control_snapshot
 from asc.control.upload import (
     UploadReport,
-    upload_drivers_stream,
     upload_instructions_stream,
     upload_plans_stream,
 )
@@ -40,7 +39,6 @@ def _finish(kind: str, report: UploadReport) -> None:
 
 def _run_upload(kind: str) -> None:
     uploaders = {
-        "drivers": upload_drivers_stream,
         "instructions": upload_instructions_stream,
         "plans": upload_plans_stream,
     }
@@ -59,13 +57,6 @@ def _run_upload(kind: str) -> None:
 def upload_instructions() -> None:
     """Upload instruction records from streamed NDJSON."""
     _run_upload("instructions")
-
-
-@upload_app.command("drivers")
-def upload_drivers() -> None:
-    """Upload driver records from streamed NDJSON."""
-    _run_upload("drivers")
-
 
 @upload_app.command("plans")
 def upload_plans() -> None:

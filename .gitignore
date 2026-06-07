@@ -1,0 +1,78 @@
+# Python
+
+**pycache**/
+*.py[cod]
+*$py.class
+
+# Virtual environments
+
+.venv/
+venv/
+env/
+
+# Build artifacts
+
+build/
+dist/
+*.egg-info/
+
+# Test / coverage
+
+.pytest_cache/
+.coverage
+htmlcov/
+
+# Type checkers
+
+.mypy_cache/
+.pyright/
+.ruff_cache/
+
+# IDEs
+
+.vscode/
+.idea/
+
+# OS files
+
+.DS_Store
+Thumbs.db
+
+# Redis dumps
+
+dump.rdb
+
+# Local databases
+
+*.sqlite
+*.sqlite3
+
+# Local runtime state
+
+.state/
+tmp/
+logs/
+
+# Obsidian plugin state
+
+.obsidian/workspace.json
+.obsidian/workspaces.json
+
+# Node
+
+node_modules/
+
+# Local AutoScribe state
+
+.local/
+workflow/
+
+# Temporary exports
+
+exports/
+*.ndjson
+
+# Pandoc temp files
+
+*.tmp
+*.temp

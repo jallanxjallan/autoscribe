@@ -1,0 +1,36 @@
+[build-system]
+requires = ["setuptools>=61"]
+build-backend = "setuptools.build_meta"
+
+
+[project]
+name = "AutoScribe"
+version = "0.0.0"
+description = "Immutable editorial pipeline (v2)"
+readme = "README.md"
+requires-python = ">=3.13"
+license = { text = "MIT" }
+
+
+authors = [
+  { name = "Jeremy Allan" }
+]
+
+dependencies = [
+  "pydantic>=2.11,<3",
+  "pyyaml>=6.0",
+  "typer>=0.12",
+  "openai>=1.0",
+  "tenacity>=8.2",
+  "tabulate>=0.9"
+]
+
+
+[tool.setuptools]
+package-dir = {"" = "src"}
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[project.scripts]
+asc = "asc.cli.__main__:main"
