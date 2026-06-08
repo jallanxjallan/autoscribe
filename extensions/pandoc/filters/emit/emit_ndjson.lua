@@ -225,8 +225,20 @@ local function meta_to_record(meta)
     end
   end
 
-  record.identifier = first_non_blank(record.identifier, record.slug, legacy_identity)
+  record.record_identity =
+  first_non_blank(
+    record.record_identity,
+    record.identifier,
+    record.slug,
+    legacy_identity
+  )
 
+record.record_type =
+  first_non_blank(
+    record.record_type,
+    record.control_type,
+    record.kind
+  )
   return record
 end
 

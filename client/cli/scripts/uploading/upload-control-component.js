@@ -26,26 +26,17 @@ const {
 const DEFAULTS = ['upload_control'];
 
 const COMPONENTS = {
-  drivers: {
-    singular: 'driver',
-    recordType: 'driver',
-    prefixes: new Set(['drv']),
-    label: 'drivers',
-    requiresDriverConfig: true,
-  },
   instructions: {
     singular: 'instruction',
     recordType: 'instruction',
     prefixes: new Set(['ins', 'gbl', 'cxt', 'spc']),
     label: 'instructions',
-    requiresDriverConfig: false,
   },
   plans: {
     singular: 'plan',
     recordType: 'plan',
     prefixes: new Set(['plan']),
     label: 'plans',
-    requiresDriverConfig: false,
   },
 };
 
@@ -126,150 +117,6 @@ function parseArgs(argv, script, component) {
 
 function contentSha256(markdown) {
   return sha256(stripFrontmatter(markdown).trim());
-}
-
-function firstNonBlank(...values) {
-  for (const value of values) {
-    if (value !== undefined && value !== null && String(value).trim()) {
-      return String(value).trim();
-    }
-  }
-
-  return '';
-}
-
-function unquoteYamlScalar(value) {
-  const text = String(value || '').trim();
-
-  if (
-    (text.startsWith('"') && text.endsWith('"')) ||
-    (text.startsWith("'") && text.endsWith("'"))
-  ) {
-    return text.slice(1, -1);
-  }
-
-  return text;
-}
-
-function frontmatterText(markdown) {
-  const text = String(markdown || '');
-
-  if (!text.startsWith('---')) {
-    return '';
-  }
-
-  const match = text.match(/^---\r?\n([\s\S]*?)\r?\n---(?:\r?\n|$)/);
-  return match ? match[1] : '';
-}
-
-function parseScalarLines(text, { topLevelOnly = false } = {}) {
-  const out = {};
-  const lines = String(text || '').split(/\r?\n/);
-
-  for (const line of lines) {
-    if (!line.trim() || line.trim().startsWith('#')) {
-      continue;
-    }
-
-    if (topLevelOnly && /^\s/.test(line)) {
-      continue;
-    }
-
-    const match = line.match(/^\s*([A-Za-z0-9_.-]+)\s*:\s*(.*?)\s*$/);
-    if (!match) {
-      continue;
-    }
-
-    const [, key, rawValue] = match;
-
-    if (!rawValue.trim()) {
-      continue;
-    }
-
-    out[key] = unquoteYamlScalar(rawValue);
-  }
-
-  return out;
-}
-
-function findDriverSection(text) {
-  const lines = String(text || '').split(/\r?\n/);
-
-  for (let index = 0; index < lines.length; index += 1) {
-    const line = lines[index];
-    const match = line.match(/^(\s*)(?:["']?driver:?["']?)\s*:\s*$/);
-
-    if (!match) {
-      continue;
-    }
-
-    const baseIndent = match[1].length;
-    const section = [];
-
-    for (let cursor = index + 1; cursor < lines.length; cursor += 1) {
-      const next = lines[cursor];
-
-      if (!next.trim()) {
-        if (section.length > 0) break;
-        continue;
-      }
-
-      const indent = (next.match(/^\s*/) || [''])[0].length;
-
-      if (indent <= baseIndent) {
-        break;
-      }
-
-      section.push(next.slice(baseIndent + 1));
-    }
-
-    return section.join('\n');
-  }
-
-  return '';
-}
-
-function extractDriverConfigFromMarkdown(markdown) {
-  const frontmatter = frontmatterText(markdown);
-  const direct = parseScalarLines(frontmatter, { topLevelOnly: true });
-  const sectionText = findDriverSection(frontmatter) || findDriverSection(markdown);
-  const section = parseScalarLines(sectionText);
-  const raw = { ...direct, ...section };
-
-  const client = firstNonBlank(raw.client, raw.engine);
-  const driverType = firstNonBlank(raw.driver_type, raw['driver-type'], raw.driverType, raw.engine);
-  const args = {};
-  const reserved = new Set([
-    'type',
-    'slug',
-    'identifier',
-    'identity',
-    'control_prefix',
-    'client',
-    'engine',
-    'driver_type',
-    'driver-type',
-    'driverType',
-    'description',
-    'assets',
-    'source',
-  ]);
-
-  for (const [key, value] of Object.entries(raw)) {
-    if (reserved.has(key)) {
-      continue;
-    }
-
-    if (value !== undefined && value !== null && String(value).trim()) {
-      args[key] = String(value).trim();
-    }
-  }
-
-  return {
-    client,
-    driver_type: driverType,
-    args,
-  };
 }
 
 function shouldSkipPath(relPath) {
@@ -602,8 +449,8 @@ function buildComponentUploadMetadata({ root, item, uploadCommit = '', uploadedA
   const markdown = readVaultFile(root, item.path);
   const metadata = {
     slug: item.slug,
-    identifier: item.slug,
-    type: item.recordType,
+    record_identity: item.slug,
+    record_type: item.recordType,
     control_prefix: item.prefix,
     source: {
       origin: `obsidian.upload-${component.label}`,
@@ -618,22 +465,6 @@ function buildComponentUploadMetadata({ root, item, uploadCommit = '', uploadedA
       selection_order: item.order,
     },
   };
-
-  if (component.requiresDriverConfig) {
-    const driver = extractDriverConfigFromMarkdown(markdown);
-
-    if (!driver.client) {
-      throw new Error('driver control is missing client or engine');
-    }
-
-    if (!driver.driver_type) {
-      throw new Error('driver control is missing driver_type, driver-type, or engine');
-    }
-
-    metadata.client = driver.client;
-    metadata.driver_type = driver.driver_type;
-    metadata.args = driver.args;
-  }
 
   return metadata;
 }
@@ -780,7 +611,6 @@ module.exports = {
   COMPONENTS,
   runUploadControlComponent,
   contentSha256,
-  extractDriverConfigFromMarkdown,
   buildComponentUploadMetadata,
   prepareUploadRecords,
   hydrateControlPath,

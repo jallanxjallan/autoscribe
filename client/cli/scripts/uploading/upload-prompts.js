@@ -72,8 +72,8 @@ function buildPromptMetadata({ root, manifest, call, markdown, uploadedAt }) {
 
   return {
     slug: callSlug,
-    identifier: callSlug,
-    type: 'prompt',
+    record_identity: callSlug,
+    record_type: 'prompt',
     plan_slug: planSlug,
     source: {
       origin: 'obsidian.upload-prompts',

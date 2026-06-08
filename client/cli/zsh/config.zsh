@@ -3,7 +3,7 @@
 #
 # No compatibility aliases or path guessing. If the tree moves, change this file.
 
-export OBSIDIAN_CLI_VERSION="2026-06-06-no-drivers"
+export OBSIDIAN_CLI_VERSION="2026-06-08-current"
 
 # Package roots.
 export AUTOSCRIBE_CLIENT_ROOT="$HOME/AutoScribe/client"
