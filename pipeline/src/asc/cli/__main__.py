@@ -4,7 +4,7 @@ import typer
 
 from asc.cli.control import app as control_app
 from asc.cli.enqueue import app as enqueue_app
-# from asc.cli.export import app as export_app
+from asc.cli.export import app as export_app
 from asc.cli.ledger import app as ledger_app
 from asc.cli.registry import app as registry_app
 from asc.cli.run import app as run_app
@@ -49,11 +49,11 @@ app.add_typer(
     help="Manage storage, ledger rotation, and result persistence.",
 )
 
-# app.add_typer(
-#     export_app,
-#     name="export",
-#     help="Export completed results.",
-# )
+app.add_typer(
+    export_app,
+    name="export",
+    help="Export completed results.",
+)
 
 app.add_typer(
     registry_app,

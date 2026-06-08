@@ -156,7 +156,6 @@ __all__ = [
     "CONTROL_MODELS",
     "UploadReport",
     "save_control_record",
-    "upload_drivers_stream",
     "upload_instructions_stream",
     "upload_plans_stream",
     "upload_typed_control_stream",

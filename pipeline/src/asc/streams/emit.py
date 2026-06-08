@@ -5,7 +5,7 @@ from typing import Any, TextIO
 
 from pydantic import BaseModel
 
-from asc.streams.ndjson import write_ndjson_record
+from asc.streams.parser import write_ndjson_record
 
 
 def model_to_stream_record(model: BaseModel) -> dict[str, Any]:
