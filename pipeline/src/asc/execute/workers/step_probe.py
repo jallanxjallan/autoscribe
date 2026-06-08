@@ -149,8 +149,9 @@ class StepProbeWorker:
             prompt=input_content,
             input_content=input_content,
         )
+        result_key = str(result_record.redis_key)
         result_record.save()
-        enqueue_result(result_record.identity)
+        enqueue_result(result_key)
 
         next_step_key = self.redis.hget(step_index_key, str(output_position))
         if next_step_key:

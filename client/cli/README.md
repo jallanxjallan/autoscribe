@@ -23,10 +23,5 @@ AutoScribe commands:
 - `writeback`
 - `writenew`
 
-Removed stale job/driver-era commands from this tree:
-
-- `enqueue-job`
-- `enqueue-prompts`
-- `upload-controls`
-- `upload-drivers`
+Stale legacy command wrappers have been removed from this tree; the supported command surface is the list above.
 

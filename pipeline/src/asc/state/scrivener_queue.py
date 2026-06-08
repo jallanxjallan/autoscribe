@@ -17,6 +17,11 @@ class QueuedResult:
 
     @property
     def identity(self) -> str:
+        """Compatibility alias for old callers that expected `.identity`.
+
+        The value is now a full Redis key, not a bare ULID identity.
+        """
+
         return self.result_key
 
 
@@ -29,6 +34,8 @@ def _require_result_key(value: object, *, field_name: str = "result_key") -> str
         raise TypeError(f"{field_name} must be a Redis key string")
     if not text:
         raise ValueError(f"{field_name} must be non-empty")
+
+    # A queued result is a concrete Redis object pointer, not a bare ULID.
     RedisKey(text)
     return text
 
@@ -70,8 +77,8 @@ def scrivener_queue_key() -> str:
     return SCRIVENER_QUEUE_KEY
 
 
-def enqueue(result_identity: str, *, score: float | None = None) -> int:
-    return _QUEUE.enqueue(result_identity, score=score)
+def enqueue(result_key: str | RedisKey, *, score: float | None = None) -> int:
+    return _QUEUE.enqueue(result_key, score=score)
 
 
 def claim_next() -> QueuedResult | None:
