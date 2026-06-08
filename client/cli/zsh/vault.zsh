@@ -66,6 +66,11 @@ update-core() {
   _vault_node_script "vault/update-core" "$@"
 }
 
+reset-manifests() {
+  emulate -L zsh
+  _vault_node_script "maintenance/reset-manifests" "$@"
+}
+
 obsidian-vault-help() {
   emulate -L zsh
   cat <<'EOF_HELP'
@@ -76,6 +81,7 @@ Obsidian vault commands:
   push-vault       Push committed vault changes to the configured vault remote
   update-vault     Update an Obsidian vault from the template/control assets
   update-core      Update shared core/control assets
+  reset-manifests  Reset generated selection/run manifests for the active vault
 
 These commands are Obsidian-specific and are separate from frontend.zsh.
 EOF_HELP

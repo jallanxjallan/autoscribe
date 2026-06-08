@@ -1,7 +1,7 @@
 const fs = require('fs');
 const path = require('path');
 const { makeSlug } = require('../lib/slug.js');
-const { vaultRoot, writeJson, workflowDir } = require('../lib/vault-state.js');
+const { vaultRoot, writeJson } = require('../lib/vault-state.js');
 const { controlWarnings } = require('../lib/control-loader.js');
 
 function normalizeKind(value) {
@@ -157,6 +157,7 @@ function buildPlanRecord({
     vault: {
       name: path.basename(root),
       root,
+      storage: 'vault-local',
     },
     registry_snapshot,
     control_snapshot,
@@ -167,6 +168,14 @@ function buildPlanRecord({
     },
     steps: planSteps,
   };
+}
+
+function localAutoscribeDir(app) {
+  return path.join(vaultRoot(app), '.autoscribe');
+}
+
+function workflowDir(app, name) {
+  return path.join(localAutoscribeDir(app), 'workflow', name);
 }
 
 function planDir(app) {

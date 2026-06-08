@@ -1,22 +1,14 @@
 "use strict";
 
 const fs = require("node:fs");
-const os = require("node:os");
 const path = require("node:path");
 const crypto = require("node:crypto");
 const { sanitizeForPath } = require("./text");
 const {
   getVaultBasePath,
   getVaultName,
+  getActiveQueryPath,
 } = require("./query-runtime");
-
-function autoscribeHome() {
-  return (
-    process.env.AUTOSCRIBE_HOME ||
-    process.env.AUTOSCRIBE_DATA_ROOT ||
-    path.join(os.homedir(), ".local", "share", "autoscribe")
-  );
-}
 
 function shortHash(text) {
   return crypto
@@ -39,65 +31,142 @@ function getVaultKey(app) {
   return getVaultKeyFromRoot(getVaultBasePath(app), getVaultName(app));
 }
 
-function getOperationDirFromVaultKey({ vaultKey, group = "selections" }) {
-  if (!vaultKey || typeof vaultKey !== "string") {
-    throw new Error("getOperationDirFromVaultKey requires vaultKey.");
+function getAutoscribeDir(app) {
+  const vaultRoot = getVaultBasePath(app);
+  if (!vaultRoot || typeof vaultRoot !== "string") {
+    throw new Error("getAutoscribeDir requires an active vault root.");
   }
-  if (!group || typeof group !== "string") {
-    throw new Error("getOperationDirFromVaultKey requires group.");
-  }
-  return path.join(autoscribeHome(), "obsidian", "vaults", vaultKey, sanitizeForPath(group));
+  return path.join(vaultRoot, ".autoscribe");
 }
 
-function getOperationPathFromVaultKey({ vaultKey, group = "selections", name }) {
-  if (!name || typeof name !== "string") {
-    throw new Error("getOperationPathFromVaultKey requires name.");
-  }
-  return path.join(getOperationDirFromVaultKey({ vaultKey, group }), `${sanitizeForPath(name)}.json`);
-}
-
-function getManifestPathFromVaultKey({ vaultKey, operation }) {
-  return getOperationPathFromVaultKey({ vaultKey, group: "selections", name: operation });
-}
-
-function getOperationPath(app, { group = "selections", name }) {
-  return getOperationPathFromVaultKey({ vaultKey: getVaultKey(app), group, name });
+function getSelectionsDir(app) {
+  return path.join(getAutoscribeDir(app), "selections");
 }
 
 function getManifestPath(app, operation) {
-  return getManifestPathFromVaultKey({ vaultKey: getVaultKey(app), operation });
+  if (!app) {
+    throw new Error("getManifestPath requires app.");
+  }
+  if (!operation || typeof operation !== "string") {
+    throw new Error("getManifestPath requires operation.");
+  }
+
+  return path.join(
+    getSelectionsDir(app),
+    `${sanitizeForPath(operation)}.json`
+  );
 }
 
-function readJsonFile(file, fallback = null) {
+function readManifest(app, operation) {
+  const manifestPath = getManifestPath(app, operation);
+
   try {
-    return JSON.parse(fs.readFileSync(file, "utf8"));
+    return JSON.parse(fs.readFileSync(manifestPath, "utf8"));
   } catch (error) {
-    if (error?.code === "ENOENT") return fallback;
+    if (error?.code === "ENOENT") return null;
     throw error;
   }
 }
 
-function writeJsonFile(file, value) {
-  fs.mkdirSync(path.dirname(file), { recursive: true });
-  fs.writeFileSync(file, `${JSON.stringify(value, null, 2)}\n`, "utf8");
-  return file;
+function normalizeWriteArgs(args) {
+  if (args.length === 1 && args[0] && typeof args[0] === "object") {
+    return args[0];
+  }
+
+  const [app, operation, manifest] = args;
+  return { app, operation, manifest };
 }
 
-function readManifest(app, operation) {
-  return readJsonFile(getManifestPath(app, operation), null);
+function buildManifest({
+  app,
+  operation,
+  queryName,
+  namespace,
+  options = {},
+  items = [],
+  manifest,
+  extra = {},
+}) {
+  if (manifest !== undefined) {
+    if (!manifest || typeof manifest !== "object" || Array.isArray(manifest)) {
+      throw new Error("writeManifest manifest must be an object.");
+    }
+
+    return manifest;
+  }
+
+  if (!Array.isArray(items)) {
+    throw new Error("writeManifest items must be an array.");
+  }
+
+  const timestamp = new Date().toISOString();
+  const vaultRoot = getVaultBasePath(app);
+  const vaultName = getVaultName(app);
+  const vaultKey = getVaultKeyFromRoot(vaultRoot, vaultName);
+  let queryPath = "";
+
+  try {
+    queryPath = getActiveQueryPath(app);
+  } catch (_) {}
+
+  return {
+    type: "operation_manifest",
+    recordType: "operation_manifest",
+
+    timestamp,
+    savedAt: timestamp,
+    saved_at: timestamp,
+
+    operation,
+    queryName: queryName || operation,
+    namespace: namespace || operation,
+
+    vaultName,
+    vault: vaultName,
+    vaultRoot,
+    vaultKey,
+    vault_info: {
+      name: vaultName,
+      root: vaultRoot,
+      key: vaultKey,
+    },
+    queryPath,
+
+    options: options && typeof options === "object" && !Array.isArray(options)
+      ? options
+      : {},
+
+    count: items.length,
+    items,
+
+    ...extra,
+  };
+}
+
+function writeManifest(...args) {
+  const params = normalizeWriteArgs(args);
+  const { app, operation } = params;
+
+  if (!app) throw new Error("writeManifest requires app.");
+  if (!operation) throw new Error("writeManifest requires operation.");
+
+  const manifestPath = getManifestPath(app, operation);
+  const manifest = buildManifest(params);
+
+  fs.mkdirSync(path.dirname(manifestPath), { recursive: true });
+  fs.writeFileSync(manifestPath, `${JSON.stringify(manifest, null, 2)}\n`, "utf8");
+
+  return { manifestPath, manifest };
 }
 
 module.exports = {
-  autoscribeHome,
   shortHash,
   getVaultKeyFromRoot,
   getVaultKey,
-  getOperationDirFromVaultKey,
-  getOperationPathFromVaultKey,
-  getOperationPath,
-  getManifestPathFromVaultKey,
+  getAutoscribeDir,
+  getSelectionsDir,
   getManifestPath,
-  readJsonFile,
-  writeJsonFile,
   readManifest,
+  buildManifest,
+  writeManifest,
 };

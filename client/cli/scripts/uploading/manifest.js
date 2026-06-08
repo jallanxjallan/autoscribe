@@ -6,18 +6,10 @@ const path = require('node:path');
 const { fail } = require('./command');
 const { normalizeRelPath } = require('./selection');
 
-const {
-  getVaultKeyFromRoot,
-  getManifestPathFromVaultKey,
-} = require('../../lib/operation-manifest');
+const { getManifestPathForRoot } = require('../../lib/operation-manifest');
 
 function defaultManifestPath({ root, operation }) {
-  const vaultKey = getVaultKeyFromRoot(root);
-
-  return getManifestPathFromVaultKey({
-    vaultKey,
-    operation,
-  });
+  return getManifestPathForRoot({ root, operation });
 }
 
 function readJsonFile(filepath, script) {

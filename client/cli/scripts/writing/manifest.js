@@ -1,28 +1,19 @@
 const fs = require("node:fs");
-const os = require("node:os");
 const path = require("node:path");
-const crypto = require("node:crypto");
-
 function vaultKey(root) {
-  const name = path.basename(root)
+  return path.basename(path.resolve(root))
     .toLowerCase()
     .replace(/[^a-z0-9]+/g, "-")
     .replace(/^-+|-+$/g, "") || "vault";
+}
 
-  const digest = crypto
-    .createHash("sha1")
-    .update(root)
-    .digest("hex")
-    .slice(0, 8);
-
-  return `${name}-${digest}`;
+function localAutoscribeDir(root) {
+  return path.join(path.resolve(root), ".autoscribe");
 }
 
 function manifestPath(root, mode) {
   return path.join(
-    os.homedir(),
-    ".local/share/autoscribe/obsidian/vaults",
-    vaultKey(root),
+    localAutoscribeDir(root),
     mode,
     `${mode}-results.json`
   );
@@ -60,6 +51,7 @@ function writeWritingManifest({ root, mode, targetDir, written, script }) {
     timestamp: new Date().toISOString(),
     vault: root,
     vault_key: vaultKey(root),
+    storage: "vault-local",
     ...(targetDir ? { target_dir: targetDir.relative || targetDir } : {}),
     items: written.map(item => manifestItem(mode, item)),
   };
@@ -72,6 +64,7 @@ function writeWritingManifest({ root, mode, targetDir, written, script }) {
 
 module.exports = {
   vaultKey,
+  localAutoscribeDir,
   manifestPath,
   writeWritingManifest,
 };

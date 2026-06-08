@@ -1,54 +1,45 @@
-const os = require("node:os");
-const path = require("node:path");
-const crypto = require("node:crypto");
-const { sanitizeForPath } = require("./text");
+'use strict';
+
+const path = require('node:path');
 
 function autoscribeHome() {
-  return (
-    process.env.AUTOSCRIBE_HOME ||
-    process.env.AUTOSCRIBE_DATA_ROOT ||
-    path.join(os.homedir(), ".local", "share", "autoscribe")
+  return process.env.AUTOSCRIBE_HOME || '';
+}
+
+function getVaultKeyFromRoot(root) {
+  return path.basename(path.resolve(root))
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, '-')
+    .replace(/^-+|-+$/g, '') || 'vault';
+}
+
+function getVaultAutoscribeDir(root) {
+  return path.join(path.resolve(root), '.autoscribe');
+}
+
+function operationFilename(operation) {
+  const name = String(operation || '').trim();
+  return name.endsWith('.json') ? name : `${name}.json`;
+}
+
+function getManifestPathForRoot({ root, operation }) {
+  return path.join(
+    getVaultAutoscribeDir(root),
+    'selections',
+    operationFilename(operation)
   );
 }
 
-function shortHash(text) {
-  return crypto
-    .createHash("sha1")
-    .update(String(text))
-    .digest("hex")
-    .slice(0, 8);
-}
-
-function getVaultKeyFromRoot(root, name = "vault") {
-  if (!root || typeof root !== "string") {
-    throw new Error("getVaultKeyFromRoot requires a vault root path string.");
-  }
-
-  const base = name === "vault" ? path.basename(root) || name : name;
-  return `${sanitizeForPath(base)}-${shortHash(path.resolve(root))}`;
-}
-
 function getManifestPathFromVaultKey({ vaultKey, operation }) {
-  if (!vaultKey || typeof vaultKey !== "string") {
-    throw new Error("getManifestPathFromVaultKey requires vaultKey.");
-  }
-  if (!operation || typeof operation !== "string") {
-    throw new Error("getManifestPathFromVaultKey requires operation.");
-  }
-
-  return path.join(
-    autoscribeHome(),
-    "obsidian",
-    "vaults",
-    vaultKey,
-    "selections",
-    `${sanitizeForPath(operation)}.json`
+  throw new Error(
+    `vault-key manifest lookup is retired (${vaultKey || 'missing'}); pass a vault root and use getManifestPathForRoot()`
   );
 }
 
 module.exports = {
   autoscribeHome,
-  shortHash,
   getVaultKeyFromRoot,
+  getVaultAutoscribeDir,
+  getManifestPathForRoot,
   getManifestPathFromVaultKey,
 };

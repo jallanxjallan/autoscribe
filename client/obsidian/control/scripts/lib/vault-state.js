@@ -12,6 +12,10 @@ function autoscribeRoot() {
   return path.join(process.env.HOME || '', '.local/share/autoscribe/obsidian/vaults');
 }
 
+function autoscribeVaultDir(app) {
+  return path.join(vaultRoot(app), '.autoscribe');
+}
+
 function safeReadJson(file, fallback = null) {
   try { return JSON.parse(fs.readFileSync(file, 'utf8')); }
   catch { return fallback; }
@@ -58,9 +62,22 @@ function gitFileState(root, abspath) {
 }
 
 function workflowDir(app, name) {
-  const root = vaultRoot(app);
-  const key = path.basename(root).toLowerCase().replace(/[^a-z0-9]+/g, '-');
-  return path.join(autoscribeRoot(), key, 'workflow', name);
+  return path.join(autoscribeVaultDir(app), 'workflow', name);
 }
 
-module.exports = { vaultRoot, autoscribeRoot, safeReadJson, writeJson, statInfo, relpath, gitFileState, workflowDir };
+function selectionsDir(app) {
+  return path.join(autoscribeVaultDir(app), 'selections');
+}
+
+module.exports = {
+  vaultRoot,
+  autoscribeRoot,
+  autoscribeVaultDir,
+  selectionsDir,
+  safeReadJson,
+  writeJson,
+  statInfo,
+  relpath,
+  gitFileState,
+  workflowDir,
+};

@@ -5,7 +5,9 @@ const path = require('node:path');
 
 const { fail } = require('./command');
 const { normalizeRelPath } = require('./selection');
-const { autoscribeHome } = require('../../lib/operation-manifest');
+function localAutoscribeDir(root) {
+  return path.join(path.resolve(root), '.autoscribe');
+}
 
 function workflowVaultKey(root) {
   return path.basename(path.resolve(root)).toLowerCase().replace(/[^a-z0-9]+/g, '-');
@@ -13,10 +15,7 @@ function workflowVaultKey(root) {
 
 function defaultRunManifestPath({ root }) {
   return path.join(
-    autoscribeHome(),
-    'obsidian',
-    'vaults',
-    workflowVaultKey(root),
+    localAutoscribeDir(root),
     'workflow',
     'runs',
     'current-run.json'
@@ -131,6 +130,7 @@ function markCallUploadError({ manifest, call, error }) {
 module.exports = {
   defaultRunManifestPath,
   workflowVaultKey,
+  localAutoscribeDir,
   loadRunManifest,
   markCallUploaded,
   markCallUploadError,

@@ -2,7 +2,6 @@
 
 const fs = require('node:fs');
 const path = require('node:path');
-const os = require('node:os');
 
 const { fail, info } = require('./command');
 const {
@@ -367,43 +366,20 @@ function discoverComponentItems({ root, script, componentName, force = false }) 
 }
 
 
-function autoscribeVaultsDir() {
-  return process.env.AUTOSCRIBE_OBSIDIAN_VAULTS_DIR ||
-    path.join(os.homedir(), '.local', 'share', 'autoscribe', 'obsidian', 'vaults');
-}
-
-function planJsonFiles() {
-  const base = autoscribeVaultsDir();
-  let vaultEntries = [];
+function planJsonFiles(root) {
+  const plansDir = path.join(path.resolve(root), '.autoscribe', 'workflow', 'plans');
+  let planEntries = [];
 
   try {
-    vaultEntries = fs.readdirSync(base, { withFileTypes: true });
+    planEntries = fs.readdirSync(plansDir, { withFileTypes: true });
   } catch {
     return [];
   }
 
-  const files = [];
-
-  for (const entry of vaultEntries) {
-    if (!entry.isDirectory()) continue;
-
-    const plansDir = path.join(base, entry.name, 'workflow', 'plans');
-    let planEntries = [];
-
-    try {
-      planEntries = fs.readdirSync(plansDir, { withFileTypes: true });
-    } catch {
-      continue;
-    }
-
-    for (const planEntry of planEntries) {
-      if (planEntry.isFile() && planEntry.name.endsWith('.json')) {
-        files.push(path.join(plansDir, planEntry.name));
-      }
-    }
-  }
-
-  return files.sort((a, b) => a.localeCompare(b));
+  return planEntries
+    .filter((entry) => entry.isFile() && entry.name.endsWith('.json'))
+    .map((entry) => path.join(plansDir, entry.name))
+    .sort((a, b) => a.localeCompare(b));
 }
 
 function readPlanJson(file) {
@@ -426,14 +402,14 @@ function planBelongsToRoot(record, root, file) {
     return true;
   }
 
-  const vaultKey = path.basename(path.dirname(path.dirname(path.dirname(file)))).trim().toLowerCase();
-  return vaultKey === rootName;
+  const localPlansDir = path.join(expectedRoot, '.autoscribe', 'workflow', 'plans');
+  return path.dirname(file) === localPlansDir;
 }
 
 function loadPlanItems({ root, script, force = false }) {
   const items = [];
 
-  for (const file of planJsonFiles()) {
+  for (const file of planJsonFiles(root)) {
     try {
       const record = readPlanJson(file);
 

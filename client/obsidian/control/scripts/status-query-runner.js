@@ -94,7 +94,7 @@ async function renderStatusQuery({
 
   const {
     getVaultKeyFromRoot,
-    getManifestPathFromVaultKey,
+    getManifestPath,
   } = loader.requireControl("scripts/lib/operation-manifest.js");
 
   const statusQuery = loader.requireControl("scripts/lib/slug-status-query.js");
@@ -129,10 +129,7 @@ async function renderStatusQuery({
 
     const vaultKey = getVaultKeyFromRoot(vaultRoot);
 
-    const manifestPath = getManifestPathFromVaultKey({
-      vaultKey,
-      operation,
-    });
+    const manifestPath = getManifestPath(app, operation);
 
     const manifest = {
       type: "operation_manifest",

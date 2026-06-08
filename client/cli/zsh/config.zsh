@@ -14,8 +14,8 @@ export OBSIDIAN_CORE_ROOT="$OBSIDIAN_TOOLS_ROOT/core"
 export OBSIDIAN_PANDOC_DATA_DIR="$AUTOSCRIBE_CLIENT_ROOT/extensions"
 export OBSIDIAN_GLOBAL_INSTRUCTIONS="$HOME/Workspace/Library/instructions"
 
-# Local operation/state root. Generated manifests and selections live under
-# AUTOSCRIBE_HOME/obsidian, never inside _control.
+# Local operation/state root for global client cache only. Vault-specific
+# selections and manifests live inside <vault>/.autoscribe.
 export AUTOSCRIBE_HOME="$HOME/.local/share/autoscribe"
 export AUTOSCRIBE_DATA_ROOT="$AUTOSCRIBE_HOME"
 
