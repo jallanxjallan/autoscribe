@@ -27,8 +27,11 @@ from typing import Any
 
 import redis
 
+from asc.core.timestamp import timestamp
+from asc.models.runtime.result import StepResultRecord
 from asc.registries.extensions import load_engine_call
 from asc.state.runtime_step_queue import claim_next, enqueue_step
+from asc.state.scrivener_queue import enqueue as enqueue_result
 
 
 @dataclass(frozen=True, slots=True)
@@ -104,7 +107,9 @@ class StepProbeWorker:
                 f"engine {engine_name!r} make_call(...) did not return a callable"
             )
 
+        started_at = timestamp()
         output_content = call(input_content)
+        completed_at = timestamp()
 
         if not isinstance(output_content, str):
             raise TypeError(
@@ -125,6 +130,27 @@ class StepProbeWorker:
 
         self.redis.set(output_key, json.dumps(output_record, ensure_ascii=False))
         self.redis.hset(content_index_key, str(output_position), output_key)
+
+        result_record = StepResultRecord(
+            call_identity=identity,
+            step_number=step_number,
+            raw_json={
+                "engine": engine_name,
+                "args": args,
+            },
+            content=output_content,
+            fail_message=None,
+            started_at=started_at,
+            completed_at=completed_at,
+            input_key=input_key,
+            output_key=output_key,
+            handler=self._handler_from_args(args),
+            engine=engine_name,
+            prompt=input_content,
+            input_content=input_content,
+        )
+        result_record.save()
+        enqueue_result(result_record.identity)
 
         next_step_key = self.redis.hget(step_index_key, str(output_position))
         if next_step_key:
@@ -154,6 +180,13 @@ class StepProbeWorker:
 
     def _runtime_key(self, identity: str, suffix: str) -> str:
         return f"runtime:{identity}:{suffix}"
+
+    def _handler_from_args(self, args: dict[str, Any]) -> str | None:
+        for key in ("handler", "script", "label"):
+            value = args.get(key)
+            if isinstance(value, str) and value.strip():
+                return value.strip()
+        return None
 
     def _require_string(self, record: dict[str, Any], field: str) -> str:
         value = record.get(field)
