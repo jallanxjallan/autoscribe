@@ -8,11 +8,10 @@ from asc.models.helpers.plain import plain_non_empty_string, slug_like_text
 
 
 class UploadedRecord(BaseModel):
-    """Legacy prompt upload model retained for callers not yet using RuntimeCallRecord."""
-
     model_config = ConfigDict(extra="ignore")
 
-    type: Literal["prompt"]
+    record_type: Literal["prompt"]
+    record_identity: str | None = None
     plan_slug: str
     content: str
     raw_record: dict[str, Any] = Field(default_factory=dict)
@@ -24,10 +23,24 @@ class UploadedRecord(BaseModel):
             return value
 
         normalized = dict(value)
+
+        normalized["record_type"] = (
+            normalized.get("record_type")
+            or normalized.get("type")
+        )
+
+        normalized["record_identity"] = (
+            normalized.get("record_identity")
+            or normalized.get("identifier")
+            or normalized.get("slug")
+            or normalized.get("prompt_slug")
+        )
+
         if "plan_slug" not in normalized:
             normalized["plan_slug"] = normalized.get("payload_frontmatter_plan_slug")
         if "content" not in normalized:
             normalized["content"] = normalized.get("payload_content")
+
         normalized.setdefault("raw_record", dict(normalized))
         return normalized
 
@@ -50,9 +63,13 @@ class UploadedRecord(BaseModel):
             raise ValueError("raw_record must be an object")
         return dict(value)
 
+
     @property
     def prompt_slug(self) -> str | None:
-        for key in ("identifier", "slug", "prompt_slug"):
+        if self.record_identity:
+            return self.record_identity.strip()
+
+        for key in ("record_identity", "identifier", "slug", "prompt_slug"):
             value = self.raw_record.get(key)
             if isinstance(value, str) and value.strip():
                 return value.strip()
