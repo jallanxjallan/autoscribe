@@ -76,3 +76,19 @@ exports/
 
 *.tmp
 *.temp
+
+# Archives / handoff bundles
+
+*.tar
+*.tar.gz
+*.tgz
+*.tar.bz2
+*.tbz2
+*.tar.xz
+*.txz
+*.zip
+*.gz
+*.bz2
+*.xz
+*.7z
+*.rar
