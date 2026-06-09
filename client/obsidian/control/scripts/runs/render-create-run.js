@@ -112,7 +112,7 @@ async function renderCreateRun({ app, container }) {
   let loadedSelection = null;
 
   container.appendChild(el('h2', { text: 'Run' }));
-  container.appendChild(el('p', { text: 'A run is a local upload queue: selected prompts plus a saved plan. The durable server-side organizing unit remains the call.' }));
+  container.appendChild(el('p', { text: 'A run dispatch manifest records intent only: prompt slugs paired with a plan slug. Upload and enqueue status belong to asc.' }));
   container.appendChild(el('p', {}, ['Helper path: ', el('code', { text: `${root}/_control/scripts/runs/render-create-run.js` })]));
 
   const selectionSelect = el('select');
@@ -173,16 +173,16 @@ async function renderCreateRun({ app, container }) {
   selectionSelect.addEventListener('change', refreshPreview);
   planSelect.addEventListener('change', refreshPreview);
 
-  const saveBtn = button('Save Run Manifest', () => {
+  const saveBtn = button('Save Dispatch Manifest', () => {
     try {
       if (!loadedSelection) refreshPreview();
       const plan = selectedPlan();
       const manifest = buildRunManifest({ app, label: label.value, selection: loadedSelection, plan });
       const files = saveRunManifest(app, manifest);
       savedPath.textContent = files.currentFile;
-      new Notice(`Saved run manifest: ${manifest.label} (${manifest.call_count} calls)`);
+      new Notice(`Saved dispatch manifest: ${manifest.label} (${manifest.count} prompt(s))`);
     } catch (err) {
-      new Notice(`Run manifest failed: ${err.message}`);
+      new Notice(`Dispatch manifest failed: ${err.message}`);
       console.error(err);
     }
   });
