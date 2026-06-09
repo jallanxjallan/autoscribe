@@ -2,33 +2,31 @@ from __future__ import annotations
 
 import logging
 import time
-from collections.abc import Callable
-from typing import Any
 
 from asc.ledger.connect import LedgerConnection
-from asc.ledger.records.result import insert_result_record_with_connection
-from asc.ledger.records.step import insert_step_record_with_connection
 from asc.ledger.util import model_value
 from asc.models.runtime.result import StepResultRecord
 from asc.state.orchestrator_queue import claim_next, enqueue as requeue_completed_step
+
+from asc.orchestrator.failure import handle_failure
+from asc.orchestrator.retry import decide_retry
+from asc.orchestrator.routing import (
+    NextStepKeyLookup,
+    OrchestratorContractError,
+    ScrivenerContractError,
+    StepQueueEnqueue,
+    default_enqueue_step,
+    default_next_step_key,
+)
+from asc.orchestrator.success import handle_success
+from asc.orchestrator.start import handle_call_start
 
 log = logging.getLogger(__name__)
 
 IDLE_SLEEP_SECONDS = 0.25
 
-NextStepKeyLookup = Callable[[str, int], str | None]
-StepQueueEnqueue = Callable[[str], None]
 
-
-class OrchestratorContractError(RuntimeError):
-    """Raised when a completed-step signal violates pipeline invariants."""
-
-
-class ScrivenerContractError(OrchestratorContractError):
-    """Backward-compatible alias for older imports."""
-
-
-def _load_persistable_result(completed_signal: str) -> StepResultRecord:
+def load_persistable_result(completed_signal: str) -> StepResultRecord:
     """Load the runtime result for a completed-step signal.
 
     Current workers may still place the result identity on the response queue.
@@ -41,42 +39,46 @@ def _load_persistable_result(completed_signal: str) -> StepResultRecord:
     return StepResultRecord.load(completed_signal)
 
 
-def _default_next_step_key(call_identity: str, next_step_number: int) -> str | None:
-    """Return the pre-created runtime key for the next step, if it exists.
-
-    The state package owns Redis key/index details. This function is only the
-    adapter from orchestrator policy to state lookup.
-    """
-
-    try:
-        from asc.state.step_index import hget  # type: ignore[attr-defined]
-
-        value = hget(call_identity, next_step_number)
-    except ImportError:
-        try:
-            from asc.state.step_index import get as hget  # type: ignore[attr-defined]
-
-            value = hget(call_identity, next_step_number)
-        except ImportError:
-            return None
-
-    if value is None:
-        return None
-    if isinstance(value, bytes):
-        return value.decode("utf-8")
-    return str(value)
-
-
-def _default_enqueue_step(step_key: str) -> None:
-    """Enqueue a pre-created runtime step key for worker execution."""
-
-    from asc.state.step_queue import enqueue
-
-    enqueue(step_key)
-
-
-def _is_successful_step(result: StepResultRecord) -> bool:
+def is_successful_step(result: StepResultRecord) -> bool:
     return model_value(result, "content", "response") is not None
+
+
+
+
+def claim_next_call_start():
+    for module_name in (
+        "asc.state.call_queue",
+        "asc.state.orchestrator_call_queue",
+        "asc.state.start_queue",
+    ):
+        try:
+            module = __import__(module_name, fromlist=["claim_next"])
+        except ImportError:
+            continue
+        claim = getattr(module, "claim_next", None)
+        if callable(claim):
+            return claim()
+    return None
+
+
+def requeue_call_start(call_key: str, *, score: object | None = None) -> None:
+    for module_name in (
+        "asc.state.call_queue",
+        "asc.state.orchestrator_call_queue",
+        "asc.state.start_queue",
+    ):
+        try:
+            module = __import__(module_name, fromlist=["enqueue"])
+        except ImportError:
+            continue
+        enqueue = getattr(module, "enqueue", None)
+        if callable(enqueue):
+            try:
+                enqueue(call_key, score=score)
+            except TypeError:
+                enqueue(call_key)
+            return
+    raise RuntimeError("no orchestrator call queue found")
 
 
 class Orchestrator:
@@ -85,7 +87,7 @@ class Orchestrator:
     Workers execute one step and write one response. The orchestrator drains the
     completed-step queue, persists the step outcome, and performs the only
     routing decision in the pipeline: enqueue the next pre-created step, record
-    a terminal result, or leave a failed call stopped for inspection.
+    a terminal result, or stop a failed call for inspection/retry policy.
     """
 
     def __init__(
@@ -98,8 +100,8 @@ class Orchestrator:
     ):
         self._conn = conn
         self._idle_sleep_seconds = float(idle_sleep_seconds)
-        self._next_step_key = next_step_key or _default_next_step_key
-        self._enqueue_step = enqueue_step or _default_enqueue_step
+        self._next_step_key = next_step_key or default_next_step_key
+        self._enqueue_step = enqueue_step or default_enqueue_step
         self._drain_then_stop = False
         self._running = False
 
@@ -113,28 +115,31 @@ class Orchestrator:
         return self._running
 
     def run(self, result: StepResultRecord) -> None:
-        call_identity = str(model_value(result, "call_identity"))
-        step_number = int(model_value(result, "step_number"))
-
         try:
-            step_id = insert_step_record_with_connection(
+            if is_successful_step(result):
+                handle_success(
+                    conn=self._conn,
+                    result=result,
+                    next_step_key=self._next_step_key,
+                    enqueue_step=self._enqueue_step,
+                )
+            else:
+                handle_failure(conn=self._conn, result=result)
+
+            self._conn.commit()
+        except Exception:
+            rollback = getattr(self._conn, "rollback", None)
+            if rollback is not None:
+                rollback()
+            raise
+
+    def run_start(self, call_key: str) -> None:
+        try:
+            handle_call_start(
                 conn=self._conn,
-                result=result,
-                commit=False,
+                call_key=call_key,
+                enqueue_step=self._enqueue_step,
             )
-
-            if _is_successful_step(result):
-                next_key = self._next_step_key(call_identity, step_number + 1)
-                if next_key is not None:
-                    self._enqueue_step(next_key)
-                else:
-                    insert_result_record_with_connection(
-                        conn=self._conn,
-                        result=result,
-                        terminal_step_id=step_id,
-                        commit=False,
-                    )
-
             self._conn.commit()
         except Exception:
             rollback = getattr(self._conn, "rollback", None)
@@ -147,11 +152,32 @@ class Orchestrator:
 
         try:
             while True:
+                started = claim_next_call_start()
+                if started is not None:
+                    call_key = started.identity
+                    score = started.score
+                    try:
+                        self.run_start(call_key)
+                    except OrchestratorContractError:
+                        log.exception(
+                            "Orchestrator dropped invalid call-start signal %s",
+                            call_key,
+                        )
+                    except Exception as exc:
+                        decision = decide_retry(error=exc)
+                        log.exception(
+                            "Orchestrator failed processing call-start signal %s",
+                            call_key,
+                        )
+                        if decision.should_retry:
+                            requeue_call_start(call_key, score=score)
+                    continue
+
                 claimed = claim_next()
 
                 if claimed is None:
                     if self._drain_then_stop:
-                        log.info("Orchestrator queue drained; stopping")
+                        log.info("Orchestrator queues drained; stopping")
                         break
 
                     time.sleep(self._idle_sleep_seconds)
@@ -161,7 +187,7 @@ class Orchestrator:
                 score = claimed.score
 
                 try:
-                    result = _load_persistable_result(completed_signal)
+                    result = load_persistable_result(completed_signal)
                     self.run(result)
 
                 except OrchestratorContractError:
@@ -170,12 +196,17 @@ class Orchestrator:
                         completed_signal,
                     )
 
-                except Exception:
+                except Exception as exc:
+                    decision = decide_retry(error=exc)
                     log.exception(
                         "Orchestrator failed processing completed-step signal %s",
                         completed_signal,
                     )
+                    if not decision.should_retry:
+                        continue
                     try:
+                        if decision.delay_seconds > 0:
+                            time.sleep(decision.delay_seconds)
                         requeue_completed_step(completed_signal, score=score)
                     except Exception:
                         log.exception(
@@ -198,4 +229,8 @@ __all__ = [
     "Scrivener",
     "ScrivenerContractError",
     "StepQueueEnqueue",
+    "is_successful_step",
+    "claim_next_call_start",
+    "load_persistable_result",
+    "requeue_call_start",
 ]

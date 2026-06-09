@@ -6,8 +6,6 @@ import sys
 from typing import Any, TextIO
 
 from asc.core.identity import generate_identity
-from asc.ledger.call_record import insert_call_record
-from asc.ledger.step_record import insert_pending_step_record
 from asc.models.control.plan import PlanRecord
 from asc.models.runtime.call import RuntimeCallRecord
 from asc.models.runtime.content import RuntimeContentRecord
@@ -15,7 +13,6 @@ from asc.models.runtime.step import build_runtime_step_records
 from asc.models.uploaded.record import UploadedRecord
 from asc.redis.key import RedisKey
 from asc.state.runtime_indices import RuntimeContentIndex, RuntimeStepIndex
-from asc.state.step_queue import enqueue_step
 from asc.enqueue.reader import EnqueueRecord, iter_enqueue_records
 
 try:  # Current name after the prompt/control slugmap merge.
@@ -80,13 +77,25 @@ def enqueue_records(records: Iterable[object]) -> EnqueueReport:
             enqueued.append(enqueue_record(record))
         except Exception as exc:
             identifier = _record_identifier(record, fallback=f"record {record_number}")
-            print(f"[enqueue] {identifier}: skipped invalid dispatch record: {exc}", file=sys.stderr)
+            print(
+                f"[enqueue] {identifier}: skipped invalid dispatch record: {exc}",
+                file=sys.stderr,
+            )
             continue
 
     return EnqueueReport(records=tuple(enqueued))
 
 
 def enqueue_record(record: object) -> EnqueuedCall:
+    """Materialize one call and submit it to the orchestrator start queue.
+
+    Enqueue owns transient runtime materialization only: call record, source
+    content, ordered step records, and the content/step indices. It does not
+    write ledger rows and it does not enqueue worker steps directly. The final
+    act is to submit the call key to the orchestrator, which becomes the sole
+    authority for ledger custody and call progression.
+    """
+
     dispatch = _enqueue_record(record)
     resolver = SlugKeyResolver()
 
@@ -94,6 +103,7 @@ def enqueue_record(record: object) -> EnqueuedCall:
     uploaded_prompt = _load_uploaded_prompt(prompt_key)
     raw_prompt_record = _prompt_runtime_record(uploaded_prompt)
     raw_prompt_record.setdefault("prompt_slug", dispatch.prompt_slug)
+    raw_prompt_record.setdefault("record_identity", dispatch.prompt_slug)
     raw_prompt_record.setdefault("content", uploaded_prompt.record_content)
 
     call = generate_identity()
@@ -126,7 +136,6 @@ def enqueue_record(record: object) -> EnqueuedCall:
     content_index = RuntimeContentIndex(call)
     step_index = RuntimeStepIndex(call)
 
-    # Disposable runtime writes. Durable custody begins with ledger rows below.
     call_key = call_record.save()
     source_content_key = source_content.save()
     content_index.bind_key(1, source_content_key)
@@ -135,22 +144,11 @@ def enqueue_record(record: object) -> EnqueuedCall:
         step_key = step_record.save()
         step_index.bind_key(step_record.step_number, step_key)
 
-    first_step = step_records[0]
-    first_step_key = str(first_step.redis_key)
-    output_key = RuntimeContentRecord.key_for_step_result(
-        identity=call,
-        step_number=first_step.step_number,
-    )
+    first_step_key = str(step_records[0].redis_key)
 
-    # Queue last: a worker should never claim a step before its ledger row exists.
-    insert_call_record(call_record)
-    insert_pending_step_record(
-        first_step,
-        input_content=call_record.source_content,
-        input_key=source_content_key,
-        output_key=output_key,
-    )
-    enqueue_step(first_step_key)
+    # Queue last. The orchestrator will insert the call ledger row, stage step 1
+    # as pending, and only then place the first step key on the worker queue.
+    enqueue_call(call_key)
 
     return EnqueuedCall(
         call=call,
@@ -161,6 +159,38 @@ def enqueue_record(record: object) -> EnqueuedCall:
         plan_key=plan_key,
         first_step_key=first_step_key,
         step_count=len(step_records),
+    )
+
+
+def enqueue_call(call_key: str) -> None:
+    """Submit a materialized call key to the orchestrator start queue.
+
+    Preferred state module name is asc.state.call_queue. The fallback keeps the
+    package compile-compatible while the state package catches up.
+    """
+
+    for module_name in (
+        "asc.state.call_queue",
+        "asc.state.orchestrator_call_queue",
+        "asc.state.start_queue",
+    ):
+        try:
+            module = __import__(module_name, fromlist=["enqueue"])
+        except ImportError:
+            continue
+
+        enqueue = getattr(module, "enqueue", None)
+        if callable(enqueue):
+            enqueue(call_key)
+            return
+
+        enqueue_call_key = getattr(module, "enqueue_call", None)
+        if callable(enqueue_call_key):
+            enqueue_call_key(call_key)
+            return
+
+    raise RuntimeError(
+        "no orchestrator call queue found; expected asc.state.call_queue.enqueue()"
     )
 
 
@@ -288,6 +318,7 @@ __all__ = [
     "SlugKeyResolver",
     "EnqueueReport",
     "EnqueuedCall",
+    "enqueue_call",
     "enqueue_from_stream",
     "enqueue_record",
     "enqueue_records",
