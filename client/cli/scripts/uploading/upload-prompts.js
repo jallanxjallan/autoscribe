@@ -1,21 +1,16 @@
 'use strict';
 
+const fs = require('node:fs');
 const path = require('node:path');
 
 const { fail, info } = require('./command');
 const { sha256 } = require('./records');
 const { readVaultFile, assertVaultRoot, vaultFileExists } = require('./selection');
 const { runPandocUpload } = require('./pandoc-upload');
-const {
-  loadRunManifest,
-  markCallUploaded,
-  markCallUploadError,
-  pendingRunCalls,
-  writeRunManifest,
-} = require('./run-manifest');
 
 const { getGitRoot } = require('../../lib/git');
 const { getFrontmatterTextFromMarkdown } = require('../../lib/markdown');
+const { buildSlugPathMap } = require('../../lib/rg');
 
 const SCRIPT = 'upload-prompts';
 const DEFAULTS = ['upload_prompt'];
@@ -25,24 +20,18 @@ function usage(script) {
   ${script} [--dry-run] [--manifest PATH]
 
 Behavior:
-  Reads the current local run manifest, streams each pending prompt through
-  Pandoc, and rewrites the manifest with optimistic upload_status updates.
-
-  Stdout is reserved for Pandoc-emitted NDJSON records only.
-  Status messages go to stderr.
+  Reads the current local run dispatch manifest, resolves each prompt slug
+  against the active vault, and streams each prompt through Pandoc.
 
 Options:
-  -n, --dry-run      Show pending prompt records; do not emit NDJSON or rewrite manifest.
-  --manifest PATH    Use this run manifest instead of runs/current-run.json.
+  -n, --dry-run      Show resolved prompt records; do not emit NDJSON.
+  --manifest PATH    Use this manifest instead of .autoscribe/workflow/runs/current-run.json.
   -h, --help         Show this help.
 `);
 }
 
 function parseArgs(argv, script) {
-  const options = {
-    dryRun: false,
-    manifestPath: '',
-  };
+  const options = { dryRun: false, manifestPath: '' };
 
   for (let i = 0; i < argv.length; i += 1) {
     const arg = argv[i];
@@ -65,10 +54,143 @@ function parseArgs(argv, script) {
   return options;
 }
 
+function workflowDir(root) {
+  return process.env.AUTOSCRIBE_WORKFLOW_DIR ||
+    path.join(root, '.autoscribe', 'workflow');
+}
+
+function defaultManifestPath(root) {
+  return path.join(workflowDir(root), 'runs', 'current-run.json');
+}
+
+function readJsonFile(filepath, script) {
+  try {
+    return JSON.parse(fs.readFileSync(filepath, 'utf8'));
+  } catch (error) {
+    fail(script, `${filepath}: could not read JSON: ${error.message || error}`);
+  }
+}
+
+function loadDispatchManifest({ options, root, script }) {
+  const filepath = path.resolve(root, options.manifestPath || defaultManifestPath(root));
+  const manifest = readJsonFile(filepath, script);
+  manifest.filepath = manifest.filepath || filepath;
+
+  const manifestType = manifest.type || manifest.manifest_type || manifest.record_type;
+
+  if (manifestType && manifestType !== 'run_dispatch_manifest') {
+    fail(script, `manifest type is ${manifestType}, expected run_dispatch_manifest`);
+  }
+
+  return manifest;
+}
+
+function firstArray(...values) {
+  for (const value of values) {
+    if (Array.isArray(value)) return value;
+  }
+  return [];
+}
+
+function normalizePromptPlanPairs(manifest) {
+  const rows = firstArray(
+    manifest.prompt_plan_pairs,
+    manifest.promptPlanPairs,
+    manifest.slug_pairs,
+    manifest.pairs,
+    manifest.calls,
+    manifest.items,
+    manifest.records,
+    manifest.dispatch
+  );
+
+  return rows.map((row, index) => {
+    const promptSlug =
+      row.prompt_slug ||
+      row.call_slug ||
+      row.record_identity ||
+      row.slug ||
+      row.prompt;
+
+    const planSlug =
+      row.plan_slug ||
+      row.job_slug ||
+      row.plan ||
+      manifest.plan_slug ||
+      manifest.job_slug ||
+      manifest.plan?.slug;
+
+    return {
+      ...row,
+      index: row.index || index + 1,
+      prompt_slug: promptSlug,
+      call_slug: row.call_slug || promptSlug,
+      plan_slug: planSlug,
+    };
+  });
+}
+
+function duplicateMessage(records) {
+  return records.map((record) => `${record.slug} ${record.path}:${record.lineNumber}`).join('\n');
+}
+
+function resolveCallPath({ root, call, slugMap, duplicates, script }) {
+  if (call.path) {
+    if (!call.path.endsWith('.md')) fail(script, `${call.path}: not a Markdown file`);
+    if (!vaultFileExists(root, call.path)) fail(script, `${call.path}: file not found in active vault`);
+    return call.path;
+  }
+
+  const slug = call.prompt_slug || call.call_slug;
+  if (!slug) fail(script, `call ${call.index || '?'} is missing prompt_slug`);
+
+  if (duplicates.has(slug)) {
+    fail(script, `${slug}: prompt slug is not unique:\n${duplicateMessage(duplicates.get(slug))}`);
+  }
+
+  const record = slugMap.get(slug);
+  if (!record) fail(script, `${slug}: prompt slug not found in active vault`);
+
+  return record.path;
+}
+
+function resolveCalls({ root, manifest, script }) {
+  const { bySlug, duplicates } = buildSlugPathMap({ root });
+
+  return normalizePromptPlanPairs(manifest).map((call) => {
+    if (!call.plan_slug) {
+      fail(script, `${call.prompt_slug || call.call_slug || call.index || '?'}: missing plan_slug`);
+    }
+
+    const resolvedPath = resolveCallPath({
+      root,
+      call,
+      slugMap: bySlug,
+      duplicates,
+      script,
+    });
+
+    const markdown = readVaultFile(root, resolvedPath);
+    const currentSlug = getFrontmatterTextFromMarkdown(markdown, 'slug');
+
+    if (call.prompt_slug && currentSlug && call.prompt_slug !== currentSlug) {
+      fail(script, `${resolvedPath}: slug mismatch: manifest=${call.prompt_slug} file=${currentSlug}`);
+    }
+
+    return {
+      ...call,
+      path: resolvedPath,
+      filename: call.filename || path.basename(resolvedPath),
+      prompt_slug: call.prompt_slug || currentSlug,
+      call_slug: call.call_slug || call.prompt_slug || currentSlug,
+    };
+  });
+}
+
 function buildPromptMetadata({ root, manifest, call, markdown, uploadedAt }) {
   const currentSlug = getFrontmatterTextFromMarkdown(markdown, 'slug');
   const callSlug = call.call_slug || call.prompt_slug || currentSlug;
-  const planSlug = call.plan_slug || manifest.plan?.slug || manifest.plan_slug;
+  const planSlug = call.plan_slug || manifest.plan?.slug || manifest.plan_slug || manifest.job_slug;
 
   return {
     slug: callSlug,
@@ -90,33 +212,14 @@ function buildPromptMetadata({ root, manifest, call, markdown, uploadedAt }) {
   };
 }
 
-function assertPendingCall({ root, call, script }) {
-  if (!call.path) {
-    fail(script, `call ${call.index || call.call_slug || '?'} is missing path`);
-  }
-
-  if (!call.path.endsWith('.md')) {
-    fail(script, `${call.path}: not a Markdown file`);
-  }
-
-  if (!vaultFileExists(root, call.path)) {
-    fail(script, `${call.path}: file not found in active vault`);
-  }
-
-  const planSlug = call.plan_slug;
-  if (!planSlug) {
-    fail(script, `${call.path}: missing plan_slug`);
-  }
-}
-
 function logPlan({ script, root, manifest, calls }) {
   info(script, `vault: ${root}`);
+  info(script, `workflow: ${workflowDir(root)}`);
   info(script, `manifest: ${manifest.filepath}`);
-  info(script, `plan: ${manifest.plan?.slug || manifest.plan_slug || calls[0]?.plan_slug || ''}`);
   info(script, `pending prompt records: ${calls.length}`);
 
   for (const call of calls) {
-    info(script, `  ${call.call_slug || call.prompt_slug || 'no-slug'}  ${call.path}`);
+    info(script, `  ${call.call_slug || call.prompt_slug || 'no-slug'}  ${call.plan_slug || 'no-plan'}  ${call.path}`);
   }
 }
 
@@ -128,31 +231,26 @@ function runUploadPrompts(config = {}) {
 
   assertVaultRoot({ root, script });
 
-  const manifest = loadRunManifest({ options, root, script });
-  const calls = pendingRunCalls(manifest);
+  const manifest = loadDispatchManifest({ options, root, script });
+  const calls = resolveCalls({ root, manifest, script });
 
   if (calls.length === 0) {
-    info(script, 'no pending prompt records');
+    info(script, 'no prompt records in dispatch manifest');
     return;
-  }
-
-  for (const call of calls) {
-    assertPendingCall({ root, call, script });
   }
 
   logPlan({ script, root, manifest, calls });
 
   if (options.dryRun) {
-    info(script, 'dry run: no NDJSON emitted and manifest not rewritten');
+    info(script, 'dry run: no NDJSON emitted');
     return;
   }
 
   for (const call of calls) {
     const uploadedAt = new Date().toISOString();
+    const markdown = readVaultFile(root, call.path);
 
     try {
-      const markdown = readVaultFile(root, call.path);
-
       runPandocUpload({
         cwd: root,
         input: call.path,
@@ -165,17 +263,12 @@ function runUploadPrompts(config = {}) {
           uploadedAt,
         }),
       });
-
-      markCallUploaded({ manifest, call, uploadedAt });
-      writeRunManifest(manifest.filepath, manifest, script);
     } catch (error) {
-      markCallUploadError({ manifest, call, error });
-      writeRunManifest(manifest.filepath, manifest, script);
       fail(script, `${call.path}: upload failed: ${error.message || error}`);
     }
   }
 
-  info(script, `marked uploaded: ${calls.length}`);
+  info(script, `emitted prompt records: ${calls.length}`);
 }
 
 module.exports = { main: runUploadPrompts, runUploadPrompts };

@@ -1,22 +1,19 @@
 from __future__ import annotations
 
-from typing import Any, ClassVar, Literal, Mapping
+from collections.abc import Mapping
+from typing import Any, ClassVar, Literal
 
-from pydantic import ConfigDict, Field, field_validator, model_validator
+from pydantic import ConfigDict, Field, field_validator
 
 from asc.core.timestamp import timestamp
-from asc.models.helpers.plain import plain_non_empty_string, redis_key_segment_text, slug_like_text
+from asc.models.helpers.plain import plain_non_empty_string, redis_key_segment_text
 from asc.redis.model_base import RedisModel
 
 
 class RuntimeCallRecord(RedisModel):
-    """Redis-persisted runtime call anchor for one uploaded prompt/chunk.
+    """Redis-persisted runtime call anchor for one uploaded record."""
 
-    The call owns the uploaded prompt row as raw_json. Executable text begins in
-    the runtime content chain at position 1.
-    """
-
-    model_config = ConfigDict(extra="ignore")
+    model_config = ConfigDict(extra="allow")
 
     domain: ClassVar[str] = "runtime"
     kind: ClassVar[str] = "call"
@@ -25,41 +22,31 @@ class RuntimeCallRecord(RedisModel):
     identity: str
     plan: str
     plan_key: str
-    plan_slug: str
-    raw_json: dict[str, Any]
+    plan_slug: str | None = None
+    record_type: str = "prompt"
+    record_identity: str
+    record_content: str
     created_at: int = Field(default_factory=timestamp)
-
-    @model_validator(mode="before")
-    @classmethod
-    def normalize_shape(cls, value: object) -> object:
-        if not isinstance(value, dict):
-            return value
-        normalized = dict(value)
-        if "raw_json" not in normalized and "raw_record" in normalized:
-            normalized["raw_json"] = normalized["raw_record"]
-        return normalized
 
     @field_validator("identity", "plan", mode="before")
     @classmethod
     def validate_identity(cls, value: object) -> str:
         return redis_key_segment_text(value, "identity")
 
-    @field_validator("plan_slug", mode="before")
-    @classmethod
-    def validate_plan_slug(cls, value: object) -> str:
-        return slug_like_text(value)
-
     @field_validator("plan_key", mode="before")
     @classmethod
     def validate_plan_key(cls, value: object) -> str:
         return plain_non_empty_string(value, "plan_key")
 
-    @field_validator("raw_json", mode="before")
+    @field_validator("record_identity", mode="before")
     @classmethod
-    def validate_raw_json(cls, value: object) -> dict[str, Any]:
-        if not isinstance(value, dict):
-            raise ValueError("raw_json must be an object")
-        return dict(value)
+    def validate_record_identity(cls, value: object) -> str:
+        return redis_key_segment_text(value, "record_identity")
+
+    @field_validator("record_content", mode="before")
+    @classmethod
+    def validate_record_content(cls, value: object) -> str:
+        return plain_non_empty_string(value, "record_content")
 
     @classmethod
     def from_raw_record(
@@ -70,13 +57,20 @@ class RuntimeCallRecord(RedisModel):
         plan: str,
         plan_key: str,
     ) -> "RuntimeCallRecord":
-        plan_slug = _plan_slug_from_record(raw_record)
+        record = dict(raw_record)
         return cls(
             identity=identity,
             plan=plan,
             plan_key=plan_key,
-            plan_slug=plan_slug,
-            raw_json=dict(raw_record),
+            plan_slug=_optional_text(record.get("plan_slug")),
+            record_type=_required_text(record.get("record_type"), "record_type"),
+            record_identity=_required_text(record.get("record_identity"), "record_identity"),
+            record_content=_required_text(record.get("record_content"), "record_content"),
+            **{
+                key: value
+                for key, value in record.items()
+                if key not in {"record_type", "record_identity", "record_content", "plan_slug"}
+            },
         )
 
     @property
@@ -85,29 +79,33 @@ class RuntimeCallRecord(RedisModel):
 
     @property
     def source_content(self) -> str:
-        return _content_from_record(self.raw_json)
+        return self.record_content
 
     @property
-    def prompt_slug(self) -> str | None:
-        for key in ("identifier", "slug", "prompt_slug"):
-            value = self.raw_json.get(key)
-            if isinstance(value, str) and value.strip():
-                return value.strip()
+    def prompt_slug(self) -> str:
+        return self.record_identity
+
+    @property
+    def raw_json(self) -> dict[str, Any]:
+        return {
+            "record_type": self.record_type,
+            "record_identity": self.record_identity,
+            "record_content": self.record_content,
+            **dict(self.model_extra or {}),
+        }
+
+
+def _required_text(value: object, field_name: str) -> str:
+    return plain_non_empty_string(value, field_name)
+
+
+def _optional_text(value: object) -> str | None:
+    if value is None:
         return None
-
-
-def _plan_slug_from_record(record: Mapping[str, Any]) -> str:
-    value = record.get("plan_slug")
-    if value is None:
-        raise ValueError("prompt record must include plan_slug")
-    return slug_like_text(value)
-
-
-def _content_from_record(record: Mapping[str, Any]) -> str:
-    value = record.get("content")
-    if value is None:
-        value = record.get("payload_content")
-    return plain_non_empty_string(value, "content")
+    if not isinstance(value, str):
+        raise ValueError("optional text field must be a plain string")
+    value = value.strip()
+    return value or None
 
 
 CallRecord = RuntimeCallRecord

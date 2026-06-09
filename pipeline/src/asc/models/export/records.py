@@ -3,40 +3,35 @@ from __future__ import annotations
 from collections.abc import Mapping
 from typing import Any, Literal, Self
 
-from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
+from pydantic import BaseModel, ConfigDict, field_validator, model_validator
 
 from asc.models.helpers.plain import plain_non_empty_string, redis_key_segment_text, slug_like_text
 
 
 class _ExportBase(BaseModel):
-    model_config = ConfigDict(extra="ignore")
+    model_config = ConfigDict(extra="allow")
 
     @classmethod
     def from_row(cls, row: Mapping[str, Any]) -> Self:
-        """Validate a SQL row or row-like mapping as an export stream record."""
         return cls.model_validate(dict(row))
 
 
 class PendingExportRecord(_ExportBase):
-    """Typed row emitted by pending export listing."""
-
-    type: Literal["pending-export"]
+    type: Literal["pending-export"] = "pending-export"
     prompt_slug: str
     call_identity: str
     result_identity: str
     plan_slug: str | None = None
     created_at: str | int | None = None
-    raw_record: dict[str, Any] = Field(default_factory=dict)
 
     @model_validator(mode="before")
     @classmethod
     def normalize_row_shape(cls, value: object) -> object:
         if not isinstance(value, dict):
             return value
-
-        normalized = dict(value)
-        normalized.setdefault("type", "pending-export")
-        return normalized
+        data = dict(value)
+        data.setdefault("type", "pending-export")
+        return data
 
     @field_validator("prompt_slug", mode="before")
     @classmethod
@@ -57,25 +52,21 @@ class PendingExportRecord(_ExportBase):
 
 
 class ExtractedResultRecord(_ExportBase):
-    """Typed row emitted by export result extraction."""
-
-    type: Literal["extracted-result"]
+    type: Literal["extracted-result"] = "extracted-result"
     prompt_slug: str
     call_identity: str
     result_identity: str
     content: str
     plan_slug: str | None = None
-    raw_record: dict[str, Any] = Field(default_factory=dict)
 
     @model_validator(mode="before")
     @classmethod
     def normalize_row_shape(cls, value: object) -> object:
         if not isinstance(value, dict):
             return value
-
-        normalized = dict(value)
-        normalized.setdefault("type", "extracted-result")
-        return normalized
+        data = dict(value)
+        data.setdefault("type", "extracted-result")
+        return data
 
     @field_validator("prompt_slug", mode="before")
     @classmethod
@@ -101,9 +92,7 @@ class ExtractedResultRecord(_ExportBase):
 
 
 class ExportUpdateRecord(_ExportBase):
-    """Typed record consumed when marking an exported result complete."""
-
-    type: Literal["export-update"]
+    type: Literal["export-update"] = "export-update"
     result_identity: str
 
     @model_validator(mode="before")
@@ -111,10 +100,9 @@ class ExportUpdateRecord(_ExportBase):
     def normalize_row_shape(cls, value: object) -> object:
         if not isinstance(value, dict):
             return value
-
-        normalized = dict(value)
-        normalized.setdefault("type", "export-update")
-        return normalized
+        data = dict(value)
+        data.setdefault("type", "export-update")
+        return data
 
     @field_validator("result_identity", mode="before")
     @classmethod
@@ -122,8 +110,4 @@ class ExportUpdateRecord(_ExportBase):
         return redis_key_segment_text(value, "result_identity")
 
 
-__all__ = [
-    "ExportUpdateRecord",
-    "ExtractedResultRecord",
-    "PendingExportRecord",
-]
+__all__ = ["ExportUpdateRecord", "ExtractedResultRecord", "PendingExportRecord"]

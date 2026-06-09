@@ -5,19 +5,19 @@
 -- Responsibility:
 --   Convert the final Pandoc document into exactly one NDJSON record.
 --
--- Contract:
---   - Every metadata key becomes a top-level JSON field, except legacy
---     top-level `identity`, which is used only as a fallback source for the
---     canonical upload `identifier`.
---   - Nested metadata maps/lists remain nested JSON objects/arrays.
---   - If top-level `identifier` is absent, it is derived from top-level
---     `slug`, then legacy top-level `identity`.
---   - The document body becomes the top-level `content` field, serialized as
---     markdown from doc.blocks.
---   - Upstream filters/defaults are responsible for injecting/normalizing all
---     metadata and content before this emitter runs.
---   - Downstream Python models validate required fields such as type,
---     identifier, job_slug, control shape, etc.
+-- Upload contract:
+--   - record_type: tells the Python side which model/route to use.
+--   - record_identity: stable client/source identity for this uploaded record.
+--   - record_content: markdown serialization of doc.blocks.
+--   - Every other metadata key is emitted as a top-level JSON field.
+--
+-- Notes:
+--   - The emitter does not pack metadata into nested payload/attrs objects.
+--     Pydantic `extra="allow"` collects all non-canonical top-level fields.
+--   - Nested metadata maps/lists remain ordinary JSON objects/arrays.
+--   - Legacy metadata keys are used only as fallback sources for canonical
+--     record_* fields when those canonical fields are absent.
+--   - Server/runtime identity is never emitted from upload records.
 --
 -- Intended use:
 --   Place this last in the Pandoc filter chain.
@@ -225,20 +225,20 @@ local function meta_to_record(meta)
     end
   end
 
-  record.record_identity =
-  first_non_blank(
+  record.record_identity = first_non_blank(
     record.record_identity,
     record.identifier,
     record.slug,
     legacy_identity
   )
 
-record.record_type =
-  first_non_blank(
+  record.record_type = first_non_blank(
     record.record_type,
     record.control_type,
-    record.kind
+    record.kind,
+    record.type
   )
+
   return record
 end
 
@@ -249,13 +249,13 @@ end
 function Pandoc(doc)
   local record = meta_to_record(doc.meta)
 
-  record.type = first_non_blank(record.type, record.control_type, record.kind)
-  record.identifier = first_non_blank(record.identifier, record.slug)
-
-  record.content = markdown_content(doc.blocks)
+  record.record_content = markdown_content(doc.blocks)
 
   -- Never emit server/runtime identity from upload records.
   record.identity = nil
+
+  -- Do not emit legacy duplicate body field if an upstream filter supplied one.
+  record.content = nil
 
   io.stdout:write(pandoc.json.encode(record) .. "\n")
 

@@ -1,14 +1,21 @@
 from __future__ import annotations
 
 from collections.abc import Iterator, Mapping
-from typing import TextIO
+from dataclasses import dataclass
+from typing import Any, TextIO
 
 from asc.streams.ndjson import iter_ndjson_records
-from asc.models.uploaded.record import UploadedRecord
 
 
-def iter_uploaded_records(stream: TextIO) -> Iterator[UploadedRecord]:
-    """Yield validated uploaded prompt/chunk records from an NDJSON stream."""
+@dataclass(frozen=True, slots=True)
+class EnqueueRecord:
+    prompt_slug: str
+    plan_slug: str
+    raw_record: Mapping[str, Any]
+
+
+def iter_enqueue_records(stream: TextIO) -> Iterator[EnqueueRecord]:
+    """Yield validated lightweight prompt/plan dispatch records."""
 
     seen = False
     for parsed in iter_ndjson_records(stream):
@@ -21,26 +28,33 @@ def iter_uploaded_records(stream: TextIO) -> Iterator[UploadedRecord]:
             )
 
         try:
-            yield UploadedRecord.model_validate(raw)
+            yield EnqueueRecord(
+                prompt_slug=_required_slug(raw, "prompt_slug"),
+                plan_slug=_required_slug(raw, "plan_slug"),
+                raw_record=raw,
+            )
         except Exception as exc:
             raise ValueError(
-                f"invalid uploaded prompt on line {parsed.line_number}: {exc}"
+                f"invalid enqueue record on line {parsed.line_number}: {exc}"
             ) from exc
 
     if not seen:
-        raise ValueError("no records found")
+        raise ValueError("no enqueue records found")
 
 
-def load_uploaded_records(stream: TextIO) -> list[UploadedRecord]:
-    return list(iter_uploaded_records(stream))
+def load_enqueue_records(stream: TextIO) -> list[EnqueueRecord]:
+    return list(iter_enqueue_records(stream))
 
 
-iter_enqueue_records = iter_uploaded_records
-load_enqueue_records = load_uploaded_records
+def _required_slug(record: Mapping[str, Any], field: str) -> str:
+    value = record.get(field)
+    if not isinstance(value, str) or not value.strip():
+        raise ValueError(f"enqueue record must include {field}")
+    return value.strip()
+
 
 __all__ = [
-    "iter_uploaded_records",
-    "load_uploaded_records",
+    "EnqueueRecord",
     "iter_enqueue_records",
     "load_enqueue_records",
 ]
