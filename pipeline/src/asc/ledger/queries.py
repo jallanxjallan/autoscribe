@@ -6,6 +6,7 @@ from asc.ledger.util import insert_sql
 CALL_COLUMNS = (
     "call",
     "plan",
+    "record_identity",
     "raw_json",
     "created_at",
 )
@@ -14,6 +15,8 @@ CALL_SELECT_COLUMNS = (
     "call AS call_identity",
     "call",
     "plan",
+    "record_identity",
+    "record_identity AS prompt_slug",
     "raw_json",
     "created_at",
 )
@@ -121,6 +124,14 @@ SELECT_CALL_SQL = f"""
     WHERE call = ?
 """
 
+SELECT_CALL_BY_PROMPT_SLUG_SQL = f"""
+    SELECT {", ".join(CALL_SELECT_COLUMNS)}
+    FROM calls
+    WHERE record_identity = ?
+    ORDER BY created_at DESC
+    LIMIT 1
+"""
+
 SELECT_CALLS_FOR_PLAN_SQL = f"""
     SELECT {", ".join(CALL_SELECT_COLUMNS)}
     FROM calls
@@ -214,11 +225,10 @@ SELECT_EXTRACT_RESULT_BY_CALL_IDENTITY_SQL = """
         c.call AS call_identity,
         c.call AS call,
         c.plan AS plan,
+        c.record_identity AS prompt_slug,
+        c.record_identity AS record_identity,
         c.raw_json AS raw_record,
         c.created_at AS call_created_at,
-        json_extract(c.raw_json, '$.identifier') AS prompt_slug,
-        json_extract(c.raw_json, '$.slug') AS source_slug,
-        json_extract(c.raw_json, '$.plan_slug') AS plan_slug,
         r.result AS result_identity,
         r.result AS result,
         r.terminal_step_id AS terminal_step_id,
@@ -252,6 +262,7 @@ __all__ = [
     "INSERT_EXPORT_SQL",
     "UPDATE_STEP_COMPLETION_SQL",
     "SELECT_CALL_SQL",
+    "SELECT_CALL_BY_PROMPT_SLUG_SQL",
     "SELECT_CALLS_FOR_PLAN_SQL",
     "SELECT_CALL_IDENTITIES_FOR_PLAN_SQL",
     "SELECT_CALLS_SQL",

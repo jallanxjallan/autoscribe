@@ -31,8 +31,8 @@ def recent_calls(*, limit: int = 20) -> list[dict[str, Any]]:
             SELECT
                 c.call,
                 c.plan,
-                json_extract(c.raw_json, '$.identifier') AS source_identifier,
-                json_extract(c.raw_json, '$.slug') AS source_slug,
+                c.record_identity AS source_identifier,
+                c.record_identity AS source_slug,
                 c.created_at,
                 COUNT(s.step_id) AS steps,
                 SUM(CASE WHEN s.status = 'pending' THEN 1 ELSE 0 END) AS pending,

@@ -115,7 +115,8 @@ def drop_user_objects(conn: LedgerConnection) -> None:
 
 CALLS: ColumnSpec = {
     "call": "TEXT PRIMARY KEY NOT NULL UNIQUE CHECK (length(call) = 26)",
-    "plan": "TEXT NOT NULL CHECK (length(plan) = 26)",
+    "plan": "TEXT NOT NULL",
+    "record_identity": "TEXT NOT NULL",
     "raw_json": "TEXT NOT NULL",
     "created_at": "INTEGER NOT NULL",
 }
@@ -179,6 +180,7 @@ LEDGER_TABLES = {
 
 LEDGER_INDEXES = (
     "CREATE INDEX IF NOT EXISTS idx_calls_plan ON calls(plan)",
+    "CREATE INDEX IF NOT EXISTS idx_calls_record_identity ON calls(record_identity)",
     "CREATE INDEX IF NOT EXISTS idx_calls_created_at ON calls(created_at)",
     "CREATE INDEX IF NOT EXISTS idx_steps_call ON steps(call)",
     "CREATE INDEX IF NOT EXISTS idx_steps_call_step_number ON steps(call, step_number)",

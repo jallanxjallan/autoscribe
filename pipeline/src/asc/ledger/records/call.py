@@ -19,6 +19,7 @@ from asc.ledger.util import (
     fetch_all_dicts,
     fetch_first_column,
     fetch_one_dict,
+    model_json_blob,
     model_value,
 )
 from asc.models.runtime.call import CallRecord
@@ -65,7 +66,7 @@ def read_call_record(call_identity: str) -> dict[str, Any] | None:
 
 
 def read_call_record_by_prompt_slug(prompt_slug: str) -> dict[str, Any] | None:
-    """Read the newest call custody row for a prompt slug."""
+    """Read the newest call custody row for a prompt slug/record identity."""
 
     with connect() as conn:
         return read_call_record_by_prompt_slug_with_connection(
@@ -114,6 +115,21 @@ def read_call_record_by_prompt_slug_with_connection(
     return fetch_one_dict(conn, SELECT_CALL_BY_PROMPT_SLUG_SQL, (prompt_slug,))
 
 
+def read_call_record_by_record_identity(record_identity: str) -> dict[str, Any] | None:
+    return read_call_record_by_prompt_slug(record_identity)
+
+
+def read_call_record_by_record_identity_with_connection(
+    *,
+    conn: LedgerConnection,
+    record_identity: str,
+) -> dict[str, Any] | None:
+    return read_call_record_by_prompt_slug_with_connection(
+        conn=conn,
+        prompt_slug=record_identity,
+    )
+
+
 def read_call_records_for_plan_with_connection(
     *,
     conn: LedgerConnection,
@@ -140,8 +156,9 @@ def read_call_records_with_connection(
 def call_values(call: CallRecord) -> tuple[Any, ...]:
     return (
         model_value(call, "identity", "call_identity"),
-        model_value(call, "plan_slug"),
-        model_value(call, "prompt_slug"),
+        model_value(call, "plan_slug", "plan"),
+        model_value(call, "record_identity", "prompt_slug", "identifier", "slug"),
+        model_json_blob(call),
         model_value(call, "created_at"),
     )
 
@@ -158,6 +175,8 @@ __all__ = [
     "read_call_record",
     "read_call_record_by_prompt_slug",
     "read_call_record_by_prompt_slug_with_connection",
+    "read_call_record_by_record_identity",
+    "read_call_record_by_record_identity_with_connection",
     "read_call_record_with_connection",
     "read_call_records",
     "read_call_records_for_plan",

@@ -122,7 +122,7 @@ def insert_step_record_with_connection(
     """Finalize an existing pending/running step row.
 
     A queued step without a pending ledger row is an invariant violation.
-    Scrivener must fail loudly rather than inventing a completed row.
+    The orchestrator must fail loudly rather than inventing a completed row.
     """
 
     call_identity = str(model_value(result, "call_identity"))
