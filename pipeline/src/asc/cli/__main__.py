@@ -6,6 +6,7 @@ from asc.cli.control import app as control_app
 from asc.cli.enqueue import app as enqueue_app
 from asc.cli.export import app as export_app
 from asc.cli.ledger import app as ledger_app
+from asc.cli.prompts import app as prompts_app
 from asc.cli.registry import app as registry_app
 from asc.cli.run import app as run_app
 from asc.cli.storage import app as storage_app
@@ -23,6 +24,12 @@ app.add_typer(
     control_app,
     name="control",
     help="Manage reusable control assets.",
+)
+
+app.add_typer(
+    prompts_app,
+    name="prompts",
+    help="Manage uploaded prompt records.",
 )
 
 app.add_typer(
