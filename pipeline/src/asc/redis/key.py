@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import json
 from typing import Any, ClassVar
 
 from attr import define, field, validators
@@ -74,8 +73,6 @@ class RedisKey:
     def _r(self) -> Any:
         return get_client()
 
-    # generic key helpers
-
     def exists(self) -> bool:
         return bool(self._r().exists(self.key))
 
@@ -93,22 +90,15 @@ class RedisKey:
             raise ValueError("expire() requires non-negative int seconds")
         return bool(self._r().expire(self.key, seconds))
 
-    # raw-ish string/json helpers
+    # Raw string helpers are intentionally minimal. Runtime records should use hashes.
 
     def get(self) -> str | None:
         return self._r().get(self.key)
 
     def set(self, value: str) -> None:
+        if not isinstance(value, str):
+            raise TypeError("set() requires a string value")
         self._r().set(self.key, value)
-
-    def get_json(self) -> object | None:
-        raw = self.get()
-        return None if raw is None else json.loads(raw)
-
-    def set_json(self, value: object) -> None:
-        self.set(json.dumps(value, ensure_ascii=False, separators=(",", ":")))
-
-    # minimal hash helpers
 
     def hget(self, field: str) -> str | None:
         return self._r().hget(self.key, field)
@@ -116,7 +106,19 @@ class RedisKey:
     def hgetall(self) -> dict[str, str]:
         return dict(self._r().hgetall(self.key))
 
-    def hset(self, *, field: str | None = None, value: str | None = None, mapping: dict[str, str] | None = None) -> int:
+    def hkeys(self) -> list[str]:
+        return [str(item) for item in self._r().hkeys(self.key)]
+
+    def hlen(self) -> int:
+        return int(self._r().hlen(self.key))
+
+    def hset(
+        self,
+        *,
+        field: str | None = None,
+        value: str | None = None,
+        mapping: dict[str, str] | None = None,
+    ) -> int:
         if mapping is not None:
             return int(self._r().hset(self.key, mapping=mapping))
         if field is None or value is None:
@@ -126,8 +128,6 @@ class RedisKey:
     def hdel(self, *fields: str) -> int:
         return int(self._r().hdel(self.key, *fields))
 
-    # minimal zset helpers
-
     def zadd(self, mapping: dict[str, float]) -> int:
         return int(self._r().zadd(self.key, mapping))
 
@@ -135,11 +135,11 @@ class RedisKey:
         return int(self._r().zcard(self.key))
 
     def zrange(self, start: int, stop: int) -> list[str]:
-        return list(self._r().zrange(self.key, start, stop))
+        return [str(item) for item in self._r().zrange(self.key, start, stop)]
 
     def zpopmin(self, count: int = 1) -> list[tuple[str, float]]:
-        return [(member, float(score)) for member, score in self._r().zpopmin(self.key, count)]
-    
+        return [(str(member), float(score)) for member, score in self._r().zpopmin(self.key, count)]
+
     def zrangebyscore(self, min_score: float, max_score: float, **kwargs: Any) -> list[Any]:
         return list(self._r().zrangebyscore(self.key, min_score, max_score, **kwargs))
 
@@ -148,8 +148,7 @@ class RedisKey:
         return None if value is None else float(value)
 
     def zrevrange(self, start: int, stop: int) -> list[str]:
-        return list(self._r().zrevrange(self.key, start, stop))
+        return [str(item) for item in self._r().zrevrange(self.key, start, stop)]
 
     def zrevrangebyscore(self, max_score: float, min_score: float, **kwargs: Any) -> list[Any]:
         return list(self._r().zrevrangebyscore(self.key, max_score, min_score, **kwargs))
-

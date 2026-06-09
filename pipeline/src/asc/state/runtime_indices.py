@@ -70,10 +70,10 @@ class RuntimeContentIndex(FixedRedisHashIndex):
         return record.to_ref()
 
     def hkeys(self) -> list[str]:
-        return [str(key) for key in self._r().hkeys(str(self.key))]
+        return self.key.hkeys()
 
     def hlen(self) -> int:
-        return int(self._r().hlen(str(self.key)))
+        return self.key.hlen()
 
 
 class RuntimeStepIndex(FixedRedisHashIndex):
@@ -105,10 +105,10 @@ class RuntimeStepIndex(FixedRedisHashIndex):
         return record.to_ref()
 
     def hkeys(self) -> list[str]:
-        return [str(key) for key in self._r().hkeys(str(self.key))]
+        return self.key.hkeys()
 
     def hlen(self) -> int:
-        return int(self._r().hlen(str(self.key)))
+        return self.key.hlen()
 
 
 __all__ = ["RuntimeContentIndex", "RuntimeStepIndex"]

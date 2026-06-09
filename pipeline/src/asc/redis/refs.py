@@ -4,17 +4,18 @@ from asc.redis.key import RedisKey
 
 
 def redis_key(kind: str, slug: str, *segments: str) -> str:
-    """Build a referenced control key as namespace:identity[:segments...]."""
+    """Compatibility helper for legacy callers that build concrete keys."""
+
     return str(RedisKey.from_parts(kind, slug, *segments))
 
 
 def key_exists(kind: str, slug: str) -> bool:
-    return RedisKey(redis_key(kind, slug)).get_json() is not None
+    return RedisKey(redis_key(kind, slug)).exists()
 
 
 def require_key(kind: str, slug: str) -> None:
     key = redis_key(kind, slug)
-    if RedisKey(key).get_json() is None:
+    if not RedisKey(key).exists():
         raise ValueError(f"missing referenced {kind} key: {key}")
 
 
