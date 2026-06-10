@@ -11,12 +11,7 @@ T = TypeVar("T", bound="RedisModel")
 
 
 class RedisModel(BaseModel):
-    """Base for Redis-backed Pydantic records.
-
-    Redis records are stored as hashes. Concrete models own all conversion
-    details through Pydantic validators/serializers. The Redis adapter only
-    calls dump_redis()/load_redis().
-    """
+    """Base for Redis-backed Pydantic hash records."""
 
     domain: ClassVar[str]
 
@@ -46,12 +41,28 @@ class RedisModel(BaseModel):
         return RedisKey.from_parts(namespace, identity, kind)
 
     @classmethod
-    def load(cls: type[T], identity: str) -> T:
-        return cls.load_from_key(cls.key_for_identity(identity))
+    def resolve_key(cls, value: str | RedisKey) -> RedisKey:
+        """Resolve either a full Redis key or a bare identity/ULID."""
+
+        if isinstance(value, RedisKey):
+            return value
+
+        text = cls._require_text(value, field_name="redis key or identity")
+
+        # Full runtime/control key:
+        #   namespace:identity:kind
+        #   namespace:identity:kind.N
+        if text.count(":") == 2:
+            return RedisKey(text)
+
+        # Bare ULID / identity:
+        #   01KT...
+        #   cnt.foo.bar
+        return cls.key_for_identity(text)
 
     @classmethod
-    def load_from_key(cls: type[T], full_key: str | RedisKey) -> T:
-        key = full_key if isinstance(full_key, RedisKey) else RedisKey(str(full_key))
+    def load(cls: type[T], value: str | RedisKey) -> T:
+        key = cls.resolve_key(value)
         raw = key.hgetall()
         if not raw:
             raise RuntimeError(f"Redis hash record missing: {key}")
@@ -59,8 +70,6 @@ class RedisModel(BaseModel):
 
     @classmethod
     def load_redis(cls: type[T], data: dict[str, str]) -> T:
-        """Validate a Redis hash mapping into a model instance."""
-
         return cls.model_validate(data)
 
     @property
@@ -75,23 +84,16 @@ class RedisModel(BaseModel):
         return self.__class__.key_for_identity(self.redis_identity)
 
     def dump_redis(self) -> dict[str, str]:
-        """Return the model's Redis hash representation.
-
-        Concrete models should use Pydantic field serializers to turn opaque
-        payloads into explicit JSON-string fields such as metadata_json or
-        engine_args_json before this method is called.
-        """
-
         dumped = self.model_dump(mode="json")
         return {key: _redis_scalar(value, field_name=key) for key, value in dumped.items()}
 
-    def save(self) -> str:
-        key = self.redis_key
+    def save(self, value: str | RedisKey | None = None) -> str:
+        key = self.redis_key if value is None else self.__class__.resolve_key(value)
         key.hset(mapping=self.dump_redis())
         return str(key)
 
-    def overwrite(self) -> str:
-        return self.save()
+    def overwrite(self, value: str | RedisKey | None = None) -> str:
+        return self.save(value)
 
 
 def _redis_scalar(value: Any, *, field_name: str) -> str:
