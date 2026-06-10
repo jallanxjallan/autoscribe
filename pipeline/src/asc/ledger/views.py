@@ -7,7 +7,8 @@ PENDING_RESULT_EXPORTS_VIEW = "pending_result_exports"
 CREATE_PENDING_RESULT_EXPORTS_VIEW_SQL = f"""
     CREATE VIEW IF NOT EXISTS {PENDING_RESULT_EXPORTS_VIEW} AS
     SELECT
-        json_extract(c.raw_json, '$.identifier') AS prompt_slug,
+        c.record_identity AS prompt_slug,
+        c.record_identity AS record_identity,
         c.call AS call_identity,
         r.result AS result_identity
     FROM calls AS c
@@ -24,6 +25,7 @@ CREATE_PENDING_RESULT_EXPORTS_VIEW_SQL = f"""
 SELECT_PENDING_RESULT_EXPORTS_SQL = f"""
     SELECT
         prompt_slug,
+        record_identity,
         call_identity,
         result_identity
     FROM {PENDING_RESULT_EXPORTS_VIEW}
@@ -45,6 +47,7 @@ SELECT_DUPLICATE_PENDING_EXPORT_SLUGS_SQL = f"""
 SELECT_DUPLICATE_PENDING_EXPORT_ROWS_SQL = f"""
     SELECT
         p.prompt_slug,
+        p.record_identity,
         p.call_identity,
         p.result_identity
     FROM {PENDING_RESULT_EXPORTS_VIEW} AS p

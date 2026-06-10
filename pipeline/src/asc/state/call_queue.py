@@ -1,44 +1,40 @@
-"""Compatibility shim for the retired call queue.
+"""Compatibility shim for the orchestrator call hold queue.
 
-The runtime queue now stores full step keys, not call identities. New code should
-import asc.state.runtime_step_queue or asc.state.step_queue directly.
+Enqueue submits materialized RuntimeCallRecord keys here. The orchestrator polls
+this hold queue, takes ledger custody, then stages the first runtime step.
 """
 
 from __future__ import annotations
 
-from asc.state.runtime_step_queue import (
-    RUNTIME_STEP_QUEUE_KEY,
-    QueuedStep as ClaimedCall,
-    RuntimeStepQueue as CallQueue,
+from asc.state.call_hold_queue import (
+    CALL_HOLD_QUEUE_KEY,
+    CallHoldQueue as CallQueue,
+    QueuedCall as ClaimedCall,
+    call_hold_queue_key,
+    claim_call,
     claim_next,
     clear,
     count,
+    enqueue,
     enqueue_batch,
-    enqueue_step,
+    enqueue_call,
+    peek_call,
     peek_next,
-    step_queue_key,
 )
 
 STATE_NAMESPACE = "queue"
 CONTROL_DOMAIN = STATE_NAMESPACE
-QUEUE_SEGMENT = "pending"
+QUEUE_SEGMENT = "hold"
 QUEUE_KIND = QUEUE_SEGMENT
-CALL_IDENTITY = "runtime-step"
+CALL_IDENTITY = "orchestrator-call"
 
 
 def call_queue_key() -> str:
-    return RUNTIME_STEP_QUEUE_KEY
-
-
-def enqueue_call(call_identity: str, *, score: float | None = None) -> int:
-    return enqueue_step(call_identity, score=score)
-
-
-def enqueue_member(queue_member: str, *, score: float | None = None) -> int:
-    return enqueue_step(queue_member, score=score)
+    return CALL_HOLD_QUEUE_KEY
 
 
 __all__ = [
+    "CALL_HOLD_QUEUE_KEY",
     "STATE_NAMESPACE",
     "CONTROL_DOMAIN",
     "QUEUE_SEGMENT",
@@ -46,12 +42,15 @@ __all__ = [
     "CALL_IDENTITY",
     "ClaimedCall",
     "CallQueue",
+    "call_hold_queue_key",
     "call_queue_key",
+    "claim_call",
     "claim_next",
     "clear",
     "count",
+    "enqueue",
     "enqueue_batch",
     "enqueue_call",
-    "enqueue_member",
+    "peek_call",
     "peek_next",
 ]

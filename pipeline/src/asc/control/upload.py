@@ -1,9 +1,9 @@
 from __future__ import annotations
 
 import sys
-from collections.abc import Iterable, Mapping
+from collections.abc import Iterable
 from dataclasses import dataclass, field
-from typing import Any, TextIO, TypeVar
+from typing import TextIO, TypeVar
 
 from pydantic import ValidationError
 
@@ -12,6 +12,7 @@ from asc.models.control.plan import PlanRecord
 from asc.redis.model_base import RedisModel
 from asc.state.control_slugmap import ControlSlugMap
 from asc.streams.ndjson import NdjsonParseError, iter_ndjson_records
+from asc.control.plan_steps import upload_plan_record
 
 ControlRecord = InstructionRecord | PlanRecord
 ControlModel = type[ControlRecord]
@@ -20,6 +21,13 @@ TControl = TypeVar("TControl", bound=RedisModel)
 CONTROL_MODELS: dict[str, ControlModel] = {
     "instruction": InstructionRecord,
     "plan": PlanRecord,
+}
+
+CONTROL_TARGETS: dict[str, str] = {
+    "instructions": "instruction",
+    "plans": "plan",
+    "instruction": "instruction",
+    "plan": "plan",
 }
 
 
@@ -31,46 +39,39 @@ class UploadReport:
 
 
 def upload_instructions_stream(source: TextIO) -> UploadReport:
-    return upload_typed_control_stream(source, expected_type="instruction")
+    return upload_typed_control_stream(source, target="instructions")
 
 
 def upload_plans_stream(source: TextIO) -> UploadReport:
-    return upload_typed_control_stream(source, expected_type="plan")
+    return upload_typed_control_stream(source, target="plans")
 
 
 def upload_typed_control_stream(
     source: Iterable[str],
     *,
-    expected_type: str,
+    target: str,
     error_stream: TextIO = sys.stderr,
 ) -> UploadReport:
+    """Upload one explicitly targeted control stream.
+
+    The CLI target chooses the model. Incoming NDJSON is passed directly to
+    that model; the model owns the public upload contract and rejects records
+    with the wrong record_type or malformed fields.
+
+    Bad records are reported to stderr and skipped. Malformed NDJSON remains a
+    fatal stream error.
     """
-    Upload one explicitly targeted control stream.
 
-    The command chooses the target model. The NDJSON `type` field is retained
-    only as a guard so one upload endpoint cannot accidentally consume another
-    control type.
-
-    Bad records are reported to stderr and skipped. This keeps producer output
-    streams clean and lets one damaged control file avoid poisoning the whole
-    upload run.
-    """
-    model_type = CONTROL_MODELS.get(expected_type)
-    if model_type is None:
-        known = ", ".join(sorted(CONTROL_MODELS))
-        raise ValueError(f"unknown control upload target {expected_type!r}; known: {known}")
-
+    record_type, model_type = control_model_for_target(target)
     saved_count = 0
     skipped_count = 0
     by_type: dict[str, int] = {}
 
     try:
-        parsed_records = iter_ndjson_records(source)
-        for parsed in parsed_records:
+        for parsed in iter_ndjson_records(source):
             try:
-                record = validate_typed_control_record(
+                record = validate_control_record(
                     parsed.record,
-                    expected_type=expected_type,
                     model_type=model_type,
                     location=f"line {parsed.line_number}",
                 )
@@ -79,18 +80,16 @@ def upload_typed_control_stream(
             except Exception as exc:
                 skipped_count += 1
                 print(
-                    f"[control:upload:{expected_type}] skipping line "
+                    f"[control:upload:{record_type}] skipping line "
                     f"{parsed.line_number}: {exc}",
                     file=error_stream,
                 )
                 continue
 
             saved_count += 1
-            by_type[expected_type] = by_type.get(expected_type, 0) + 1
+            by_type[record_type] = by_type.get(record_type, 0) + 1
 
     except NdjsonParseError as exc:
-        # A malformed JSON line means the stream itself cannot be trusted after
-        # this point; unlike model validation, this is a fatal stream error.
         raise ValueError(str(exc)) from exc
 
     return UploadReport(
@@ -100,21 +99,22 @@ def upload_typed_control_stream(
     )
 
 
-def validate_typed_control_record(
-    record: Mapping[str, Any],
+def control_model_for_target(target: str) -> tuple[str, ControlModel]:
+    record_type = CONTROL_TARGETS.get(target)
+    if record_type is None:
+        known = ", ".join(sorted(CONTROL_TARGETS))
+        raise ValueError(f"unknown control upload target {target!r}; known: {known}")
+
+    model_type = CONTROL_MODELS[record_type]
+    return record_type, model_type
+
+
+def validate_control_record(
+    record: object,
     *,
-    expected_type: str,
     model_type: type[TControl],
     location: str = "record",
 ) -> TControl:
-    record_type = record.get("type")
-
-    if record_type != expected_type:
-        raise ValueError(
-            f"{location}: type={record_type!r} does not match upload target "
-            f"{expected_type!r}"
-        )
-
     try:
         return model_type.model_validate(record)
     except ValidationError as exc:
@@ -122,8 +122,23 @@ def validate_typed_control_record(
 
 
 def save_control_record(record: RedisModel) -> None:
+    if isinstance(record, PlanRecord):
+        upload_plan_record(record.model_dump(mode="json"))
+        return
+
     full_key = record.save()
     ControlSlugMap().bind_record(record, full_key=full_key)
+
+
+# Compatibility aliases for older callers/tests.
+def validate_typed_control_record(
+    record: object,
+    *,
+    expected_type: str,
+    model_type: type[TControl],
+    location: str = "record",
+) -> TControl:
+    return validate_control_record(record, model_type=model_type, location=location)
 
 
 def _clean_optional_text(value: object) -> str:
@@ -154,10 +169,13 @@ def _record_label(record: RedisModel, *, fallback: str) -> str:
 
 __all__ = [
     "CONTROL_MODELS",
+    "CONTROL_TARGETS",
     "UploadReport",
+    "control_model_for_target",
     "save_control_record",
     "upload_instructions_stream",
     "upload_plans_stream",
     "upload_typed_control_stream",
+    "validate_control_record",
     "validate_typed_control_record",
 ]

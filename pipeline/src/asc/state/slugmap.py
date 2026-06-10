@@ -69,6 +69,19 @@ class SlugMap(FixedRedisHashIndex):
             RedisKey(resolved_key).expire(ttl_seconds)
         return resolved_key
 
+    # Compatibility aliases for callers that use generic index verbs.
+    def bind(self, slug: str, full_key: str | RedisKey, **kwargs: object) -> str:
+        return self.bind_key(slug, full_key, **kwargs)  # type: ignore[arg-type]
+
+    def set_key(self, slug: str, full_key: str | RedisKey, **kwargs: object) -> str:
+        return self.bind_key(slug, full_key, **kwargs)  # type: ignore[arg-type]
+
+    def store(self, slug: str, full_key: str | RedisKey, **kwargs: object) -> str:
+        return self.bind_key(slug, full_key, **kwargs)  # type: ignore[arg-type]
+
+    def record(self, slug: str, full_key: str | RedisKey, **kwargs: object) -> str:
+        return self.bind_key(slug, full_key, **kwargs)  # type: ignore[arg-type]
+
     def list_bindings(self) -> dict[str, str]:
         entries = self.key.hgetall()
         return {str(key): str(value) for key, value in sorted(entries.items())}
@@ -197,6 +210,22 @@ def bind_key(
     )
 
 
+def bind(slug: str, full_key: str | RedisKey, **kwargs: object) -> str:
+    return bind_key(slug, full_key, **kwargs)  # type: ignore[arg-type]
+
+
+def set_key(slug: str, full_key: str | RedisKey, **kwargs: object) -> str:
+    return bind_key(slug, full_key, **kwargs)  # type: ignore[arg-type]
+
+
+def store(slug: str, full_key: str | RedisKey, **kwargs: object) -> str:
+    return bind_key(slug, full_key, **kwargs)  # type: ignore[arg-type]
+
+
+def record(slug: str, full_key: str | RedisKey, **kwargs: object) -> str:
+    return bind_key(slug, full_key, **kwargs)  # type: ignore[arg-type]
+
+
 @overload
 def resolve_key(slug: str, *, require: Literal[True], **kwargs: object) -> str: ...
 
@@ -225,8 +254,12 @@ __all__ = [
     "SLUGMAP_KEY",
     "SLUGMAP_TTL_SECONDS",
     "SlugMap",
+    "bind",
     "bind_key",
     "bind_record",
+    "record",
+    "set_key",
+    "store",
     "has_slug",
     "list_bindings",
     "list_slugs",

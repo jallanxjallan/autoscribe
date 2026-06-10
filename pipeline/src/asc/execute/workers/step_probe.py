@@ -31,7 +31,7 @@ from asc.core.timestamp import timestamp
 from asc.models.runtime.result import StepResultRecord
 from asc.registries.extensions import load_engine_call
 from asc.state.runtime_step_queue import claim_next, enqueue_step
-from asc.state.scrivener_queue import enqueue as enqueue_result
+from asc.state.orchestrator_queue import enqueue as enqueue_result
 
 
 @dataclass(frozen=True, slots=True)
