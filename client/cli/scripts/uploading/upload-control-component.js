@@ -253,6 +253,16 @@ function planBelongsToRoot(record, root, file) {
   return path.dirname(file) === localPlansDir;
 }
 
+function planRecordIdentity(record) {
+  return typeof record?.record_identity === 'string'
+    ? record.record_identity.trim()
+    : '';
+}
+
+function isPlanUploadRecord(record) {
+  return record && record.record_type === 'plan' && Boolean(planRecordIdentity(record));
+}
+
 function loadPlanItems({ root, script, force = false }) {
   const items = [];
 
@@ -260,7 +270,7 @@ function loadPlanItems({ root, script, force = false }) {
     try {
       const record = readPlanJson(file);
 
-      if (!record || record.type !== 'plan' || !record.slug) {
+      if (!isPlanUploadRecord(record)) {
         continue;
       }
 
@@ -272,14 +282,16 @@ function loadPlanItems({ root, script, force = false }) {
         continue;
       }
 
+      const recordIdentity = planRecordIdentity(record);
+
       items.push({
         order: items.length + 1,
-        slug: record.slug,
-        prefix: slugPrefix(record.slug) || 'plan',
+        slug: recordIdentity,
+        prefix: slugPrefix(recordIdentity) || 'plan',
         recordType: 'plan',
         path: file,
         basename: path.basename(file),
-        label: record.label || record.slug,
+        label: record.label || recordIdentity,
         record,
       });
     } catch (error) {
@@ -294,22 +306,8 @@ function loadPlanItems({ root, script, force = false }) {
   });
 }
 
-function planUploadRecord({ root, item, uploadedAt, force }) {
-  return {
-    ...item.record,
-    identifier: item.record.identifier || item.record.slug,
-    control_prefix: item.record.control_prefix || item.prefix || slugPrefix(item.record.slug) || 'plan',
-    source: {
-      ...(item.record.source || {}),
-      origin: 'obsidian.upload-plans',
-      vault_root: root,
-      path: item.path,
-      filename_hint: item.basename || path.basename(item.path),
-      uploaded_at: uploadedAt,
-      selection_mode: force ? 'force-all-local-plans' : 'pending-upload-local-plans',
-      selection_order: item.order,
-    },
-  };
+function planUploadRecord({ item }) {
+  return item.record;
 }
 
 function markPlanUploaded(item, uploadedAt) {

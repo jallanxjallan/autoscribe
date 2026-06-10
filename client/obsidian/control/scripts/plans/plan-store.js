@@ -11,12 +11,12 @@ function normalizeKind(value) {
 function compactControl(record) {
   if (!record) return null;
   return {
-    slug: record.slug || null,
+    slug: record.slug || record.record_identity || null,
     key: record.key || null,
     identity: record.identity || null,
     type: record.type || record.kind || null,
     kind: record.kind || record.type || null,
-    label: record.label || record.slug || record.key || null,
+    label: record.label || record.slug || record.record_identity || record.key || null,
     description: record.description || '',
     path: record.path || null,
     abspath: record.abspath || null,
@@ -72,6 +72,10 @@ function hasExecutableTarget(step) {
   return Boolean(step.engine);
 }
 
+function planSlug(record) {
+  return record?.record_identity || record?.slug || '';
+}
+
 function buildPlanRecord({
   app,
   label,
@@ -83,12 +87,15 @@ function buildPlanRecord({
   force_slug = null,
 }) {
   if (!label || !label.trim()) throw new Error('Plan label is required.');
+
   const cleanSteps = (steps || []).filter(hasExecutableTarget);
   if (!cleanSteps.length) throw new Error('At least one executable step is required.');
 
   const root = vaultRoot(app);
-  const slug = force_slug || existing?.slug || makeSlug('plan', label);
+  const recordIdentity = force_slug || planSlug(existing) || makeSlug('plan', label);
+  const now = new Date().toISOString();
   const selectedControls = [];
+
   const planSteps = cleanSteps.map((step, index) => {
     const stepNumber = index + 1;
     const kind = normalizeStepKind(step);
@@ -144,14 +151,22 @@ function buildPlanRecord({
   });
 
   const warnings = controlWarnings(selectedControls);
+  const cleanDescription = (description || '').trim();
+
   return {
-    type: 'plan',
+    record_type: 'plan',
+    record_identity: recordIdentity,
+    record_content: cleanDescription,
+
     version: Number(existing?.version || 0) + 1,
     label: label.trim(),
-    slug,
-    description: (description || '').trim(),
-    created: existing?.created || new Date().toISOString(),
-    modified: new Date().toISOString(),
+
+    // UI/local compatibility only. Pipeline upload contract uses record_identity.
+    slug: recordIdentity,
+
+    description: cleanDescription,
+    created: existing?.created || now,
+    modified: now,
     pending_upload: true,
     uploaded_at: existing?.uploaded_at || null,
     vault: {
@@ -187,7 +202,9 @@ function planFileFor(app, slug) {
 }
 
 function savePlanRecord(app, record) {
-  const file = planFileFor(app, record.slug);
+  const slug = planSlug(record);
+  if (!slug) throw new Error('Plan record missing record_identity.');
+  const file = planFileFor(app, slug);
   writeJson(file, record);
   return file;
 }
@@ -197,41 +214,59 @@ function readJsonFile(file) {
   return JSON.parse(text);
 }
 
+function isPlanRecord(record) {
+  return record && record.record_type === 'plan' && Boolean(record.record_identity);
+}
+
 function listPlanRecords(app) {
   const dir = planDir(app);
   let entries = [];
   try { entries = fs.readdirSync(dir, { withFileTypes: true }); } catch { return []; }
+
   const records = [];
   for (const entry of entries) {
     if (!entry.isFile() || !entry.name.endsWith('.json')) continue;
+
     const file = path.join(dir, entry.name);
     try {
       const record = readJsonFile(file);
-      if (!record || record.type !== 'plan' || !record.slug) continue;
+      if (!isPlanRecord(record)) continue;
+
       const stat = fs.statSync(file);
-      records.push({ ...record, file, file_mtime: stat.mtime.toISOString() });
-    } catch (err) {
       records.push({
-        type: 'plan',
-        slug: path.basename(entry.name, '.json'),
-        label: path.basename(entry.name, '.json'),
+        ...record,
+        slug: record.record_identity,
+        file,
+        file_mtime: stat.mtime.toISOString(),
+      });
+    } catch (err) {
+      const fallbackSlug = path.basename(entry.name, '.json');
+      records.push({
+        record_type: 'plan',
+        record_identity: fallbackSlug,
+        slug: fallbackSlug,
+        label: fallbackSlug,
         file,
         read_error: err.message,
       });
     }
   }
+
   records.sort((a, b) => {
     const am = String(a.modified || a.file_mtime || a.created || '');
     const bm = String(b.modified || b.file_mtime || b.created || '');
     const cmp = bm.localeCompare(am);
     if (cmp) return cmp;
-    return String(a.label || a.slug).localeCompare(String(b.label || b.slug));
+    return String(a.label || a.record_identity || a.slug).localeCompare(
+      String(b.label || b.record_identity || b.slug)
+    );
   });
+
   return records;
 }
 
 function loadPlanRecord(app, slug) {
-  const found = listPlanRecords(app).find((record) => record.slug === slug);
+  const found = listPlanRecords(app).find((record) => planSlug(record) === slug);
   if (!found) throw new Error(`Plan not found: ${slug}`);
   if (found.read_error) throw new Error(`Could not read ${found.file}: ${found.read_error}`);
   return found;

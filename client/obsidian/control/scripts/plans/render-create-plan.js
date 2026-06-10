@@ -24,6 +24,10 @@ function normalizeKind(value) {
   return String(value || '').trim().toLowerCase();
 }
 
+function planSlug(record) {
+  return record?.record_identity || record?.slug || '';
+}
+
 function sortByLabel(records) {
   return [...records].sort((a, b) => {
     const la = String(a.label || a.slug || a.key || '');
@@ -35,7 +39,7 @@ function sortByLabel(records) {
 }
 
 function optionText(record) {
-  const id = record.slug || record.key || '';
+  const id = record.record_identity || record.slug || record.key || '';
   const kind = record.kind ? ` [${normalizeKind(record.kind)}]` : '';
   const type = record.type && !record.kind ? ` [${normalizeKind(record.type)}]` : '';
   const dirty = record.repo_state && record.repo_state !== 'clean' ? ' [dirty]' : '';
@@ -49,7 +53,8 @@ function planOptionText(record) {
   const bad = record.read_error ? ' [read error]' : '';
   const count = Number.isFinite(record.step_count) ? ` — ${record.step_count} step(s)` : '';
   const changed = record.modified || record.file_mtime || record.created || '';
-  return `${record.label || record.slug} — ${record.slug}${count}${changed ? ` (${changed})` : ''}${bad}`;
+  const slug = planSlug(record);
+  return `${record.label || slug} — ${slug}${count}${changed ? ` (${changed})` : ''}${bad}`;
 }
 
 function selectFor(records, placeholder, valueField = 'slug') {
@@ -160,6 +165,18 @@ function coerceStepKind(step, kind, { engines }) {
     step.script = null;
     step.rag_profile = null;
   }
+}
+
+function ensurePlanUploadContract(record) {
+  const plan = { ...record };
+  const identity = plan.record_identity || plan.slug;
+  if (!identity) throw new Error('Plan must have record_identity');
+  plan.record_type = 'plan';
+  plan.record_identity = identity;
+  if (typeof plan.record_content !== 'string') {
+    plan.record_content = typeof plan.description === 'string' ? plan.description : '';
+  }
+  return plan;
 }
 
 function planToScreenSteps(plan, { engines, instructions, scripts, ragProfiles }) {
@@ -466,7 +483,7 @@ async function renderCreatePlan({ app, container }) {
     try {
       const plan = loadPlanRecord(app, slug);
       loadedPlan = plan;
-      currentPlan.textContent = `${plan.slug} (${plan.file || 'saved plan'})`;
+      currentPlan.textContent = `${planSlug(plan)} (${plan.file || 'saved plan'})`;
       savedPath.textContent = plan.file || '';
       label.value = plan.label || '';
       description.value = plan.description || '';
@@ -480,7 +497,7 @@ async function renderCreatePlan({ app, container }) {
   }
 
   function snapshotPayload(existing = null, forceSlug = null) {
-    return buildPlanRecord({
+    const record = buildPlanRecord({
       app,
       label: label.value,
       description: description.value,
@@ -500,14 +517,21 @@ async function renderCreatePlan({ app, container }) {
         source: controlSnapshot.data?.source || null,
       },
     });
+    console.log(JSON.stringify(record, null, 2));
+new Notice(
+  `record keys: ${Object.keys(record).sort().join(', ')}`
+);
+    return ensurePlanUploadContract(record);
   }
+
+  
 
   function saveRecord(record) {
     const file = savePlanRecord(app, record);
     savedPath.textContent = file;
     loadedPlan = { ...record, file };
-    currentPlan.textContent = `${record.slug} (${file})`;
-    refreshExistingPlans(record.slug);
+    currentPlan.textContent = `${planSlug(record)} (${file})`;
+    refreshExistingPlans(planSlug(record));
     const warn = record.preflight.warnings.length ? ` (${record.preflight.warnings.join('; ')})` : '';
     new Notice(`Saved plan: ${record.label}${warn}`);
   }
@@ -515,7 +539,7 @@ async function renderCreatePlan({ app, container }) {
   const loadBtn = button('Modify Selected Plan', loadSelectedPlan);
   const newBtn = button('New Blank Plan', clearScreen);
   const deleteBtn = button('Delete Selected Plan', () => {
-    const slug = existingSelect.value || loadedPlan?.slug;
+    const slug = existingSelect.value || planSlug(loadedPlan);
     if (!slug) {
       new Notice('Choose a saved plan to delete.');
       return;
@@ -523,7 +547,7 @@ async function renderCreatePlan({ app, container }) {
     if (!confirm(`Delete plan ${slug}?`)) return;
     try {
       const file = deletePlanRecord(app, slug);
-      if (loadedPlan?.slug === slug) clearScreen();
+      if (planSlug(loadedPlan) === slug) clearScreen();
       refreshExistingPlans('');
       new Notice(`Deleted plan: ${file}`);
     } catch (err) {
@@ -538,12 +562,12 @@ async function renderCreatePlan({ app, container }) {
   });
 
   const saveChangesBtn = button('Save Changes to Loaded Plan', () => {
-    if (!loadedPlan?.slug) {
+    if (!planSlug(loadedPlan)) {
       new Notice('Load a plan first, or use Save Screen as New Plan.');
       return;
     }
     try {
-      saveRecord(snapshotPayload(loadedPlan, loadedPlan.slug));
+      saveRecord(snapshotPayload(loadedPlan, planSlug(loadedPlan)));
     } catch (err) {
       new Notice(`Save plan failed: ${err.message}`);
       console.error(err);
