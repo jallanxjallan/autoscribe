@@ -8,14 +8,8 @@ from typing import Any, TextIO
 from asc.enqueue.reader import EnqueueRecord, iter_enqueue_records
 from asc.models.runtime.state import CallState
 from asc.redis.key import RedisKey
-
-try:
-    from asc.state.slugmap import SLUGMAP_TTL_SECONDS, SlugMap
-except ModuleNotFoundError:
-    from asc.state.control_slugmap import (  # type: ignore[no-redef]
-        CONTROL_SLUGMAP_TTL_SECONDS as SLUGMAP_TTL_SECONDS,
-        ControlSlugMap as SlugMap,
-    )
+from asc.state.orchestrator_queue import enqueue_call as enqueue_orchestrator_call
+from asc.state.slugmap import SLUGMAP_TTL_SECONDS, SlugMap
 
 
 @dataclass(frozen=True, slots=True)
@@ -97,11 +91,9 @@ def enqueue_record(record: object) -> EnqueuedCall:
 
 
 def enqueue_call(call_identity: str) -> None:
-    """Submit a call identity to the orchestrator hold queue."""
+    """Submit a call identity to the orchestrator queue."""
 
-    from asc.state.orchestrator_hold_queue import enqueue
-
-    enqueue(call_identity)
+    enqueue_orchestrator_call(call_identity)
 
 
 def _enqueue_record(record: object) -> EnqueueRecord:
@@ -140,16 +132,22 @@ def _record_identifier(record: object, *, fallback: str) -> str:
 
 
 def _identity_from_key(key: str) -> str:
-    segments = RedisKey(key).segments
-    if len(segments) < 2:
-        raise ValueError(f"invalid Redis key, cannot extract identity: {key}")
-    return str(segments[1])
+    """Extract identity from a canonical Redis model key: domain:identity:kind."""
+
+    if not isinstance(key, str) or not key.strip():
+        raise ValueError("Redis key must be a non-empty string")
+
+    parts = key.strip().split(":")
+    if len(parts) != 3 or not all(parts):
+        raise ValueError(f"invalid Redis model key, cannot extract identity: {key}")
+
+    return parts[1]
 
 
 class SlugKeyResolver:
     """Resolve source slugs into full Redis keys at enqueue time."""
 
-    def __init__(self, slugmap: object | None = None) -> None:
+    def __init__(self, slugmap: SlugMap | None = None) -> None:
         self._slugmap = slugmap or SlugMap()
 
     def resolve(self, value: str, expected_kind: str) -> str:
@@ -162,18 +160,11 @@ class SlugKeyResolver:
         return self._resolve_slug(reference, expected_kind=expected_kind)
 
     def _resolve_slug(self, slug: str, *, expected_kind: str) -> str:
-        for method_name in ("resolve_key", "get_key", "lookup_key"):
-            method = getattr(self._slugmap, method_name, None)
-            if callable(method):
-                try:
-                    return str(method(slug, require=True, expected_kind=expected_kind))
-                except TypeError:
-                    return str(method(slug, expected_kind=expected_kind))
-        raise TypeError("SlugMap must provide resolve_key(), get_key(), or lookup_key()")
+        return str(self._slugmap.resolve_key(slug, require=True, expected_kind=expected_kind))
 
     def _validate_full_key(self, key: str, *, expected_kind: str) -> str:
         redis_key = RedisKey(key)
-        actual_kind = redis_key.segments[-1] if redis_key.segments else None
+        actual_kind = key.strip().split(":")[-1]
         if actual_kind != expected_kind:
             raise ValueError(
                 f"key kind mismatch: expected {expected_kind}, got {actual_kind} ({key})"
@@ -184,11 +175,7 @@ class SlugKeyResolver:
         return str(redis_key)
 
 
-ControlKeyResolver = SlugKeyResolver
-
-
 __all__ = [
-    "ControlKeyResolver",
     "SlugKeyResolver",
     "EnqueueReport",
     "EnqueuedCall",

@@ -10,7 +10,7 @@ from pydantic import ValidationError
 from asc.models.control.instruction import InstructionRecord
 from asc.models.control.plan import PlanRecord
 from asc.redis.model_base import RedisModel
-from asc.state.control_slugmap import ControlSlugMap
+from asc.state.slugmap import SlugMap
 from asc.streams.ndjson import NdjsonParseError, iter_ndjson_records
 from asc.control.plan_steps import upload_plan_record
 
@@ -127,7 +127,7 @@ def save_control_record(record: RedisModel) -> None:
         return
 
     full_key = record.save()
-    ControlSlugMap().bind_record(record, full_key=full_key)
+    SlugMap().bind_record(record, full_key=full_key)
 
 
 # Compatibility aliases for older callers/tests.

@@ -1,7 +1,7 @@
 from __future__ import annotations
 
-from asc.state.control_slugmap import ControlSlugMap
+from asc.state.slugmap import SlugMap
 
 
 def list_control_slugs() -> list[str]:
-    return ControlSlugMap().list_slugs()
+    return SlugMap().list_slugs()

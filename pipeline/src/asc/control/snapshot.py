@@ -3,7 +3,7 @@ from __future__ import annotations
 from typing import Any
 
 from asc.redis.key import RedisKey
-from asc.state.control_slugmap import ControlSlugMap
+from asc.state.slugmap import SlugMap
 
 CONTROL_KIND_TO_REGISTRY = {
     "driver": "drivers",
@@ -20,7 +20,7 @@ def build_control_snapshot() -> dict[str, Any]:
     This snapshot reads the live slug -> Redis key index, removes stale pointers,
     and groups the current records by control kind.
     """
-    slugmap = ControlSlugMap()
+    slugmap = SlugMap()
     registries: dict[str, dict[str, Any]] = {
         name: {} for name in CONTROL_KIND_TO_REGISTRY.values()
     }
@@ -45,7 +45,7 @@ def build_control_snapshot() -> dict[str, Any]:
         "schema_version": 1,
         "type": "autoscribe.controls",
         "source": {
-            "slugmap": ControlSlugMap.KEY,
+            "slugmap": SlugMap.KEY,
         },
         "registries": registries,
         "stale": stale,

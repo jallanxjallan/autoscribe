@@ -8,20 +8,18 @@ from asc.redis.index_base import FixedRedisIndex
 from asc.redis.key import RedisKey
 
 
-RUNTIME_STEP_QUEUE_KEY = "queue:runtime-step:pending"
+WORKER_QUEUE_KEY = "queue:worker:pending"
 
 
 @dataclass(frozen=True, slots=True)
 class QueuedStep:
-    """One claimed runtime step queue member."""
+    """One concrete runtime step key claimed by a worker."""
 
     step_key: str
     score: float
 
     @property
     def identity(self) -> str:
-        """Compatibility alias for old callers that expected `.identity`."""
-
         return self.step_key
 
 
@@ -36,27 +34,29 @@ def _require_step_key(value: object, *, field_name: str = "step_key") -> str:
     if not text:
         raise ValueError(f"{field_name} must be non-empty")
 
-    # Validate general Redis key shape. A queued runtime step is deliberately a
-    # full key, e.g. runtime:<identity>:step.1, not a single identity segment.
     RedisKey(text)
-
     parts = text.split(":")
-    if len(parts) < 3 or parts[0] != "runtime" or not parts[-1].startswith("step."):
+    if len(parts) != 3 or parts[0] != "runtime" or not parts[2].startswith("step."):
         raise ValueError(
             f"{field_name} must look like runtime:<identity>:step.<n>; got {text!r}"
+        )
+
+    suffix = parts[2].removeprefix("step.")
+    if not suffix.isdigit() or int(suffix) < 1:
+        raise ValueError(
+            f"{field_name} must end with a positive step number; got {text!r}"
         )
 
     return text
 
 
-class RuntimeStepQueue(FixedRedisIndex):
+class WorkerQueue(FixedRedisIndex):
     """Pending executable runtime step queue.
 
-    Members are full RuntimeStepRecord Redis keys such as:
-        runtime:01KTG0QMSZCTC3NNJ2QMG96V33:step.1
+    Members are full runtime step keys such as runtime:<identity>:step.1.
     """
 
-    KEY = RUNTIME_STEP_QUEUE_KEY
+    KEY = WORKER_QUEUE_KEY
 
     def enqueue(self, step_key: str | RedisKey, *, score: float | None = None) -> int:
         member = _require_step_key(step_key)
@@ -89,6 +89,12 @@ class RuntimeStepQueue(FixedRedisIndex):
         member, score = items[0]
         return QueuedStep(step_key=str(member), score=float(score))
 
+    def claim_step(self) -> str | None:
+        claimed = self.claim_next()
+        if claimed is None:
+            return None
+        return claimed.step_key
+
     def peek_next(self) -> str | None:
         items = self.key.zrange(0, 0)
         if not items:
@@ -102,15 +108,19 @@ class RuntimeStepQueue(FixedRedisIndex):
         return int(self.delete())
 
 
-_QUEUE = RuntimeStepQueue()
+_QUEUE = WorkerQueue()
 
 
-def step_queue_key() -> str:
-    return RUNTIME_STEP_QUEUE_KEY
+def worker_queue_key() -> str:
+    return WORKER_QUEUE_KEY
 
 
 def enqueue_step(step_key: str | RedisKey, *, score: float | None = None) -> int:
     return _QUEUE.enqueue(step_key, score=score)
+
+
+def enqueue(step_key: str | RedisKey, *, score: float | None = None) -> int:
+    return enqueue_step(step_key, score=score)
 
 
 def enqueue_batch(
@@ -127,10 +137,7 @@ def claim_next() -> QueuedStep | None:
 
 
 def claim_step() -> str | None:
-    claimed = claim_next()
-    if claimed is None:
-        return None
-    return claimed.step_key
+    return _QUEUE.claim_step()
 
 
 def peek_next() -> str | None:
@@ -150,16 +157,17 @@ def clear() -> int:
 
 
 __all__ = [
-    "RUNTIME_STEP_QUEUE_KEY",
+    "WORKER_QUEUE_KEY",
     "QueuedStep",
-    "RuntimeStepQueue",
+    "WorkerQueue",
     "claim_next",
     "claim_step",
     "clear",
     "count",
+    "enqueue",
     "enqueue_batch",
     "enqueue_step",
     "peek_next",
     "peek_step",
-    "step_queue_key",
+    "worker_queue_key",
 ]
