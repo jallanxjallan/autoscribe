@@ -4,8 +4,8 @@ import sys
 from typing import TextIO
 
 from asc.ledger.connect import LedgerConnection
-from asc.ledger.export_record import insert_export_record_with_connection
-from asc.ledger.result_record import read_extract_result_record_by_call_identity_with_connection
+from asc.ledger.records.export import insert_export_record_with_connection
+from asc.ledger.records.result import read_extract_result_record_by_call_identity_with_connection
 from asc.streams import write_ndjson_record
 
 

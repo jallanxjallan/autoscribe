@@ -3,9 +3,9 @@ from __future__ import annotations
 import sys
 from typing import TextIO
 
-from asc.ledger.call_record import read_call_record_with_connection
+from asc.ledger.records.call import read_call_record_with_connection
 from asc.ledger.connect import LedgerConnection
-from asc.ledger.result_record import (
+from asc.ledger.records.result import (
     read_pending_result_export_records_with_connection,
     require_unique_pending_export_slugs_with_connection,
 )
