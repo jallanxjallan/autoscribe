@@ -1,9 +1,10 @@
 """User-facing run commands.
 
-The run CLI is intentionally orchestrator-first.  Enqueue materializes calls
-and submits call keys; workers execute only the step keys they are given; the
-orchestrator owns pipeline progression, ledger writes, retry/failure policy,
-and final result detection.
+The run CLI is intentionally orchestrator-first.  Enqueue materializes calls and submits call_state keys. Workers receive the
+mutable call_state key, load the immutable uploaded plan step indicated by that
+state, write the next content artifact, and return the call_state only after
+success or worker-scoped retries are exhausted. The orchestrator owns artifact
+verification, pipeline progression, ledger writes, and final result detection.
 """
 
 from __future__ import annotations
@@ -61,7 +62,7 @@ def _run_service(
 
 @app.command("start")
 def run_start() -> None:
-    """Claim one submitted call, ledger it, and enqueue its first worker step."""
+    """Claim one submitted call_state, ledger it, and enqueue it for worker custody."""
 
     processed = _run_service(
         module_name="asc.orchestrator.start",
@@ -72,7 +73,7 @@ def run_start() -> None:
 
 @app.command("response")
 def run_response() -> None:
-    """Claim one completed worker response and advance, fail, retry, or finalize it."""
+    """Claim one returned call_state and advance, fail, or finalize it."""
 
     processed = _run_service(
         module_name="asc.orchestrator.daemon",
@@ -94,7 +95,7 @@ def run_once(
         ),
     ] = True,
 ) -> None:
-    """Run one local custody cycle: start call, optionally execute one step, process response."""
+    """Run one local custody cycle: start call_state, optionally execute worker custody, process returned state."""
 
     processed = 0
 
@@ -139,7 +140,7 @@ def run_drain(
         ),
     ] = 100,
 ) -> None:
-    """Drain submitted calls, worker steps, and completed responses until idle."""
+    """Drain submitted call_state keys, worker custody, and returned states until idle."""
 
     from asc.execute.workers.drain import DrainWorker
 
@@ -177,7 +178,8 @@ def run_state() -> None:
     # if a queue module exists and exposes a count/length function, report it.
     queue_modules = {
         "calls": "asc.state.call_queue",
-        "steps": "asc.state.step_queue",
+        "workers": "asc.state.worker_queue",
+        "steps_compat": "asc.state.step_queue",
         "responses": "asc.state.response_queue",
         "failures": "asc.state.failure_queue",
     }
