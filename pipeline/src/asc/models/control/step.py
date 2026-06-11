@@ -1,32 +1,38 @@
 from __future__ import annotations
 
-import json
-from collections.abc import Mapping
 from typing import Any, ClassVar, Literal
 
 from pydantic import ConfigDict, Field, field_validator
 
 from asc.models.helpers.plain import positive_int, redis_key_segment_text
-from asc.models.helpers.upload import RecordIdentity, json_blob
+from asc.models.helpers.upload import RecordIdentity
 from asc.redis.key import RedisKey
 from asc.redis.model_base import RedisModel
 
 
+_RESERVED_FIELDS = {
+    "type",
+    "identity",
+    "plan_identity",
+    "plan_slug",
+    "step_number",
+}
+
+
 class PlanStepRecord(RedisModel):
-    """Compiled reusable control step belonging to an uploaded plan."""
+    """Trusted immutable control step belonging to an uploaded plan."""
 
     namespace: ClassVar[str] = "control"
     domain: ClassVar[str] = namespace
     kind: ClassVar[str] = "plan-step"
 
-    model_config = ConfigDict(extra="forbid")
+    model_config = ConfigDict(extra="allow")
 
     type: Literal["plan-step"] = "plan-step"
     identity: str
     plan_identity: str
     plan_slug: RecordIdentity
     step_number: int = Field(ge=1)
-    definition_json: str
 
     @field_validator("identity", "plan_identity", mode="before")
     @classmethod
@@ -38,35 +44,39 @@ class PlanStepRecord(RedisModel):
     def validate_step_number(cls, value: object) -> int:
         return positive_int(value, "step_number")
 
-    @field_validator("definition_json", mode="before")
     @classmethod
-    def validate_definition_json(cls, value: object) -> str:
-        return json_blob(value, "definition_json")
-
-    @classmethod
-    def from_definition(
+    def from_step(
         cls,
         *,
         plan_identity: str,
         plan_slug: str,
         step_number: int,
-        definition: Mapping[str, Any],
+        step: object,
     ) -> "PlanStepRecord":
+        if not isinstance(step, dict):
+            raise ValueError("plan step must be an object")
+
+        payload = dict(step)
+        for field in _RESERVED_FIELDS:
+            payload.pop(field, None)
+
         step_number = positive_int(step_number, "step_number")
         return cls(
             identity=f"{redis_key_segment_text(plan_identity, 'plan_identity')}.{step_number}",
             plan_identity=plan_identity,
             plan_slug=plan_slug,
             step_number=step_number,
-            definition_json=dict(definition),
+            **payload,
         )
 
     @property
     def definition(self) -> dict[str, Any]:
-        parsed = json.loads(self.definition_json or "{}")
-        if not isinstance(parsed, dict):
-            raise ValueError("definition_json must contain a JSON object")
-        return parsed
+        data = self.model_dump(mode="json")
+        return {
+            key: value
+            for key, value in data.items()
+            if key not in _RESERVED_FIELDS
+        }
 
     @classmethod
     def key_for_step(cls, plan_identity: str, step_number: int) -> RedisKey:
@@ -78,7 +88,9 @@ class PlanStepRecord(RedisModel):
 
     @classmethod
     def key_for_identity(cls, identity: str) -> RedisKey:
-        raise TypeError("PlanStepRecord requires step_number; use key_for_step(plan_identity, step_number)")
+        raise TypeError(
+            "PlanStepRecord requires step_number; use key_for_step(plan_identity, step_number)"
+        )
 
     @property
     def redis_key(self) -> RedisKey:

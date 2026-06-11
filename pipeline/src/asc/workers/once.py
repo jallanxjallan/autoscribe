@@ -7,7 +7,7 @@ summary, and stops. It does not execute an engine yet.
 
 from __future__ import annotations
 
-from asc.execute.workers.step_probe import StepProbeWorker
+from asc.workers.step_probe import StepProbeWorker
 
 
 class OnceWorker(StepProbeWorker):

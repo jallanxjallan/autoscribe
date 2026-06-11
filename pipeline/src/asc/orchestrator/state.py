@@ -1,151 +1,135 @@
 from __future__ import annotations
 
-from importlib import import_module
 from typing import Any
 
+from asc.models.runtime.call import CallRecord
+from asc.models.runtime.call_state import RuntimeCallState
 from asc.orchestrator.errors import OrchestratorContractError
 
-CALL_STATE_CLASS_CANDIDATES = (
-    ("asc.models.runtime.call_state", "RuntimeCallState"),
-    ("asc.models.runtime.state", "RuntimeCallState"),
-    ("asc.models.runtime.call", "RuntimeCallState"),
-    ("asc.models.runtime.call", "CallState"),
-)
+
+def load_call_state(call_state_key: str) -> RuntimeCallState:
+    """Load the mutable runtime call_state from its full Redis key."""
+
+    return RuntimeCallState.load(call_state_key)
 
 
-def load_call_state(call_state_key: str) -> Any:
-    """Load the mutable runtime call_state object from its Redis key."""
+def save_call_state(call_state: RuntimeCallState) -> None:
+    """Persist the mutable runtime call_state through its model API."""
 
-    for module_name, class_name in CALL_STATE_CLASS_CANDIDATES:
-        try:
-            cls = getattr(import_module(module_name), class_name)
-        except (ModuleNotFoundError, AttributeError):
-            continue
-
-        for method_name in ("load_from_key", "load", "from_key"):
-            method = getattr(cls, method_name, None)
-            if callable(method):
-                return method(call_state_key)
-
-        try:
-            from asc.redis.key import RedisKey
-        except ModuleNotFoundError:
-            continue
-        return RedisKey(call_state_key).load_model(cls)  # type: ignore[attr-defined]
-
-    raise OrchestratorContractError(
-        "no RuntimeCallState model available; expected one of "
-        + ", ".join(f"{m}.{c}" for m, c in CALL_STATE_CLASS_CANDIDATES)
-    )
+    call_state.save()
 
 
-def save_call_state(call_state: Any) -> None:
-    """Persist a mutated call_state using the model/state API available in-tree."""
-
-    for method_name in ("save", "store", "persist", "write"):
-        method = getattr(call_state, method_name, None)
-        if callable(method):
-            method()
-            return
-
-    key = call_state_key(call_state)
-    try:
-        from asc.redis.key import RedisKey
-    except ModuleNotFoundError as exc:
-        raise OrchestratorContractError("call_state has no save/store method") from exc
-
-    RedisKey(key).store_model(call_state)  # type: ignore[attr-defined]
+def call_state_key(call_state: RuntimeCallState) -> str:
+    return _required_str(call_state, "key")
 
 
-def call_state_key(call_state: Any) -> str:
-    for name in ("key", "redis_key", "call_state_key", "runtime_key"):
-        value = getattr(call_state, name, None)
-        if callable(value):
-            value = value()
-        if value:
-            return _to_str(value)
-    identity = call_identity(call_state)
-    if identity:
-        return f"runtime:{identity}:state"
-    raise OrchestratorContractError("call_state has no key or identity")
+def call_key(call_state: RuntimeCallState) -> str:
+    """Full immutable CallRecord key referenced by this mutable state."""
+
+    return _required_str(call_state, "call_key")
 
 
-def call_identity(call_state: Any) -> str:
-    for name in ("call_identity", "identity", "record_identity"):
-        value = getattr(call_state, name, None)
-        if value:
-            return _to_str(value)
-    raise OrchestratorContractError("call_state has no call identity")
+def call_record(call_state: RuntimeCallState) -> CallRecord:
+    return CallRecord.load(call_key(call_state))
 
 
-def current_step_number(call_state: Any) -> int:
-    for name in ("step_number", "current_step_number", "plan_step_number"):
-        value = getattr(call_state, name, None)
-        if value is not None:
-            return int(value)
-    raise OrchestratorContractError("call_state has no current step number")
+def call_identity(call_state: RuntimeCallState) -> str:
+    return _required_str(call_record(call_state), "identity")
 
 
-def set_current_step_number(call_state: Any, step_number: int) -> None:
-    for name in ("step_number", "current_step_number", "plan_step_number"):
-        if hasattr(call_state, name):
-            setattr(call_state, name, int(step_number))
-            return
-    raise OrchestratorContractError("call_state has no mutable step number")
+def current_step_number(call_state: RuntimeCallState) -> int:
+    return int(_required_value(call_state, "step_number"))
 
 
-def mark_started(call_state: Any) -> None:
-    for name in ("status", "state", "call_status"):
-        if hasattr(call_state, name):
-            setattr(call_state, name, "running")
-            return
+def set_current_step_number(call_state: RuntimeCallState, step_number: int) -> None:
+    _set_required(call_state, "step_number", int(step_number))
 
 
-def mark_completed(call_state: Any) -> None:
-    for name in ("status", "state", "call_status"):
-        if hasattr(call_state, name):
-            setattr(call_state, name, "complete")
-            return
+def current_step_key(call_state: RuntimeCallState) -> str:
+    return _required_str(call_state, "step_key")
 
 
-def mark_failed(call_state: Any) -> None:
-    for name in ("status", "state", "call_status"):
-        if hasattr(call_state, name):
-            setattr(call_state, name, "failed")
-            return
+def input_content_key(call_state: RuntimeCallState) -> str:
+    """Return the immutable prompt key from the CallRecord.
+
+    The mutable call_state deliberately does not carry prompt_key.  It carries
+    only execution pointers/status.  The original prompt belongs to the
+    immutable call record.
+    """
+
+    return _required_str(call_record(call_state), "prompt_key")
 
 
-def is_failed(call_state: Any) -> bool:
-    for name in ("failed", "is_failed"):
-        value = getattr(call_state, name, None)
-        if callable(value):
-            return bool(value())
-        if value is not None:
-            return bool(value)
-    for name in ("status", "state", "call_status"):
-        value = getattr(call_state, name, None)
-        if value is not None and str(value).lower() in {"failed", "failure", "error", "exhausted"}:
-            return True
-    return False
+def output_content_key(call_state: RuntimeCallState) -> str:
+    return _required_str(call_state, "response_key")
 
 
-def failure_message(call_state: Any) -> str:
-    for name in ("failure_message", "fail_message", "error", "worker_error", "last_error"):
-        value = getattr(call_state, name, None)
-        if value:
-            return _to_str(value)
-    return "worker reported terminal failure"
+def set_worker_keys(
+    call_state: RuntimeCallState,
+    *,
+    step_key: str,
+    response_key: str,
+) -> None:
+    """Expose only full execution keys to the worker."""
+
+    _set_required(call_state, "step_key", step_key)
+    _set_required(call_state, "response_key", response_key)
 
 
-def plan_key(call_state: Any) -> str:
-    for name in ("plan_key", "plan", "plan_identity", "plan_slug"):
-        value = getattr(call_state, name, None)
-        if value:
-            return _to_str(value)
-    raise OrchestratorContractError("call_state has no plan key")
+def status(call_state: RuntimeCallState) -> str:
+    value = getattr(call_state, "status", None)
+    return str(value).strip().lower() if value is not None else ""
 
 
-def _to_str(value: Any) -> str:
+def is_started(call_state: RuntimeCallState) -> bool:
+    return status(call_state) in {"running", "success", "failed", "complete", "completed"}
+
+
+def is_success(call_state: RuntimeCallState) -> bool:
+    return status(call_state) == "success"
+
+
+def mark_started(call_state: RuntimeCallState) -> None:
+    _set_required(call_state, "status", "running")
+
+
+def mark_completed(call_state: RuntimeCallState) -> None:
+    _set_required(call_state, "status", "complete")
+
+
+def mark_failed(call_state: RuntimeCallState) -> None:
+    _set_required(call_state, "status", "failed")
+
+
+def is_failed(call_state: RuntimeCallState) -> bool:
+    return status(call_state) == "failed"
+
+
+def failure_message(call_state: RuntimeCallState) -> str:
+    value = getattr(call_state, "failure_message", None)
+    return str(value) if value else "worker reported terminal failure"
+
+
+def _required_value(obj: Any, name: str) -> Any:
+    if not hasattr(obj, name):
+        raise OrchestratorContractError(f"{type(obj).__name__} missing required field: {name}")
+    value = getattr(obj, name)
+    if value is None:
+        raise OrchestratorContractError(f"{type(obj).__name__} field is empty: {name}")
+    return value
+
+
+def _required_str(obj: Any, name: str) -> str:
+    value = _required_value(obj, name)
     if isinstance(value, bytes):
-        return value.decode("utf-8")
-    return str(value)
+        value = value.decode("utf-8")
+    text = str(value).strip()
+    if not text:
+        raise OrchestratorContractError(f"{type(obj).__name__} field is empty: {name}")
+    return text
+
+
+def _set_required(obj: Any, name: str, value: Any) -> None:
+    if not hasattr(obj, name):
+        raise OrchestratorContractError(f"{type(obj).__name__} missing required field: {name}")
+    setattr(obj, name, value)

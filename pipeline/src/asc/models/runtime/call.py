@@ -54,32 +54,9 @@ class RuntimeCallRecord(RedisModel):
             },
         )
 
-    @property
-    def call_identity(self) -> str:
-        return self.identity
-
-    @property
-    def source_content(self) -> str:
-        return self.record_content
-
-    @property
-    def prompt_slug(self) -> str:
-        return self.record_identity
-
-    @property
-    def raw_json(self) -> dict[str, Any]:
-        return {
-            "record_type": self.record_type,
-            "record_identity": self.record_identity,
-            "record_content": self.record_content,
-            **dict(self.model_extra or {}),
-        }
-
 
 def _required_text(value: object, field_name: str) -> str:
     return plain_non_empty_string(value, field_name)
 
 
-CallRecord = RuntimeCallRecord
-
-__all__ = ["CallRecord", "RuntimeCallRecord"]
+__all__ = ["RuntimeCallRecord"]

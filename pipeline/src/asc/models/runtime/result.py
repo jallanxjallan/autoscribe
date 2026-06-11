@@ -120,6 +120,4 @@ def _raw_record(engine_result: Any) -> Any:
     return {"type": type(engine_result).__name__, "repr": repr(engine_result)}
 
 
-ResultRecord = StepResultRecord
-
-__all__ = ["ResultRecord", "StepResultRecord"]
+__all__ = ["StepResultRecord"]

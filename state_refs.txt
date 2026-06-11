@@ -1,0 +1,50 @@
+pipeline/src/asc/enqueue/service.py:from asc.models.runtime.call_state import RuntimeCallState
+pipeline/src/asc/enqueue/service.py:    call_state = RuntimeCallState(
+pipeline/src/asc/enqueue/service.py:    enqueue_call_state(call_state_key)
+pipeline/src/asc/enqueue/service.py:def enqueue_call_state(call_state_key: str) -> None:
+pipeline/src/asc/enqueue/service.py:    """Submit a full RuntimeCallState key to the single orchestrator queue."""
+pipeline/src/asc/enqueue/service.py:    "enqueue_call_state",
+pipeline/src/asc/workers/step_probe.py:    runtime:<identity>:call-state or equivalent full RuntimeCallState key
+pipeline/src/asc/workers/step_probe.py:    - CallState exposes mutable execution keys only: step_key and response_key.
+pipeline/src/asc/workers/step_probe.py:      only the response artifact, annotates CallState, and returns the same
+pipeline/src/asc/workers/step_probe.py:from asc.models.runtime.call_state import RuntimeCallState
+pipeline/src/asc/workers/step_probe.py:        call_state = RuntimeCallState.load(call_state_key)
+pipeline/src/asc/workers/step_probe.py:            call_state = RuntimeCallState.load(call_state_key)
+pipeline/src/asc/workers/step_probe.py:        call_state: RuntimeCallState,
+pipeline/src/asc/workers/step_probe.py:        call_state: RuntimeCallState,
+pipeline/src/asc/workers/step_probe.py:        # prompt_key belongs to CallRecord, not mutable CallState.
+pipeline/src/asc/orchestrator/state.py:from asc.models.runtime.call_state import RuntimeCallState
+pipeline/src/asc/orchestrator/state.py:def load_call_state(call_state_key: str) -> RuntimeCallState:
+pipeline/src/asc/orchestrator/state.py:    return RuntimeCallState.load(call_state_key)
+pipeline/src/asc/orchestrator/state.py:def save_call_state(call_state: RuntimeCallState) -> None:
+pipeline/src/asc/orchestrator/state.py:def call_state_key(call_state: RuntimeCallState) -> str:
+pipeline/src/asc/orchestrator/state.py:def call_key(call_state: RuntimeCallState) -> str:
+pipeline/src/asc/orchestrator/state.py:def call_record(call_state: RuntimeCallState) -> CallRecord:
+pipeline/src/asc/orchestrator/state.py:def call_identity(call_state: RuntimeCallState) -> str:
+pipeline/src/asc/orchestrator/state.py:def current_step_number(call_state: RuntimeCallState) -> int:
+pipeline/src/asc/orchestrator/state.py:def set_current_step_number(call_state: RuntimeCallState, step_number: int) -> None:
+pipeline/src/asc/orchestrator/state.py:def current_step_key(call_state: RuntimeCallState) -> str:
+pipeline/src/asc/orchestrator/state.py:def input_content_key(call_state: RuntimeCallState) -> str:
+pipeline/src/asc/orchestrator/state.py:def output_content_key(call_state: RuntimeCallState) -> str:
+pipeline/src/asc/orchestrator/state.py:    call_state: RuntimeCallState,
+pipeline/src/asc/orchestrator/state.py:def status(call_state: RuntimeCallState) -> str:
+pipeline/src/asc/orchestrator/state.py:def is_started(call_state: RuntimeCallState) -> bool:
+pipeline/src/asc/orchestrator/state.py:def is_success(call_state: RuntimeCallState) -> bool:
+pipeline/src/asc/orchestrator/state.py:def mark_started(call_state: RuntimeCallState) -> None:
+pipeline/src/asc/orchestrator/state.py:def mark_completed(call_state: RuntimeCallState) -> None:
+pipeline/src/asc/orchestrator/state.py:def mark_failed(call_state: RuntimeCallState) -> None:
+pipeline/src/asc/orchestrator/state.py:def is_failed(call_state: RuntimeCallState) -> bool:
+pipeline/src/asc/orchestrator/state.py:def failure_message(call_state: RuntimeCallState) -> str:
+pipeline/src/asc/models/runtime/call_state.py:class RuntimeCallState(RedisModel):
+pipeline/src/asc/models/runtime/call_state.py:__all__ = ["RuntimeCallState"]
+pipeline/src/asc/state/orchestrator_queue.py:class QueuedCallState(QueuedKey):
+pipeline/src/asc/state/orchestrator_queue.py:    def claim_next(self) -> QueuedCallState | None:
+pipeline/src/asc/state/orchestrator_queue.py:        return QueuedCallState(key=claimed.key, score=claimed.score)
+pipeline/src/asc/state/orchestrator_queue.py:    def peek_next(self) -> QueuedCallState | None:
+pipeline/src/asc/state/orchestrator_queue.py:        return QueuedCallState(key=peeked.key, score=peeked.score)
+pipeline/src/asc/state/orchestrator_queue.py:def claim_next() -> QueuedCallState | None:
+pipeline/src/asc/state/orchestrator_queue.py:def peek_next() -> QueuedCallState | None:
+pipeline/src/asc/state/orchestrator_queue.py:    "QueuedCallState",
+pipeline/src/asc/models/runtime/__init__.py:from asc.models.runtime.call_state import RuntimeCallState
+pipeline/src/asc/models/runtime/__init__.py:    "RuntimeCallState",
+pipeline/src/asc/models/runtime/call.py:    slug and writes that mutable orchestration choice to RuntimeCallState.

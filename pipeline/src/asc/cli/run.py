@@ -111,7 +111,7 @@ def run_once(
         pass
 
     if include_worker:
-        from asc.execute.workers.once import OnceWorker
+        from asc.workers.once import OnceWorker
 
         processed += int(OnceWorker().run())
 
@@ -142,7 +142,7 @@ def run_drain(
 ) -> None:
     """Drain submitted call_state keys, worker custody, and returned states until idle."""
 
-    from asc.execute.workers.drain import DrainWorker
+    from asc.workers.drain import DrainWorker
 
     processed = 0
 

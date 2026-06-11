@@ -6,7 +6,7 @@ otherwise requeue-on-claim would create an infinite loop.
 
 from __future__ import annotations
 
-from asc.execute.workers.once import OnceWorker
+from asc.workers.once import OnceWorker
 
 
 class DrainWorker(OnceWorker):

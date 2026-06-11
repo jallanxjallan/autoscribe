@@ -43,6 +43,4 @@ class RuntimeContentRecord(RedisModel):
         return cls(identity=identity, content=content, origin="source")
 
 
-ContentRecord = RuntimeContentRecord
-
-__all__ = ["ContentRecord", "RuntimeContentRecord"]
+__all__ = ["RuntimeContentRecord"]
