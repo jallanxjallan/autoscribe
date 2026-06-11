@@ -123,11 +123,11 @@ def validate_control_record(
 
 def save_control_record(record: RedisModel) -> None:
     if isinstance(record, PlanRecord):
-        upload_plan_record(record.model_dump(mode="json"))
+        upload_plan_record(record.plan_dict())
         return
-
+    
     full_key = record.save()
-    SlugMap().bind_record(record, full_key=full_key)
+    SlugMap().set(record.record_identity, full_key)
 
 
 # Compatibility aliases for older callers/tests.

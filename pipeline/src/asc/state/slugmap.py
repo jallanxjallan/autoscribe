@@ -50,7 +50,7 @@ class SlugMap(FixedRedisHashIndex):
     def set(self, slug: str, key: str) -> str:
         normalized_slug = _require_slug(slug)
         normalized_key = _require_key(key)
-        self.key.hset(normalized_slug, normalized_key)
+        self.key.hset(field=normalized_slug, value=normalized_key)
         return normalized_key
 
     @overload
@@ -202,4 +202,3 @@ __all__ = [
     "set",
     "slugmap_hash_key",
 ]
-

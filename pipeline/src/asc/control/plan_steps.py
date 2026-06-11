@@ -6,7 +6,7 @@ from typing import Any
 
 from asc.models.control.plan import PlanRecord
 from asc.models.control.step import PlanStepRecord
-from asc.state.slugmap import SlugKeyResolver
+from asc.state.slugmap import SlugMap
 
 
 @dataclass(frozen=True, slots=True)
@@ -29,7 +29,7 @@ def upload_plan_record(
     if not plan.steps:
         raise ValueError("plan must include at least one executable step")
 
-    resolver = SlugKeyResolver(slugmap)
+    
     plan_key = plan.save()
 
     step_keys: list[str] = []
@@ -42,8 +42,7 @@ def upload_plan_record(
         )
         step_keys.append(step_record.save())
 
-    resolver.bind(plan.record_identity, plan_key)
-
+    SlugMap().set(plan.record_identity, plan_key)
     return UploadedPlan(plan=plan, plan_key=plan_key, step_keys=tuple(step_keys))
 
 

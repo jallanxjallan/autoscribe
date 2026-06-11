@@ -26,10 +26,10 @@ def build_control_snapshot() -> dict[str, Any]:
     }
     stale: dict[str, str] = {}
 
-    for slug, full_key in slugmap.list_bindings().items():
+    for slug, full_key in slugmap.list().items():
         key = RedisKey(full_key)
         if not key.exists():
-            slugmap.delete_pointer(slug)
+            slugmap.delete(slug)
             stale[slug] = full_key
             continue
 
