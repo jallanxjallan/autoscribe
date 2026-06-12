@@ -1,3 +1,4 @@
+# plan.py
 from __future__ import annotations
 
 import json
@@ -19,12 +20,18 @@ def _json_text(value: object, *, default: str) -> str:
     return json.dumps(value, ensure_ascii=False, separators=(",", ":"))
 
 
-class PlanRecord(RedisModel):
-    """Uploaded reusable plan control asset.
+def _json_list(value: object, *, field_name: str) -> list[Any]:
+    if value is None:
+        return []
+    if isinstance(value, str):
+        value = json.loads(value or "[]")
+    if not isinstance(value, list):
+        raise ValueError(f"plan {field_name} must be a list")
+    return value
 
-    Upload dispatcher fields are stripped by ``asc.upload.uploader``.  The
-    persisted model uses ``slug`` and ``content`` like other upload targets.
-    """
+
+class PlanRecord(RedisModel):
+    """Uploaded reusable plan control asset."""
 
     namespace: ClassVar[str] = "control"
     domain: ClassVar[str] = namespace
@@ -39,8 +46,11 @@ class PlanRecord(RedisModel):
 
     instructions: list[Any] = Field(default_factory=list, exclude=True)
     instructions_json: str = ""
+
     metadata_json: str = "{}"
+
     steps: list[dict[str, Any]] = Field(default_factory=list, exclude=True)
+    steps_json: str = ""
 
     @model_validator(mode="before")
     @classmethod
@@ -59,10 +69,17 @@ class PlanRecord(RedisModel):
             "instructions_json",
             "metadata_json",
             "steps",
+            "steps_json",
         }
 
         if "instructions" in data and "instructions_json" not in data:
             data["instructions_json"] = data["instructions"]
+
+        if "steps" in data and "steps_json" not in data:
+            data["steps_json"] = data["steps"]
+
+        if "steps" not in data and "steps_json" in data:
+            data["steps"] = data["steps_json"]
 
         metadata: dict[str, Any] = {}
 
@@ -88,11 +105,7 @@ class PlanRecord(RedisModel):
     @field_validator("instructions", mode="before")
     @classmethod
     def validate_instructions(cls, value: object) -> list[Any]:
-        if value is None:
-            return []
-        if not isinstance(value, list):
-            raise ValueError("plan instructions must be a list")
-        return value
+        return _json_list(value, field_name="instructions")
 
     @field_validator("instructions_json", mode="before")
     @classmethod
@@ -107,21 +120,37 @@ class PlanRecord(RedisModel):
     @field_validator("steps", mode="before")
     @classmethod
     def validate_steps(cls, value: object) -> list[dict[str, Any]]:
-        if value is None:
-            return []
-        if not isinstance(value, list):
-            raise ValueError("plan steps must be a list")
+        raw_steps = _json_list(value, field_name="steps")
 
         steps: list[dict[str, Any]] = []
-        for index, item in enumerate(value, start=1):
+        for index, item in enumerate(raw_steps, start=1):
             if not isinstance(item, Mapping):
                 raise ValueError(f"plan steps[{index}] must be an object")
             steps.append(dict(item))
+
         return steps
 
-    @field_serializer("instructions_json", "metadata_json", when_used="json")
+    @field_validator("steps_json", mode="before")
+    @classmethod
+    def validate_steps_json(cls, value: object) -> str:
+        return _json_text(value, default="[]")
+
+    @field_serializer(
+        "instructions_json",
+        "metadata_json",
+        "steps_json",
+        when_used="json",
+    )
     def serialize_json_text(self, value: str) -> str:
         return value
+
+    @property
+    def record_identity(self) -> str:
+        return self.slug
+
+    @property
+    def record_content(self) -> str:
+        return self.content
 
     def plan_dict(self) -> dict[str, Any]:
         data = self.model_dump(mode="json")
@@ -145,6 +174,7 @@ class PlanRecord(RedisModel):
             "content": self.content,
             "instructions_json": self.instructions_json,
             "metadata_json": self.metadata_json,
+            "steps_json": self.steps_json,
         }
 
 

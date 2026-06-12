@@ -12,65 +12,75 @@ from asc.redis.model_base import RedisModel
 class RuntimeCursor(RedisModel):
     """Mutable orchestration cursor for one runtime call.
 
-    Worker-facing fields are full Redis keys only:
+    The cursor exists only while a call is actively moving through the
+    pipeline. It stores the minimum durable state required to resume
+    orchestration.
 
-        document_key
-            Resolved uploaded document key captured at enqueue time.
+    All worker-facing keys are derived from:
 
-        input_key
-            The content-bearing key the worker should read for this step.
-            For step 1 this is document_key. For later steps this is the
-            previous RuntimeContentRecord key.
+        identity
+        current_step
 
-        step_key
-            The materialized RuntimeStepRecord key for this step.
-
-        response_key
-            The RuntimeContentRecord key the worker should write.
+    and therefore are exposed as computed properties rather than persisted
+    fields.
     """
 
     model_config = ConfigDict(extra="forbid")
 
     domain: ClassVar[str] = "runtime"
-    kind: ClassVar[str] = "call"
+    kind: ClassVar[str] = "cursor"
 
-    type: Literal["call"] = "call"
+    type: Literal["cursor"] = "cursor"
+
     identity: str
 
-    document_key: str
+    call_key: str
     plan_key: str
-    input_key: str
-    step_key: str
-    response_key: str
 
-    status: Literal["pending", "running", "retry", "failed", "complete"] = "pending"
+    status: Literal[
+        "pending",
+        "running",
+        "failed",
+        "complete",
+    ] = "pending"
+
     current_step: int = Field(default=1, ge=1)
     last_step_completed: int = Field(default=0, ge=0)
+
     retry_count: int = Field(default=0, ge=0)
+
     fail_code: str | None = None
     fail_message: str | None = None
+
     created_at: int = Field(default_factory=timestamp)
     updated_at: int = Field(default_factory=timestamp)
+
+    @property
+    def step_key(self) -> str:
+        return f"runtime:{self.identity}:step.{self.current_step}"
+
+    @property
+    def input_key(self) -> str:
+        if self.current_step == 1:
+            return self.call_key
+        return f"runtime:{self.identity}:response.{self.current_step - 1}"
+
+    @property
+    def output_key(self) -> str:
+        return f"runtime:{self.identity}:response.{self.current_step}"
 
     @field_validator("identity", mode="before")
     @classmethod
     def validate_identity(cls, value: object) -> str:
         return redis_key_segment_text(value, "identity")
 
-    @field_validator(
-        "document_key",
-        "plan_key",
-        "input_key",
-        "step_key",
-        "response_key",
-        mode="before",
-    )
+    @field_validator("call_key", "plan_key", mode="before")
     @classmethod
     def validate_full_key(cls, value: object) -> str:
         text = plain_non_empty_string(value, "runtime key")
         if ":" not in text:
-            raise ValueError(f"call key must be a full Redis key, got {text!r}")
+            raise ValueError(f"expected full Redis key, got {text!r}")
         return text
 
 
-__all__ = ["Call"]
+__all__ = ["RuntimeCursor"]

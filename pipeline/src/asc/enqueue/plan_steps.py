@@ -1,5 +1,7 @@
+# plan_steps.py
 from __future__ import annotations
 
+import json
 from collections.abc import Mapping
 from dataclasses import dataclass
 from typing import Any
@@ -27,7 +29,9 @@ def upload_plan_record(
     slugmap: object | None = None,
 ) -> UploadedPlan:
     plan = PlanRecord.model_validate(dict(record))
-    if not plan.steps:
+    steps = _steps_from_plan(plan)
+
+    if not steps:
         raise ValueError("plan must include at least one executable step")
 
     plan_key = plan.save()
@@ -42,30 +46,25 @@ def ensure_plan_step_records(
     *,
     plan: PlanRecord | None = None,
 ) -> tuple[str, ...]:
-    """Ensure Redis step records exist for every step in a stored plan.
-
-    Plan upload and enqueue can now be decoupled: upload stores the plan record,
-    while enqueue may be the first code path that needs concrete step keys.  This
-    function is intentionally idempotent.  If any expected step key is missing, it
-    materializes the step records from the submitted plan definition.
-    """
+    """Ensure Redis step records exist for every step in a stored plan."""
 
     plan_identity = _identity_from_plan_key(plan_key)
     plan_record = plan or PlanRecord.load(plan_key)
+    steps = _steps_from_plan(plan_record)
 
-    if not plan_record.steps:
+    if not steps:
         raise ValueError(f"plan has no executable steps: {plan_key}")
 
     expected_keys = tuple(
         str(PlanStepRecord.key_for_step(plan_identity, step_number))
-        for step_number, _step in enumerate(plan_record.steps, start=1)
+        for step_number, _step in enumerate(steps, start=1)
     )
 
     if all(RedisKey(key).exists() for key in expected_keys):
         return expected_keys
 
     step_keys: list[str] = []
-    for step_number, step in enumerate(plan_record.steps, start=1):
+    for step_number, step in enumerate(steps, start=1):
         step_record = PlanStepRecord.from_step(
             plan_identity=plan_identity,
             plan_slug=plan_record.record_identity,
@@ -92,6 +91,25 @@ def load_plan_step_definitions(plan_identity: str) -> list[dict[str, Any]]:
         step_number += 1
 
     return definitions
+
+
+def _steps_from_plan(plan: PlanRecord) -> list[dict[str, Any]]:
+    if plan.steps:
+        return [dict(step) for step in plan.steps]
+
+    raw_steps = getattr(plan, "steps_json", "") or "[]"
+    parsed = json.loads(raw_steps)
+
+    if not isinstance(parsed, list):
+        raise ValueError("plan steps_json must contain a list")
+
+    steps: list[dict[str, Any]] = []
+    for index, item in enumerate(parsed, start=1):
+        if not isinstance(item, Mapping):
+            raise ValueError(f"plan steps_json[{index}] must be an object")
+        steps.append(dict(item))
+
+    return steps
 
 
 def _identity_from_plan_key(plan_key: str) -> str:

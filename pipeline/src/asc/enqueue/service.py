@@ -1,3 +1,4 @@
+# service.py
 from __future__ import annotations
 
 from collections.abc import Iterable, Mapping
@@ -7,21 +8,21 @@ from typing import Any, TextIO
 
 from asc.enqueue.plan_steps import ensure_plan_step_records
 from asc.enqueue.reader import EnqueueRecord, iter_enqueue_records
-from asc.models.runtime.result import StepResultRecord
 from asc.models.runtime.cursor import RuntimeCursor
 from asc.state.orchestrator_queue import enqueue as enqueue_orchestrator
 from asc.state.slugmap import SlugKeyResolver
+from asc.upload.calls import target as call_upload_target
 
 
 @dataclass(frozen=True, slots=True)
 class EnqueuedCall:
     call: str
     call_state_key: str
-    prompt_key: str
+    call_key: str
     plan_key: str
     step_key: str
     input_key: str
-    result_key: str
+    output_key: str
 
 
 @dataclass(frozen=True, slots=True)
@@ -49,7 +50,10 @@ def enqueue_records(records: Iterable[object]) -> EnqueueReport:
             enqueued.append(enqueue_record(record))
         except Exception as exc:
             identifier = _record_identifier(record, fallback=f"record {record_number}")
-            print(f"[enqueue] {identifier}: skipped invalid dispatch record: {exc}", file=sys.stderr)
+            print(
+                f"[enqueue] {identifier}: skipped invalid dispatch record: {exc}",
+                file=sys.stderr,
+            )
 
     return EnqueueReport(records=tuple(enqueued))
 
@@ -57,23 +61,18 @@ def enqueue_records(records: Iterable[object]) -> EnqueueReport:
 def enqueue_record(record: object) -> EnqueuedCall:
     dispatch = _enqueue_record(record)
     resolver = SlugKeyResolver()
+    call_target = call_upload_target()
 
-    prompt_key = resolver.resolve(dispatch.prompt_slug, expected_kind="prompt")
+    call_key = resolver.resolve(dispatch.prompt_slug, expected_kind=call_target.name)
     plan_key = resolver.resolve(dispatch.plan_slug, expected_kind="plan")
 
-    call_identity = _identity_from_key(prompt_key, expected_kind="prompt")
-    step_keys = ensure_plan_step_records(plan_key)
-    step_key = step_keys[0]
-
-    result_key = str(StepResultRecord.key_for_identity(call_identity))
+    call_identity = _identity_from_key(call_key, expected_kind=call_target.name)
+    ensure_plan_step_records(plan_key)
 
     call_state = RuntimeCursor(
         identity=call_identity,
-        prompt_key=prompt_key,
+        call_key=call_key,
         plan_key=plan_key,
-        input_key=prompt_key,
-        step_key=step_key,
-        result_key=result_key,
         status="pending",
         current_step=1,
     )
@@ -85,11 +84,11 @@ def enqueue_record(record: object) -> EnqueuedCall:
     return EnqueuedCall(
         call=call_identity,
         call_state_key=call_state_key,
-        prompt_key=prompt_key,
+        call_key=call_key,
         plan_key=plan_key,
-        step_key=step_key,
-        input_key=prompt_key,
-        result_key=result_key,
+        step_key=call_state.step_key,
+        input_key=call_state.input_key,
+        output_key=call_state.output_key,
     )
 
 

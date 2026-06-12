@@ -6,6 +6,7 @@ from typing import TextIO
 
 from asc.models.control.plan import PlanRecord
 from asc.redis.model_base import RedisModel
+from asc.state.slugmap import SlugMap
 from asc.upload.common import UploadedItem, UploadReport, UploadTarget, upload_records_for_target, upload_stream_for_target
 
 
@@ -32,12 +33,9 @@ def _save_plan_record(record: RedisModel) -> UploadedItem:
     if not isinstance(record, PlanRecord):
         raise TypeError(f"expected PlanRecord, got {type(record).__name__}")
 
-    # Plan step materialization is plan-upload specific. Keep this import here
-    # so call uploads never load asc.control.plan_steps.
-    from asc.control.plan_steps import upload_plan_record
-
-    upload_plan_record(record.plan_dict())
-    return UploadedItem(target="plan", slug=record.slug, key=record.key())
+    full_key = str(record.save())
+    SlugMap().set(record.slug, full_key)
+    return UploadedItem(target="plan", slug=record.slug, key=full_key)
 
 
 __all__ = ["target", "upload_records", "upload_stream"]
