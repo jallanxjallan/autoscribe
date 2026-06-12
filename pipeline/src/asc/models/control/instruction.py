@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from typing import ClassVar, Literal
 
-from pydantic import ConfigDict, Field, field_validator, model_validator
+from pydantic import ConfigDict, Field, field_validator
 
 from asc.core.identity import generate_identity
 from asc.models.helpers.upload import (
@@ -10,7 +10,6 @@ from asc.models.helpers.upload import (
     RedisIdentity,
     RequiredRecordContent,
     asset_list,
-    record_type_text,
 )
 from asc.redis.model_base import RedisModel
 
@@ -18,8 +17,8 @@ from asc.redis.model_base import RedisModel
 class InstructionRecord(RedisModel):
     """Uploaded reusable instruction control asset.
 
-    Canonical upload contract: record_type, record_identity, record_content.
-    Unknown source fields are carried as Redis baggage for export consumers.
+    Public ``record_*`` upload fields are normalized by ``asc.upload.uploader``.
+    The stored control model keeps only its canonical fields.
     """
 
     namespace: ClassVar[str] = "control"
@@ -29,32 +28,10 @@ class InstructionRecord(RedisModel):
     model_config = ConfigDict(extra="allow")
 
     type: Literal["instruction"] = "instruction"
-    record_type: Literal["instruction"]
     identity: RedisIdentity = Field(default_factory=generate_identity)
     slug: RecordIdentity
-    record_identity: RecordIdentity
-    record_content: RequiredRecordContent
+    content: RequiredRecordContent
     assets: list[str] = Field(default_factory=list)
-
-    @model_validator(mode="before")
-    @classmethod
-    def normalize_upload_shape(cls, value: object) -> object:
-        if not isinstance(value, dict):
-            return value
-        normalized = dict(value)
-        normalized.pop("identity", None)
-        if "record_type" not in normalized and "type" in normalized:
-            normalized["record_type"] = normalized.pop("type")
-        if "record_identity" in normalized:
-            normalized["slug"] = normalized["record_identity"]
-        elif "slug" in normalized:
-            normalized["record_identity"] = normalized["slug"]
-        return normalized
-
-    @field_validator("record_type", mode="before")
-    @classmethod
-    def validate_record_type(cls, value: object) -> str:
-        return record_type_text(value, expected=cls.kind)
 
     @field_validator("assets", mode="before")
     @classmethod

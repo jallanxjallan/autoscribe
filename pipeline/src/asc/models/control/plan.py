@@ -7,12 +7,7 @@ from typing import Any, ClassVar, Literal
 from pydantic import ConfigDict, Field, field_serializer, field_validator, model_validator
 
 from asc.core.identity import generate_identity
-from asc.models.helpers.upload import (
-    OptionalRecordContent,
-    RecordIdentity,
-    RedisIdentity,
-    record_type_text,
-)
+from asc.models.helpers.upload import OptionalRecordContent, RecordIdentity, RedisIdentity
 from asc.redis.model_base import RedisModel
 
 
@@ -25,7 +20,11 @@ def _json_text(value: object, *, default: str) -> str:
 
 
 class PlanRecord(RedisModel):
-    """Uploaded reusable plan control asset."""
+    """Uploaded reusable plan control asset.
+
+    Upload dispatcher fields are stripped by ``asc.upload.uploader``.  The
+    persisted model uses ``slug`` and ``content`` like other upload targets.
+    """
 
     namespace: ClassVar[str] = "control"
     domain: ClassVar[str] = namespace
@@ -33,19 +32,15 @@ class PlanRecord(RedisModel):
 
     model_config = ConfigDict(extra="forbid")
 
-    record_type: Literal["plan"]
+    type: Literal["plan"] = "plan"
     identity: RedisIdentity = Field(default_factory=generate_identity)
-    record_identity: RecordIdentity
-    record_content: OptionalRecordContent = ""
+    slug: RecordIdentity
+    content: OptionalRecordContent = ""
 
     instructions: list[Any] = Field(default_factory=list, exclude=True)
     instructions_json: str = ""
     metadata_json: str = "{}"
     steps: list[dict[str, Any]] = Field(default_factory=list, exclude=True)
-
-    @property
-    def slug(self) -> str:
-        return self.record_identity
 
     @model_validator(mode="before")
     @classmethod
@@ -56,10 +51,10 @@ class PlanRecord(RedisModel):
         data = dict(value)
 
         declared = {
-            "record_type",
+            "type",
             "identity",
-            "record_identity",
-            "record_content",
+            "slug",
+            "content",
             "instructions",
             "instructions_json",
             "metadata_json",
@@ -89,11 +84,6 @@ class PlanRecord(RedisModel):
         data["metadata_json"] = metadata
 
         return data
-
-    @field_validator("record_type", mode="before")
-    @classmethod
-    def validate_record_type(cls, value: object) -> str:
-        return record_type_text(value, expected=cls.kind)
 
     @field_validator("instructions", mode="before")
     @classmethod
@@ -135,6 +125,9 @@ class PlanRecord(RedisModel):
 
     def plan_dict(self) -> dict[str, Any]:
         data = self.model_dump(mode="json")
+        data["record_type"] = self.kind
+        data["record_identity"] = self.slug
+        data["record_content"] = self.content
         data["instructions"] = list(self.instructions)
         data["steps"] = list(self.steps)
 
@@ -146,10 +139,10 @@ class PlanRecord(RedisModel):
 
     def dump_redis(self) -> dict[str, str]:
         return {
-            "record_type": self.record_type,
+            "type": self.type,
             "identity": self.identity,
-            "record_identity": self.record_identity,
-            "record_content": self.record_content,
+            "slug": self.slug,
+            "content": self.content,
             "instructions_json": self.instructions_json,
             "metadata_json": self.metadata_json,
         }
