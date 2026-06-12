@@ -6,10 +6,10 @@ from asc.cli.control import app as control_app
 from asc.cli.enqueue import app as enqueue_app
 # from asc.cli.export import app as export_app
 from asc.cli.ledger import app as ledger_app
-from asc.cli.prompts import app as prompts_app
 from asc.cli.registry import app as registry_app
 from asc.cli.run import app as run_app
 from asc.cli.storage import app as storage_app
+from asc.cli.upload import app as upload_app
 
 
 app = typer.Typer(
@@ -27,15 +27,15 @@ app.add_typer(
 )
 
 app.add_typer(
-    prompts_app,
-    name="prompts",
-    help="Manage uploaded prompt records.",
+    upload_app,
+    name="upload",
+    help="Upload instructions, calls, plans, and future assets.",
 )
 
 app.add_typer(
     enqueue_app,
     name="enqueue",
-    help="Freeze prompt records into calls and queue them.",
+    help="Freeze uploaded call records and queue them.",
 )
 
 app.add_typer(

@@ -5,10 +5,10 @@ from dataclasses import dataclass
 import sys
 from typing import Any, TextIO
 
+from asc.enqueue.plan_steps import ensure_plan_step_records
 from asc.enqueue.reader import EnqueueRecord, iter_enqueue_records
-from asc.models.control.step import PlanStepRecord
-from asc.models.runtime.call_state import RuntimeCallState
-from asc.redis.key import RedisKey
+from asc.models.runtime.result import StepResultRecord
+from asc.models.runtime.cursor import RuntimeCursor
 from asc.state.orchestrator_queue import enqueue as enqueue_orchestrator
 from asc.state.slugmap import SlugKeyResolver
 
@@ -62,14 +62,12 @@ def enqueue_record(record: object) -> EnqueuedCall:
     plan_key = resolver.resolve(dispatch.plan_slug, expected_kind="plan")
 
     call_identity = _identity_from_key(prompt_key, expected_kind="prompt")
-    plan_identity = _identity_from_key(plan_key, expected_kind="plan")
+    step_keys = ensure_plan_step_records(plan_key)
+    step_key = step_keys[0]
 
-    step_key = str(PlanStepRecord.key_for_step(plan_identity, 1))
-    _require_existing_key(step_key)
+    result_key = str(StepResultRecord.key_for_identity(call_identity))
 
-    result_key = str(RuntimeResultRecord.key_for_step(call_identity, 1))
-
-    call_state = RuntimeCallState(
+    call_state = RuntimeCursor(
         identity=call_identity,
         prompt_key=prompt_key,
         plan_key=plan_key,
@@ -146,11 +144,6 @@ def _identity_from_key(key: str, *, expected_kind: str) -> str:
             f"key kind mismatch: expected {expected_kind}, got {parts[2]} ({key})"
         )
     return parts[1]
-
-
-def _require_existing_key(key: str) -> None:
-    if not RedisKey(key).exists():
-        raise KeyError(f"missing key: {key}")
 
 
 __all__ = [

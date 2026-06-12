@@ -28,7 +28,7 @@ import redis
 
 from asc.core.timestamp import timestamp
 from asc.models.runtime.call import CallRecord
-from asc.models.runtime.call_state import RuntimeCallState
+from asc.models.runtime.cursor import RuntimeCallState
 from asc.models.runtime.step import RuntimeStepRecord
 from asc.registries.extensions import load_engine_call
 from asc.state import orchestrator_queue, worker_queue

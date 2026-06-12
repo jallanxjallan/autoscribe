@@ -3,7 +3,7 @@ from __future__ import annotations
 from typing import Any
 
 from asc.models.runtime.call import CallRecord
-from asc.models.runtime.call_state import RuntimeCallState
+from asc.models.runtime.cursor import RuntimeCallState
 from asc.orchestrator.errors import OrchestratorContractError
 
 

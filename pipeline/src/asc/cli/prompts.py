@@ -27,7 +27,7 @@ def _upload_prompts_stream(source: TextIO) -> Any:
     keep working while prompt-side modules are being refactored independently.
     """
 
-    from asc.prompts.upload import upload_prompts_stream
+    from asc.documents.upload import upload_prompts_stream
 
     return upload_prompts_stream(source)
 

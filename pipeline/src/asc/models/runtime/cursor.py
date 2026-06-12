@@ -9,17 +9,17 @@ from asc.models.helpers.plain import plain_non_empty_string, redis_key_segment_t
 from asc.redis.model_base import RedisModel
 
 
-class RuntimeCallState(RedisModel):
+class RuntimeCursor(RedisModel):
     """Mutable orchestration cursor for one runtime call.
 
     Worker-facing fields are full Redis keys only:
 
-        prompt_key
-            Resolved uploaded prompt key captured at enqueue time.
+        document_key
+            Resolved uploaded document key captured at enqueue time.
 
         input_key
             The content-bearing key the worker should read for this step.
-            For step 1 this is prompt_key. For later steps this is the
+            For step 1 this is document_key. For later steps this is the
             previous RuntimeContentRecord key.
 
         step_key
@@ -32,12 +32,12 @@ class RuntimeCallState(RedisModel):
     model_config = ConfigDict(extra="forbid")
 
     domain: ClassVar[str] = "runtime"
-    kind: ClassVar[str] = "state"
+    kind: ClassVar[str] = "call"
 
-    type: Literal["runtime-state"] = "runtime-state"
+    type: Literal["call"] = "call"
     identity: str
 
-    prompt_key: str
+    document_key: str
     plan_key: str
     input_key: str
     step_key: str
@@ -58,7 +58,7 @@ class RuntimeCallState(RedisModel):
         return redis_key_segment_text(value, "identity")
 
     @field_validator(
-        "prompt_key",
+        "document_key",
         "plan_key",
         "input_key",
         "step_key",
@@ -69,8 +69,8 @@ class RuntimeCallState(RedisModel):
     def validate_full_key(cls, value: object) -> str:
         text = plain_non_empty_string(value, "runtime key")
         if ":" not in text:
-            raise ValueError(f"runtime key must be a full Redis key, got {text!r}")
+            raise ValueError(f"call key must be a full Redis key, got {text!r}")
         return text
 
 
-__all__ = ["RuntimeCallState"]
+__all__ = ["Call"]
