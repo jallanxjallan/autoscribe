@@ -212,7 +212,6 @@ function discoverComponentItems({ root, script, componentName, force = false }) 
   return dropDuplicateSlugItems({ items, script, component });
 }
 
-
 function planJsonFiles(root) {
   const plansDir = path.join(path.resolve(root), '.autoscribe', 'workflow', 'plans');
   let planEntries = [];
@@ -307,7 +306,11 @@ function loadPlanItems({ root, script, force = false }) {
 }
 
 function planUploadRecord({ item }) {
-  return item.record;
+  return {
+    record_type: 'plan',
+    record_identity: item.slug,
+    record_content: JSON.stringify(item.record),
+  };
 }
 
 function markPlanUploaded(item, uploadedAt) {
@@ -356,10 +359,7 @@ function runUploadPlansFromStore({ script, options }) {
   for (const item of items) {
     try {
       process.stdout.write(`${JSON.stringify(planUploadRecord({
-        root,
         item,
-        uploadedAt,
-        force: options.force,
       }))}\n`);
       emitted += 1;
     } catch (error) {

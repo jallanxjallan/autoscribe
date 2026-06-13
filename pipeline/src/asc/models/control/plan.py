@@ -60,6 +60,40 @@ class PlanRecord(RedisModel):
 
         data = dict(value)
 
+        # Upload envelope:
+        # {
+        #   "record_type": "plan",
+        #   "record_identity": "plan.foo",
+        #   "record_content": "{...serialized plan json...}"
+        # }
+        if "record_content" in data:
+            raw_content = data.get("record_content")
+
+            if isinstance(raw_content, str) and raw_content.strip():
+                payload = json.loads(raw_content)
+            else:
+                payload = raw_content
+
+            if not isinstance(payload, Mapping):
+                raise ValueError("plan record_content must decode to an object")
+
+            payload_data = dict(payload)
+
+            # Envelope identity is the public slug. Redis identity must remain fresh.
+            if "record_identity" in data:
+                payload_data["slug"] = data["record_identity"]
+
+            # Preserve content as the raw serialized payload for audit/debug.
+            payload_data["content"] = raw_content if isinstance(raw_content, str) else _json_text(raw_content, default="{}")
+
+            # Never trust client-emitted Redis identity on upload.
+            payload_data.pop("identity", None)
+
+            data = payload_data
+
+        if "record_identity" in data and "slug" not in data:
+            data["slug"] = data["record_identity"]
+
         declared = {
             "type",
             "identity",

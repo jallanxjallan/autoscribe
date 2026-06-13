@@ -22,7 +22,7 @@ from asc.ledger.util import (
     result_timestamp,
 )
 from asc.models.runtime.result import StepResultRecord
-from asc.models.runtime.step import RuntimeStepRecord
+from asc.models.control.step import PlanStepRecord
 
 
 class StepLedgerError(RuntimeError):
@@ -30,7 +30,7 @@ class StepLedgerError(RuntimeError):
 
 
 def insert_pending_step_record(
-    step: RuntimeStepRecord,
+    step: PlanStepRecord,
     *,
     input_content: str,
     input_key: str | None = None,
@@ -51,7 +51,7 @@ def insert_pending_step_record(
 def insert_pending_step_record_with_connection(
     *,
     conn: LedgerConnection,
-    step: RuntimeStepRecord,
+    step: PlanStepRecord,
     input_content: str,
     input_key: str | None = None,
     output_key: str | None = None,
@@ -208,7 +208,7 @@ def read_previous_completed_step_with_connection(
 
 def pending_step_values(
     *,
-    step: RuntimeStepRecord,
+    step: PlanStepRecord,
     input_content: str,
     input_key: str | None,
     output_key: str | None,
@@ -264,7 +264,7 @@ def completed_step_update_values(result: StepResultRecord) -> tuple[Any, ...]:
     )
 
 
-def _handler_for_step(step: RuntimeStepRecord) -> str:
+def _handler_for_step(step: PlanStepRecord) -> str:
     args = step.definition.get("args")
     if isinstance(args, dict):
         for key in ("handler", "script", "label"):
@@ -280,7 +280,7 @@ def _handler_for_step(step: RuntimeStepRecord) -> str:
     return ""
 
 
-def _engine_for_step(step: RuntimeStepRecord) -> str:
+def _engine_for_step(step: PlanStepRecord) -> str:
     value = step.definition.get("engine") or step.definition.get("client")
     if isinstance(value, str) and value.strip():
         return value.strip()

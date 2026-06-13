@@ -27,7 +27,7 @@ def _upload_stream(target: str, source: Iterable[str], *, error_stream: TextIO =
     package is being refactored independently.
     """
 
-    from asc.upload.uploader import upload_stream
+    from asc.upload.upload_streams import upload_stream
 
     return upload_stream(source, target=target, error_stream=error_stream)
 
