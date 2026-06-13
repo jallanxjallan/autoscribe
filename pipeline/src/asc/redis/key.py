@@ -147,6 +147,9 @@ class RedisKey:
         value = self._r().zscore(self.key, member)
         return None if value is None else float(value)
 
+    def zrem(self, *members: str) -> int:
+        return int(self._r().zrem(self.key, *members))
+
     def zrevrange(self, start: int, stop: int) -> list[str]:
         return [str(item) for item in self._r().zrevrange(self.key, start, stop)]
 

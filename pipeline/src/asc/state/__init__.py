@@ -1,12 +1,16 @@
 """Redis-backed state helpers for AutoScribe runtime coordination.
 
-The active queue surface is intentionally small:
+Custody queues:
 
-- orchestrator_queue: pending call identities awaiting orchestration
-- worker_queue: concrete runtime step keys awaiting execution
+- orchestrator_queue: state:orchestrator:pending
+- worker_queue: state:worker:pending
+- worker_outcome_queue: state:worker:outcome
 
-Slug resolution remains in slugmap. Runtime step/content progression belongs to
-Orchestrator, not to state indices.
+Monitoring index:
+
+- orchestrator_index: state:runtime:active
+
+Queues move cursors. The active index observes cursors.
 """
 
 __all__: list[str] = []

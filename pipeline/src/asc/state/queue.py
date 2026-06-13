@@ -10,8 +10,31 @@ from asc.redis.index_base import FixedRedisIndex
 
 @dataclass(frozen=True, slots=True)
 class QueuedKey:
+    """One claimed queue item.
+
+    The aliases keep callers simple during the cursor/call_state rename.  The
+    queue only knows that the member is a full Redis key; domain modules decide
+    what that key points to.
+    """
+
     key: str
     score: float
+
+    @property
+    def identity(self) -> str:
+        return self.key
+
+    @property
+    def cursor_key(self) -> str:
+        return self.key
+
+    @property
+    def call_state_key(self) -> str:
+        return self.key
+
+    @property
+    def step_key(self) -> str:
+        return self.key
 
 
 def require_queue_key(value: object, *, field_name: str = "key") -> str:
@@ -28,13 +51,20 @@ def require_queue_key(value: object, *, field_name: str = "key") -> str:
 
 
 class RedisQueue(FixedRedisIndex):
+    """Small sorted-set queue.
+
+    Subclasses provide only KEY.  All queue behavior lives here so individual
+    queue managers stay as thin wrappers.
+    """
+
     KEY: str
 
-    def enqueue(self, key: str, *, score: float | None = None) -> int:
+    def insert(self, key: str, *, score: float | None = None) -> int:
         member = require_queue_key(key)
-        return self.key.zadd({member: timestamp() if score is None else float(score)})
+        queued_at = timestamp() if score is None else float(score)
+        return int(self.key.zadd({member: queued_at}))
 
-    def enqueue_batch(
+    def insert_many(
         self,
         keys: Sequence[str],
         *,
@@ -53,9 +83,9 @@ class RedisQueue(FixedRedisIndex):
             mapping[require_queue_key(key, field_name=f"keys[{index}]")] = score
             score += float(step)
 
-        return self.key.zadd(mapping)
+        return int(self.key.zadd(mapping))
 
-    def claim_next(self) -> QueuedKey | None:
+    def claim(self) -> QueuedKey | None:
         items = self.key.zpopmin(1)
         if not items:
             return None
@@ -63,7 +93,7 @@ class RedisQueue(FixedRedisIndex):
         key, score = items[0]
         return QueuedKey(key=str(key), score=float(score))
 
-    def peek_next(self) -> QueuedKey | None:
+    def peek(self) -> QueuedKey | None:
         items = self.key.zrange(0, 0, withscores=True)
         if not items:
             return None
@@ -77,9 +107,64 @@ class RedisQueue(FixedRedisIndex):
     def clear(self) -> int:
         return int(self.delete())
 
+    # Compatibility aliases.  Prefer insert()/claim() in new code.
+    def enqueue(self, key: str, *, score: float | None = None) -> int:
+        return self.insert(key, score=score)
+
+    def enqueue_batch(
+        self,
+        keys: Sequence[str],
+        *,
+        start_score: float | None = None,
+        step: float = 0.001,
+    ) -> int:
+        return self.insert_many(keys, start_score=start_score, step=step)
+
+    def claim_next(self) -> QueuedKey | None:
+        return self.claim()
+
+    def peek_next(self) -> QueuedKey | None:
+        return self.peek()
+
+
+def insert(queue: RedisQueue, key: str, *, score: float | None = None) -> int:
+    return queue.insert(key, score=score)
+
+
+def insert_many(
+    queue: RedisQueue,
+    keys: Sequence[str],
+    *,
+    start_score: float | None = None,
+    step: float = 0.001,
+) -> int:
+    return queue.insert_many(keys, start_score=start_score, step=step)
+
+
+def claim(queue: RedisQueue) -> QueuedKey | None:
+    return queue.claim()
+
+
+def peek(queue: RedisQueue) -> QueuedKey | None:
+    return queue.peek()
+
+
+def count(queue: RedisQueue) -> int:
+    return queue.count()
+
+
+def clear(queue: RedisQueue) -> int:
+    return queue.clear()
+
 
 __all__ = [
     "QueuedKey",
     "RedisQueue",
+    "claim",
+    "clear",
+    "count",
+    "insert",
+    "insert_many",
+    "peek",
     "require_queue_key",
 ]

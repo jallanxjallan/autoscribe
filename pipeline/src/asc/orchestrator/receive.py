@@ -1,43 +1,44 @@
 from __future__ import annotations
 
 from asc.ledger.connect import LedgerConnection
-
-from asc.orchestrator.advance import advance_call_state
-from asc.orchestrator.complete import handle_complete
-from asc.orchestrator.outcome import handle_failure, handle_success
-from asc.orchestrator.start import handle_call_start
-from asc.orchestrator.state import is_failed, is_started, load_call_state
+from asc.models.runtime.cursor import RuntimeCursor
+from asc.orchestrator.errors import OrchestratorContractError
+from asc.orchestrator.queues import enqueue_worker, mark_complete, touch_active
 
 
-def handle_orchestrator_signal(*, conn: LedgerConnection, call_state_key: str) -> str:
-    """Process one full call_state key from the single orchestrator queue.
+def handle_orchestrator_signal(
+    *,
+    ledger: LedgerConnection,
+    cursor_key: str,
+    source: str = "orchestrator_pending",
+) -> str:
+    cursor = RuntimeCursor.load(cursor_key)
 
-    New calls and worker returns use the same queue. The mutable call_state
-    status determines whether this signal starts a call, records a terminal
-    worker failure, advances after worker success, or completes the call.
-    """
+    if cursor.status == "pending":
+        cursor.status = "queued"
+        cursor.save()
+        enqueue_worker(cursor_key)
+        touch_active(cursor_key)
+        return "queued-worker"
 
-    call_state = load_call_state(call_state_key)
+    if cursor.status == "success":
+        cursor.status = "done"
+        cursor.save()
+        mark_complete(cursor_key)
+        return "done"
 
-    if not is_started(call_state):
-        handle_call_start(conn=conn, call_state=call_state, call_state_key=call_state_key)
-        return "started"
-
-    if is_failed(call_state):
-        handle_failure(conn=conn, call_state=call_state)
+    if cursor.status == "failed":
+        mark_complete(cursor_key)
         return "failed"
 
-    result, step_id = handle_success(conn=conn, call_state=call_state)
-    if advance_call_state(call_state, call_state_key):
-        return "advanced"
+    if cursor.status in {"queued", "working", "running"}:
+        # Watchdog observation only. Do not enqueue or loop; just refresh the
+        # active index so the next stale inspection is delayed.
+        touch_active(cursor_key)
+        return f"observed-{cursor.status}"
 
-    handle_complete(
-        conn=conn,
-        call_state=call_state,
-        result=result,
-        terminal_step_id=step_id,
-    )
-    return "complete"
+    if cursor.status == "done":
+        mark_complete(cursor_key)
+        return "already-done"
 
-
-__all__ = ["handle_orchestrator_signal"]
+    raise OrchestratorContractError(f"unknown cursor status: {cursor.status!r}")

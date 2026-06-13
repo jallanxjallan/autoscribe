@@ -1,21 +1,21 @@
-# asc/state/worker_queue.py
+# asc/state/worker_outcome_queue.py
 from __future__ import annotations
 
 from asc.state.queue import QueuedKey, RedisQueue
 
 
-WORKER_QUEUE_KEY = "state:worker:pending"
+WORKER_OUTCOME_QUEUE_KEY = "state:worker:outcome"
 
 
-class WorkerQueue(RedisQueue):
-    KEY = WORKER_QUEUE_KEY
+class WorkerOutcomeQueue(RedisQueue):
+    KEY = WORKER_OUTCOME_QUEUE_KEY
 
 
-_QUEUE = WorkerQueue()
+_QUEUE = WorkerOutcomeQueue()
 
 
-def worker_queue_key() -> str:
-    return WORKER_QUEUE_KEY
+def worker_outcome_queue_key() -> str:
+    return WORKER_OUTCOME_QUEUE_KEY
 
 
 def insert(key: str, *, score: float | None = None) -> int:
@@ -51,9 +51,9 @@ def clear() -> int:
 
 
 __all__ = [
-    "WORKER_QUEUE_KEY",
-    "WorkerQueue",
+    "WORKER_OUTCOME_QUEUE_KEY",
     "QueuedKey",
+    "WorkerOutcomeQueue",
     "claim",
     "claim_next",
     "clear",
@@ -62,5 +62,5 @@ __all__ = [
     "insert",
     "peek",
     "peek_next",
-    "worker_queue_key",
+    "worker_outcome_queue_key",
 ]

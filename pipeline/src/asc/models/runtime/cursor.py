@@ -10,19 +10,10 @@ from asc.redis.model_base import RedisModel
 
 
 class RuntimeCursor(RedisModel):
-    """Mutable orchestration cursor for one runtime call.
+    """Minimal mutable cursor for one runtime call.
 
-    The cursor exists only while a call is actively moving through the
-    pipeline. It stores the minimum durable state required to resume
-    orchestration.
-
-    All worker-facing keys are derived from:
-
-        identity
-        current_step
-
-    and therefore are exposed as computed properties rather than persisted
-    fields.
+    Queue membership determines custody. Runtime artifact keys determine
+    completed step payloads. Ledger rows determine final success/failure.
     """
 
     model_config = ConfigDict(extra="forbid")
@@ -33,20 +24,10 @@ class RuntimeCursor(RedisModel):
     type: Literal["cursor"] = "cursor"
 
     identity: str
-
     call_key: str
     plan_key: str
 
-    status: Literal[
-        "pending",
-        "running",
-        "failed",
-        "complete",
-    ] = "pending"
-
     current_step: int = Field(default=1, ge=1)
-    last_step_completed: int = Field(default=0, ge=0)
-
     retry_count: int = Field(default=0, ge=0)
 
     fail_code: str | None = None

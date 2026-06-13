@@ -6,14 +6,18 @@ from typing import Any, ClassVar, Literal
 
 from pydantic import ConfigDict, Field, field_validator
 
-from asc.models.helpers.plain import positive_int, redis_key_segment_text
+from asc.models.helpers.plain import plain_non_empty_string, positive_int, redis_key_segment_text
 from asc.models.helpers.upload import RecordIdentity
 from asc.redis.key import RedisKey
 from asc.redis.model_base import RedisModel
 
 
 class PlanStepRecord(RedisModel):
-    """Trusted immutable executable step belonging to an uploaded plan."""
+    """Trusted immutable executable step belonging to an uploaded plan.
+
+    The engine is first-class. definition_json is the engine argument payload
+    and is passed blindly to the selected engine.
+    """
 
     namespace: ClassVar[str] = "control"
     domain: ClassVar[str] = namespace
@@ -22,10 +26,13 @@ class PlanStepRecord(RedisModel):
     model_config = ConfigDict(extra="forbid")
 
     type: Literal["plan-step"] = "plan-step"
+
     identity: str
     plan_identity: str
     plan_slug: RecordIdentity
     step_number: int = Field(ge=1)
+
+    engine: str
     definition_json: str = "{}"
 
     @field_validator("identity", "plan_identity", mode="before")
@@ -37,6 +44,11 @@ class PlanStepRecord(RedisModel):
     @classmethod
     def validate_step_number(cls, value: object) -> int:
         return positive_int(value, "step_number")
+
+    @field_validator("engine", mode="before")
+    @classmethod
+    def validate_engine(cls, value: object) -> str:
+        return plain_non_empty_string(value, "engine")
 
     @field_validator("definition_json", mode="before")
     @classmethod
@@ -61,16 +73,16 @@ class PlanStepRecord(RedisModel):
         if not isinstance(step, Mapping):
             raise ValueError("plan step must be an object")
 
-        step_number = positive_int(step_number, "step_number")
         normalized_plan_identity = redis_key_segment_text(plan_identity, "plan_identity")
-        definition = _execution_definition(step, step_number=step_number)
+        normalized_step_number = positive_int(step_number, "step_number")
 
         return cls(
-            identity=f"{normalized_plan_identity}.{step_number}",
+            identity=f"{normalized_plan_identity}.{normalized_step_number}",
             plan_identity=normalized_plan_identity,
             plan_slug=plan_slug,
-            step_number=step_number,
-            definition_json=definition,
+            step_number=normalized_step_number,
+            engine=_engine(step),
+            definition_json=_definition(step),
         )
 
     @property
@@ -99,34 +111,26 @@ class PlanStepRecord(RedisModel):
         return self.key_for_step(self.plan_identity, self.step_number)
 
 
-def _execution_definition(step: Mapping[str, Any], *, step_number: int) -> dict[str, Any]:
-    args = dict(step.get("args") or {})
+def _engine(step: Mapping[str, Any]) -> str:
+    value = step["engine"]
+    if isinstance(value, Mapping):
+        value = value["key"]
+    return plain_non_empty_string(value, "engine")
 
-    engine = args.get("engine")
-    script = args.get("script")
 
-    engine_record = step.get("engine")
-    if not engine and isinstance(engine_record, Mapping):
-        engine = engine_record.get("key") or engine_record.get("module")
+def _definition(step: Mapping[str, Any]) -> dict[str, Any]:
+    value = step.get("definition_json")
+    if value is not None:
+        if isinstance(value, str):
+            decoded = json.loads(value)
+            if not isinstance(decoded, dict):
+                raise ValueError("definition_json must decode to an object")
+            return decoded
+        if isinstance(value, Mapping):
+            return dict(value)
+        raise ValueError("definition_json must be a JSON string or object")
 
-    script_record = step.get("script")
-    if not script and isinstance(script_record, Mapping):
-        script = script_record.get("key") or script_record.get("module")
-
-    definition: dict[str, Any] = {
-        "index": step_number,
-        "kind": step.get("kind", ""),
-        "label": step.get("label", ""),
-        "instructions": list(step.get("instructions") or []),
-        "args": args,
-    }
-
-    if engine:
-        args["engine"] = engine
-    if script:
-        args["script"] = script
-
-    return definition
+    return dict(step["args"])
 
 
 __all__ = ["PlanStepRecord"]

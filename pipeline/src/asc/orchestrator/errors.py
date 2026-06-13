@@ -2,4 +2,4 @@ from __future__ import annotations
 
 
 class OrchestratorContractError(RuntimeError):
-    """Raised when a runtime handoff violates orchestration invariants."""
+    """Raised when an orchestrator queue signal is malformed."""

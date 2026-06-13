@@ -72,7 +72,6 @@ def enqueue_record(record: object) -> EnqueuedCall:
         identity=call_identity,
         call_key=call_key,
         plan_key=plan_key,
-        status="pending",
         current_step=1,
     )
     cursor.save()
