@@ -12,33 +12,19 @@ def handle_orchestrator_signal(
     cursor_key: str,
     source: str = "orchestrator_pending",
 ) -> str:
-    cursor = RuntimeCursor.load(cursor_key)
+    # cursor = RuntimeCursor.load(cursor_key)
 
-    if cursor.status == "pending":
-        cursor.status = "queued"
-        cursor.save()
+    # pending signal means: send this cursor to worker queue
+    if source == "orchestrator_pending":
         enqueue_worker(cursor_key)
         touch_active(cursor_key)
         return "queued-worker"
 
-    if cursor.status == "success":
-        cursor.status = "done"
-        cursor.save()
+    # outcome signal means: worker returned cursor; inspect output artifact/result
+    if source == "worker_outcome":
+        # success/failure should come from output existence / result record,
+        # not cursor.status
         mark_complete(cursor_key)
-        return "done"
+        return "received-outcome"
 
-    if cursor.status == "failed":
-        mark_complete(cursor_key)
-        return "failed"
-
-    if cursor.status in {"queued", "working", "running"}:
-        # Watchdog observation only. Do not enqueue or loop; just refresh the
-        # active index so the next stale inspection is delayed.
-        touch_active(cursor_key)
-        return f"observed-{cursor.status}"
-
-    if cursor.status == "done":
-        mark_complete(cursor_key)
-        return "already-done"
-
-    raise OrchestratorContractError(f"unknown cursor status: {cursor.status!r}")
+    raise OrchestratorContractError(f"unknown orchestrator signal source: {source!r}")

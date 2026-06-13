@@ -36,9 +36,11 @@ class RuntimeCursor(RedisModel):
     created_at: int = Field(default_factory=timestamp)
     updated_at: int = Field(default_factory=timestamp)
 
+    total_steps: int = Field(default=1, ge=1)
+
     @property
-    def step_key(self) -> str:
-        return f"runtime:{self.identity}:step.{self.current_step}"
+    def is_terminal_step(self) -> bool:
+        return self.current_step >= self.total_steps
 
     @property
     def input_key(self) -> str:

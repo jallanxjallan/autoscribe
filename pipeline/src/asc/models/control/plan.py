@@ -185,6 +185,30 @@ class PlanRecord(RedisModel):
     @property
     def record_content(self) -> str:
         return self.content
+    
+        @property
+    def total_steps(self) -> int:
+        return len(self.steps)
+
+    def step_args(self, step_number: int) -> dict[str, Any]:
+        if step_number < 1:
+            raise IndexError(f"step_number must be >= 1, got {step_number}")
+
+        try:
+            step = self.steps[step_number - 1]
+        except IndexError as exc:
+            raise IndexError(
+                f"plan {self.slug} has no step {step_number}; "
+                f"total_steps={self.total_steps}"
+            ) from exc
+
+        args = step.get("args", {})
+        if args is None:
+            return {}
+        if not isinstance(args, Mapping):
+            raise ValueError(f"plan step {step_number} args must be an object")
+
+        return dict(args)
 
     def plan_dict(self) -> dict[str, Any]:
         data = self.model_dump(mode="json")

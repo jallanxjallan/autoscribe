@@ -6,8 +6,8 @@ import sys
 from typing import Any, TextIO
 
 from asc.enqueue.reader import EnqueueRecord, iter_enqueue_records
-from asc.enqueue.plan_steps import ensure_plan_step_records
 from asc.models.runtime.cursor import RuntimeCursor
+from as
 from asc.state.orchestrator_queue import enqueue as enqueue_orchestrator
 from asc.state.slugmap import SlugKeyResolver
 
@@ -18,7 +18,7 @@ class EnqueuedCall:
     cursor_key: str
     call_key: str
     plan_key: str
-    step_keys: tuple[str, ...]
+    
 
 
 @dataclass(frozen=True, slots=True)
@@ -61,18 +61,14 @@ def enqueue_record(record: object) -> EnqueuedCall:
     call_key = resolver.resolve(dispatch.prompt_slug, expected_kind="call")
     plan_key = resolver.resolve(dispatch.plan_slug, expected_kind="plan")
 
-    # Enqueue is where a plan becomes executable runtime control.
-    # If the uploaded plan has not yet been expanded into plan-step records,
-    # this parses the stored plan and writes the missing step records.
-    step_keys = ensure_plan_step_records(plan_key)
-
+    
     call_identity = _identity_from_key(call_key)
+
 
     cursor = RuntimeCursor(
         identity=call_identity,
         call_key=call_key,
-        plan_key=plan_key,
-        current_step=1,
+        plan_key=plan_key
     )
     cursor.save()
 
@@ -84,7 +80,6 @@ def enqueue_record(record: object) -> EnqueuedCall:
         cursor_key=cursor_key,
         call_key=call_key,
         plan_key=plan_key,
-        step_keys=step_keys,
     )
 
 
