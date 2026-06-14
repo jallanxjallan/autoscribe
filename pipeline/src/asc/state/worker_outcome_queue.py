@@ -30,8 +30,16 @@ def claim() -> QueuedKey | None:
     return _QUEUE.claim()
 
 
+def block_claim(*, timeout: int = 0) -> QueuedKey | None:
+    return _QUEUE.block_claim(timeout=timeout)
+
+
 def claim_next() -> QueuedKey | None:
     return claim()
+
+
+def block_claim_next(*, timeout: int = 0) -> QueuedKey | None:
+    return block_claim(timeout=timeout)
 
 
 def peek() -> QueuedKey | None:
@@ -54,6 +62,8 @@ __all__ = [
     "WORKER_OUTCOME_QUEUE_KEY",
     "QueuedKey",
     "WorkerOutcomeQueue",
+    "block_claim",
+    "block_claim_next",
     "claim",
     "claim_next",
     "clear",

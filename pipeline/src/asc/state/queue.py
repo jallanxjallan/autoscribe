@@ -12,9 +12,9 @@ from asc.redis.index_base import FixedRedisIndex
 class QueuedKey:
     """One claimed queue item.
 
-    The aliases keep callers simple during the cursor/call_state rename.  The
-    queue only knows that the member is a full Redis key; domain modules decide
-    what that key points to.
+    Redis LIST queues do not store scores. The score field is retained as a
+    compatibility/diagnostic timestamp so older callers that read `.score` do
+    not break during the zset -> list migration.
     """
 
     key: str
@@ -51,18 +51,20 @@ def require_queue_key(value: object, *, field_name: str = "key") -> str:
 
 
 class RedisQueue(FixedRedisIndex):
-    """Small sorted-set queue.
+    """Small Redis LIST FIFO queue.
 
-    Subclasses provide only KEY.  All queue behavior lives here so individual
-    queue managers stay as thin wrappers.
+    Live handoff queues should block when idle. That is why this class uses
+    RPUSH + LPOP/BLPOP instead of zset polling. Scheduling/watchdog state belongs
+    in a separate zset index, not in the handoff queue.
     """
 
     KEY: str
 
     def insert(self, key: str, *, score: float | None = None) -> int:
+        # score is accepted for compatibility with the old zset interface.
+        # FIFO order is Redis list order: RPUSH at tail, LPOP/BLPOP from head.
         member = require_queue_key(key)
-        queued_at = timestamp() if score is None else float(score)
-        return int(self.key.zadd({member: queued_at}))
+        return int(self.key.rpush(member))
 
     def insert_many(
         self,
@@ -71,43 +73,45 @@ class RedisQueue(FixedRedisIndex):
         start_score: float | None = None,
         step: float = 0.001,
     ) -> int:
-        if step <= 0:
-            raise ValueError("step must be > 0")
-        if not keys:
+        # start_score/step are compatibility-only; list order is input order.
+        members = [require_queue_key(key, field_name=f"keys[{index}]") for index, key in enumerate(keys)]
+        if not members:
             return 0
-
-        score = timestamp() if start_score is None else float(start_score)
-        mapping: dict[str, float] = {}
-
-        for index, key in enumerate(keys):
-            mapping[require_queue_key(key, field_name=f"keys[{index}]")] = score
-            score += float(step)
-
-        return int(self.key.zadd(mapping))
+        return int(self.key.rpush(*members))
 
     def claim(self) -> QueuedKey | None:
-        items = self.key.zpopmin(1)
-        if not items:
+        key = self.key.lpop()
+        if key is None:
+            return None
+        return QueuedKey(key=str(key), score=timestamp())
+
+    def block_claim(self, *, timeout: int = 0) -> QueuedKey | None:
+        """Block until one item is available, or until timeout expires.
+
+        timeout=0 means block indefinitely, matching Redis BLPOP semantics.
+        Use a small positive timeout when the caller needs periodic shutdown
+        checks.
+        """
+        item = self.key.blpop(timeout=timeout)
+        if item is None:
             return None
 
-        key, score = items[0]
-        return QueuedKey(key=str(key), score=float(score))
+        _queue_key, value = item
+        return QueuedKey(key=str(value), score=timestamp())
 
     def peek(self) -> QueuedKey | None:
-        items = self.key.zrange(0, 0, withscores=True)
-        if not items:
+        key = self.key.lindex(0)
+        if key is None:
             return None
-
-        key, score = items[0]
-        return QueuedKey(key=str(key), score=float(score))
+        return QueuedKey(key=str(key), score=timestamp())
 
     def count(self) -> int:
-        return int(self.key.zcard())
+        return int(self.key.llen())
 
     def clear(self) -> int:
         return int(self.delete())
 
-    # Compatibility aliases.  Prefer insert()/claim() in new code.
+    # Compatibility aliases. Prefer insert()/claim()/block_claim() in new code.
     def enqueue(self, key: str, *, score: float | None = None) -> int:
         return self.insert(key, score=score)
 
@@ -122,6 +126,9 @@ class RedisQueue(FixedRedisIndex):
 
     def claim_next(self) -> QueuedKey | None:
         return self.claim()
+
+    def block_claim_next(self, *, timeout: int = 0) -> QueuedKey | None:
+        return self.block_claim(timeout=timeout)
 
     def peek_next(self) -> QueuedKey | None:
         return self.peek()
@@ -145,6 +152,10 @@ def claim(queue: RedisQueue) -> QueuedKey | None:
     return queue.claim()
 
 
+def block_claim(queue: RedisQueue, *, timeout: int = 0) -> QueuedKey | None:
+    return queue.block_claim(timeout=timeout)
+
+
 def peek(queue: RedisQueue) -> QueuedKey | None:
     return queue.peek()
 
@@ -160,6 +171,7 @@ def clear(queue: RedisQueue) -> int:
 __all__ = [
     "QueuedKey",
     "RedisQueue",
+    "block_claim",
     "claim",
     "clear",
     "count",

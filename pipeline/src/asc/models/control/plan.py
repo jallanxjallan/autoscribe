@@ -84,7 +84,9 @@ class PlanRecord(RedisModel):
                 payload_data["slug"] = data["record_identity"]
 
             # Preserve content as the raw serialized payload for audit/debug.
-            payload_data["content"] = raw_content if isinstance(raw_content, str) else _json_text(raw_content, default="{}")
+            payload_data["content"] = (
+                raw_content if isinstance(raw_content, str) else _json_text(raw_content, default="{}")
+            )
 
             # Never trust client-emitted Redis identity on upload.
             payload_data.pop("identity", None)
@@ -185,12 +187,12 @@ class PlanRecord(RedisModel):
     @property
     def record_content(self) -> str:
         return self.content
-    
-        @property
+
+    @property
     def total_steps(self) -> int:
         return len(self.steps)
 
-    def step_args(self, step_number: int) -> dict[str, Any]:
+    def step_definition(self, step_number: int) -> dict[str, Any]:
         if step_number < 1:
             raise IndexError(f"step_number must be >= 1, got {step_number}")
 
@@ -202,6 +204,10 @@ class PlanRecord(RedisModel):
                 f"total_steps={self.total_steps}"
             ) from exc
 
+        return dict(step)
+
+    def step_args(self, step_number: int) -> dict[str, Any]:
+        step = self.step_definition(step_number)
         args = step.get("args", {})
         if args is None:
             return {}
@@ -209,6 +215,22 @@ class PlanRecord(RedisModel):
             raise ValueError(f"plan step {step_number} args must be an object")
 
         return dict(args)
+
+    def step_engine(self, step_number: int) -> str:
+        step = self.step_definition(step_number)
+        args = self.step_args(step_number)
+
+        engine = step.get("engine")
+        if engine is None:
+            engine = args.get("engine")
+
+        if isinstance(engine, Mapping):
+            engine = engine.get("key") or engine.get("module")
+
+        if not isinstance(engine, str) or not engine.strip():
+            raise ValueError(f"plan step {step_number} must provide an engine")
+
+        return engine.strip()
 
     def plan_dict(self) -> dict[str, Any]:
         data = self.model_dump(mode="json")

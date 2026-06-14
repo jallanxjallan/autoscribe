@@ -128,6 +128,45 @@ class RedisKey:
     def hdel(self, *fields: str) -> int:
         return int(self._r().hdel(self.key, *fields))
 
+
+    # Redis LIST helpers. Live handoff queues use RPUSH + LPOP/BLPOP.
+
+    def rpush(self, *values: str) -> int:
+        if not values:
+            raise ValueError("rpush() requires at least one value")
+        for value in values:
+            if not isinstance(value, str):
+                raise TypeError("rpush() values must be strings")
+        return int(self._r().rpush(self.key, *values))
+
+    def lpush(self, *values: str) -> int:
+        if not values:
+            raise ValueError("lpush() requires at least one value")
+        for value in values:
+            if not isinstance(value, str):
+                raise TypeError("lpush() values must be strings")
+        return int(self._r().lpush(self.key, *values))
+
+    def lpop(self) -> str | None:
+        value = self._r().lpop(self.key)
+        return None if value is None else str(value)
+
+    def blpop(self, *, timeout: int = 0) -> tuple[str, str] | None:
+        if not isinstance(timeout, int) or timeout < 0:
+            raise ValueError("blpop() timeout must be a non-negative int")
+        item = self._r().blpop(self.key, timeout=timeout)
+        if item is None:
+            return None
+        key, value = item
+        return str(key), str(value)
+
+    def lindex(self, index: int) -> str | None:
+        value = self._r().lindex(self.key, index)
+        return None if value is None else str(value)
+
+    def llen(self) -> int:
+        return int(self._r().llen(self.key))
+
     def zadd(self, mapping: dict[str, float]) -> int:
         return int(self._r().zadd(self.key, mapping))
 

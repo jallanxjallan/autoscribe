@@ -1,11 +1,10 @@
 # asc/state/orchestrator_queue.py
 from __future__ import annotations
 
-import time
+from collections.abc import Iterable
 from dataclasses import dataclass
-from typing import Iterable
 
-import redis
+from asc.state.queue import QueuedKey, RedisQueue
 
 
 ORCHESTRATOR_PENDING_QUEUE_KEY = "state:orchestrator:pending"
@@ -27,20 +26,17 @@ class PendingCursor:
         return self.cursor_key
 
 
-def _redis() -> redis.Redis:
-    return redis.Redis(decode_responses=True)
+class OrchestratorQueue(RedisQueue):
+    KEY = ORCHESTRATOR_PENDING_QUEUE_KEY
 
 
-def _clean_key(cursor_key: str) -> str:
-    if not isinstance(cursor_key, str) or not cursor_key.strip():
-        raise TypeError("cursor_key must be a non-empty RuntimeCursor key")
-    if ":" not in cursor_key:
-        raise ValueError("cursor_key must be a full Redis key, not a bare identity")
-    return cursor_key.strip()
+_QUEUE = OrchestratorQueue()
 
 
-def _score(score: float | None = None) -> float:
-    return float(time.time() if score is None else score)
+def _as_pending(item: QueuedKey | None) -> PendingCursor | None:
+    if item is None:
+        return None
+    return PendingCursor(cursor_key=item.key, score=item.score)
 
 
 def orchestrator_queue_key() -> str:
@@ -54,10 +50,11 @@ def pending_queue_key() -> str:
 def insert(key: str, *, score: float | None = None) -> int:
     """Put a cursor under orchestrator custody.
 
-    This is a real work queue, not the active cursor index. Members are removed
-    when claimed. Use asc.state.orchestrator_index for passive monitoring.
+    This is a Redis LIST work queue. Members are removed when claimed.
+    Use asc.state.orchestrator_index for active-cursor monitoring, stale checks,
+    or delayed/scheduled cursor metadata.
     """
-    return int(_redis().zadd(ORCHESTRATOR_PENDING_QUEUE_KEY, {_clean_key(key): _score(score)}))
+    return _QUEUE.insert(key, score=score)
 
 
 def enqueue(key: str, *, score: float | None = None) -> int:
@@ -65,61 +62,59 @@ def enqueue(key: str, *, score: float | None = None) -> int:
 
 
 def schedule(key: str, *, score: float | None = None) -> int:
+    # Compatibility alias. Immediate handoff only.
     return insert(key, score=score)
 
 
 def schedule_after(key: str, *, delay_seconds: float) -> int:
-    return insert(key, score=time.time() + max(0.0, float(delay_seconds)))
-
-
-def claim_due(*, now: float | None = None, limit: int = 100) -> list[PendingCursor]:
-    """Claim due cursors by removing them from the pending queue."""
-    if limit <= 0:
-        return []
-
-    r = _redis()
-    rows = r.zrangebyscore(
-        ORCHESTRATOR_PENDING_QUEUE_KEY,
-        "-inf",
-        _score(now),
-        start=0,
-        num=int(limit),
-        withscores=True,
-    )
-    claimed: list[PendingCursor] = []
-    for raw_key, raw_score in rows:
-        cursor_key = _clean_key(str(raw_key))
-        if r.zrem(ORCHESTRATOR_PENDING_QUEUE_KEY, cursor_key) == 1:
-            claimed.append(PendingCursor(cursor_key=cursor_key, score=float(raw_score)))
-    return claimed
+    if float(delay_seconds) > 0:
+        raise NotImplementedError(
+            "orchestrator_queue is a Redis LIST and cannot delay items; "
+            "store delayed/scheduled cursor metadata in orchestrator_index instead"
+        )
+    return insert(key)
 
 
 def claim() -> PendingCursor | None:
-    rows = claim_due(limit=1)
-    return rows[0] if rows else None
+    return _as_pending(_QUEUE.claim())
+
+
+def block_claim(*, timeout: int = 0) -> PendingCursor | None:
+    return _as_pending(_QUEUE.block_claim(timeout=timeout))
 
 
 def claim_next() -> PendingCursor | None:
     return claim()
 
 
-def due(*, now: float | None = None, limit: int = 100) -> list[PendingCursor]:
+def block_claim_next(*, timeout: int = 0) -> PendingCursor | None:
+    return block_claim(timeout=timeout)
+
+
+def claim_due(*, now: float | None = None, limit: int = 100) -> list[PendingCursor]:
+    """Compatibility wrapper for old zset callers.
+
+    LIST queues are not score-filtered. This drains up to `limit` immediately
+    available items without blocking.
+    """
     if limit <= 0:
         return []
-    rows = _redis().zrangebyscore(
-        ORCHESTRATOR_PENDING_QUEUE_KEY,
-        "-inf",
-        _score(now),
-        start=0,
-        num=int(limit),
-        withscores=True,
-    )
-    return [PendingCursor(cursor_key=_clean_key(str(k)), score=float(s)) for k, s in rows]
+    claimed: list[PendingCursor] = []
+    for _ in range(int(limit)):
+        item = claim()
+        if item is None:
+            break
+        claimed.append(item)
+    return claimed
+
+
+def due(*, now: float | None = None, limit: int = 100) -> list[PendingCursor]:
+    item = peek()
+    return [] if item is None else [item]
 
 
 def peek() -> PendingCursor | None:
-    rows = due(limit=1)
-    return rows[0] if rows else None
+    return _as_pending(_QUEUE.peek())
 
 
 def peek_next() -> PendingCursor | None:
@@ -127,22 +122,23 @@ def peek_next() -> PendingCursor | None:
 
 
 def remove(key: str) -> int:
-    return int(_redis().zrem(ORCHESTRATOR_PENDING_QUEUE_KEY, _clean_key(key)))
+    # Redis lists do not provide a cheap queue-position delete. If a future
+    # recovery path needs this, use LREM deliberately rather than hiding it.
+    from asc.state.queue import require_queue_key
+
+    return int(_QUEUE.key._r().lrem(ORCHESTRATOR_PENDING_QUEUE_KEY, 0, require_queue_key(key)))
 
 
 def count() -> int:
-    return int(_redis().zcard(ORCHESTRATOR_PENDING_QUEUE_KEY))
+    return _QUEUE.count()
 
 
 def clear() -> int:
-    return int(_redis().delete(ORCHESTRATOR_PENDING_QUEUE_KEY))
+    return _QUEUE.clear()
 
 
 def enqueue_batch(keys: Iterable[str], *, score: float | None = None) -> int:
-    mapping = {_clean_key(key): _score(score) for key in keys}
-    if not mapping:
-        return 0
-    return int(_redis().zadd(ORCHESTRATOR_PENDING_QUEUE_KEY, mapping))
+    return _QUEUE.insert_many(list(keys), start_score=score)
 
 
 # Compatibility names from the old index-shaped module.
@@ -154,7 +150,10 @@ mark_complete = remove
 __all__ = [
     "ORCHESTRATOR_PENDING_QUEUE_KEY",
     "ORCHESTRATOR_QUEUE_KEY",
+    "OrchestratorQueue",
     "PendingCursor",
+    "block_claim",
+    "block_claim_next",
     "claim",
     "claim_due",
     "claim_next",

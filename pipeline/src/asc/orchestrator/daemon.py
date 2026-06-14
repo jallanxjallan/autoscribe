@@ -17,7 +17,8 @@ from asc.orchestrator.receive import handle_orchestrator_signal
 
 log = logging.getLogger(__name__)
 
-IDLE_SLEEP_SECONDS = 0.5
+OUTCOME_BLOCK_TIMEOUT_SECONDS = 1
+PENDING_BLOCK_TIMEOUT_SECONDS = 1
 MAX_PENDING_CURSORS_PER_TICK = 100
 MAX_STALE_CURSORS_PER_TICK = 25
 ACTIVE_STALE_AFTER_SECONDS = 30.0
@@ -26,24 +27,24 @@ ACTIVE_WATCHDOG_INTERVAL_SECONDS = 5.0
 
 
 class OrchestratorDaemon:
-    """Long-lived orchestrator over real custody queues plus passive monitoring.
+    """Long-lived orchestrator over blocking custody queues plus watchdog.
 
-    Normal custody moves through queues:
+    Normal custody moves through Redis LIST queues:
 
     - state:orchestrator:pending
     - state:worker:pending
     - state:worker:outcome
 
-    state:runtime:active is only a passive monitoring/recovery index. It must
-    never make the daemon loop hot. The watchdog is therefore rate-limited and
-    watchdog observations do not count as foreground work.
+    state:runtime:active remains a passive ZSET monitoring/recovery index. It is
+    inspected on a timer only, and never drives the main loop hot.
     """
 
     def __init__(
         self,
         *,
         ledger: LedgerConnection | None = None,
-        idle_sleep_seconds: float = IDLE_SLEEP_SECONDS,
+        outcome_block_timeout_seconds: int = OUTCOME_BLOCK_TIMEOUT_SECONDS,
+        pending_block_timeout_seconds: int = PENDING_BLOCK_TIMEOUT_SECONDS,
         max_pending_cursors_per_tick: int = MAX_PENDING_CURSORS_PER_TICK,
         max_stale_cursors_per_tick: int = MAX_STALE_CURSORS_PER_TICK,
         active_stale_after_seconds: float = ACTIVE_STALE_AFTER_SECONDS,
@@ -51,7 +52,8 @@ class OrchestratorDaemon:
         active_watchdog_interval_seconds: float = ACTIVE_WATCHDOG_INTERVAL_SECONDS,
     ) -> None:
         self.ledger = ledger or LedgerConnection()
-        self.idle_sleep_seconds = float(idle_sleep_seconds)
+        self.outcome_block_timeout_seconds = int(outcome_block_timeout_seconds)
+        self.pending_block_timeout_seconds = int(pending_block_timeout_seconds)
         self.max_pending_cursors_per_tick = int(max_pending_cursors_per_tick)
         self.max_stale_cursors_per_tick = int(max_stale_cursors_per_tick)
         self.active_stale_after_seconds = float(active_stale_after_seconds)
@@ -59,17 +61,51 @@ class OrchestratorDaemon:
         self.active_watchdog_interval_seconds = float(active_watchdog_interval_seconds)
         self._next_watchdog_at = time.monotonic() + self.active_watchdog_interval_seconds
 
-    def run_once(self) -> int:
-        """Process one foreground tick and return real custody work touched.
+    def run_forever(self) -> None:
+        while True:
+            self.run_once_blocking()
 
-        The passive active-index watchdog may also run, but watchdog-only work is
-        intentionally not included in the return value. This guarantees the main
-        loop still sleeps when no pending/outcome queue work exists.
-        """
+    def run_once_blocking(self) -> int:
+        """Process one blocking foreground tick and return custody work touched."""
         processed = 0
 
-        outcome = claim_outcome()
+        # Prefer completed worker outcomes so finished work advances promptly.
+        outcome = claim_outcome(block=True, timeout=self.outcome_block_timeout_seconds)
         if outcome is not None:
+            self._process_signal(outcome, source="worker_outcome")
+            processed += 1
+            processed += self._drain_foreground()
+            self._run_watchdog_if_due()
+            return processed
+
+        # If no outcome arrived, block briefly for newly enqueued calls/retries.
+        pending = claim_orchestrator_pending(
+            limit=self.max_pending_cursors_per_tick,
+            block=True,
+            timeout=self.pending_block_timeout_seconds,
+        )
+        for signal in pending:
+            self._process_signal(signal, source="orchestrator_pending")
+            processed += 1
+
+        if processed:
+            processed += self._drain_foreground()
+
+        self._run_watchdog_if_due()
+        return processed
+
+    def run_once(self) -> int:
+        """Compatibility alias for old CLI/tests."""
+        return self.run_once_blocking()
+
+    def _drain_foreground(self) -> int:
+        """Drain immediately available live custody work without blocking."""
+        processed = 0
+
+        while True:
+            outcome = claim_outcome()
+            if outcome is None:
+                break
             self._process_signal(outcome, source="worker_outcome")
             processed += 1
 
@@ -77,14 +113,7 @@ class OrchestratorDaemon:
             self._process_signal(signal, source="orchestrator_pending")
             processed += 1
 
-        self._run_watchdog_if_due()
         return processed
-
-    def run_forever(self) -> None:
-        while True:
-            processed = self.run_once()
-            if processed == 0:
-                time.sleep(self.idle_sleep_seconds)
 
     def _run_watchdog_if_due(self) -> None:
         now = time.monotonic()
@@ -114,9 +143,10 @@ class OrchestratorDaemon:
         except Exception as exc:
             decision = decide_infrastructure_retry(error=exc)
             log.exception("Infrastructure failure processing %s from %s", cursor_key, source)
-            raise
             if decision.should_retry:
                 requeue(cursor_key, delay_seconds=decision.delay_seconds)
+                return
+            raise
 
 
 def _claimed_identity(claimed: Any) -> str:
@@ -149,8 +179,9 @@ __all__ = [
     "ACTIVE_INSPECTION_LEASE_SECONDS",
     "ACTIVE_STALE_AFTER_SECONDS",
     "ACTIVE_WATCHDOG_INTERVAL_SECONDS",
-    "IDLE_SLEEP_SECONDS",
     "MAX_PENDING_CURSORS_PER_TICK",
     "MAX_STALE_CURSORS_PER_TICK",
     "OrchestratorDaemon",
+    "OUTCOME_BLOCK_TIMEOUT_SECONDS",
+    "PENDING_BLOCK_TIMEOUT_SECONDS",
 ]

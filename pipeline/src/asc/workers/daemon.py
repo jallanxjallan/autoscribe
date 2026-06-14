@@ -1,53 +1,56 @@
 from __future__ import annotations
 
 import logging
-import time
 from typing import Any
-import sys
 
 from asc.state import worker_queue
 from asc.workers.execute import WorkerExecutor
 
 log = logging.getLogger(__name__)
 
-IDLE_SLEEP_SECONDS = 0.25
+# Use a finite timeout rather than BLPOP 0 so a production supervisor can add
+# shutdown checks later without changing the queue contract. While blocked in
+# Redis this process consumes no Python-loop CPU.
+BLOCK_TIMEOUT_SECONDS = 30
 
 
 class WorkerDaemon:
-    """Long-lived worker process over full RuntimeCursor keys."""
+    """Long-lived worker process over full RuntimeCursor keys.
 
-    def __init__(self, *, idle_sleep_seconds: float = IDLE_SLEEP_SECONDS) -> None:
+    The worker queue is a Redis LIST. claim_next() is intentionally blocking:
+    idle workers sleep inside Redis/socket I/O instead of polling in Python.
+    """
+
+    def __init__(self, *, block_timeout_seconds: int = BLOCK_TIMEOUT_SECONDS) -> None:
         self.executor = WorkerExecutor()
-        self.idle_sleep_seconds = float(idle_sleep_seconds)
+        self.block_timeout_seconds = int(block_timeout_seconds)
 
     def run_forever(self) -> None:
-        
         while True:
-            print("[worker:daemon] claim_next", flush=True)
-            print("[worker:daemon] before claim_next", flush=True)
-            claimed = worker_queue.claim_next()
-            print(f"[worker:daemon] after claim_next claimed={claimed!r}", flush=True)
-
+            claimed = worker_queue.block_claim_next(timeout=self.block_timeout_seconds)
             if claimed is None:
-                print("[worker:daemon] idle", flush=True)
-                time.sleep(self.idle_sleep_seconds)
+                # Timeout expiry is not work and not an error. Loop quietly.
                 continue
 
-            print(f"[worker:daemon] claimed={claimed!r}", flush=True)
-
             cursor_key = _claimed_key(claimed)
-            print(f"[worker:daemon] cursor_key={cursor_key}", flush=True)
-
-            print(f"[worker:daemon] before execute cursor={cursor_key}", flush=True)
+            log.info("worker claimed cursor=%s", cursor_key)
             self.executor.execute(cursor_key)
-            print(f"[worker:daemon] after execute cursor={cursor_key}", flush=True)
 
 
 def _claimed_key(claimed: Any) -> str:
     value = getattr(claimed, "key", None)
+    if value is None:
+        value = getattr(claimed, "cursor_key", None)
+    if value is None:
+        value = getattr(claimed, "identity", None)
+    if value is None:
+        value = claimed
+
+    if isinstance(value, bytes):
+        value = value.decode("utf-8")
 
     if not isinstance(value, str) or not value.strip():
-        raise TypeError(f"worker queue claim must provide .key, got {claimed!r}")
+        raise TypeError(f"worker queue claim must provide a RuntimeCursor key, got {claimed!r}")
 
     return value.strip()
 
@@ -61,4 +64,4 @@ if __name__ == "__main__":
     main()
 
 
-__all__ = ["IDLE_SLEEP_SECONDS", "WorkerDaemon"]
+__all__ = ["BLOCK_TIMEOUT_SECONDS", "WorkerDaemon"]
