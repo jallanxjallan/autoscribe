@@ -2,10 +2,11 @@ from __future__ import annotations
 
 from asc.models.runtime.call import CallRecord
 from asc.models.runtime.cursor import RuntimeCursor
-from asc.models.runtime.result import StepResultRecord
+from asc.models.runtime.result import StepResult, StepFailure
 
 __all__ = [
     "CallRecord",
     "RuntimeCursor",
-    "StepResultRecord"
+    "StepResult",
+	"StepFailure"
 ]

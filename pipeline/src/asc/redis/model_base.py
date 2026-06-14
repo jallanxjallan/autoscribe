@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 from typing import Any, ClassVar, TypeVar
 
 from pydantic import BaseModel
@@ -42,22 +43,14 @@ class RedisModel(BaseModel):
 
     @classmethod
     def resolve_key(cls, value: str | RedisKey) -> RedisKey:
-        """Resolve either a full Redis key or a bare identity/ULID."""
-
         if isinstance(value, RedisKey):
             return value
 
         text = cls._require_text(value, field_name="redis key or identity")
 
-        # Full runtime/control key:
-        #   namespace:identity:kind
-        #   namespace:identity:kind.N
         if text.count(":") == 2:
             return RedisKey(text)
 
-        # Bare ULID / identity:
-        #   01KT...
-        #   cnt.foo.bar
         return cls.key_for_identity(text)
 
     @classmethod
@@ -85,7 +78,10 @@ class RedisModel(BaseModel):
 
     def dump_redis(self) -> dict[str, str]:
         dumped = self.model_dump(mode="json")
-        return {key: _redis_scalar(value, field_name=key) for key, value in dumped.items()}
+        return {
+            key: _redis_value(value, field_name=key)
+            for key, value in dumped.items()
+        }
 
     def save(self, value: str | RedisKey | None = None) -> str:
         key = self.redis_key if value is None else self.__class__.resolve_key(value)
@@ -96,15 +92,17 @@ class RedisModel(BaseModel):
         return self.save(value)
 
 
-def _redis_scalar(value: Any, *, field_name: str) -> str:
+def _redis_value(value: Any, *, field_name: str) -> str:
     if value is None:
         return ""
     if isinstance(value, bool):
         return "true" if value else "false"
     if isinstance(value, (str, int, float)):
         return str(value)
-    raise TypeError(
-        f"{field_name} serialized to {type(value).__name__}; "
-        "Redis hash values must be scalar strings. Use a model field_serializer "
-        "to produce an explicit *_json blob field."
-    )
+
+    try:
+        return json.dumps(value, ensure_ascii=False, separators=(",", ":"))
+    except TypeError as exc:
+        raise TypeError(
+            f"{field_name} could not be JSON-serialized for Redis hash storage"
+        ) from exc

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from typing import Any, Callable
 
+from asc.models.runtime.result import StepFailure, StepResult
 from asc.registries.extensions import load_transform
 
 ENGINE = "scripts"
@@ -16,21 +17,33 @@ class FatalScriptError(RuntimeError):
     """Raised for local script failures; these are not retryable congestion."""
 
 
-def make_call(*, args: dict[str, Any]) -> Callable[[str], dict[str, Any]]:
+def make_call(*, args: dict[str, Any]) -> Callable[[str], StepResult | StepFailure]:
     script = args["script"]
     transform = load_transform(script)
 
-    def call(content: str) -> dict[str, Any]:
-        output = transform(content)
-        return {
-            "content": output,
-            "fail_message": None,
-            "raw_json": {
+    def call(content: str) -> StepResult | StepFailure:
+        try:
+            output = transform(content)
+        except Exception as exc:
+            return StepFailure(
+                content=content,
+                failure_reason=type(exc).__name__,
+                raw_json={
+                    "engine": ENGINE,
+                    "script": script,
+                    "args": args,
+                    "error": str(exc),
+                },
+            )
+
+        return StepResult(
+            content=output,
+            raw_json={
                 "engine": ENGINE,
                 "script": script,
                 "args": args,
             },
-        }
+        )
 
     return call
 
