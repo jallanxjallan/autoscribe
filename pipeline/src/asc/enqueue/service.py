@@ -1,36 +1,15 @@
 from __future__ import annotations
 
-from collections.abc import Iterable, Mapping
-from dataclasses import dataclass
+from collections.abc import Iterable
 import sys
-from typing import Any, TextIO
+from typing import TextIO
 
-from asc.enqueue.reader import EnqueueRecord, iter_enqueue_records
-from asc.models.runtime.cursor import RuntimeCursor
-from asc.state.orchestrator_queue import enqueue as enqueue_orchestrator
-from asc.state.slugmap import SlugKeyResolver
-
-
-@dataclass(frozen=True, slots=True)
-class EnqueuedCall:
-    call: str
-    cursor_key: str
-    call_key: str
-    plan_key: str
-    
-
-
-@dataclass(frozen=True, slots=True)
-class EnqueueReport:
-    records: tuple[EnqueuedCall, ...]
-
-    @property
-    def record_count(self) -> int:
-        return len(self.records)
-
-    @property
-    def call_count(self) -> int:
-        return len(self.records)
+from asc.enqueue.cursor_factory import build_runtime_cursor, save_runtime_cursor
+from asc.enqueue.keys import resolve_enqueue_keys
+from asc.enqueue.normalize import enqueue_record_identifier, normalize_enqueue_record
+from asc.enqueue.queue import enqueue_cursor
+from asc.enqueue.reader import iter_enqueue_records
+from asc.enqueue.report import EnqueuedCall, EnqueueReport
 
 
 def enqueue_from_stream(stream: TextIO) -> EnqueueReport:
@@ -44,7 +23,7 @@ def enqueue_records(records: Iterable[object]) -> EnqueueReport:
         try:
             enqueued.append(enqueue_record(record))
         except Exception as exc:
-            identifier = _record_identifier(record, fallback=f"record {record_number}")
+            identifier = enqueue_record_identifier(record, fallback=f"record {record_number}")
             print(
                 f"[enqueue] {identifier}: skipped invalid dispatch record: {exc}",
                 file=sys.stderr,
@@ -54,77 +33,19 @@ def enqueue_records(records: Iterable[object]) -> EnqueueReport:
 
 
 def enqueue_record(record: object) -> EnqueuedCall:
-    dispatch = _enqueue_record(record)
-    resolver = SlugKeyResolver()
+    dispatch = normalize_enqueue_record(record)
+    keys = resolve_enqueue_keys(dispatch)
 
-    call_key = resolver.resolve(dispatch.prompt_slug, expected_kind="call")
-    plan_key = resolver.resolve(dispatch.plan_slug, expected_kind="plan")
-
-    
-    call_identity = _identity_from_key(call_key)
-
-
-    cursor = RuntimeCursor(
-        identity=call_identity,
-        call_key=call_key,
-        plan_key=plan_key
-    )
-    cursor.save()
-
-    cursor_key = str(cursor.redis_key)
+    cursor = build_runtime_cursor(keys)
+    cursor_key = save_runtime_cursor(cursor)
     enqueue_cursor(cursor_key)
 
     return EnqueuedCall(
-        call=call_identity,
+        call=keys.call_identity,
         cursor_key=cursor_key,
-        call_key=call_key,
-        plan_key=plan_key,
+        call_key=keys.call_key,
+        plan_key=keys.plan_key,
     )
-
-
-def enqueue_cursor(cursor_key: str) -> None:
-    if not isinstance(cursor_key, str) or not cursor_key.strip():
-        raise ValueError("cursor_key must be a non-empty full Redis key")
-    if ":" not in cursor_key:
-        raise ValueError(f"cursor_key must be a full Redis key: {cursor_key!r}")
-
-    enqueue_orchestrator(cursor_key.strip())
-
-
-def _enqueue_record(record: object) -> EnqueueRecord:
-    if isinstance(record, EnqueueRecord):
-        return record
-
-    if isinstance(record, Mapping):
-        return EnqueueRecord(
-            prompt_slug=_required_slug(record, "prompt_slug"),
-            plan_slug=_required_slug(record, "plan_slug"),
-            raw_record=record,
-        )
-
-    raise TypeError("enqueue record must be a mapping or EnqueueRecord")
-
-
-def _required_slug(record: Mapping[str, Any], field: str) -> str:
-    value = record.get(field)
-    if not isinstance(value, str) or not value.strip():
-        raise ValueError(f"enqueue record must include {field}")
-    return value.strip()
-
-
-def _record_identifier(record: object, *, fallback: str) -> str:
-    try:
-        dispatch = _enqueue_record(record)
-    except Exception:
-        return fallback
-    return dispatch.prompt_slug
-
-
-def _identity_from_key(key: str) -> str:
-    parts = key.strip().split(":")
-    if len(parts) != 3 or not all(parts):
-        raise ValueError(f"invalid Redis model key: {key}")
-    return parts[1]
 
 
 __all__ = [

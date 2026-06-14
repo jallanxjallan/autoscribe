@@ -4,13 +4,10 @@ import logging
 from typing import Any
 
 from asc.ledger.connect import LedgerConnection
-from asc.orchestrator.brain import (
-    ORCHESTRATOR_PENDING,
-    WORKER_OUTCOME,
-    handle_orchestrator_signal,
-)
 from asc.orchestrator.errors import OrchestratorContractError
 from asc.orchestrator.queues import claim_orchestrator_pending, claim_outcome
+from asc.orchestrator.receive import handle_orchestrator_signal
+from asc.orchestrator.signals import ORCHESTRATOR_PENDING, WORKER_OUTCOME
 
 log = logging.getLogger(__name__)
 
@@ -29,7 +26,7 @@ class OrchestratorDaemon:
     - state:worker:outcome
 
     The active cursor index remains a passive observability/recovery index. It is
-    updated by queue/brain helpers, but this daemon does not inspect it, lease it,
+    updated by queue helpers, but this daemon does not inspect it, lease it,
     retry from it, or requeue from it.
     """
 
@@ -107,7 +104,7 @@ class OrchestratorDaemon:
             log.info("orchestrator source=%s cursor=%s result=%s", source, cursor_key, result)
         except OrchestratorContractError:
             log.exception("Dropped invalid runtime cursor signal %s from %s", cursor_key, source)
-            raise
+            return
 
 
 def _claimed_identity(claimed: Any) -> str:
