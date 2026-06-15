@@ -3,14 +3,32 @@ from __future__ import annotations
 from collections.abc import Mapping
 from typing import Any
 
-import redis
+from asc.redis.index_base import RedisIndex
 
 
 EMPTY_RESPONSE_SLOT = ""
 
 
-def redis_client() -> redis.Redis:
-    return redis.Redis(decode_responses=True)
+class ResponseIndex(RedisIndex):
+    """Runtime response-slot index for one call."""
+
+    @classmethod
+    def for_identity(cls, identity: str) -> "ResponseIndex":
+        return cls(response_index_key(identity))
+
+    def replace_slots(self, mapping: Mapping[int, str]) -> None:
+        self.delete()
+        self.key.hset(mapping={str(k): str(v) for k, v in mapping.items()})
+
+    def slots(self) -> dict[int, str]:
+        return _normalize_slots(self.key.hgetall())
+
+    def get_slot(self, slot: int) -> str | None:
+        return self.key.hget(str(int(slot)))
+
+    def set_slot(self, slot: int, value: str) -> None:
+        value = self._require_text(value, field_name="value")
+        self.key.hset(field=str(int(slot)), value=value)
 
 
 def response_index_key(identity: str) -> str:
@@ -35,29 +53,29 @@ def initialize_response_index(
     if terminal < 1:
         raise ValueError(f"terminal_step must be >= 1, got {terminal_step!r}")
 
-    key = response_index_key(identity)
+    index = ResponseIndex.for_identity(identity)
+
     mapping = {0: str(call_key)}
     for slot in range(1, terminal + 1):
         mapping[slot] = EMPTY_RESPONSE_SLOT
 
-    client = redis_client()
-    client.delete(key)
-    client.hset(key, mapping=mapping)
-    return key
+    index.replace_slots(mapping)
+    return str(index)
 
 
 def response_index(index_key: str) -> dict[int, str]:
-    raw = redis_client().hgetall(index_key)
-    return _normalize_slots(raw)
+    return ResponseIndex(index_key).slots()
 
 
 def response_input_key(index_key: str, current_step: int) -> str:
     slot = int(current_step) - 1
-    value = redis_client().hget(index_key, slot)
+    value = ResponseIndex(index_key).get_slot(slot)
+
     if value is None or not str(value).strip():
         raise ValueError(
             f"response index missing input slot {slot} for step {current_step}: {index_key}"
         )
+
     return str(value).strip()
 
 
@@ -74,43 +92,48 @@ def response_output_key(identity: str, current_step: int) -> str:
 
 def record_response_output(index_key: str, current_step: int, output_key: str) -> None:
     slot = response_output_slot(current_step)
-    if not isinstance(output_key, str) or not output_key.strip():
-        raise ValueError("output_key must be non-empty")
-    redis_client().hset(index_key, slot, output_key.strip())
+    ResponseIndex(index_key).set_slot(slot, output_key)
 
 
 def response_index_complete(index_key: str) -> bool:
     slots = response_index(index_key)
+
     if not slots:
         raise ValueError(f"response index is missing or empty: {index_key}")
+
     return all(str(value).strip() for value in slots.values())
 
 
 def next_empty_response_slot(index_key: str) -> int | None:
     slots = response_index(index_key)
+
     for slot in sorted(slots):
         if not str(slots[slot]).strip():
             return slot
+
     return None
 
 
 def _normalize_slots(raw: Mapping[Any, Any]) -> dict[int, str]:
     slots: dict[int, str] = {}
+
     for key, value in raw.items():
         try:
             slot = int(str(key))
         except (TypeError, ValueError):
             continue
+
         slots[slot] = "" if value is None else str(value)
+
     return slots
 
 
 __all__ = [
     "EMPTY_RESPONSE_SLOT",
+    "ResponseIndex",
     "initialize_response_index",
     "next_empty_response_slot",
     "record_response_output",
-    "redis_client",
     "response_index",
     "response_index_complete",
     "response_index_key",

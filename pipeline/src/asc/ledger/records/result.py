@@ -18,11 +18,11 @@ from asc.ledger.views import (
     SELECT_DUPLICATE_PENDING_EXPORT_SLUGS_SQL,
     SELECT_PENDING_RESULT_EXPORTS_SQL,
 )
-from asc.models.runtime.result import StepResultRecord
+from asc.models.runtime.result import StepResult
 
 
 def insert_result_record(
-    result: StepResultRecord,
+    result: StepResult,
     *,
     terminal_step_id: int,
 ) -> None:
@@ -37,7 +37,7 @@ def insert_result_record(
 
 
 def insert_result_records(
-    results: Sequence[tuple[StepResultRecord, int]],
+    results: Sequence[tuple[StepResult, int]],
 ) -> None:
     """Open the configured ledger and write terminal result pointers."""
 
@@ -48,7 +48,7 @@ def insert_result_records(
 def insert_result_record_with_connection(
     *,
     conn: LedgerConnection,
-    result: StepResultRecord,
+    result: StepResult,
     terminal_step_id: int,
     commit: bool = True,
 ) -> None:
@@ -62,7 +62,7 @@ def insert_result_record_with_connection(
 def insert_result_records_with_connection(
     *,
     conn: LedgerConnection,
-    results: Sequence[tuple[StepResultRecord, int]],
+    results: Sequence[tuple[StepResult, int]],
 ) -> None:
     """Write terminal result pointers using an existing ledger connection."""
 
@@ -213,7 +213,7 @@ def require_unique_pending_export_slugs_with_connection(
     raise ValueError(f"duplicate pending export prompt slugs: {details}")
 
 
-def result_values(result: StepResultRecord, *, terminal_step_id: int) -> tuple[Any, ...]:
+def result_values(result: StepResult, *, terminal_step_id: int) -> tuple[Any, ...]:
     if model_value(result, "content", "response") is None:
         raise ValueError("terminal result pointer requires a successful step response")
 
