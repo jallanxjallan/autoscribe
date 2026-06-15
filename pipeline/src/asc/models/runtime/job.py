@@ -1,80 +1,60 @@
+"""Runtime job records.
+
+Each daemon has its own model with hard-coded Redis domain/kind. These models
+use RedisModel.save() and RedisModel.load(); they do not define key() or
+redis_key() methods.
+"""
+
 from __future__ import annotations
 
-import json
-from typing import Any, ClassVar, Literal
+from typing import ClassVar
 
-from pydantic import Field, field_serializer
+from pydantic import ConfigDict, field_serializer
 
 from asc.redis.model_base import RedisModel
 
 
-class RuntimeJobBase(RedisModel):
-    """
-    Base model for daemon-specific runtime jobs.
+class _JobBase(RedisModel):
+    domain: ClassVar[str] = "runtime"
 
-    Subclasses hard-code domain/kind so callers only pass call_identity.
-    """
+    model_config = ConfigDict(extra="forbid")
 
-    domain: ClassVar[str]
-    kind: ClassVar[str]
-
+    identity: str
     call_identity: str
-    step_number: int
-
+    cursor_key: str
+    action: str
+    step_number: int = 0
     engine: str
-    script: str | None = None
-
+    handler: str = ""
     input_model: str
     input_key: str
-
     output_model: str
     output_key: str
+    args_json: str = "{}"
 
-    args: dict[str, Any] = Field(default_factory=dict)
-
-    @classmethod
-    def redis_key(cls, call_identity: str) -> str:
-        return f"{cls.domain}:{call_identity}:{cls.kind}"
-
-    @property
-    def key(self) -> str:
-        return self.redis_key(self.call_identity)
-
-    @field_serializer("args")
-    def serialize_args(self, value: dict[str, Any]) -> str:
-        return json.dumps(value, ensure_ascii=False)
-
-    @classmethod
-    def from_redis_hash(cls, data: dict[str, Any]) -> RuntimeJobBase:
-        raw_args = data.get("args", "{}")
-        if isinstance(raw_args, str):
-            data["args"] = json.loads(raw_args or "{}")
-        return cls(**data)
+    @field_serializer("step_number")
+    def _serialize_step_number(self, value: int) -> str:
+        return str(value)
 
 
-class WorkerJobRecord(RuntimeJobBase):
-    """
-    Job consumed by the worker daemon.
-
-    The worker should not load plans or infer step shape.
-    It receives exactly one executable job envelope.
-    """
-
-    domain: ClassVar[str] = "job"
-    kind: ClassVar[str] = "worker"
-
-    daemon: Literal["worker"] = "worker"
+class WorkerJobRecord(_JobBase):
+    kind: ClassVar[str] = "worker-job"
 
 
-class LedgerJobRecord(RuntimeJobBase):
-    """
-    Job consumed by the orchestrator/ledger daemon.
+class LedgerJobRecord(_JobBase):
+    kind: ClassVar[str] = "ledger-job"
 
-    This allows cursor/outcome handling to use the same hard-coded
-    load pattern without sharing the worker job keyspace.
-    """
 
-    domain: ClassVar[str] = "job"
-    kind: ClassVar[str] = "ledger"
+# Backward-compatible aliases for older imports.
+WorkerJob = WorkerJobRecord
+ScrivenerJob = LedgerJobRecord
+ScrivenerJobRecord = LedgerJobRecord
 
-    daemon: Literal["ledger"] = "ledger"
+
+__all__ = [
+    "LedgerJobRecord",
+    "ScrivenerJob",
+    "ScrivenerJobRecord",
+    "WorkerJob",
+    "WorkerJobRecord",
+]
