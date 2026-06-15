@@ -10,23 +10,13 @@ from asc.redis.model_base import RedisModel
 
 
 class RuntimeCursor(RedisModel):
-    """Minimal mutable cursor for one runtime call.
+    """Immutable runtime cursor for one call.
 
-    Queue membership determines custody. The fixed response index hash is the
-    source of truth for runtime input/output progress:
-
-        runtime:<identity>:responses
-          0 = original call key
-          1 = response from step 1
-          2 = response from step 2
-          ...
-
-    Legacy Redis hashes may still contain retired cursor fields such as
-    terminal_step, total_steps, fail_code, and fail_message. Ignore unknown
-    fields on load so live cursors survive model cleanup.
+    Queue membership determines custody.
+    The response index determines progress.
     """
 
-    model_config = ConfigDict(extra="ignore")
+    model_config = ConfigDict(extra="forbid", frozen=True)
 
     domain: ClassVar[str] = "runtime"
     kind: ClassVar[str] = "cursor"
@@ -37,22 +27,21 @@ class RuntimeCursor(RedisModel):
     call_key: str
     plan_key: str
 
-    current_step: int = Field(default=1, ge=1)
-    retry_count: int = Field(default=0, ge=0)
-
     created_at: int = Field(default_factory=timestamp)
-    updated_at: int = Field(default_factory=timestamp)
 
     @property
     def response_index_key(self) -> str:
         return f"runtime:{self.identity}:responses"
 
-    # Legacy compatibility: callers should move to the response index helpers.
     @property
-    def is_terminal_step(self) -> bool:
-        from asc.runtime.response_index import response_index_complete
+    def completed_step_count(self) -> int:
+        from asc.runtime.response_index import response_completed_step_count
 
-        return response_index_complete(self.response_index_key)
+        return response_completed_step_count(self.response_index_key)
+
+    @property
+    def current_step(self) -> int:
+        return self.completed_step_count + 1
 
     @property
     def input_key(self) -> str:
@@ -63,6 +52,12 @@ class RuntimeCursor(RedisModel):
     @property
     def output_key(self) -> str:
         return f"runtime:{self.identity}:response.{self.current_step}"
+
+    @property
+    def is_complete(self) -> bool:
+        from asc.runtime.response_index import response_index_complete
+
+        return response_index_complete(self.response_index_key)
 
     @field_validator("identity", mode="before")
     @classmethod

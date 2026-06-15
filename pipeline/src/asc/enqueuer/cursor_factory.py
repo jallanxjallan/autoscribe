@@ -45,28 +45,9 @@ def _runtime_cursor(
         identity=identity,
         call_key=call_key,
         plan_key=plan_key,
-        response_index_key=response_index_key,
-        current_step=1,
-        action=INITIAL_CURSOR_ACTION,
-        status=INITIAL_CURSOR_STATUS,
     )
-    try:
-        return RuntimeCursor(**kwargs)
-    except TypeError:
-        # Compatibility for the current cursor model before action/status are
-        # added. Keep the constructor minimal, then set attributes when allowed.
-        cursor = RuntimeCursor(
-            identity=identity,
-            call_key=call_key,
-            plan_key=plan_key,
-            current_step=1,
-        )
-        for name in ("response_index_key", "action", "status"):
-            try:
-                setattr(cursor, name, kwargs[name])
-            except Exception:
-                pass
-        return cursor
+    return RuntimeCursor(**kwargs)
+    
 
 
 __all__ = [
