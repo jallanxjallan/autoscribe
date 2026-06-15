@@ -10,10 +10,11 @@ from asc.redis.model_base import RedisModel
 
 
 class RuntimeCursor(RedisModel):
-    """Immutable runtime cursor for one call.
+    """Runtime baton for one call.
 
-    Queue membership determines custody.
-    The response index determines progress.
+    Queues move only cursor keys.
+    The cursor points to the current assigned job.
+    Progress is derived from the current job and ledger artifacts.
     """
 
     model_config = ConfigDict(extra="forbid", frozen=True)
@@ -27,37 +28,10 @@ class RuntimeCursor(RedisModel):
     call_key: str
     plan_key: str
 
+    current_job_key: str = ""
+
     created_at: int = Field(default_factory=timestamp)
-
-    @property
-    def response_index_key(self) -> str:
-        return f"runtime:{self.identity}:responses"
-
-    @property
-    def completed_step_count(self) -> int:
-        from asc.runtime.response_index import response_completed_step_count
-
-        return response_completed_step_count(self.response_index_key)
-
-    @property
-    def current_step(self) -> int:
-        return self.completed_step_count + 1
-
-    @property
-    def input_key(self) -> str:
-        from asc.runtime.response_index import response_input_key
-
-        return response_input_key(self.response_index_key, self.current_step)
-
-    @property
-    def output_key(self) -> str:
-        return f"runtime:{self.identity}:response.{self.current_step}"
-
-    @property
-    def is_complete(self) -> bool:
-        from asc.runtime.response_index import response_index_complete
-
-        return response_index_complete(self.response_index_key)
+    updated_at: int = Field(default_factory=timestamp)
 
     @field_validator("identity", mode="before")
     @classmethod
@@ -68,6 +42,16 @@ class RuntimeCursor(RedisModel):
     @classmethod
     def validate_full_key(cls, value: object) -> str:
         text = plain_non_empty_string(value, "runtime key")
+        if ":" not in text:
+            raise ValueError(f"expected full Redis key, got {text!r}")
+        return text
+
+    @field_validator("current_job_key", mode="before")
+    @classmethod
+    def validate_current_job_key(cls, value: object) -> str:
+        if value in (None, ""):
+            return ""
+        text = plain_non_empty_string(value, "current_job_key")
         if ":" not in text:
             raise ValueError(f"expected full Redis key, got {text!r}")
         return text
