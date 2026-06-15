@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from asc.state.orchestrator_queue import enqueue as enqueue_orchestrator
+from asc.state.orchestrator_queue import insert as enqueue_orchestrator
 
 
 def enqueue_cursor(cursor_key: str) -> None:

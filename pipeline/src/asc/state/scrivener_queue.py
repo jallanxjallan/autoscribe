@@ -1,4 +1,4 @@
-# asc/state/worker_queue.py
+# asc/state/scrivener_queue.py
 from __future__ import annotations
 
 from collections.abc import Sequence
@@ -6,18 +6,18 @@ from collections.abc import Sequence
 from asc.state.queue import QueuedKey, RedisQueue
 
 
-WORKER_QUEUE_KEY = "state:worker:queue"
+SCRIVENER_QUEUE_KEY = "state:scrivener:queue"
 
 
-class WorkerQueue(RedisQueue):
-    KEY = WORKER_QUEUE_KEY
+class ScrivenerQueue(RedisQueue):
+    KEY = SCRIVENER_QUEUE_KEY
 
 
-_QUEUE = WorkerQueue()
+_QUEUE = ScrivenerQueue()
 
 
-def worker_queue_key() -> str:
-    return WORKER_QUEUE_KEY
+def scrivener_queue_key() -> str:
+    return SCRIVENER_QUEUE_KEY
 
 
 def insert(cursor_key: str) -> int:
@@ -53,8 +53,8 @@ def clear() -> int:
 
 
 __all__ = [
-    "WORKER_QUEUE_KEY",
-    "WorkerQueue",
+    "SCRIVENER_QUEUE_KEY",
+    "ScrivenerQueue",
     "QueuedKey",
     "block_claim",
     "claim",
@@ -64,5 +64,5 @@ __all__ = [
     "insert_many",
     "peek",
     "remove",
-    "worker_queue_key",
+    "scrivener_queue_key",
 ]

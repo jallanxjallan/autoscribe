@@ -1,16 +1,19 @@
-"""Redis-backed state helpers for AutoScribe runtime coordination.
+"""Redis-backed runtime custody state.
 
-Custody queues:
+Invariant:
+    one daemon, one inbound queue
 
-- orchestrator_queue: state:orchestrator:pending
-- worker_queue: state:worker:pending
-- worker_outcome_queue: state:worker:outcome
+Queues:
+    state:orchestrator:queue  -> cursor keys for orchestrator
+    state:worker:queue        -> cursor keys for workers
+    state:scrivener:queue     -> cursor keys for scrivener
 
-Monitoring index:
+Non-queue state:
+    state:runtime:active      -> active cursor watchdog zset
+    state:slugmap            -> slug -> Redis key resolver
 
-- orchestrator_index: state:runtime:active
-
-Queues move cursors. The active index observes cursors.
+All daemon queues contain cursor keys only. Job/instruction records, when
+needed, live outside the queues and are derived from the cursor identity.
 """
 
 __all__: list[str] = []
