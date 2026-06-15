@@ -46,6 +46,21 @@ def content_key(identity: str, step_number: int) -> str:
     return f"runtime:{identity}:content.{step_number}"
 
 
+def job_identity(call_identity: str, daemon: str, action: str, step_number: int = 0) -> str:
+    """Return a unique Redis identity for a runtime job.
+
+    Job models use RedisModel.key_for_identity(), so the model identity must
+    identify the job, not merely the call. The original call id remains in
+    call_identity for grouping and ledger lookup.
+    """
+    call_identity = required_text(call_identity, "call_identity")
+    daemon = required_text(daemon, "daemon")
+    action = required_text(action, "action")
+    if step_number:
+        return f"{call_identity}.{daemon}.{action}.{int(step_number)}"
+    return f"{call_identity}.{daemon}.{action}"
+
+
 def required_text(value: object, field_name: str) -> str:
     if not isinstance(value, str):
         raise OrchestratorContractError(f"{field_name} must be a string")
@@ -146,7 +161,7 @@ def make_ledger_call_job(cursor: Any) -> LedgerJobRecord:
     identity = required_text(getattr(cursor, "identity", None), "cursor.identity")
     call_key = required_text(getattr(cursor, "call_key", None), "cursor.call_key")
     return LedgerJobRecord(
-        identity=identity,
+        identity=job_identity(identity, "ledger", "write-call"),
         call_identity=identity,
         cursor_key=cursor_key_for(cursor),
         action="write_call",
@@ -183,7 +198,7 @@ def make_worker_job(
         actual_input_key = getattr(cursor, "call_key") if step_number == 1 else content_key(identity, step_number - 1)
 
     return WorkerJobRecord(
-        identity=identity,
+        identity=job_identity(identity, "worker", "execute-step", step_number),
         call_identity=identity,
         cursor_key=cursor_key_for(cursor),
         action="execute_step",
@@ -202,7 +217,7 @@ def make_ledger_step_job(*, cursor: Any, worker_job: WorkerJobRecord) -> LedgerJ
     identity = required_text(getattr(cursor, "identity", None), "cursor.identity")
     step_number = int(worker_job.step_number)
     return LedgerJobRecord(
-        identity=identity,
+        identity=job_identity(identity, "ledger", "write-step", step_number),
         call_identity=identity,
         cursor_key=cursor_key_for(cursor),
         action="write_step",
@@ -220,7 +235,7 @@ def make_ledger_step_job(*, cursor: Any, worker_job: WorkerJobRecord) -> LedgerJ
 def make_ledger_result_job(*, cursor: Any, previous_job: LedgerJobRecord) -> LedgerJobRecord:
     identity = required_text(getattr(cursor, "identity", None), "cursor.identity")
     return LedgerJobRecord(
-        identity=identity,
+        identity=job_identity(identity, "ledger", "write-result"),
         call_identity=identity,
         cursor_key=cursor_key_for(cursor),
         action="write_result",
