@@ -6,7 +6,6 @@ from asc.redis.key import RedisKey
 from asc.state.slugmap import SlugMap
 
 CONTROL_KIND_TO_REGISTRY = {
-    "driver": "drivers",
     "instruction": "instructions",
     "plan": "plans",
 }

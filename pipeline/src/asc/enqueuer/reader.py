@@ -9,13 +9,23 @@ from asc.streams.ndjson import iter_ndjson_records
 
 @dataclass(frozen=True, slots=True)
 class EnqueueRecord:
-    prompt_slug: str
+    """One run-spec row: a call to run under a plan.
+
+    ``call_slug`` is canonical. ``prompt_slug`` remains accepted as a temporary
+    compatibility alias for older client run manifests.
+    """
+
+    call_slug: str
     plan_slug: str
     raw_record: Mapping[str, Any]
 
+    @property
+    def prompt_slug(self) -> str:
+        return self.call_slug
+
 
 def iter_enqueue_records(stream: TextIO) -> Iterator[EnqueueRecord]:
-    """Yield validated lightweight prompt/plan dispatch records."""
+    """Yield validated run-spec records from an NDJSON stream."""
 
     seen = False
     for parsed in iter_ndjson_records(stream):
@@ -29,7 +39,7 @@ def iter_enqueue_records(stream: TextIO) -> Iterator[EnqueueRecord]:
 
         try:
             yield EnqueueRecord(
-                prompt_slug=_required_slug(raw, "prompt_slug"),
+                call_slug=_required_call_slug(raw),
                 plan_slug=_required_slug(raw, "plan_slug"),
                 raw_record=raw,
             )
@@ -44,6 +54,15 @@ def iter_enqueue_records(stream: TextIO) -> Iterator[EnqueueRecord]:
 
 def load_enqueue_records(stream: TextIO) -> list[EnqueueRecord]:
     return list(iter_enqueue_records(stream))
+
+
+def _required_call_slug(record: Mapping[str, Any]) -> str:
+    value = record.get("call_slug")
+    if value is None:
+        value = record.get("prompt_slug")
+    if not isinstance(value, str) or not value.strip():
+        raise ValueError("enqueue record must include call_slug or prompt_slug")
+    return value.strip()
 
 
 def _required_slug(record: Mapping[str, Any], field: str) -> str:

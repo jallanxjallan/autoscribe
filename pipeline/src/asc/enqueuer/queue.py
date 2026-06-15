@@ -4,6 +4,7 @@ from asc.state.orchestrator_queue import enqueue as enqueue_orchestrator
 
 
 def enqueue_cursor(cursor_key: str) -> None:
+    """Place a newly materialized cursor in the orchestrator pending queue."""
     if not isinstance(cursor_key, str) or not cursor_key.strip():
         raise ValueError("cursor_key must be a non-empty full Redis key")
     if ":" not in cursor_key:

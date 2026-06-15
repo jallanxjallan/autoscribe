@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
-from asc.enqueue.reader import EnqueueRecord
+from asc.enqueuer.reader import EnqueueRecord
 from asc.state.slugmap import SlugKeyResolver
 
 
@@ -19,7 +19,7 @@ class ResolvedEnqueueKeys:
 def resolve_enqueue_keys(record: EnqueueRecord) -> ResolvedEnqueueKeys:
     resolver = SlugKeyResolver()
     return ResolvedEnqueueKeys(
-        call_key=resolver.resolve(record.prompt_slug, expected_kind="call"),
+        call_key=resolver.resolve(record.call_slug, expected_kind="call"),
         plan_key=resolver.resolve(record.plan_slug, expected_kind="plan"),
     )
 

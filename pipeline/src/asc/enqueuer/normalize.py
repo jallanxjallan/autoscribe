@@ -3,7 +3,7 @@ from __future__ import annotations
 from collections.abc import Mapping
 from typing import Any
 
-from asc.enqueue.reader import EnqueueRecord
+from asc.enqueuer.reader import EnqueueRecord
 
 
 def normalize_enqueue_record(record: object) -> EnqueueRecord:
@@ -12,7 +12,7 @@ def normalize_enqueue_record(record: object) -> EnqueueRecord:
 
     if isinstance(record, Mapping):
         return EnqueueRecord(
-            prompt_slug=_required_slug(record, "prompt_slug"),
+            call_slug=_required_call_slug(record),
             plan_slug=_required_slug(record, "plan_slug"),
             raw_record=record,
         )
@@ -25,7 +25,16 @@ def enqueue_record_identifier(record: object, *, fallback: str) -> str:
         dispatch = normalize_enqueue_record(record)
     except Exception:
         return fallback
-    return dispatch.prompt_slug
+    return dispatch.call_slug
+
+
+def _required_call_slug(record: Mapping[str, Any]) -> str:
+    value = record.get("call_slug")
+    if value is None:
+        value = record.get("prompt_slug")
+    if not isinstance(value, str) or not value.strip():
+        raise ValueError("enqueue record must include call_slug or prompt_slug")
+    return value.strip()
 
 
 def _required_slug(record: Mapping[str, Any], field: str) -> str:

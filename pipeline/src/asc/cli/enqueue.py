@@ -4,7 +4,7 @@ import sys
 
 import typer
 
-from asc.enqueue.service import enqueue_from_stream
+from asc.enqueuer.service import enqueue_from_stream
 
 app = typer.Typer(help="Enqueue prompt/plan dispatch records.")
 

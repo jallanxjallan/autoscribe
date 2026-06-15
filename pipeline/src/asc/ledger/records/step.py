@@ -21,7 +21,7 @@ from asc.ledger.util import (
     model_value,
     result_timestamp,
 )
-from asc.models.runtime.result import StepResultRecord
+from asc.models.runtime.result import StepResult
 from asc.models.control.step import PlanStepRecord
 
 

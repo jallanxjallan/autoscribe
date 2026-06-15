@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from asc.enqueue.service import (
+from asc.enqueuer.service import (
     EnqueueReport,
     EnqueuedCall,
     enqueue_from_stream,
