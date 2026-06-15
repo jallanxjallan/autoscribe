@@ -4,7 +4,7 @@ import json
 from collections.abc import Iterable, Sequence
 from typing import Any
 
-from asc.ledger.connect import LedgerConnection
+from asc.scrivener.connect import LedgerConnection
 
 
 SqlParams = Sequence[Any] | dict[str, Any]

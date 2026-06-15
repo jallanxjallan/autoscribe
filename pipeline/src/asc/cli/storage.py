@@ -7,8 +7,8 @@ from zoneinfo import ZoneInfo
 
 import typer
 
-from asc.ledger.connect import configured_ledger_path
-from asc.ledger.load import init_database
+from asc.scrivener.connect import configured_ledger_path
+from asc.scrivener.load import init_database
 
 
 DEFAULT_ARCHIVE_DIRNAME = "archive"

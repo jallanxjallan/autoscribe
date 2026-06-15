@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from asc.ledger.util import insert_sql
+from asc.scrivener.util import insert_sql
 
 
 CALL_COLUMNS = (

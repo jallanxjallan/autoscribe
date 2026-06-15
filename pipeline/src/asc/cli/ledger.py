@@ -5,7 +5,7 @@ from typing import Annotated, Any
 
 import typer
 
-from asc.ledger.inspect import (
+from asc.scrivener.inspect import (
     pending_work,
     recent_calls,
     recent_exports,
@@ -15,7 +15,7 @@ from asc.ledger.inspect import (
     show_step,
     table_counts,
 )
-from asc.ledger.lifecycle import (
+from asc.scrivener.lifecycle import (
     active_ledger_path,
     ensure_active_ledger,
     reset_ledger,

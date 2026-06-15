@@ -1,7 +1,7 @@
 from __future__ import annotations
 
-from asc.ledger.connect import connect
-from asc.ledger.schema import drop_user_objects, ensure_ledger_schema
+from asc.scrivener.connect import connect
+from asc.scrivener.schema import drop_user_objects, ensure_ledger_schema
 
 
 def init_database(*, force: bool = False) -> None:

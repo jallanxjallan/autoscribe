@@ -1,10 +1,12 @@
 from __future__ import annotations
 
-from asc.state import worker_outcome_queue
+from asc.state import orchestrator_queue
 
 
 def submit_outcome(cursor_key: str) -> int:
-    return worker_outcome_queue.enqueue(cursor_key)
+    """Return a completed worker cursor to orchestrator custody."""
+
+    return orchestrator_queue.insert(cursor_key)
 
 
 __all__ = ["submit_outcome"]

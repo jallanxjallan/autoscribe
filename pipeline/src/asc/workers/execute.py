@@ -42,7 +42,7 @@ class WorkerExecutor:
         # Development mode fails fast so contract violations are immediately
         # visible. In production the worker should never die because an engine
         # returned an unexpected object. Instead, catch the exception, log it,
-        # persist a StepFailure record, submit the cursor to the outcome queue,
+        # persist a StepFailure record, return the cursor to the orchestrator queue,
         # and allow the orchestrator to decide whether to retry, fail, or
         # escalate the call.
         try:

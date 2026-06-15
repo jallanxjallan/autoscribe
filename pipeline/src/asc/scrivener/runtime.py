@@ -3,9 +3,9 @@ from __future__ import annotations
 import logging
 from dataclasses import dataclass
 
-from asc.scrivener.jobs import cursor_key_from_claim, job_key_from_cursor, load_cursor, load_job
-from asc.scrivener.queues import claim_scrivener_cursor, post_cursor_to_orchestrator
+from asc.scrivener.jobs import job_key_from_cursor, load_cursor, load_job
 from asc.scrivener.writers.calls import insert_call_from_job
+from asc.state import orchestrator_queue, scrivener_queue
 
 log = logging.getLogger(__name__)
 
@@ -20,27 +20,30 @@ class ScrivenerRunReport:
 def run_once(*, timeout: int | None = None) -> ScrivenerRunReport:
     """Claim one cursor, write its current job as a call row, repost cursor.
 
-    Scrivener does not decide workflow state.  Its custody is deliberately tiny:
+    Scrivener does not decide workflow state. Its custody is deliberately tiny:
 
     1. claim a cursor from the Scrivener queue
     2. load the cursor
     3. load ``cursor.current_job``
     4. insert the call row in the ledger
-    5. post the same cursor to the orchestrator queue
+    5. return the same cursor to the orchestrator queue
     """
 
-    claimed = claim_scrivener_cursor(timeout=timeout)
-    cursor_key = cursor_key_from_claim(claimed)
-
-    if cursor_key is None:
+    claimed = (
+        scrivener_queue.claim()
+        if timeout is None
+        else scrivener_queue.block_claim(timeout=timeout)
+    )
+    if claimed is None:
         return ScrivenerRunReport(claimed=False)
 
+    cursor_key = claimed.cursor_key
     cursor = load_cursor(cursor_key)
     job_key = job_key_from_cursor(cursor)
     job = load_job(job_key)
 
     insert_call_from_job(job)
-    post_cursor_to_orchestrator(cursor_key)
+    orchestrator_queue.insert(cursor_key)
 
     return ScrivenerRunReport(claimed=True, cursor_key=cursor_key, job_key=job_key)
 

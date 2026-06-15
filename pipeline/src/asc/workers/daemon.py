@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import logging
-from typing import Any
 
 from asc.state import worker_queue
 from asc.workers.execute import WorkerExecutor
@@ -17,7 +16,7 @@ BLOCK_TIMEOUT_SECONDS = 30
 class WorkerDaemon:
     """Long-lived worker process over full RuntimeCursor keys.
 
-    The worker queue is a Redis LIST. claim_next() is intentionally blocking:
+    The worker queue is a Redis LIST. block_claim() is intentionally blocking:
     idle workers sleep inside Redis/socket I/O instead of polling in Python.
     """
 
@@ -27,32 +26,14 @@ class WorkerDaemon:
 
     def run_forever(self) -> None:
         while True:
-            claimed = worker_queue.block_claim_next(timeout=self.block_timeout_seconds)
+            claimed = worker_queue.block_claim(timeout=self.block_timeout_seconds)
             if claimed is None:
                 # Timeout expiry is not work and not an error. Loop quietly.
                 continue
 
-            cursor_key = _claimed_key(claimed)
+            cursor_key = claimed.cursor_key
             log.info("worker claimed cursor=%s", cursor_key)
             self.executor.execute(cursor_key)
-
-
-def _claimed_key(claimed: Any) -> str:
-    value = getattr(claimed, "key", None)
-    if value is None:
-        value = getattr(claimed, "cursor_key", None)
-    if value is None:
-        value = getattr(claimed, "identity", None)
-    if value is None:
-        value = claimed
-
-    if isinstance(value, bytes):
-        value = value.decode("utf-8")
-
-    if not isinstance(value, str) or not value.strip():
-        raise TypeError(f"worker queue claim must provide a RuntimeCursor key, got {claimed!r}")
-
-    return value.strip()
 
 
 def main() -> None:

@@ -93,36 +93,8 @@ def job_key_from_cursor(cursor: object) -> str:
 
     return str(job_key)
 
-def cursor_key_from_claim(claimed: Any) -> str | None:
-    """Normalize queue claim return values to a cursor key string."""
-
-    if claimed is None or claimed is False:
-        return None
-
-    if isinstance(claimed, str):
-        return claimed
-
-    if isinstance(claimed, bytes):
-        return claimed.decode()
-
-    # Redis zpopmin returns [(member, score)]. blpop returns (queue, member).
-    if isinstance(claimed, (tuple, list)):
-        if len(claimed) == 0:
-            return None
-        first = claimed[0]
-        if isinstance(first, tuple) and first:
-            value = first[0]
-            return value.decode() if isinstance(value, bytes) else str(value)
-        if len(claimed) == 2 and isinstance(claimed[1], (str, bytes)):
-            value = claimed[1]
-            return value.decode() if isinstance(value, bytes) else str(value)
-
-    value = model_value(claimed, "cursor_key", "cursor", "key", "value", "member")
-    return None if value is None else str(value)
-
 
 __all__ = [
-    "cursor_key_from_claim",
     "job_key_from_cursor",
     "load_cursor",
     "load_job",

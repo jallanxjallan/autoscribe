@@ -7,8 +7,8 @@ import shutil
 import sqlite3
 from zoneinfo import ZoneInfo
 
-from asc.ledger.connect import configured_ledger_path, connect
-from asc.ledger.schema import ensure_ledger_schema, reset_ledger_schema
+from asc.scrivener.connect import configured_ledger_path, connect
+from asc.scrivener.schema import ensure_ledger_schema, reset_ledger_schema
 
 
 DEFAULT_ARCHIVE_DIRNAME = "archive"

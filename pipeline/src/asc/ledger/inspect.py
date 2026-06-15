@@ -4,7 +4,7 @@ from dataclasses import dataclass
 import json
 from typing import Any
 
-from asc.ledger.connect import connect
+from asc.scrivener.connect import connect
 
 
 TABLE_NAMES = ("calls", "steps", "results", "exports")

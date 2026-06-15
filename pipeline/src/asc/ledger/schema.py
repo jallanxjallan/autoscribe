@@ -2,8 +2,8 @@ from __future__ import annotations
 
 from collections.abc import Iterable
 
-from asc.ledger.connect import LedgerConnection
-from asc.ledger.views import CREATE_LEDGER_VIEWS_SQL, LEDGER_VIEW_NAMES
+from asc.scrivener.connect import LedgerConnection
+from asc.scrivener.views import CREATE_LEDGER_VIEWS_SQL, LEDGER_VIEW_NAMES
 
 ColumnSpec = dict[str, str | list[str]]
 

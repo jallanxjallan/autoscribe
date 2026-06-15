@@ -4,8 +4,8 @@ from collections.abc import Sequence
 from typing import Any
 
 from asc.core.timestamp import timestamp
-from asc.ledger.connect import LedgerConnection, connect
-from asc.ledger.queries import (
+from asc.scrivener.connect import LedgerConnection, connect
+from asc.scrivener.queries import (
     INSERT_STEP_SQL,
     SELECT_PREVIOUS_COMPLETED_STEP_SQL,
     SELECT_STEP_BY_CALL_NUMBER_SQL,
@@ -14,7 +14,7 @@ from asc.ledger.queries import (
     STEP_COLUMNS,
     UPDATE_STEP_COMPLETION_SQL,
 )
-from asc.ledger.util import (
+from asc.scrivener.util import (
     fetch_all_dicts,
     fetch_one_dict,
     model_json_blob,

@@ -3,8 +3,8 @@ from __future__ import annotations
 from collections.abc import Sequence
 from typing import Any
 
-from asc.ledger.connect import LedgerConnection, connect
-from asc.ledger.queries import (
+from asc.scrivener.connect import LedgerConnection, connect
+from asc.scrivener.queries import (
     CALL_COLUMNS,
     INSERT_CALL_SQL,
     SELECT_CALL_BY_PROMPT_SLUG_SQL,
@@ -13,7 +13,7 @@ from asc.ledger.queries import (
     SELECT_CALLS_FOR_PLAN_SQL,
     SELECT_CALLS_SQL,
 )
-from asc.ledger.util import (
+from asc.scrivener.util import (
     executemany_and_commit,
     execute_and_commit,
     fetch_all_dicts,

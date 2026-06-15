@@ -7,7 +7,7 @@ import typer
 
 from asc.export.export_result import mark_result_exported, write_extracted_result_record
 from asc.export.pending_exports import pending_export_records
-from asc.ledger.connect import connect
+from asc.scrivener.connect import connect
 
 
 app = typer.Typer(
