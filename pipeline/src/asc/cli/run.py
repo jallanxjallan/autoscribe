@@ -1,14 +1,15 @@
 """User-facing run commands.
 
-The run surface manages the two long-lived runtime services:
+The run surface manages the three long-lived runtime services:
 
-    asc run start   # start or confirm orchestrator + worker daemons
-    asc run stop    # stop both daemons
-    asc run status  # show daemon and queue status
+    asc run start          # start or confirm orchestrator + worker + scrivener daemons
+    asc run start --debug  # start daemons with stdout/stderr attached to this terminal
+    asc run stop           # stop all daemons
+    asc run status         # show daemon and queue status
 
 Internal queue phases are deliberately not exposed here.  The orchestrator owns
-runtime cursor progression and ledger writes.  The worker owns worker custody
-and engine execution.
+runtime cursor progression.  The worker owns engine execution.  The scrivener
+owns ledger writes.
 """
 
 from __future__ import annotations
@@ -44,6 +45,7 @@ class ManagedDaemon:
 DAEMONS: tuple[ManagedDaemon, ...] = (
     ManagedDaemon(name="orchestrator", module="asc.orchestrator.daemon"),
     ManagedDaemon(name="worker", module="asc.workers.daemon"),
+    ManagedDaemon(name="scrivener", module="asc.scrivener.daemon"),
 )
 
 
@@ -82,17 +84,19 @@ def _pid_alive(pid: int) -> bool:
     return True
 
 
-def _start_daemon(daemon: ManagedDaemon, pids: dict[str, int]) -> int:
+def _start_daemon(daemon: ManagedDaemon, pids: dict[str, int], *, debug: bool = False) -> int:
     existing = pids.get(daemon.name)
     if existing is not None and _pid_alive(existing):
         typer.echo(f"{daemon.name}=running pid={existing}")
         return existing
 
+    output_target = None if debug else subprocess.DEVNULL
+
     process = subprocess.Popen(
         [sys.executable, "-m", daemon.module],
         stdin=subprocess.DEVNULL,
-        stdout=subprocess.DEVNULL,
-        stderr=subprocess.DEVNULL,
+        stdout=output_target,
+        stderr=output_target,
         start_new_session=True,
     )
     pids[daemon.name] = int(process.pid)
@@ -112,12 +116,18 @@ def _stop_daemon(name: str, pid: int, *, force: bool = False) -> bool:
 
 
 @app.command("start")
-def run_start() -> None:
-    """Start or confirm both runtime daemons."""
+def run_start(
+    debug: bool = typer.Option(
+        False,
+        "--debug",
+        help="Attach daemon stdout/stderr to this terminal instead of suppressing output.",
+    ),
+) -> None:
+    """Start or confirm all runtime daemons."""
 
     pids = _read_pids()
     for daemon in DAEMONS:
-        _start_daemon(daemon, pids)
+        _start_daemon(daemon, pids, debug=debug)
     _write_pids(pids)
 
 
@@ -125,7 +135,7 @@ def run_start() -> None:
 def run_stop(
     force: bool = typer.Option(False, "--force", help="Use SIGKILL instead of SIGTERM."),
 ) -> None:
-    """Stop both runtime daemons."""
+    """Stop all runtime daemons."""
 
     pids = _read_pids()
     remaining: dict[str, int] = {}
@@ -156,7 +166,7 @@ def run_status() -> None:
     for label, module_name in {
         "orchestrator_pending": "asc.state.orchestrator_queue",
         "worker_pending": "asc.state.worker_queue",
-        "worker_outcome": "asc.state.worker_outcome_queue",
+        "scrivener_pending": "asc.state.scrivener_queue",
         "runtime_active": "asc.state.runtime_active",
     }.items():
         typer.echo(f"{label}={_queue_count(module_name)}")

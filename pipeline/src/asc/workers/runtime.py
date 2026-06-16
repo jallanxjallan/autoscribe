@@ -5,12 +5,12 @@ import os
 from dataclasses import dataclass
 
 from asc.state import worker_queue
+from asc.state.daemon import DEFAULT_CLAIM_TIMEOUT_SECONDS, idle_empty_limit, run_daemon
 from asc.workers.execute import WorkerExecutor
 
 log = logging.getLogger(__name__)
 
-DEFAULT_CLAIM_TIMEOUT_SECONDS = int(os.environ.get("AUTOSCRIBE_DAEMON_CLAIM_TIMEOUT", "5"))
-DEFAULT_EMPTY_LIMIT = int(os.environ.get("AUTOSCRIBE_DAEMON_EMPTY_LIMIT", "60"))
+DEFAULT_EMPTY_LIMIT = idle_empty_limit(timeout=DEFAULT_CLAIM_TIMEOUT_SECONDS)
 
 
 @dataclass(frozen=True, slots=True)
@@ -30,11 +30,14 @@ def run_once(
     if wait:
         claimed = worker_queue.daemon_claim(timeout=timeout, empty_limit=empty_limit)
     else:
-        claimed = worker_queue.daemon_drain_claim()
+        claimed = worker_queue.claim()
     if claimed is None:
         return WorkerRunReport(claimed=False)
 
     job_key = str(getattr(claimed, "key", claimed)).strip()
+    if not job_key:
+        raise ValueError("worker claimed an empty job key")
+
     result = WorkerExecutor().execute(job_key)
     return WorkerRunReport(
         claimed=True,
@@ -43,34 +46,19 @@ def run_once(
         output_key=result.output_key,
     )
 
+
 def run_forever(
     *,
     timeout: int | None = DEFAULT_CLAIM_TIMEOUT_SECONDS,
     empty_limit: int | None = DEFAULT_EMPTY_LIMIT,
 ) -> None:
-    report = run_once(timeout=timeout, empty_limit=empty_limit, wait=True)
-    if not report.claimed:
-        waited = int(timeout or DEFAULT_CLAIM_TIMEOUT_SECONDS) * int(empty_limit or DEFAULT_EMPTY_LIMIT)
-        message = (
-            f"worker queue empty after {empty_limit} cycles "
-            f"({waited} seconds); daemon exiting, restart required"
-        )
-        log.warning(message)
-        print(message, flush=True)
-        return
+    run_daemon(
+        name="worker",
+        run_once=run_once,
+        timeout=timeout,
+        empty_limit=empty_limit,
+    )
 
-    while report.claimed:
-        log.info("worker wrote output=%s job=%s cursor=%s", report.output_key, report.job_key, report.cursor_key)
-        report = run_once(timeout=timeout, empty_limit=empty_limit, wait=False)
-        if not report.claimed:
-            waited = int(timeout or DEFAULT_CLAIM_TIMEOUT_SECONDS) * int(empty_limit or DEFAULT_EMPTY_LIMIT)
-            message = (
-                f"worker queue empty after {empty_limit} cycles "
-                f"({waited} seconds); daemon exiting, restart required"
-            )
-            log.warning(message)
-            print(message, flush=True)
-            return
 
 def main() -> None:
     """Run the worker daemon.

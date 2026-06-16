@@ -158,11 +158,37 @@ def _copy_rows(old: sqlite3.Connection, new: sqlite3.Connection, *, table: str, 
         return 0
 
     columns = tuple(rows[0].keys())
+    if table == "exports" and "source_identity" not in columns:
+        # Rotation may be run once against a pre-guard ledger.  The new schema
+        # stores source_identity directly on exports, so recover it from calls
+        # while carrying unfinished export custody rows forward.
+        columns = ("identity", "source_identity", "final_step", "result_key", "exported_at", "export_message", "created_at")
+        values = [
+            (
+                row["identity"],
+                _source_identity_for_old_call(old, str(row["identity"])),
+                row["final_step"],
+                row["result_key"],
+                row["exported_at"],
+                row["export_message"],
+                row["created_at"],
+            )
+            for row in rows
+        ]
+    else:
+        values = [tuple(row[col] for col in columns) for row in rows]
+
     col_sql = ", ".join(columns)
     placeholders = ", ".join("?" for _ in columns)
-    values = [tuple(row[col] for col in columns) for row in rows]
     new.executemany(f"INSERT INTO {table} ({col_sql}) VALUES ({placeholders})", values)
     return len(rows)
+
+
+def _source_identity_for_old_call(conn: sqlite3.Connection, identity: str) -> str:
+    row = conn.execute("SELECT source_identity FROM calls WHERE identity = ?", (identity,)).fetchone()
+    if row is None:
+        raise RuntimeError(f"cannot carry export without source call row: {identity}")
+    return str(row["source_identity"])
 
 
 def _delete_rows(conn: sqlite3.Connection, *, table: str, where: str, params: tuple[str, ...]) -> int:

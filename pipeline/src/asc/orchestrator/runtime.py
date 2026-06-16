@@ -6,12 +6,13 @@ import logging
 import os
 from dataclasses import dataclass
 
+from asc.state.daemon import DEFAULT_CLAIM_TIMEOUT_SECONDS, idle_empty_limit, run_daemon
+
 from .wiring import build_service
 
 log = logging.getLogger(__name__)
 
-DEFAULT_CLAIM_TIMEOUT_SECONDS = int(os.environ.get("AUTOSCRIBE_DAEMON_CLAIM_TIMEOUT", "5"))
-DEFAULT_EMPTY_LIMIT = int(os.environ.get("AUTOSCRIBE_DAEMON_EMPTY_LIMIT", "60"))
+DEFAULT_EMPTY_LIMIT = idle_empty_limit(timeout=DEFAULT_CLAIM_TIMEOUT_SECONDS)
 
 
 @dataclass(frozen=True, slots=True)
@@ -34,29 +35,13 @@ def run_forever(
     timeout: int | None = DEFAULT_CLAIM_TIMEOUT_SECONDS,
     empty_limit: int | None = DEFAULT_EMPTY_LIMIT,
 ) -> None:
-    report = run_once(timeout=timeout, empty_limit=empty_limit, wait=True)
-    if not report.claimed:
-        waited = int(timeout or DEFAULT_CLAIM_TIMEOUT_SECONDS) * int(empty_limit or DEFAULT_EMPTY_LIMIT)
-        message = (
-            f"orchestrator queue empty after {empty_limit} cycles "
-            f"({waited} seconds); daemon exiting, restart required"
-        )
-        log.warning(message)
-        print(message, flush=True)
-        return
+    run_daemon(
+        name="orchestrator",
+        run_once=run_once,
+        timeout=timeout,
+        empty_limit=empty_limit,
+    )
 
-    while report.claimed:
-        log.info("orchestrator claimed=True")
-        report = run_once(timeout=timeout, empty_limit=empty_limit, wait=False)
-        if not report.claimed:
-            waited = int(timeout or DEFAULT_CLAIM_TIMEOUT_SECONDS) * int(empty_limit or DEFAULT_EMPTY_LIMIT)
-            message = (
-                f"orchestrator queue empty after {empty_limit} cycles "
-                f"({waited} seconds); daemon exiting, restart required"
-            )
-            log.warning(message)
-            print(message, flush=True)
-            return
 
 def main() -> None:
     """Run the orchestrator daemon.

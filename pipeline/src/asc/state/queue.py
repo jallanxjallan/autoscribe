@@ -51,11 +51,35 @@ def daemon_timeout_seconds(default: int = 5) -> int:
     return max(1, int(value))
 
 
-def daemon_empty_limit(default: int = 60) -> int:
-    value = os.environ.get("AUTOSCRIBE_DAEMON_EMPTY_LIMIT")
+def daemon_idle_seconds(default: int = 3600) -> int:
+    """Seconds a daemon may sit idle before returning None.
+
+    Development default is deliberately long: daemons should stay alive while
+    you inspect Redis, ledger rows, and logs. Stop commands should be the normal
+    way to end them.
+    """
+
+    value = os.environ.get("AUTOSCRIBE_DAEMON_IDLE_SECONDS")
     if value is None:
         return default
     return max(1, int(value))
+
+
+def daemon_empty_limit(*, timeout: int | None = None, default: int | None = None) -> int:
+    """Return empty BLPOP cycles before a daemon may exit.
+
+    ``AUTOSCRIBE_DAEMON_EMPTY_LIMIT`` is still honored for compatibility, but
+    the default is now derived from ``AUTOSCRIBE_DAEMON_IDLE_SECONDS``.
+    """
+
+    value = os.environ.get("AUTOSCRIBE_DAEMON_EMPTY_LIMIT")
+    if value is not None:
+        return max(1, int(value))
+
+    cycle_timeout = daemon_timeout_seconds() if timeout is None else max(1, int(timeout))
+    if default is not None:
+        return max(1, int(default))
+    return max(1, daemon_idle_seconds() // cycle_timeout)
 
 
 class RedisQueue(FixedRedisIndex):
@@ -107,7 +131,9 @@ class RedisQueue(FixedRedisIndex):
         """
 
         cycle_timeout = daemon_timeout_seconds() if timeout is None else max(1, int(timeout))
-        max_empty = daemon_empty_limit() if empty_limit is None else max(1, int(empty_limit))
+        idle_limit = daemon_empty_limit(timeout=cycle_timeout)
+        requested_limit = idle_limit if empty_limit is None else max(1, int(empty_limit))
+        max_empty = max(idle_limit, requested_limit)
 
         for _ in range(max_empty):
             claimed = self.block_claim(timeout=cycle_timeout)
@@ -193,6 +219,7 @@ __all__ = [
     "daemon_claim",
     "daemon_drain_claim",
     "daemon_empty_limit",
+    "daemon_idle_seconds",
     "daemon_timeout_seconds",
     "claim",
     "clear",
