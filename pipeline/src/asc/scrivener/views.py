@@ -1,82 +1,82 @@
 from __future__ import annotations
 
 
-PENDING_RESULT_EXPORTS_VIEW = "pending_result_exports"
+PENDING_EXPORTS_VIEW = "pending_exports"
 
 
-CREATE_PENDING_RESULT_EXPORTS_VIEW_SQL = f"""
-    CREATE VIEW IF NOT EXISTS {PENDING_RESULT_EXPORTS_VIEW} AS
+CREATE_PENDING_EXPORTS_VIEW_SQL = f"""
+    CREATE VIEW IF NOT EXISTS {PENDING_EXPORTS_VIEW} AS
     SELECT
-        c.record_identity AS prompt_slug,
-        c.record_identity AS record_identity,
-        c.call AS call_identity,
-        r.result AS result_identity
-    FROM calls AS c
-    JOIN results AS r
-        ON r.call = c.call
-    WHERE NOT EXISTS (
-        SELECT 1
-        FROM exports AS x
-        WHERE x.result = r.result
-    )
+        c.source_identity AS record_identity,
+        c.identity AS call_identity,
+        e.final_step AS final_step,
+        e.result_key AS result_key,
+        s.content AS content,
+        s.raw_json AS raw_json,
+        e.created_at AS created_at
+    FROM exports AS e
+    JOIN calls AS c
+        ON c.identity = e.identity
+    JOIN steps AS s
+        ON s.identity = e.identity
+       AND s.step_number = e.final_step
+    WHERE e.exported_at IS NULL
 """
 
 
-SELECT_PENDING_RESULT_EXPORTS_SQL = f"""
+SELECT_PENDING_EXPORTS_SQL = f"""
     SELECT
-        prompt_slug,
         record_identity,
         call_identity,
-        result_identity
-    FROM {PENDING_RESULT_EXPORTS_VIEW}
-    ORDER BY prompt_slug ASC, call_identity ASC
+        final_step,
+        result_key,
+        content,
+        raw_json,
+        created_at
+    FROM {PENDING_EXPORTS_VIEW}
+    ORDER BY record_identity ASC, call_identity ASC
 """
 
 
 SELECT_DUPLICATE_PENDING_EXPORT_SLUGS_SQL = f"""
     SELECT
-        prompt_slug,
+        record_identity,
         COUNT(*) AS pending_count
-    FROM {PENDING_RESULT_EXPORTS_VIEW}
-    GROUP BY prompt_slug
+    FROM {PENDING_EXPORTS_VIEW}
+    GROUP BY record_identity
     HAVING COUNT(*) > 1
-    ORDER BY prompt_slug ASC
+    ORDER BY record_identity ASC
 """
 
 
 SELECT_DUPLICATE_PENDING_EXPORT_ROWS_SQL = f"""
     SELECT
-        p.prompt_slug,
         p.record_identity,
         p.call_identity,
-        p.result_identity
-    FROM {PENDING_RESULT_EXPORTS_VIEW} AS p
+        p.final_step,
+        p.result_key
+    FROM {PENDING_EXPORTS_VIEW} AS p
     JOIN (
-        SELECT prompt_slug
-        FROM {PENDING_RESULT_EXPORTS_VIEW}
-        GROUP BY prompt_slug
+        SELECT record_identity
+        FROM {PENDING_EXPORTS_VIEW}
+        GROUP BY record_identity
         HAVING COUNT(*) > 1
     ) AS duplicated
-        ON duplicated.prompt_slug = p.prompt_slug
-    ORDER BY p.prompt_slug ASC, p.call_identity ASC
+        ON duplicated.record_identity = p.record_identity
+    ORDER BY p.record_identity ASC, p.call_identity ASC
 """
 
 
-LEDGER_VIEW_NAMES = (
-    PENDING_RESULT_EXPORTS_VIEW,
-)
-
-CREATE_LEDGER_VIEWS_SQL = (
-    CREATE_PENDING_RESULT_EXPORTS_VIEW_SQL,
-)
+LEDGER_VIEW_NAMES = (PENDING_EXPORTS_VIEW,)
+CREATE_LEDGER_VIEWS_SQL = (CREATE_PENDING_EXPORTS_VIEW_SQL,)
 
 
 __all__ = [
-    "PENDING_RESULT_EXPORTS_VIEW",
-    "CREATE_PENDING_RESULT_EXPORTS_VIEW_SQL",
+    "PENDING_EXPORTS_VIEW",
+    "CREATE_PENDING_EXPORTS_VIEW_SQL",
     "CREATE_LEDGER_VIEWS_SQL",
     "LEDGER_VIEW_NAMES",
-    "SELECT_PENDING_RESULT_EXPORTS_SQL",
+    "SELECT_PENDING_EXPORTS_SQL",
     "SELECT_DUPLICATE_PENDING_EXPORT_SLUGS_SQL",
     "SELECT_DUPLICATE_PENDING_EXPORT_ROWS_SQL",
 ]

@@ -3,8 +3,8 @@ from __future__ import annotations
 import logging
 from dataclasses import dataclass
 
-from asc.scrivener.jobs import job_key_from_cursor, load_cursor, load_job
-from asc.scrivener.writers.calls import insert_call_from_job
+from asc.scrivener.jobs import RuntimeCursor, ScrivenerJob
+from asc.scrivener.write import write_job
 from asc.state import orchestrator_queue, scrivener_queue
 
 log = logging.getLogger(__name__)
@@ -15,37 +15,36 @@ class ScrivenerRunReport:
     claimed: bool
     cursor_key: str | None = None
     job_key: str | None = None
+    action: str | None = None
 
 
 def run_once(*, timeout: int | None = None) -> ScrivenerRunReport:
-    """Claim one cursor, write its current job as a call row, repost cursor.
-
-    Scrivener does not decide workflow state. Its custody is deliberately tiny:
-
-    1. claim a cursor from the Scrivener queue
-    2. load the cursor
-    3. load ``cursor.current_job``
-    4. insert the call row in the ledger
-    5. return the same cursor to the orchestrator queue
-    """
-
+    # ``timeout=0`` is the manual smoke-test path used by ``python -m``.
+    # Redis BLPOP treats zero as "block forever", but for this package we
+    # want parity with orchestrator: one non-blocking pass and a no-op report
+    # when the queue is empty.
     claimed = (
         scrivener_queue.claim()
-        if timeout is None
+        if timeout is None or timeout == 0
         else scrivener_queue.block_claim(timeout=timeout)
     )
     if claimed is None:
         return ScrivenerRunReport(claimed=False)
 
     cursor_key = claimed.cursor_key
-    cursor = load_cursor(cursor_key)
-    job_key = job_key_from_cursor(cursor)
-    job = load_job(job_key)
+    cursor = RuntimeCursor.load(cursor_key)
+    job_key = cursor.current_job_key
+    job = ScrivenerJob.load(job_key)
 
-    insert_call_from_job(job)
+    write_job(job)
     orchestrator_queue.insert(cursor_key)
 
-    return ScrivenerRunReport(claimed=True, cursor_key=cursor_key, job_key=job_key)
+    return ScrivenerRunReport(
+        claimed=True,
+        cursor_key=cursor_key,
+        job_key=job_key,
+        action=job.action,
+    )
 
 
 def run_forever(*, timeout: int | None = 5) -> None:
@@ -53,7 +52,8 @@ def run_forever(*, timeout: int | None = 5) -> None:
         report = run_once(timeout=timeout)
         if report.claimed:
             log.info(
-                "scrivener wrote call job=%s cursor=%s",
+                "scrivener wrote %s job=%s cursor=%s",
+                report.action,
                 report.job_key,
                 report.cursor_key,
             )

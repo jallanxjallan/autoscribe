@@ -4,7 +4,7 @@ from collections.abc import Mapping
 from typing import Any, ClassVar, Literal
 import json
 
-from pydantic import ConfigDict, Field, field_validator, model_validator, field_serializer
+from pydantic import ConfigDict, Field, field_serializer, field_validator, model_validator
 
 from asc.core.identity import generate_identity
 from asc.core.timestamp import timestamp
@@ -14,7 +14,7 @@ from asc.redis.model_base import RedisModel
 
 
 class CallRecord(RedisModel):
-    """Runtime call/document payload."""
+    """Runtime call/source payload."""
 
     namespace: ClassVar[str] = "runtime"
     domain: ClassVar[str] = namespace
@@ -24,7 +24,7 @@ class CallRecord(RedisModel):
 
     type: Literal["call"] = "call"
     identity: RedisIdentity = Field(default_factory=generate_identity)
-    source_slug: RecordIdentity
+    source_identity: RecordIdentity
     content: RequiredRecordContent
     source_json: str = "{}"
     created_at: int = Field(default_factory=timestamp)
@@ -37,8 +37,8 @@ class CallRecord(RedisModel):
 
         data: dict[str, Any] = dict(value)
 
-        if "record_identity" in data and "source_slug" not in data:
-            data["source_slug"] = data["record_identity"]
+        if "record_identity" in data and "source_identity" not in data:
+            data["source_identity"] = data["record_identity"]
 
         if "record_content" in data and "content" not in data:
             data["content"] = data["record_content"]
@@ -49,11 +49,11 @@ class CallRecord(RedisModel):
             data["type"] = "call"
 
         data.pop("record_type", None)
-        data.pop("record_identity", None)
         data.pop("record_content", None)
 
         # Uploads are immutable. Never reuse a client-emitted Redis identity.
         data.pop("identity", None)
+
         if "source" in data and "source_json" not in data:
             data["source_json"] = json.dumps(
                 data.pop("source"),
@@ -63,15 +63,11 @@ class CallRecord(RedisModel):
 
         return data
 
-    @property
-    def slug(self) -> str:
-        return self.source_slug
-
     @field_validator("content", mode="before")
     @classmethod
     def validate_content(cls, value: object) -> str:
         return plain_non_empty_string(value, "content")
-    
+
     @field_serializer("source_json", when_used="json")
     def serialize_source_json(self, value: str) -> str:
         return value

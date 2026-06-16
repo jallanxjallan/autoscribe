@@ -17,9 +17,12 @@ def main() -> None:
 
     logging.basicConfig(level=logging.INFO)
     report = run_once(timeout=0)
-    log.info("scrivener claimed=%s", report.claimed)
-    if report.claimed:
-        log.info("scrivener job=%s cursor=%s", report.job_key, report.cursor_key)
+    if not report.claimed:
+        log.info("scrivener no-op: queue empty")
+        return
+
+    log.info("scrivener claimed=True")
+    log.info("scrivener job=%s cursor=%s", report.job_key, report.cursor_key)
 
 
 if __name__ == "__main__":
