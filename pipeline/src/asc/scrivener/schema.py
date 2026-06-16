@@ -127,7 +127,7 @@ def require_ledger_columns(conn: LedgerConnection) -> None:
     required = {
         "calls": {"identity", "source_identity", "source_json", "created_at"},
         "steps": {"identity", "step_number", "result_key", "status", "content", "fail_message", "raw_json", "created_at"},
-        "exports": {"identity", "final_step", "result_key", "exported_at", "export_message", "created_at"},
+        "exports": {"identity", "source_identity", "final_step", "result_key", "exported_at", "export_message", "created_at"},
     }
     missing: list[str] = []
     for table_name, expected in required.items():
@@ -164,6 +164,7 @@ STEPS: ColumnSpec = {
 
 EXPORTS: ColumnSpec = {
     "identity": "TEXT PRIMARY KEY NOT NULL UNIQUE CHECK (length(identity) = 26)",
+    "source_identity": "TEXT NOT NULL",
     "final_step": "INTEGER NOT NULL CHECK (final_step > 0)",
     "result_key": "TEXT NOT NULL",
     "exported_at": "INTEGER",
@@ -188,6 +189,8 @@ LEDGER_INDEXES = (
     "CREATE INDEX IF NOT EXISTS idx_steps_identity ON steps(identity)",
     "CREATE INDEX IF NOT EXISTS idx_steps_status ON steps(status)",
     "CREATE INDEX IF NOT EXISTS idx_steps_created_at ON steps(created_at)",
+    "CREATE INDEX IF NOT EXISTS idx_exports_source_identity ON exports(source_identity)",
+    "CREATE INDEX IF NOT EXISTS idx_exports_source_pending ON exports(source_identity, exported_at)",
     "CREATE INDEX IF NOT EXISTS idx_exports_exported_at ON exports(exported_at)",
     "CREATE INDEX IF NOT EXISTS idx_exports_created_at ON exports(created_at)",
 )

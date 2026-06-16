@@ -8,6 +8,7 @@ from typing import Any
 import typer
 
 from asc.scrivener.inspect import (
+    pending_export_for_source,
     pending_work,
     recent_calls,
     recent_exports,
@@ -17,8 +18,112 @@ from asc.scrivener.inspect import (
     show_step,
     table_counts,
 )
+from asc.scrivener.lifecycle import (
+    active_ledger_path,
+    ensure_active_ledger,
+    reset_ledger,
+    rotate_ledger,
+)
+from asc.scrivener.schema_dump import schema_columns, schema_sql
 
-app = typer.Typer(help="Inspect the Scrivener ledger.")
+app = typer.Typer(help="Inspect and maintain the Scrivener ledger.")
+
+
+@app.command("path")
+def path_command() -> None:
+    """Print the active Scrivener ledger path."""
+
+    typer.echo(str(active_ledger_path()))
+
+
+@app.command("init")
+def init_command() -> None:
+    """Create or update the active Scrivener ledger schema."""
+
+    path = ensure_active_ledger()
+    typer.echo(f"initialized: {path}")
+
+
+@app.command("reset")
+def reset_command(
+    yes: bool = typer.Option(False, "--yes", help="Actually reset the ledger."),
+) -> None:
+    """Drop and recreate all Scrivener ledger objects.
+
+    Without --yes this is a dry run, so accidental resets are noisy and safe.
+    """
+
+    report = reset_ledger(apply=yes)
+    if not report.applied:
+        typer.echo(f"ledger reset would clear all rows from: {report.ledger_path}")
+        typer.echo("run again with --yes to apply")
+        return
+    typer.echo(f"reset: {report.ledger_path}")
+
+
+@app.command("rotate")
+def rotate_command() -> None:
+    """Archive the current ledger and create a fresh active ledger.
+
+    Pending export custody rows are carried forward so completed-but-unexported
+    work remains visible after rotation.
+    """
+
+    report = rotate_ledger()
+    typer.echo(f"active:  {report.active_path}")
+    if report.archive_path is not None:
+        typer.echo(f"archive: {report.archive_path}")
+    typer.echo(
+        "carried: "
+        f"calls={report.carried_calls} "
+        f"steps={report.carried_steps} "
+        f"exports={report.carried_exports}"
+    )
+    typer.echo(
+        "removed from archive: "
+        f"calls={report.old_deleted_calls} "
+        f"steps={report.old_deleted_steps} "
+        f"exports={report.old_deleted_exports}"
+    )
+
+
+@app.command("schema")
+def schema_command(
+    columns: bool = typer.Option(False, "--columns", help="Print PRAGMA table_info rows instead of CREATE SQL."),
+) -> None:
+    """Print the actual active SQLite ledger schema."""
+
+    if columns:
+        rows = [
+            (
+                item.table,
+                item.cid,
+                item.name,
+                item.column_type,
+                item.not_null,
+                item.default_value or "",
+                item.primary_key,
+            )
+            for item in schema_columns()
+        ]
+        _print_table(("table", "cid", "name", "type", "not_null", "default", "pk"), rows)
+        return
+
+    for ddl in schema_sql():
+        typer.echo(f"-- {ddl.name}")
+        typer.echo(ddl.sql)
+        typer.echo("")
+
+
+@app.command("blocked")
+def blocked_command(source_identity: str) -> None:
+    """Check whether a source document has an unfinished export row."""
+
+    row = pending_export_for_source(source_identity)
+    if row is None:
+        typer.echo(f"not blocked: {source_identity}")
+        return
+    _print_dict_rows([row], ("identity", "source_identity", "final_step", "result_key", "created_at", "exported_at"))
 
 
 @app.command("counts")

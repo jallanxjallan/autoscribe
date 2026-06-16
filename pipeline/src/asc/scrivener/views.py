@@ -7,16 +7,14 @@ PENDING_EXPORTS_VIEW = "pending_exports"
 CREATE_PENDING_EXPORTS_VIEW_SQL = f"""
     CREATE VIEW IF NOT EXISTS {PENDING_EXPORTS_VIEW} AS
     SELECT
-        c.source_identity AS record_identity,
-        c.identity AS call_identity,
+        e.source_identity AS record_identity,
+        e.identity AS call_identity,
         e.final_step AS final_step,
         e.result_key AS result_key,
         s.content AS content,
         s.raw_json AS raw_json,
         e.created_at AS created_at
     FROM exports AS e
-    JOIN calls AS c
-        ON c.identity = e.identity
     JOIN steps AS s
         ON s.identity = e.identity
        AND s.step_number = e.final_step

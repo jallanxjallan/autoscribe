@@ -23,6 +23,7 @@ STEP_COLUMNS = (
 
 EXPORT_COLUMNS = (
     "identity",
+    "source_identity",
     "final_step",
     "result_key",
     "exported_at",
@@ -89,6 +90,15 @@ SELECT_PENDING_EXPORTS_SQL = f"""
     ORDER BY created_at ASC, identity ASC
 """
 
+SELECT_PENDING_EXPORT_BY_SOURCE_IDENTITY_SQL = f"""
+    SELECT {", ".join(EXPORT_COLUMNS)}
+    FROM exports
+    WHERE source_identity = ?
+      AND exported_at IS NULL
+    ORDER BY created_at ASC, identity ASC
+    LIMIT 1
+"""
+
 SELECT_EXTRACT_RESULT_BY_CALL_IDENTITY_SQL = """
     SELECT
         c.identity AS identity,
@@ -128,5 +138,6 @@ __all__ = [
     "SELECT_STEPS_FOR_IDENTITY_SQL",
     "SELECT_EXPORT_BY_IDENTITY_SQL",
     "SELECT_PENDING_EXPORTS_SQL",
+    "SELECT_PENDING_EXPORT_BY_SOURCE_IDENTITY_SQL",
     "SELECT_EXTRACT_RESULT_BY_CALL_IDENTITY_SQL",
 ]

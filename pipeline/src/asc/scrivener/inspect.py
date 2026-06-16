@@ -76,15 +76,13 @@ def recent_exports(*, limit: int = 30) -> list[dict[str, Any]]:
             """
             SELECT
                 e.identity,
-                c.source_identity,
+                e.source_identity,
                 e.final_step,
                 e.result_key,
                 e.created_at,
                 e.exported_at,
                 e.export_message
             FROM exports AS e
-            LEFT JOIN calls AS c
-                ON c.identity = e.identity
             ORDER BY e.created_at DESC
             LIMIT ?
             """,
@@ -99,13 +97,11 @@ def pending_exports(*, limit: int = 50) -> list[dict[str, Any]]:
             """
             SELECT
                 e.identity,
-                c.source_identity,
+                e.source_identity,
                 e.final_step,
                 e.result_key,
                 e.created_at
             FROM exports AS e
-            JOIN calls AS c
-                ON c.identity = e.identity
             WHERE e.exported_at IS NULL
             ORDER BY e.created_at ASC
             LIMIT ?
@@ -113,6 +109,28 @@ def pending_exports(*, limit: int = 50) -> list[dict[str, Any]]:
             (limit,),
         ).fetchall()
         return [_row_dict(row) for row in rows]
+
+
+def pending_export_for_source(source_identity: str) -> dict[str, Any] | None:
+    """Return one unfinished export row for a source document, if any.
+
+    Enqueue code can use this as the guard against starting a new run while
+    an earlier completed run is still waiting to be written back.
+    """
+
+    with connect() as conn:
+        row = conn.execute(
+            """
+            SELECT *
+            FROM exports
+            WHERE source_identity = ?
+              AND exported_at IS NULL
+            ORDER BY created_at ASC, identity ASC
+            LIMIT 1
+            """,
+            (source_identity,),
+        ).fetchone()
+    return _row_dict(row) if row is not None else None
 
 
 def pending_work(*, limit: int = 50) -> list[dict[str, Any]]:
@@ -200,6 +218,7 @@ def _safe_json(value: Any) -> Any:
 
 __all__ = [
     "TableCount",
+    "pending_export_for_source",
     "pending_exports",
     "pending_work",
     "recent_calls",
