@@ -1,8 +1,7 @@
 """Job factories and job-loading helpers for the orchestrator.
 
-The cursor is now deliberately small. It stores identity, call/plan keys, and
-``current_job_key`` only. Step progress is derived from the current job and
-ledger/runtime artifacts, not from cursor step fields.
+The cursor is deliberately small. It stores identity and call/plan keys.
+Step progress is derived from completed job records returned to the orchestrator.
 """
 
 from __future__ import annotations
@@ -34,7 +33,15 @@ def cursor_key_for(cursor: Any) -> str:
 
 
 def current_job_key(cursor: Any) -> str:
-    value = getattr(cursor, "current_job_key", "")
+    """Return the current job key from the canonical cursor field.
+
+    ``current_job`` is the field consumed by workers and scrivener. The older
+    ``current_job_key`` name is read only as a defensive bridge for cursors that
+    may already be sitting in Redis from an earlier run.
+    """
+    value = getattr(cursor, "current_job", None)
+    if value in (None, ""):
+        value = getattr(cursor, "current_job_key", "")
     if value is None:
         return ""
     return str(value).strip()
@@ -70,6 +77,20 @@ def required_text(value: object, field_name: str) -> str:
     return text
 
 
+def required_key(value: object, field_name: str) -> str:
+    """Return a Redis key as text.
+
+    Some Redis key helpers return key-like objects rather than raw strings.
+    Model fields should still use required_text(); generated Redis keys use this.
+    """
+    if value is None:
+        raise OrchestratorContractError(f"{field_name} must be non-empty")
+    text = str(value).strip()
+    if not text:
+        raise OrchestratorContractError(f"{field_name} must be non-empty")
+    return text
+
+
 def json_blob(value: Mapping[str, Any] | str | None) -> str:
     if value is None:
         return "{}"
@@ -93,6 +114,58 @@ def load_job(job_key: str) -> WorkerJobRecord | LedgerJobRecord:
         return LedgerJobRecord.load(key)
 
     raise OrchestratorContractError(f"unknown runtime job kind in key: {key}")
+
+
+
+
+def runtime_job_key_for(job: WorkerJobRecord | LedgerJobRecord) -> str:
+    """Return the Redis key for a runtime job without trusting save() output.
+
+    RedisModel.save() return values are not a queue contract. Queues must carry
+    the persisted job key, so the orchestrator computes that key from the job
+    model itself and only uses save() for persistence.
+    """
+
+    identity = required_text(getattr(job, "identity", None), "job.identity")
+    kind = required_text(getattr(job, "kind", None), "job.kind")
+
+    key_for_identity = getattr(job, "key_for_identity", None)
+    if callable(key_for_identity):
+        try:
+            return required_key(key_for_identity(identity), "job.key_for_identity(identity)")
+        except TypeError:
+            # Some RedisModel implementations expose key_for_identity as an
+            # instance method taking no arguments. Support that shape too, but
+            # do not rely on save() returning the key.
+            return required_key(key_for_identity(), "job.key_for_identity()")
+
+    domain = str(getattr(job, "domain", "runtime") or "runtime").strip()
+    return f"{domain}:{identity}:{kind}"
+
+
+def assert_job_key_for_queue(*, queue_name: str, job_key: str) -> str:
+    """Validate that a queue handoff is a job key, not a cursor key."""
+
+    key = required_text(job_key, f"{queue_name}.job_key")
+    if key.endswith(":cursor") or ":cursor" in key:
+        raise OrchestratorContractError(
+            f"refusing to enqueue cursor key on {queue_name} queue: {key}"
+        )
+
+    if queue_name == "worker" and not key.endswith(f":{WorkerJobRecord.kind}"):
+        raise OrchestratorContractError(f"worker queue requires worker job key, got: {key}")
+
+    if queue_name == "scrivener" and not key.endswith(f":{LedgerJobRecord.kind}"):
+        raise OrchestratorContractError(f"scrivener queue requires ledger job key, got: {key}")
+
+    if queue_name == "orchestrator" and not (
+        key.endswith(":cursor")
+        or key.endswith(f":{WorkerJobRecord.kind}")
+        or key.endswith(f":{LedgerJobRecord.kind}")
+    ):
+        raise OrchestratorContractError(f"orchestrator queue received unknown key: {key}")
+
+    return key
 
 
 # ---------------------------------------------------------------------------
@@ -152,6 +225,32 @@ def plan_args_for_step(plan: Any, step_number: int) -> Mapping[str, Any]:
     raise OrchestratorContractError(f"cannot load plan args for step {step_number}")
 
 
+def step_engine_key(value: object, *, step_number: int) -> str:
+    """Normalize a plan step engine selector to a plain runtime module key."""
+    if isinstance(value, str):
+        text = value.strip()
+    elif isinstance(value, Mapping):
+        raw = value.get("key") or value.get("slug") or value.get("name")
+        text = str(raw).strip() if raw is not None else ""
+    else:
+        text = ""
+
+    if not text:
+        raise OrchestratorContractError(f"plan step {step_number} has no engine")
+
+    return text.removeprefix("engines.").replace("-", "_")
+
+
+def step_handler_key(args: Mapping[str, Any], *, step_number: int) -> str:
+    value = args.get("handler") or args.get("script") or args.get("model")
+    if isinstance(value, Mapping):
+        value = value.get("key") or value.get("slug") or value.get("name")
+    text = str(value or "").strip()
+    if not text:
+        raise OrchestratorContractError(f"plan step {step_number} has no handler/script/model")
+    return text
+
+
 # ---------------------------------------------------------------------------
 # Factories
 # ---------------------------------------------------------------------------
@@ -186,12 +285,8 @@ def make_worker_job(
     identity = required_text(getattr(cursor, "identity", None), "cursor.identity")
     args = plan_args_for_step(plan, step_number)
 
-    engine = str(args.get("engine") or "").strip()
-    handler = str(args.get("handler") or args.get("script") or args.get("model") or "").strip()
-    if not engine:
-        raise OrchestratorContractError(f"plan step {step_number} has no engine")
-    if not handler:
-        raise OrchestratorContractError(f"plan step {step_number} has no handler/script/model")
+    engine = step_engine_key(args.get("engine"), step_number=step_number)
+    handler = step_handler_key(args, step_number=step_number)
 
     actual_input_key = input_key
     if actual_input_key is None:
@@ -253,7 +348,6 @@ def make_ledger_result_job(*, cursor: Any, previous_job: LedgerJobRecord) -> Led
 __all__ = [
     "RouteDecision",
     "content_key",
-    "current_job_key",
     "cursor_key_for",
     "load_job",
     "make_ledger_call_job",

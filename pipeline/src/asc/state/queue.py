@@ -3,6 +3,7 @@ from __future__ import annotations
 
 from collections.abc import Sequence
 from dataclasses import dataclass
+import os
 
 from asc.core.timestamp import timestamp
 from asc.redis.index_base import FixedRedisIndex
@@ -12,8 +13,10 @@ from asc.redis.index_base import FixedRedisIndex
 class QueuedKey:
     """One claimed daemon queue item.
 
-    Daemon queues contain full Redis cursor keys only. The score is a local
-    claim timestamp for diagnostics; LIST queues do not persist per-item scores.
+    Daemon queues contain full Redis keys. Only orchestrator ingress from enqueue
+    may be a cursor key; after activation, all daemon handoff items are job keys.
+    The score is a local claim timestamp for diagnostics; LIST queues do not
+    persist per-item scores.
     """
 
     key: str
@@ -39,6 +42,20 @@ def require_queue_key(value: object, *, field_name: str = "key") -> str:
         raise ValueError(f"{field_name} must be a full Redis key, not a bare identity")
 
     return text
+
+
+def daemon_timeout_seconds(default: int = 5) -> int:
+    value = os.environ.get("AUTOSCRIBE_DAEMON_CLAIM_TIMEOUT")
+    if value is None:
+        return default
+    return max(1, int(value))
+
+
+def daemon_empty_limit(default: int = 60) -> int:
+    value = os.environ.get("AUTOSCRIBE_DAEMON_EMPTY_LIMIT")
+    if value is None:
+        return default
+    return max(1, int(value))
 
 
 class RedisQueue(FixedRedisIndex):
@@ -75,6 +92,39 @@ class RedisQueue(FixedRedisIndex):
         _queue_key, value = item
         return QueuedKey(key=str(value), score=float(timestamp()))
 
+    def daemon_claim(
+        self,
+        *,
+        timeout: int | None = None,
+        empty_limit: int | None = None,
+    ) -> QueuedKey | None:
+        """Wait for the first daemon handoff item across bounded empty cycles.
+
+        Use this only when a command first starts and there may be no queue yet.
+        Once a daemon has claimed work, switch back to ``claim()`` so the command
+        drains already-pending items and returns to the shell on the first empty
+        queue instead of sitting through another idle window.
+        """
+
+        cycle_timeout = daemon_timeout_seconds() if timeout is None else max(1, int(timeout))
+        max_empty = daemon_empty_limit() if empty_limit is None else max(1, int(empty_limit))
+
+        for _ in range(max_empty):
+            claimed = self.block_claim(timeout=cycle_timeout)
+            if claimed is not None:
+                return claimed
+        return None
+
+    def daemon_drain_claim(self) -> QueuedKey | None:
+        """Claim immediately while draining pending daemon work.
+
+        This is deliberately non-blocking. It preserves CLI behavior: process all
+        pending queue entries, then print the empty message and return control to
+        the shell.
+        """
+
+        return self.claim()
+
     def peek(self) -> QueuedKey | None:
         key = self.key.lindex(0)
         if key is None:
@@ -107,6 +157,19 @@ def block_claim(queue: RedisQueue, *, timeout: int = 0) -> QueuedKey | None:
     return queue.block_claim(timeout=timeout)
 
 
+def daemon_claim(
+    queue: RedisQueue,
+    *,
+    timeout: int | None = None,
+    empty_limit: int | None = None,
+) -> QueuedKey | None:
+    return queue.daemon_claim(timeout=timeout, empty_limit=empty_limit)
+
+
+def daemon_drain_claim(queue: RedisQueue) -> QueuedKey | None:
+    return queue.daemon_drain_claim()
+
+
 def peek(queue: RedisQueue) -> QueuedKey | None:
     return queue.peek()
 
@@ -127,6 +190,10 @@ __all__ = [
     "QueuedKey",
     "RedisQueue",
     "block_claim",
+    "daemon_claim",
+    "daemon_drain_claim",
+    "daemon_empty_limit",
+    "daemon_timeout_seconds",
     "claim",
     "clear",
     "count",

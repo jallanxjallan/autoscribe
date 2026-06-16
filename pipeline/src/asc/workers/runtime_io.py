@@ -3,7 +3,7 @@ from __future__ import annotations
 import json
 from typing import Any
 
-from asc.runtime.response_index import redis_client
+from asc.redis.key import RedisKey
 
 
 CONTENT_FIELDS = (
@@ -15,16 +15,16 @@ CONTENT_FIELDS = (
 
 
 def load_runtime_content(key: str) -> str:
-    """Load text content from a call/result Redis hash.
+    """Load text content from a runtime Redis hash.
 
-    The response index deliberately stores only keys. Workers should not care
-    whether the key points to the original CallRecord or a prior StepResult; both
-    are runtime input records that must expose content.
+    Workers receive concrete input keys from their jobs. They should not know
+    whether the input points at the original call record or a previous step
+    result; both records only need to expose a content-like field.
     """
     if not isinstance(key, str) or not key.strip():
         raise ValueError("runtime input key must be non-empty")
 
-    data = redis_client().hgetall(key.strip())
+    data = RedisKey(key.strip()).hgetall()
     if not data:
         raise ValueError(f"runtime input key is missing or empty: {key}")
 

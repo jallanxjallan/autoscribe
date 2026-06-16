@@ -15,7 +15,27 @@ class ModuleQueue:
     def __init__(self, module: Any) -> None:
         self.module = module
 
-    def claim(self) -> Any | None:
+    def claim(
+        self,
+        *,
+        timeout: int | None = None,
+        empty_limit: int | None = None,
+        wait: bool = False,
+    ) -> Any | None:
+        if wait:
+            daemon_claim = getattr(self.module, "daemon_claim", None)
+            if callable(daemon_claim):
+                return daemon_claim(timeout=timeout, empty_limit=empty_limit)
+
+            if timeout is not None:
+                block_claim = getattr(self.module, "block_claim", None)
+                if callable(block_claim):
+                    return block_claim(timeout=timeout)
+
+        drain_claim = getattr(self.module, "daemon_drain_claim", None)
+        if callable(drain_claim):
+            return drain_claim()
+
         return self.module.claim()
 
     def insert(self, cursor_key: str) -> int:
@@ -33,28 +53,9 @@ class RedisStore:
 
         return PlanRecord.load(key)
 
-    def save_cursor_with_job(self, cursor: Any, job_key: str) -> Any:
-        updated = cursor.model_copy(
-            update={
-                "current_job_key": str(job_key),
-                "updated_at": timestamp(),
-            }
-        )
-        updated.save()
-        return updated
-
-    def clear_cursor_job(self, cursor: Any) -> Any:
-        updated = cursor.model_copy(
-            update={
-                "current_job_key": "",
-                "updated_at": timestamp(),
-            }
-        )
-        updated.save()
-        return updated
-
-    def save_job(self, job: Any) -> str:
-        return str(job.save())
+    def save_job(self, job: Any) -> None:
+        job.save()
+        return None
 
     def touch_active_cursor(self, cursor_key: str) -> None:
         try:

@@ -36,6 +36,14 @@ def block_claim(*, timeout: int = 0) -> QueuedKey | None:
     return _QUEUE.block_claim(timeout=timeout)
 
 
+def daemon_claim(*, timeout: int | None = None, empty_limit: int | None = None) -> QueuedKey | None:
+    return _QUEUE.daemon_claim(timeout=timeout, empty_limit=empty_limit)
+
+
+def daemon_drain_claim() -> QueuedKey | None:
+    return _QUEUE.daemon_drain_claim()
+
+
 def peek() -> QueuedKey | None:
     return _QUEUE.peek()
 
@@ -58,6 +66,8 @@ __all__ = [
     "QueuedKey",
     "block_claim",
     "claim",
+    "daemon_claim",
+    "daemon_drain_claim",
     "clear",
     "count",
     "insert",
