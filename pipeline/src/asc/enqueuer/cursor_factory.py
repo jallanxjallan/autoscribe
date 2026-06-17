@@ -3,7 +3,7 @@ from __future__ import annotations
 from asc.enqueuer.keys import ResolvedEnqueueKeys
 from asc.enqueuer.plan_steps import MaterializedPlanStep
 from asc.enqueuer.response_index import create_response_index_from_plan_steps
-from asc.models.runtime.cursor import RuntimeCursor
+from asc.models.runtime.cursor import Cursor
 
 
 INITIAL_CURSOR_ACTION = "call_started"
@@ -14,7 +14,7 @@ def build_runtime_cursor(
     keys: ResolvedEnqueueKeys,
     *,
     plan_steps: tuple[MaterializedPlanStep, ...],
-) -> RuntimeCursor:
+) -> Cursor:
     response_index_key = create_response_index_from_plan_steps(
         identity=keys.call_identity,
         call_key=keys.call_key,
@@ -29,7 +29,7 @@ def build_runtime_cursor(
     )
 
 
-def save_runtime_cursor(cursor: RuntimeCursor) -> str:
+def save_runtime_cursor(cursor: Cursor) -> str:
     cursor.save()
     return str(cursor.redis_key)
 
@@ -40,13 +40,13 @@ def _runtime_cursor(
     call_key: str,
     plan_key: str,
     response_index_key: str,
-) -> RuntimeCursor:
+) -> Cursor:
     kwargs = dict(
         identity=identity,
         call_key=call_key,
         plan_key=plan_key,
     )
-    return RuntimeCursor(**kwargs)
+    return Cursor(**kwargs)
     
 
 

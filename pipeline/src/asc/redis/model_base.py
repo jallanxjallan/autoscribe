@@ -14,7 +14,8 @@ T = TypeVar("T", bound="RedisModel")
 class RedisModel(BaseModel):
     """Base for Redis-backed Pydantic hash records."""
 
-    domain: ClassVar[str]
+    kind: ClassVar[str]
+    suffix: ClassVar[str]
 
     @staticmethod
     def _require_text(value: object, *, field_name: str) -> str:
@@ -26,20 +27,27 @@ class RedisModel(BaseModel):
         return value
 
     @classmethod
-    def _redis_kind(cls) -> str | None:
-        value = getattr(cls, "kind", None)
-        if value is None:
-            return None
-        return cls._require_text(value, field_name=f"{cls.__name__}.kind")
+    def redis_kind(cls) -> str:
+        return cls._require_text(
+            getattr(cls, "kind", None),
+            field_name=f"{cls.__name__}.kind",
+        )
+
+    @classmethod
+    def redis_suffix(cls) -> str:
+        return cls._require_text(
+            getattr(cls, "suffix", None),
+            field_name=f"{cls.__name__}.suffix",
+        )
 
     @classmethod
     def key_for_identity(cls, identity: str) -> RedisKey:
-        namespace = cls._require_text(cls.domain, field_name=f"{cls.__name__}.domain")
         identity = cls._require_text(identity, field_name="identity")
-        kind = cls._redis_kind()
-        if kind is None:
-            return RedisKey.from_parts(namespace, identity)
-        return RedisKey.from_parts(namespace, identity, kind)
+        return RedisKey.from_parts(
+            cls.redis_kind(),
+            identity,
+            cls.redis_suffix(),
+        )
 
     @classmethod
     def resolve_key(cls, value: str | RedisKey) -> RedisKey:

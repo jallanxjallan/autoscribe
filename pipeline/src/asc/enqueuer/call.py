@@ -3,12 +3,12 @@ from __future__ import annotations
 from collections.abc import Mapping, Sequence
 from typing import Any
 
-from asc.models.runtime.call import CallRecord
+from asc.models.runtime.call import Call
 
 
-def load_non_empty_call(call_key: str) -> CallRecord:
+def load_non_empty_call(call_key: str) -> Call:
     """Load a call and fail early if it has no usable content."""
-    call = CallRecord.load(call_key)
+    call = Call.load(call_key)
     content = call_content(call)
     if not isinstance(content, str) or not content.strip():
         raise ValueError(f"call has empty content: {call_key}")

@@ -14,15 +14,13 @@ from asc.models.helpers.upload import (
 from asc.redis.model_base import RedisModel
 
 
-class InstructionRecord(RedisModel):
+class Instruction(RedisModel):
     """Uploaded reusable instruction control asset.
 
     Public ``record_*`` upload fields are normalized by ``asc.upload.uploader``.
     The stored control model keeps only its canonical fields.
     """
 
-    namespace: ClassVar[str] = "control"
-    domain: ClassVar[str] = namespace
     kind: ClassVar[str] = "instruction"
 
     model_config = ConfigDict(extra="allow")
@@ -39,4 +37,4 @@ class InstructionRecord(RedisModel):
         return asset_list(value)
 
 
-__all__ = ["InstructionRecord"]
+__all__ = ["Instruction"]

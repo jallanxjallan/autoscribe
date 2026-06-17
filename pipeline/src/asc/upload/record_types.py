@@ -2,9 +2,9 @@ from __future__ import annotations
 
 from typing import Final
 
-from asc.models.control.instruction import InstructionRecord
-from asc.models.control.plan import PlanRecord
-from asc.models.runtime.call import CallRecord
+from asc.models.control.instruction import Instruction
+from asc.models.control.plan import Plan
+from asc.models.runtime.call import Call
 from asc.redis.model_base import RedisModel
 
 RECORD_TYPE_ALIASES: Final[dict[str, str]] = {
@@ -21,9 +21,9 @@ RECORD_TYPE_ALIASES: Final[dict[str, str]] = {
 }
 
 MODEL_BY_RECORD_TYPE: Final[dict[str, type[RedisModel]]] = {
-    "instruction": InstructionRecord,
-    "call": CallRecord,
-    "plan": PlanRecord,
+    "instruction": Instruction,
+    "call": Call,
+    "plan": Plan,
 }
 
 

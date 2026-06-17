@@ -4,8 +4,6 @@ from __future__ import annotations
 
 from typing import Any
 
-from asc.core.timestamp import timestamp
-
 from .service import OrchestratorService
 
 
@@ -44,14 +42,14 @@ class ModuleQueue:
 
 class RedisStore:
     def load_cursor(self, key: str) -> Any:
-        from asc.models.runtime.cursor import RuntimeCursor
+        from asc.models.runtime.loader import load_key
 
-        return RuntimeCursor.load(key)
+        return load_key(key)
 
     def load_plan(self, key: str) -> Any:
-        from asc.models.control.plan import PlanRecord
+        from asc.models.control.plan import Plan
 
-        return PlanRecord.load(key)
+        return Plan.load(key)
 
     def save_job(self, job: Any) -> None:
         job.save()

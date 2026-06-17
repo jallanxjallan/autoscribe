@@ -17,7 +17,7 @@ from typing import Any, Protocol
 
 from asc.models.runtime.job import LedgerJobRecord, WorkerJobRecord
 
-from .jobs import (
+from .tasks import (
     RouteDecision,
     cursor_key_for,
     load_job,

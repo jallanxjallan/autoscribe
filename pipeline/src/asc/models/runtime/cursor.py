@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from typing import ClassVar, Literal
+from typing import ClassVar
 
 from pydantic import ConfigDict, Field, field_validator
 
@@ -9,29 +9,22 @@ from asc.models.helpers.plain import plain_non_empty_string, redis_key_segment_t
 from asc.redis.model_base import RedisModel
 
 
-class RuntimeCursor(RedisModel):
+class Cursor(RedisModel):
     """Runtime baton for one call.
 
-    Queues move only cursor keys.
-    The cursor points to the current assigned job.
     Progress is derived from the current job and ledger artifacts.
     """
 
     model_config = ConfigDict(extra="forbid", frozen=True)
 
-    domain: ClassVar[str] = "runtime"
     kind: ClassVar[str] = "cursor"
 
-    type: Literal["cursor"] = "cursor"
 
     identity: str
     call_key: str
     plan_key: str
 
-    current_job_key: str = ""
-
     created_at: int = Field(default_factory=timestamp)
-    updated_at: int = Field(default_factory=timestamp)
 
     @field_validator("identity", mode="before")
     @classmethod
@@ -46,15 +39,7 @@ class RuntimeCursor(RedisModel):
             raise ValueError(f"expected full Redis key, got {text!r}")
         return text
 
-    @field_validator("current_job_key", mode="before")
-    @classmethod
-    def validate_current_job_key(cls, value: object) -> str:
-        if value in (None, ""):
-            return ""
-        text = plain_non_empty_string(value, "current_job_key")
-        if ":" not in text:
-            raise ValueError(f"expected full Redis key, got {text!r}")
-        return text
+    
 
 
-__all__ = ["RuntimeCursor"]
+__all__ = ["Cursor"]

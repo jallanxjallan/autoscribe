@@ -4,7 +4,7 @@ from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from typing import Any
 
-from asc.models.control.plan import PlanRecord
+from asc.models.control.plan import Plan
 
 
 @dataclass(frozen=True, slots=True)
@@ -19,7 +19,7 @@ def load_plan_steps(plan_key: str) -> tuple[MaterializedPlanStep, ...]:
     Enqueue only confirms that steps exist and can be numbered. Terminal logic
     belongs in the orchestrator/scrivener path, not here.
     """
-    plan = PlanRecord.load(plan_key)
+    plan = Plan.load(plan_key)
     raw_steps = _plan_steps(plan)
     steps = tuple(_materialize_steps(raw_steps, plan_key=plan_key))
     if not steps:

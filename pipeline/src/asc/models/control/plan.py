@@ -30,12 +30,11 @@ def _json_list(value: object, *, field_name: str) -> list[Any]:
     return value
 
 
-class PlanRecord(RedisModel):
+class Plan(RedisModel):
     """Uploaded reusable plan control asset."""
 
-    namespace: ClassVar[str] = "control"
-    domain: ClassVar[str] = namespace
     kind: ClassVar[str] = "plan"
+    suffix: ClassVar[str] = 'control'
 
     model_config = ConfigDict(extra="forbid")
 

@@ -2,15 +2,19 @@ from __future__ import annotations
 
 from typing import Any
 
-from asc.models.runtime.scrivener import ScrivenerFailure, ScrivenerResult
-
 
 def is_scrivener_failure(outcome: Any) -> bool:
-    return isinstance(outcome, ScrivenerFailure) or getattr(outcome, "type", "") == "scrivener_failure"
+    return getattr(outcome, "type", "") == "scrivener_failure" or getattr(outcome, "kind", "") in {
+        "scrivener_failure",
+        "failure",
+    }
 
 
 def is_scrivener_result(outcome: Any) -> bool:
-    return isinstance(outcome, ScrivenerResult) or getattr(outcome, "type", "") == "scrivener_result"
+    return getattr(outcome, "type", "") == "scrivener_result" or getattr(outcome, "kind", "") in {
+        "scrivener_result",
+        "result",
+    }
 
 
 def describe_scrivener_failure(outcome: Any) -> str:

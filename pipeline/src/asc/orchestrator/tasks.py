@@ -10,7 +10,8 @@ import json
 from dataclasses import dataclass
 from typing import Any, Mapping
 
-from asc.models.runtime.job import LedgerJobRecord, WorkerJobRecord
+from asc.models.runtime.task import WorkerTask, ScrivenerTask, TaskStatus
+from asc.models.runtime.loader import load_key
 
 from .errors import OrchestratorContractError
 
@@ -18,7 +19,7 @@ from .errors import OrchestratorContractError
 @dataclass(frozen=True, slots=True)
 class RouteDecision:
     queue_name: str | None
-    job: WorkerJobRecord | LedgerJobRecord | None
+    task: WorkerTask | ScrivenerTask | None
     reason: str
 
 
@@ -104,21 +105,19 @@ def json_blob(value: Mapping[str, Any] | str | None) -> str:
 # ---------------------------------------------------------------------------
 
 
-def load_job(job_key: str) -> WorkerJobRecord | LedgerJobRecord:
+def load_job(job_key: str) -> WorkerTask | ScrivenerTask:
     key = required_text(job_key, "job_key")
-    kind = key.rsplit(":", 1)[-1]
-
-    if kind == WorkerJobRecord.kind:
-        return WorkerJobRecord.load(key)
-    if kind == LedgerJobRecord.kind:
-        return LedgerJobRecord.load(key)
-
-    raise OrchestratorContractError(f"unknown runtime job kind in key: {key}")
+    job = load_key(key)
+    if isinstance(job, (WorkerTask, ScrivenerTask)):
+        return job
+    raise OrchestratorContractError(
+        f"orchestrator expected runtime job key, got {type(job).__name__}: {key}"
+    )
 
 
 
 
-def runtime_job_key_for(job: WorkerJobRecord | LedgerJobRecord) -> str:
+def runtime_job_key_for(job: WorkerTask | ScrivenerTask) -> str:
     """Return the Redis key for a runtime job without trusting save() output.
 
     RedisModel.save() return values are not a queue contract. Queues must carry
@@ -155,13 +154,13 @@ def assert_job_key_for_queue(*, queue_name: str, job_key: str) -> str:
     if queue_name == "worker" and not key.endswith(f":{WorkerJobRecord.kind}"):
         raise OrchestratorContractError(f"worker queue requires worker job key, got: {key}")
 
-    if queue_name == "scrivener" and not key.endswith(f":{LedgerJobRecord.kind}"):
+    if queue_name == "scrivener" and not key.endswith(f":{ScrivenerTask.kind}"):
         raise OrchestratorContractError(f"scrivener queue requires ledger job key, got: {key}")
 
     if queue_name == "orchestrator" and not (
         key.endswith(":cursor")
         or key.endswith(f":{WorkerJobRecord.kind}")
-        or key.endswith(f":{LedgerJobRecord.kind}")
+        or key.endswith(f":{ScrivenerTask.kind}")
     ):
         raise OrchestratorContractError(f"orchestrator queue received unknown key: {key}")
 
@@ -267,7 +266,7 @@ def make_ledger_call_job(cursor: Any) -> LedgerJobRecord:
         step_number=0,
         engine="ledger",
         handler="write_call",
-        input_model="CallRecord",
+        input_model="Call",
         input_key=call_key,
         output_model="LedgerCallRow",
         output_key=call_key,
@@ -300,9 +299,9 @@ def make_worker_job(
         step_number=int(step_number),
         engine=engine,
         handler=handler,
-        input_model="CallRecord" if step_number == 1 else "ResponseRecord",
+        input_model="Call" if step_number == 1 else "Result",
         input_key=required_text(actual_input_key, "worker.input_key"),
-        output_model="ResponseRecord",
+        output_model="Result",
         output_key=content_key(identity, step_number),
         args_json=json_blob(args),
     )

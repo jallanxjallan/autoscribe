@@ -13,16 +13,15 @@ from asc.models.helpers.upload import RedisIdentity, RecordIdentity, RequiredRec
 from asc.redis.model_base import RedisModel
 
 
-class CallRecord(RedisModel):
+class Call(RedisModel):
     """Runtime call/source payload."""
 
-    namespace: ClassVar[str] = "runtime"
-    domain: ClassVar[str] = namespace
     kind: ClassVar[str] = "call"
+    suffix: ClassVar[str] = "record"
+
 
     model_config = ConfigDict(extra="allow")
 
-    type: Literal["call"] = "call"
     identity: RedisIdentity = Field(default_factory=generate_identity)
     source_identity: RecordIdentity
     content: RequiredRecordContent
@@ -73,4 +72,4 @@ class CallRecord(RedisModel):
         return value
 
 
-__all__ = ["CallRecord"]
+__all__ = ["Call"]

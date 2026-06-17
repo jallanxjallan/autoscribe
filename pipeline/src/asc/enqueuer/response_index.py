@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import inspect
 from typing import Any
 
 from asc.enqueuer.plan_steps import MaterializedPlanStep
