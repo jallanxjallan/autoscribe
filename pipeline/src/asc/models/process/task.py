@@ -14,13 +14,13 @@ from pydantic import ConfigDict, Field, field_serializer, field_validator
 
 from asc.core.timestamp import timestamp
 from asc.models.helpers.plain import plain_non_empty_string, redis_key_segment_text
-from asc.redis.model_base import RedisModel
+from asc.redis.message_base import RedisMessage
 
 
 TaskStatus = Literal["queued", "claimed"]
 
 
-class _TaskBase(RedisModel):
+class _TaskBase(RedisMessage):
     """Shared shape for daemon tasks.
 
     ``identity`` is the call identity shared by the cursor, response index,

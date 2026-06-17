@@ -4,37 +4,39 @@ Queues carry Redis keys, not hydrated model state.
 
 * Enqueue may place one fresh cursor key on the orchestrator queue.
 * The orchestrator activates that cursor in ``state:runtime:active``.
-* After activation, every queue handoff is a job key.
-* Workers and scrivener return completed job keys to the orchestrator.
+* After activation, every daemon handoff is a task key.
+* Workers and scrivener return completed task keys to the orchestrator.
 
-That removes the fragile ``cursor.current_job`` contract. The cursor remains the
-stable call context and active-index member; the job key itself is the handoff token for daemon work.
+The cursor remains the stable call context and active-index member; the
+returned task key itself is the handoff token for daemon work.
 """
 
 from __future__ import annotations
 
 from typing import Any, Protocol
 
-from asc.models.process.job import LedgerJobRecord, WorkerJobRecord
+from asc.models.process.task import ScrivenerTask, WorkerTask
 
+from .outcomes import ScrivenerOutcome, WorkerOutcome, outcome_from_key
 from .tasks import (
     RouteDecision,
+    assert_task_key_for_queue,
     cursor_key_for,
-    load_job,
-    make_ledger_call_job,
-    make_ledger_result_job,
-    make_ledger_step_job,
-    make_worker_job,
+    is_cursor_key,
+    make_scrivener_call_task,
+    make_scrivener_result_task,
+    make_scrivener_step_task,
+    make_worker_task,
     plan_step_count,
-    runtime_job_key_for,
-    assert_job_key_for_queue,
+    runtime_task_key_for,
+    task_number_for,
 )
 
 
 class StoreLike(Protocol):
     def load_cursor(self, key: str) -> Any: ...
     def load_plan(self, key: str) -> Any: ...
-    def save_job(self, job: Any) -> None: ...
+    def save_task(self, task: Any) -> None: ...
     def touch_active_cursor(self, cursor_key: str) -> None: ...
     def bump_terminal_cursor(self, cursor_key: str) -> None: ...
 
@@ -83,111 +85,112 @@ class OrchestratorService:
         if not claimed_key:
             raise ValueError("orchestrator claimed an empty queue key")
 
-        cursor, completed_job = self._load_context(claimed_key)
+        cursor, outcome = self._load_context(claimed_key)
         cursor_key = cursor_key_for(cursor)
         self.store.touch_active_cursor(cursor_key)
 
-        decision = self.route(cursor=cursor, completed_job=completed_job)
-        if decision.job is None:
+        decision = self.route(cursor=cursor, outcome=outcome)
+        if decision.task is None:
             self.store.bump_terminal_cursor(cursor_key)
             return True
 
-        # Persist the job, but never trust save() as the queue token.
-        # The queue contract is explicit: downstream queues receive job keys,
+        # Persist the task, but never trust save() as the queue token.
+        # The queue contract is explicit: downstream queues receive task keys,
         # while only the orchestrator queue may receive a fresh cursor key.
-        self.store.save_job(decision.job)
-        job_key = runtime_job_key_for(decision.job)
-        assert_job_key_for_queue(queue_name=decision.queue_name, job_key=job_key)
+        self.store.save_task(decision.task)
+        task_key = runtime_task_key_for(decision.task)
+        assert_task_key_for_queue(queue_name=decision.queue_name, task_key=task_key)
 
         if decision.queue_name == "worker":
-            self.worker_queue.insert(job_key)
+            self.worker_queue.insert(task_key)
         elif decision.queue_name == "scrivener":
-            self.scrivener_queue.insert(job_key)
+            self.scrivener_queue.insert(task_key)
         elif decision.queue_name == "orchestrator":
-            self.orchestrator_queue.insert(job_key)
+            self.orchestrator_queue.insert(task_key)
         else:
             raise ValueError(f"unknown queue route: {decision.queue_name!r}")
 
         return True
 
-    def _load_context(self, claimed_key: str) -> tuple[Any, WorkerJobRecord | LedgerJobRecord | None]:
-        """Load cursor plus optional completed job from an orchestrator queue key."""
+    def _load_context(self, claimed_key: str) -> tuple[Any, WorkerOutcome | ScrivenerOutcome | None]:
+        """Load cursor plus optional completed task outcome from an orchestrator queue key."""
 
-        if claimed_key.endswith(":cursor"):
+        if is_cursor_key(claimed_key):
             return self.store.load_cursor(claimed_key), None
 
-        completed_job = load_job(claimed_key)
-        cursor_key = str(getattr(completed_job, "cursor_key", "")).strip()
-        if not cursor_key:
-            raise ValueError(f"completed job has no cursor_key: {claimed_key}")
-        return self.store.load_cursor(cursor_key), completed_job
+        outcome = outcome_from_key(claimed_key)
+        return self.store.load_cursor(outcome.cursor_key), outcome
 
     def route(
         self,
         *,
         cursor: Any,
-        completed_job: WorkerJobRecord | LedgerJobRecord | None,
+        outcome: WorkerOutcome | ScrivenerOutcome | None,
     ) -> RouteDecision:
-        if completed_job is None:
+        if outcome is None:
             return RouteDecision(
                 queue_name="scrivener",
-                job=make_ledger_call_job(cursor),
+                task=make_scrivener_call_task(cursor),
                 reason="new call needs call ledger row",
             )
 
-        if isinstance(completed_job, WorkerJobRecord):
+        if isinstance(outcome, WorkerOutcome):
             return RouteDecision(
                 queue_name="scrivener",
-                job=make_ledger_step_job(cursor=cursor, worker_job=completed_job),
-                reason="worker job completed; write step ledger row",
+                task=make_scrivener_step_task(cursor=cursor, worker_task=outcome.task),
+                reason="worker task completed; write step ledger row",
             )
 
-        if isinstance(completed_job, LedgerJobRecord):
-            return self._route_after_ledger_job(cursor, completed_job)
+        if isinstance(outcome, ScrivenerOutcome):
+            return self._route_after_scrivener_task(cursor, outcome.task)
 
-        raise TypeError(f"unknown completed job type: {type(completed_job).__name__}")
+        raise TypeError(f"unknown outcome type: {type(outcome).__name__}")
 
-    def _route_after_ledger_job(self, cursor: Any, job: LedgerJobRecord) -> RouteDecision:
-        if job.action == "write_result":
+    def _route_after_scrivener_task(self, cursor: Any, task: ScrivenerTask) -> RouteDecision:
+        if task.action == "write_result":
             return RouteDecision(
                 queue_name=None,
-                job=None,
+                task=None,
                 reason="terminal result already written",
             )
 
         plan = self.store.load_plan(cursor.plan_key)
         total_steps = plan_step_count(plan)
 
-        if job.action == "write_call":
+        if task.action == "write_call":
             if total_steps < 1:
                 return RouteDecision(
                     queue_name="scrivener",
-                    job=make_ledger_result_job(cursor=cursor, previous_job=job),
+                    task=make_scrivener_result_task(cursor=cursor, previous_task=task),
                     reason="plan has no worker steps; write terminal result",
                 )
             return RouteDecision(
                 queue_name="worker",
-                job=make_worker_job(cursor=cursor, plan=plan, step_number=1),
+                task=make_worker_task(cursor=cursor, plan=plan, step_number=1),
                 reason="call ledger row written; execute step 1",
             )
 
-        if job.action == "write_step":
-            next_step = int(job.step_number) + 1
+        if task.action == "write_step":
+            task_number = task_number_for(task)
+            next_step = task_number + 1
             if next_step > total_steps:
                 return RouteDecision(
                     queue_name="scrivener",
-                    job=make_ledger_result_job(cursor=cursor, previous_job=job),
+                    task=make_scrivener_result_task(cursor=cursor, previous_task=task),
                     reason="terminal step ledger row written; write result row",
                 )
             return RouteDecision(
                 queue_name="worker",
-                job=make_worker_job(
+                task=make_worker_task(
                     cursor=cursor,
                     plan=plan,
                     step_number=next_step,
-                    input_key=job.input_key,
+                    input_key=task.input_key,
                 ),
-                reason=f"step {job.step_number} ledger row written; execute step {next_step}",
+                reason=f"task {task_number} ledger row written; execute task {next_step}",
             )
 
-        raise ValueError(f"unknown ledger job action: {job.action!r}")
+        raise ValueError(f"unknown scrivener task action: {task.action!r}")
+
+
+__all__ = ["OrchestratorService", "QueueLike", "StoreLike"]

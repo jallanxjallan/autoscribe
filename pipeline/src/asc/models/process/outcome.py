@@ -14,13 +14,13 @@ from pydantic import ConfigDict, Field, field_serializer, field_validator
 
 from asc.core.timestamp import timestamp
 from asc.models.helpers.plain import plain_non_empty_string, redis_key_segment_text
-from asc.redis.model_base import RedisModel
+from asc.redis.message_base import RedisMessage
 
 
 OutcomeStatus = Literal["completed", "failed"]
 
 
-class _OutcomeBase(RedisModel):
+class _OutcomeBase(RedisMessage):
     """Shared shape for daemon outcomes."""
 
     model_config = ConfigDict(extra="allow")
