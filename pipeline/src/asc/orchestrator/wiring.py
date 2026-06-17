@@ -42,7 +42,7 @@ class ModuleQueue:
 
 class RedisStore:
     def load_cursor(self, key: str) -> Any:
-        from asc.models.runtime.loader import load_key
+        from asc.models.process.loader import load_key
 
         return load_key(key)
 

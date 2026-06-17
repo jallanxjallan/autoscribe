@@ -27,7 +27,7 @@ def resolve_enqueue_keys(record: EnqueueRecord) -> ResolvedEnqueueKeys:
 def identity_from_key(key: str) -> str:
     parts = key.strip().split(":")
     if len(parts) != 3 or not all(parts):
-        raise ValueError(f"invalid Redis model key: {key}")
+        raise ValueError(f"invalid Redis model key: {key!r}")
     return parts[1]
 
 

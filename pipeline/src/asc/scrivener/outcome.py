@@ -3,7 +3,7 @@ from __future__ import annotations
 import time
 from typing import Any
 
-from asc.models.runtime.scrivener import ScrivenerFailure, ScrivenerResult
+from asc.models.process.scrivener import ScrivenerFailure, ScrivenerResult
 
 
 def job_value(job: Any, name: str, default: Any = "") -> Any:

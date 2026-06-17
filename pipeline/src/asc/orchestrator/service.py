@@ -15,7 +15,7 @@ from __future__ import annotations
 
 from typing import Any, Protocol
 
-from asc.models.runtime.job import LedgerJobRecord, WorkerJobRecord
+from asc.models.process.job import LedgerJobRecord, WorkerJobRecord
 
 from .tasks import (
     RouteDecision,

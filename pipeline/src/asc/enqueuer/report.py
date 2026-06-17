@@ -9,7 +9,6 @@ class EnqueuedCall:
     cursor_key: str
     call_key: str
     plan_key: str
-    response_index_key: str
     step_count: int
 
 
@@ -26,4 +25,4 @@ class EnqueueReport:
         return len(self.records)
 
 
-__all__ = ["EnqueueReport", "EnqueuedCall"]
+__all__ = ["EnqueuedCall", "EnqueueReport"]

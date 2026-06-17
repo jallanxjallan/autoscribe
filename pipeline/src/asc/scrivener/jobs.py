@@ -1,7 +1,7 @@
 from __future__ import annotations
 
-from asc.models.runtime.cursor import RuntimeCursor
-from asc.models.runtime.job import LedgerJobRecord, ScrivenerJob
+from asc.models.process.cursor import RuntimeCursor
+from asc.models.process.job import LedgerJobRecord, ScrivenerJob
 
 # Scrivener historically imported ScrivenerJob.  The orchestrator now creates
 # LedgerJobRecord instances for scrivener handoff, so expose both names here and

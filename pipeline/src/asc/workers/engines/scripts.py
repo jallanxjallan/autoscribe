@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from typing import Any, Callable, Mapping
 
-from asc.models.runtime.result import StepFailure, StepResult
+from asc.models.process.result import StepFailure, StepResult
 from asc.registries.extensions import load_transform
 
 ENGINE = "scripts"

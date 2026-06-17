@@ -7,25 +7,25 @@ from typing import TextIO
 from asc.enqueuer.call import load_non_empty_call
 from asc.enqueuer.cursor_factory import build_runtime_cursor, save_runtime_cursor
 from asc.enqueuer.keys import resolve_enqueue_keys
-from asc.enqueuer.normalize import enqueue_record_identifier, normalize_enqueue_record
-from asc.enqueuer.plan_steps import load_plan_steps
+from asc.enqueuer.plan import load_runnable_plan_step_count
 from asc.enqueuer.queue import enqueue_cursor
-from asc.enqueuer.reader import iter_enqueue_records
+from asc.enqueuer.reader import EnqueueRecord, iter_enqueue_records
 from asc.enqueuer.report import EnqueuedCall, EnqueueReport
+from asc.enqueuer.response_index import create_response_index
 
 
 def enqueue_from_stream(stream: TextIO) -> EnqueueReport:
     return enqueue_records(iter_enqueue_records(stream))
 
 
-def enqueue_records(records: Iterable[object]) -> EnqueueReport:
+def enqueue_records(records: Iterable[EnqueueRecord]) -> EnqueueReport:
     enqueued: list[EnqueuedCall] = []
 
     for record_number, record in enumerate(records, start=1):
         try:
             enqueued.append(enqueue_record(record))
         except Exception as exc:
-            identifier = enqueue_record_identifier(record, fallback=f"record {record_number}")
+            identifier = _record_identifier(record, fallback=f"record {record_number}")
             print(
                 f"[enqueue] {identifier}: skipped invalid run spec record: {exc}",
                 file=sys.stderr,
@@ -34,14 +34,19 @@ def enqueue_records(records: Iterable[object]) -> EnqueueReport:
     return EnqueueReport(records=tuple(enqueued))
 
 
-def enqueue_record(record: object) -> EnqueuedCall:
-    dispatch = normalize_enqueue_record(record)
-    keys = resolve_enqueue_keys(dispatch)
+def enqueue_record(record: EnqueueRecord) -> EnqueuedCall:
+    keys = resolve_enqueue_keys(record)
 
     load_non_empty_call(keys.call_key)
-    plan_steps = load_plan_steps(keys.plan_key)
+    step_count = load_runnable_plan_step_count(keys.plan_key)
 
-    cursor = build_runtime_cursor(keys, plan_steps=plan_steps)
+    create_response_index(
+        identity=keys.call_identity,
+        call_key=keys.call_key,
+        total_steps=step_count,
+    )
+
+    cursor = build_runtime_cursor(keys)
     cursor_key = save_runtime_cursor(cursor)
     enqueue_cursor(cursor_key)
 
@@ -50,9 +55,14 @@ def enqueue_record(record: object) -> EnqueuedCall:
         cursor_key=cursor_key,
         call_key=keys.call_key,
         plan_key=keys.plan_key,
-        response_index_key=str(getattr(cursor, "response_index_key", "")),
-        step_count=len(plan_steps),
+        step_count=step_count,
     )
+
+
+def _record_identifier(record: object, *, fallback: str) -> str:
+    if isinstance(record, EnqueueRecord):
+        return record.call_slug
+    return fallback
 
 
 __all__ = [

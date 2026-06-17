@@ -10,8 +10,8 @@ import json
 from dataclasses import dataclass
 from typing import Any, Mapping
 
-from asc.models.runtime.task import WorkerTask, ScrivenerTask, TaskStatus
-from asc.models.runtime.loader import load_key
+from asc.models.process.task import WorkerTask, ScrivenerTask, TaskStatus
+from asc.models.process.loader import load_key
 
 from .errors import OrchestratorContractError
 
