@@ -18,6 +18,7 @@ class Cursor(RedisModel):
     model_config = ConfigDict(extra="forbid", frozen=True)
 
     kind: ClassVar[str] = "cursor"
+    suffix: ClassVar[str] = "index"
 
 
     identity: str

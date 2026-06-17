@@ -32,7 +32,7 @@ def _require_key(value: object, *, field_name: str = "key") -> str:
 
 
 def _key_kind(key: str) -> str:
-    return _require_key(key).split(":")[-1]
+    return _require_key(key).split(":")[0]
 
 
 def _key_identity(key: str) -> str:
