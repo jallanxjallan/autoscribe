@@ -1,123 +1,214 @@
 from __future__ import annotations
 
 import importlib
+import json
+from collections.abc import Mapping
 from typing import Any
 
-from asc.scrivener.util import json_blob, model_json_blob
+from asc.scrivener.connect import LedgerConnection
+from asc.scrivener.schema import table_columns
+from asc.scrivener.util import execute_and_commit
 
 
-MODEL_MODULES = (
-    "asc.models.runtime.call",
-    "asc.models.runtime.result",
-    "asc.models.runtime.response",
-    "asc.models.runtime.failure",
-    "asc.models.runtime.job",
-    "asc.models.runtime.cursor",
-)
+_RUNTIME_MODEL_CANDIDATES: dict[str, tuple[tuple[str, str], ...]] = {
+    "call": (
+        ("asc.models.runtime.call", "CallRecord"),
+        ("asc.models.process.call", "CallRecord"),
+        ("asc.models.call", "CallRecord"),
+    ),
+    "result": (
+        ("asc.models.runtime.result", "StepResult"),
+        ("asc.models.process.result", "StepResult"),
+        ("asc.models.runtime.step", "StepResult"),
+    ),
+    "failure": (
+        ("asc.models.runtime.result", "StepFailure"),
+        ("asc.models.process.result", "StepFailure"),
+        ("asc.models.runtime.step", "StepFailure"),
+    ),
+}
 
 
-def job_action(job: object) -> str:
-    # ``kind`` is the Redis/model storage kind, e.g. ``ledger-job``.  The
-    # ledger operation lives in ``action``.  During the scrivener/ledger naming
-    # migration, some job records still carried that operation as ``handler``;
-    # accept it here so the writer remains tolerant of queue records produced by
-    # either side of the refactor.
-    for name in ("action", "handler"):
-        value = optional(job, name, default=None)
-        if value:
-            return str(value)
-    raise ValueError("scrivener job missing required field: action/handler")
-
-
-def ledger_identity(job: object) -> str:
-    return str(required(job, "call_identity"))
-
-
-def source_identity(job: object, record: object | None) -> str:
-    for obj in (record, job):
-        for name in ("source_identity", "record_identity", "source_slug", "slug"):
-            value = optional(obj, name, default=None)
-            if value:
-                return str(value)
-    return str(required(job, "input_key"))
-
-
-def load_job_input(job: object) -> object | None:
-    return load_model_record(
-        str(optional(job, "input_model", default="")),
-        str(optional(job, "input_key", default="")),
-    )
-
-
-def load_job_output(job: object) -> object | None:
-    return load_model_record(
-        str(optional(job, "output_model", default="")),
-        str(optional(job, "output_key", default="")),
-    )
-
-
-def load_cursor(job: object) -> object | None:
-    return load_model_record("RuntimeCursor", str(optional(job, "cursor_key", default="")))
-
-
-def load_model_record(model_name: str, key: str) -> object | None:
-    if not model_name or not key:
-        return None
-    for module_name in MODEL_MODULES:
-        try:
-            module = importlib.import_module(module_name)
-            cls = getattr(module, model_name)
-        except (ImportError, AttributeError):
-            continue
-        try:
-            return cls.load(key)
-        except Exception:
-            return None
-    return None
-
-
-def record_blob(record: object | None, *, fallback: object) -> str:
-    if record is None:
-        return model_json_blob(fallback)
-    raw_json = optional(record, "raw_json", default=None)
-    if raw_json is not None:
-        return raw_json if isinstance(raw_json, str) else json_blob(raw_json)
-    raw_json_json = optional(record, "raw_json_json", default=None)
-    if raw_json_json is not None:
-        return str(raw_json_json)
-    source_json = optional(record, "source_json", default=None)
-    if source_json is not None:
-        return source_json if isinstance(source_json, str) else json_blob(source_json)
-    raw_record_json = optional(record, "raw_record_json", default=None)
-    if raw_record_json is not None:
-        return str(raw_record_json)
-    return model_json_blob(record)
-
-
-def optional(obj: object | None, name: str, *, default: Any = None) -> Any:
-    if obj is None:
-        return default
-    if isinstance(obj, dict):
-        return obj.get(name, default)
-    return getattr(obj, name, default)
-
-
-def required(obj: object, name: str) -> Any:
-    value = optional(obj, name, default=None)
-    if value is None:
-        raise ValueError(f"scrivener job missing required field: {name}")
+def text(value: object, name: str) -> str:
+    if not isinstance(value, str):
+        raise ValueError(f"scrivener task field must be a string: {name}")
+    value = value.strip()
+    if not value:
+        raise ValueError(f"scrivener task missing required field: {name}")
     return value
 
 
+def optional_text(value: object, default: str = "") -> str:
+    if value in (None, ""):
+        return default
+    return str(value).strip()
+
+
+def task_source_key(task: Any) -> str:
+    return text(getattr(task, "source_key", None), "source_key")
+
+
+def source_key(task: Any) -> str:
+    return task_source_key(task)
+
+
+def ledger_table(task: Any) -> str:
+    return text(getattr(task, "ledger_table", None), "ledger_table")
+
+
+def source_identity(task: Any) -> str:
+    key = task_source_key(task)
+    parts = key.split(":", 2)
+    if len(parts) != 3 or not parts[1].strip():
+        raise ValueError(f"cannot derive source identity from source_key: {key!r}")
+    return parts[1].strip()
+
+
+def ledger_identity(task: Any) -> str:
+    return source_identity(task)
+
+
+def cursor_key(task: Any) -> str:
+    return text(getattr(task, "cursor_key", None), "cursor_key")
+
+
+def task_number(task: Any) -> int:
+    value = getattr(task, "task_number", None)
+    if value in (None, ""):
+        return 0
+    number = int(value)
+    if number < 0:
+        raise ValueError("task_number must be >= 0")
+    return number
+
+
+def step_number(task: Any) -> int:
+    return task_number(task)
+
+
+def action(task: Any) -> str:
+    return text(getattr(task, "action", None), "action")
+
+
+def _source_kind(key: str) -> str:
+    kind = key.split(":", 1)[0].strip()
+    if not kind:
+        raise ValueError(f"cannot derive model kind from source key: {key!r}")
+    return kind
+
+
+def load_source_key(key: str) -> Any:
+    suffix = _source_kind(key)
+    for module_name, class_name in _RUNTIME_MODEL_CANDIDATES.get(suffix, ()):
+        try:
+            module = importlib.import_module(module_name)
+            model = getattr(module, class_name)
+        except (ImportError, AttributeError):
+            continue
+
+        load = getattr(model, "load", None)
+        if callable(load):
+            return load(key)
+
+    raise ValueError(f"no runtime model loader found for source key: {key}")
+
+
+def load_task_source(task: Any) -> Any:
+    return load_source_key(task_source_key(task))
+
+
+def load_task_input(task: Any) -> Any:
+    return load_task_source(task)
+
+
+def load_task_output(task: Any) -> Any:
+    return load_task_source(task)
+
+
+def model_dict(record: Any) -> dict[str, Any]:
+    if record is None:
+        return {}
+
+    dump = getattr(record, "model_dump", None)
+    if callable(dump):
+        return dict(dump(mode="json", exclude_none=True))
+
+    if isinstance(record, Mapping):
+        return {str(k): v for k, v in record.items() if v is not None}
+
+    if hasattr(record, "__attrs_attrs__"):
+        return {
+            field.name: getattr(record, field.name)
+            for field in record.__attrs_attrs__
+            if getattr(record, field.name) is not None
+        }
+
+    return {
+        key: value
+        for key, value in vars(record).items()
+        if not key.startswith("_") and value is not None
+    }
+
+
+def json_text(value: object) -> str:
+    if value in (None, ""):
+        return "{}"
+    if isinstance(value, str):
+        json.loads(value or "{}")
+        return value
+    return json.dumps(value, ensure_ascii=False, separators=(",", ":"), default=str)
+
+
+def model_json(record: Any) -> str:
+    return json.dumps(
+        model_dict(record),
+        ensure_ascii=False,
+        separators=(",", ":"),
+        default=str,
+    )
+
+
+def insert_row(conn: LedgerConnection, table: str, row: Mapping[str, Any]) -> None:
+    columns = table_columns(conn, table)
+    if not columns:
+        raise RuntimeError(f"ledger table does not exist or has no columns: {table}")
+
+    filtered = {key: value for key, value in row.items() if key in columns}
+
+    if not filtered:
+        raise ValueError(f"no insertable columns for ledger table: {table}")
+
+    names = list(filtered)
+    placeholders = ", ".join("?" for _ in names)
+    quoted = ", ".join(f'"{name}"' for name in names)
+
+    sql = f'INSERT INTO "{table}" ({quoted}) VALUES ({placeholders})'
+    execute_and_commit(conn, sql, tuple(filtered[name] for name in names))
+
+def task_action(task: Any) -> str:
+    return action(task)
+
+
 __all__ = [
-    "job_action",
+    "action",
+    "cursor_key",
+    "insert_row",
+    "json_text",
     "ledger_identity",
+    "ledger_table",
+    "load_source_key",
+    "load_task_input",
+    "load_task_output",
+    "load_task_source",
+    "model_dict",
+    "model_json",
+    "optional_text",
     "source_identity",
-    "load_job_input",
-    "load_job_output",
-    "load_cursor",
-    "load_model_record",
-    "record_blob",
-    "optional",
-    "required",
+    "source_key",
+    "step_number",
+    "task_number",
+    "task_source_key",
+    "task_action",
+    "text",
+    
 ]

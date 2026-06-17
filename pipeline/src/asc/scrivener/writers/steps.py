@@ -3,60 +3,72 @@ from __future__ import annotations
 from typing import Any
 
 from asc.scrivener.connect import LedgerConnection
-from asc.scrivener.queries import INSERT_STEP_SQL
-from asc.scrivener.util import execute_and_commit, timestamp_now
+from asc.scrivener.util import timestamp_now
 from asc.scrivener.writers.common import (
+    insert_row,
     ledger_identity,
-    load_job_output,
-    optional,
-    record_blob,
-    required,
+    load_task_output,
+    model_json,
+    source_key,
+    step_number,
 )
 
 
-def insert_step(*, conn: LedgerConnection, job: object) -> None:
-    execute_and_commit(conn, INSERT_STEP_SQL, step_values(job))
+def insert_step(*, conn: LedgerConnection, task: object) -> None:
+    record = load_task_output(task)
+    insert_row(conn, "steps", step_values(task, record))
 
 
-def step_values(job: object) -> tuple[Any, ...]:
-    record = load_job_output(job)
-    step_number = int(required(job, "step_number"))
-    if step_number <= 0:
-        raise ValueError(f"ledger step_number must be > 0: {step_number}")
+def step_values(task: object, record: object | None = None) -> dict[str, Any]:
+    if record is None:
+        record = load_task_output(task)
 
-    status = step_status(job, record)
+    number = step_number(task)
+    if number <= 0:
+        raise ValueError(f"ledger step_number must be > 0: {number}")
+
+    status = step_status(record)
     if status not in {"completed", "failed"}:
         raise ValueError(f"invalid ledger step status: {status}")
 
-    return (
-        ledger_identity(job),
-        step_number,
-        str(required(job, "output_key")),
-        status,
-        optional(record, "content", default=None),
-        failure_message(record),
-        record_blob(record, fallback=job),
-        int(optional(record, "created_at", default=optional(job, "created_at", default=timestamp_now()))),
-    )
+    created_at = getattr(record, "created_at", None) or getattr(task, "created_at", None) or timestamp_now()
+
+    return {
+        "identity": ledger_identity(task),
+        "step_number": number,
+        "result_key": source_key(task),
+        "status": status,
+        "content": getattr(record, "content", None),
+        "fail_message": failure_message(record),
+        "raw_json": model_json(record),
+        "created_at": int(created_at),
+    }
 
 
-def step_status(job: object, record: object | None) -> str:
-    explicit = optional(job, "status", default=None)
+def step_status(record: object | None) -> str:
+    explicit = getattr(record, "status", None)
     if explicit:
         return str(explicit)
-    output_model = str(optional(job, "output_model", default="")).lower()
-    if "failure" in output_model or "fail" in output_model:
+
+    name = type(record).__name__.lower()
+    if "failure" in name or "fail" in name:
         return "failed"
+
     if failure_message(record):
         return "failed"
+
     return "completed"
 
 
 def failure_message(record: object | None) -> str | None:
+    if record is None:
+        return None
+
     for name in ("fail_message", "failure_reason", "error", "message"):
-        value = optional(record, name, default=None)
+        value = getattr(record, name, None)
         if value:
             return str(value)
+
     return None
 
 

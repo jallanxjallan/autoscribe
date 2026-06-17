@@ -3,9 +3,11 @@ from __future__ import annotations
 from typing import TypeVar
 
 from asc.redis.model_base import RedisRecord
+from pydantic import field_validator
 
 
 T = TypeVar("T", bound="RedisMessage")
+
 
 
 class RedisMessage(RedisRecord):
@@ -30,6 +32,14 @@ class RedisMessage(RedisRecord):
                 raise ValueError(f"{self.__class__.__name__}.ttl_seconds must be a positive int or None")
             self.__class__.resolve_key(key).expire(ttl)
         return key
-
+    
+    @field_validator("ttl_seconds", "claimed_at", mode="before", check_fields=False)
+    @classmethod
+    def empty_optional_ints_are_none(cls, value):
+        if value == "":
+            return None
+        return value
+    
+    
 
 __all__ = ["RedisMessage"]

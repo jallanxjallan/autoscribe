@@ -4,8 +4,8 @@ import logging
 import os
 from dataclasses import dataclass
 
-from asc.scrivener.jobs import LedgerJobRecord
-from asc.scrivener.write import write_job
+from asc.models.process.task import ScrivenerTask
+from asc.scrivener.write import write_task
 from asc.state import orchestrator_queue, scrivener_queue
 from asc.state.daemon import DEFAULT_CLAIM_TIMEOUT_SECONDS, idle_empty_limit, run_daemon
 
@@ -18,7 +18,7 @@ DEFAULT_EMPTY_LIMIT = idle_empty_limit(timeout=DEFAULT_CLAIM_TIMEOUT_SECONDS)
 class ScrivenerRunReport:
     claimed: bool
     cursor_key: str | None = None
-    job_key: str | None = None
+    task_key: str | None = None
     action: str | None = None
 
 
@@ -35,27 +35,27 @@ def run_once(
     if claimed is None:
         return ScrivenerRunReport(claimed=False)
 
-    job_key = str(getattr(claimed, "key", claimed)).strip()
-    if not job_key:
-        raise ValueError("scrivener claimed an empty job key")
+    task_key = str(getattr(claimed, "key", claimed)).strip()
+    if not task_key:
+        raise ValueError("scrivener claimed an empty task key")
 
-    job = LedgerJobRecord.load(job_key)
-    cursor_key = str(getattr(job, "cursor_key", "")).strip()
+    task = ScrivenerTask.load(task_key)
+    cursor_key = str(getattr(task, "cursor_key", "")).strip()
     if not cursor_key:
-        raise ValueError(f"scrivener job has no cursor_key: {job_key}")
+        raise ValueError(f"scrivener task has no cursor_key: {task_key}")
 
-    write_job(job)
+    write_task(task)
 
-    # Return the completed job key to the orchestrator. The orchestrator can load
-    # the job, recover the cursor_key from it, and route the next job without
-    # mutating RuntimeCursor.
-    orchestrator_queue.insert(job_key)
+    # Return the completed task key to orchestrator. Orchestrator can load the
+    # task, recover cursor_key from it, and route the next task without mutating
+    # RuntimeCursor.
+    orchestrator_queue.insert(task_key)
 
     return ScrivenerRunReport(
         claimed=True,
         cursor_key=cursor_key,
-        job_key=job_key,
-        action=str(getattr(job, "action", "") or getattr(job, "handler", "") or ""),
+        task_key=task_key,
+        action=str(getattr(task, "action", "") or ""),
     )
 
 

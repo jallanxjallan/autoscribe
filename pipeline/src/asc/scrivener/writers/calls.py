@@ -3,45 +3,49 @@ from __future__ import annotations
 from typing import Any
 
 from asc.scrivener.connect import LedgerConnection, connect
-from asc.scrivener.queries import INSERT_CALL_SQL
 from asc.scrivener.schema import ensure_ledger_schema
-from asc.scrivener.util import execute_and_commit, timestamp_now
+from asc.scrivener.util import timestamp_now
 from asc.scrivener.writers.common import (
+    insert_row,
     ledger_identity,
-    load_job_input,
-    optional,
-    record_blob,
+    load_task_input,
+    model_json,
     source_identity,
 )
 
 
-def insert_call_from_job(job: object) -> None:
+def insert_call_from_task(task: object) -> None:
     with connect() as conn:
-        insert_call_from_job_with_connection(conn=conn, job=job)
+        insert_call_from_task_with_connection(conn=conn, task=task)
 
 
-def insert_call_from_job_with_connection(*, conn: LedgerConnection, job: object) -> None:
+def insert_call_from_task_with_connection(*, conn: LedgerConnection, task: object) -> None:
     ensure_ledger_schema(conn)
-    insert_call(conn=conn, job=job)
+    insert_call(conn=conn, task=task)
 
 
-def insert_call(*, conn: LedgerConnection, job: object) -> None:
-    execute_and_commit(conn, INSERT_CALL_SQL, call_values(job))
+def insert_call(*, conn: LedgerConnection, task: object) -> None:
+    record = load_task_input(task)
+    insert_row(conn, "calls", call_values(task, record))
 
 
-def call_values(job: object) -> tuple[Any, ...]:
-    record = load_job_input(job)
-    return (
-        ledger_identity(job),
-        source_identity(job, record),
-        record_blob(record, fallback=job),
-        int(optional(record, "created_at", default=optional(job, "created_at", default=timestamp_now()))),
-    )
+def call_values(task: object, record: object | None = None) -> dict[str, Any]:
+    if record is None:
+        record = load_task_input(task)
+
+    created_at = getattr(record, "created_at", None) or getattr(task, "created_at", None) or timestamp_now()
+
+    return {
+        "identity": ledger_identity(task),
+        "source_identity": source_identity(task),
+        "source_json": model_json(record),
+        "created_at": int(created_at),
+    }
 
 
 __all__ = [
     "call_values",
     "insert_call",
-    "insert_call_from_job",
-    "insert_call_from_job_with_connection",
+    "insert_call_from_task",
+    "insert_call_from_task_with_connection",
 ]

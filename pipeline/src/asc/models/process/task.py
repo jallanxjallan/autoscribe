@@ -8,7 +8,7 @@ from __future__ import annotations
 
 import json
 from collections.abc import Mapping
-from typing import Any, ClassVar, Literal
+from typing import ClassVar, Literal
 
 from pydantic import ConfigDict, Field, field_serializer, field_validator
 
@@ -21,34 +21,17 @@ TaskStatus = Literal["queued", "claimed"]
 
 
 class _TaskBase(RedisMessage):
-    """Shared shape for daemon tasks.
-
-    ``identity`` is the call identity shared by the cursor, response index,
-    results, failures, and all daemon task/outcome records.
-
-    ``task_number`` is a daemon-local sequence number for this call. It is not
-    necessarily the same as ``step_number`` because scrivener tasks may bracket
-    or follow worker tasks.
-    """
+    """Shared shape for daemon tasks."""
 
     model_config = ConfigDict(extra="forbid")
 
     identity: str
     task_number: int
     cursor_key: str
+
     action: str
-    step_number: int = 0
-
-    input_model: str = ""
-    input_key: str = ""
-    output_model: str = ""
-    output_key: str = ""
-
-    engine: str = ""
-    handler: str = ""
-    args_json: str = "{}"
-
     status: TaskStatus = "queued"
+
     created_at: int = Field(default_factory=timestamp)
     claimed_at: int | None = None
 
@@ -57,14 +40,14 @@ class _TaskBase(RedisMessage):
     def validate_identity(cls, value: object) -> str:
         return redis_key_segment_text(value, "identity")
 
-    @field_validator("task_number", "step_number", mode="before")
+    @field_validator("task_number", mode="before")
     @classmethod
-    def validate_number(cls, value: object) -> int:
+    def validate_task_number(cls, value: object) -> int:
         if value in (None, ""):
             return 0
         number = int(value)
         if number < 0:
-            raise ValueError("task and step numbers must be >= 0")
+            raise ValueError("task_number must be >= 0")
         return number
 
     @field_validator("cursor_key", mode="before")
@@ -75,20 +58,59 @@ class _TaskBase(RedisMessage):
             raise ValueError(f"expected full Redis key, got {text!r}")
         return text
 
+    @field_validator("action", mode="before")
+    @classmethod
+    def validate_action(cls, value: object) -> str:
+        return redis_key_segment_text(value, "action")
+
+    @field_validator("claimed_at", mode="before")
+    @classmethod
+    def validate_claimed_at(cls, value: object) -> int | None:
+        if value in (None, ""):
+            return None
+        return int(value)
+
+    @field_serializer("task_number")
+    def serialize_task_number(self, value: int) -> str:
+        return str(value)
+
+
+class WorkerTask(_TaskBase):
+    """Task consumed by the worker daemon."""
+
+    kind: ClassVar[str] = "worker_task"
+
+    step_number: int
+
+    input_model: str
+    input_key: str
+
+    output_model: str
+    output_key: str
+
+    engine: str
+    handler: str
+    args_json: str = "{}"
+
+    @field_validator("step_number", mode="before")
+    @classmethod
+    def validate_step_number(cls, value: object) -> int:
+        if value in (None, ""):
+            return 0
+        number = int(value)
+        if number < 0:
+            raise ValueError("step_number must be >= 0")
+        return number
+
     @field_validator("input_key", "output_key", mode="before")
     @classmethod
-    def validate_optional_full_key(cls, value: object) -> str:
+    def validate_optional_key(cls, value: object) -> str:
         if value in (None, ""):
             return ""
         text = plain_non_empty_string(value, "Redis key")
         if ":" not in text:
             raise ValueError(f"expected full Redis key, got {text!r}")
         return text
-
-    @field_validator("action", mode="before")
-    @classmethod
-    def validate_action(cls, value: object) -> str:
-        return redis_key_segment_text(value, "action")
 
     @field_validator("args_json", mode="before")
     @classmethod
@@ -100,17 +122,11 @@ class _TaskBase(RedisMessage):
             return value
         if isinstance(value, Mapping):
             return json.dumps(value, ensure_ascii=False, separators=(",", ":"))
-        raise ValueError("args_json must be a JSON string or mapping")
+        raise ValueError("args_json must be JSON or a mapping")
 
-    @field_serializer("task_number", "step_number")
-    def serialize_number(self, value: int) -> str:
+    @field_serializer("step_number")
+    def serialize_step_number(self, value: int) -> str:
         return str(value)
-
-
-class WorkerTask(_TaskBase):
-    """Task consumed by the worker daemon."""
-
-    kind: ClassVar[str] = "worker_task"
 
 
 class ScrivenerTask(_TaskBase):
@@ -118,11 +134,20 @@ class ScrivenerTask(_TaskBase):
 
     kind: ClassVar[str] = "scrivener_task"
 
-    ledger_table: str = ""
+    source_key: str
+    ledger_table: str
+
+    @field_validator("source_key", mode="before")
+    @classmethod
+    def validate_source_key(cls, value: object) -> str:
+        text = plain_non_empty_string(value, "source_key")
+        if ":" not in text:
+            raise ValueError(f"expected full Redis key, got {text!r}")
+        return text
 
 
 __all__ = [
-    "ScrivenerTask",
     "TaskStatus",
     "WorkerTask",
+    "ScrivenerTask",
 ]
