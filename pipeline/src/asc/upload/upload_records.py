@@ -6,6 +6,7 @@ from typing import Any, TextIO
 
 from pydantic import ValidationError
 
+from asc.core.identity import generate_identity
 from asc.redis.key import RedisKey
 from asc.state.slugmap import SlugMap
 from asc.upload.common import SkippedUpload, UploadedItem, UploadReport
@@ -79,8 +80,12 @@ def upload_record(raw_record: object, *, expected_type: str) -> UploadedItem:
     for field_name in SERVER_IDENTITY_FIELDS:
         record.pop(field_name, None)
 
+    model_class = model_for_record_type(record_type)
     try:
-        model = model_for_record_type(record_type).model_validate(record)
+        if hasattr(model_class, "from_ndjson"):
+            model = model_class.from_ndjson(record, identity=generate_identity())
+        else:
+            model = model_class.model_validate(record)
     except ValidationError as exc:
         raise ValueError(f"validation failed: {exc}") from exc
 

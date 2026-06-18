@@ -1,38 +1,70 @@
 from __future__ import annotations
 
-from typing import ClassVar
+import json
+from typing import Any, ClassVar
 
-from pydantic import ConfigDict, Field, field_serializer, field_validator
+from pydantic import ConfigDict, model_validator
 
-from asc.core.identity import generate_identity
-from asc.core.timestamp import timestamp
-from asc.models.helpers.plain import plain_non_empty_string
-from asc.models.helpers.upload import RedisIdentity, RecordIdentity, RequiredRecordContent
 from asc.redis.model_base import RedisModel
 
 
 class Call(RedisModel):
-    """Immutable source payload for one process call."""
+    model_config = ConfigDict(extra="allow")
 
-    model_config = ConfigDict(extra="forbid")
+    allowed_record_types: ClassVar[set[str]] = {"call", "prompt", "document"}
 
-    kind: ClassVar[str] = "call"
-    suffix: ClassVar[str] = "record"
+    identity: str
+    source_identity: str
+    content: str
+    blob_json: str = "{}"
 
-    identity: RedisIdentity = Field(default_factory=generate_identity)
-    source_identity: RecordIdentity
-    content: RequiredRecordContent
-    source_json: str = "{}"
-    created_at: int = Field(default_factory=timestamp)
-
-    @field_validator("content", mode="before")
     @classmethod
-    def validate_content(cls, value: object) -> str:
-        return plain_non_empty_string(value, "content")
+    def from_ndjson(cls, record: dict[str, Any], *, identity: str) -> "Call":
+        record_type = cls._required(record, "record_type")
+        if record_type not in cls.allowed_record_types:
+            allowed = ", ".join(sorted(cls.allowed_record_types))
+            raise ValueError(
+                f"unsupported call record_type: {record_type!r}; expected one of: {allowed}"
+            )
 
-    @field_serializer("source_json", when_used="json")
-    def serialize_source_json(self, value: str) -> str:
+        payload = dict(record)
+        payload.pop("record_type")
+
+        return cls(
+            identity=identity,
+            source_identity=cls._required(payload, "record_identity"),
+            content=cls._required(payload, "record_content"),
+            **payload,
+        )
+
+    @staticmethod
+    def _required(record: dict[str, Any], field: str) -> Any:
+        try:
+            value = record.pop(field)
+        except KeyError as exc:
+            raise ValueError(f"call ndjson record missing required field: {field}") from exc
+
+        if value is None:
+            raise ValueError(f"call ndjson record has empty required field: {field}")
+
+        if isinstance(value, str) and not value.strip():
+            raise ValueError(f"call ndjson record has empty required field: {field}")
+
         return value
+
+    @model_validator(mode="after")
+    def gather_extra_fields(self) -> "Call":
+        extras = dict(self.__pydantic_extra__ or {})
+        if not extras:
+            return self
+
+        object.__setattr__(
+            self,
+            "blob_json",
+            json.dumps(extras, ensure_ascii=False, sort_keys=True),
+        )
+        self.__pydantic_extra__.clear()
+        return self
 
 
 __all__ = ["Call"]
