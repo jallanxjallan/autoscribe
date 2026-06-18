@@ -2,26 +2,27 @@
 
 Queues carry Redis keys, not hydrated model state.
 
-* Enqueue may place one fresh cursor key on the orchestrator queue.
-* The orchestrator activates that cursor in ``state:cursor:active``.
-* After activation, every daemon handoff is a task key.
-* Workers and scrivener return completed task keys to the orchestrator.
-
-The cursor remains the stable call context and active-index member; the
-returned task key itself is the handoff token for daemon work.
+Progress lives in the response index, not in mutable cursor fields.  Before a
+worker task is queued, the orchestrator claims the response-index step slot with
+a short-lived in-process marker.  The worker outcome must later replace that
+marker with a result or failure key.
 """
 
 from __future__ import annotations
 
 from typing import Any, Protocol
 
-try:
-    from asc.models.process.task import ScrivenerTask, WorkerTask
-except ImportError:
-    from asc.models.process.scrivener_task import ScrivenerTask
-    from asc.models.process.worker_task import WorkerTask
+
+from asc.models.process.task import ScrivenerTask, WorkerTask
+
 
 from .outcomes import ScrivenerOutcome, WorkerOutcome, outcome_from_key
+from .response_manager import (
+    input_key_for_step,
+    mark_step_in_flight,
+    record_step_output,
+)
+
 from .tasks import (
     RouteDecision,
     assert_task_key_for_queue,
@@ -106,6 +107,7 @@ class OrchestratorService:
         assert_task_key_for_queue(queue_name=decision.queue_name, task_key=task_key)
 
         if decision.queue_name == "worker":
+            self._claim_worker_step(cursor=cursor, worker_task=decision.task)
             self.worker_queue.insert(task_key)
         elif decision.queue_name == "scrivener":
             self.scrivener_queue.insert(task_key)
@@ -115,6 +117,30 @@ class OrchestratorService:
             raise ValueError(f"unknown queue route: {decision.queue_name!r}")
 
         return True
+
+    def _claim_worker_step(self, *, cursor: Any, worker_task: WorkerTask) -> None:
+        """Write an in-process marker into the response index before enqueue."""
+
+        step_number = task_number_for(worker_task)
+        mark_step_in_flight(
+            cursor=cursor,
+            step_number=step_number,
+            task_key=runtime_task_key_for(worker_task),
+            cursor_key=cursor_key_for(cursor),
+        )
+
+    def _record_worker_output(self, *, cursor: Any, worker_task: WorkerTask) -> None:
+        """Replace an in-process marker with the worker-produced output key."""
+
+        produced_key = str(getattr(worker_task, "output_key", "")).strip()
+        if not produced_key:
+            raise ValueError("worker task has no output_key to record in response index")
+
+        record_step_output(
+            cursor=cursor,
+            step_number=task_number_for(worker_task),
+            produced_key=produced_key,
+        )
 
     def _load_context(self, claimed_key: str) -> tuple[Any, WorkerOutcome | ScrivenerOutcome | None]:
         """Load cursor plus optional completed task outcome from an orchestrator queue key."""
@@ -139,6 +165,7 @@ class OrchestratorService:
             )
 
         if isinstance(outcome, WorkerOutcome):
+            self._record_worker_output(cursor=cursor, worker_task=outcome.task)
             return RouteDecision(
                 queue_name="scrivener",
                 task=make_scrivener_step_task(cursor=cursor, worker_task=outcome.task),
@@ -170,7 +197,12 @@ class OrchestratorService:
                 )
             return RouteDecision(
                 queue_name="worker",
-                task=make_worker_task(cursor=cursor, plan=plan, step_number=1),
+                task=make_worker_task(
+                    cursor=cursor,
+                    plan=plan,
+                    step_number=1,
+                    input_key=input_key_for_step(cursor, 1),
+                ),
                 reason="call ledger row written; execute step 1",
             )
 
@@ -189,7 +221,7 @@ class OrchestratorService:
                     cursor=cursor,
                     plan=plan,
                     step_number=next_step,
-                    input_key=task.source_key,
+                    input_key=input_key_for_step(cursor, next_step),
                 ),
                 reason=f"task {task_number} ledger row written; execute task {next_step}",
             )

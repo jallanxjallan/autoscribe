@@ -127,6 +127,7 @@ def make_worker_task(
         cursor_key=cursor_key_for(cursor),
         action="execute_step",
         task_number=step_number,
+        step_number=step_number,
         engine=step_engine_key(args.get("engine"), step_number=step_number),
         handler=step_handler_key(args, step_number=step_number),
         input_model="Call" if step_number == 1 else "Result",
