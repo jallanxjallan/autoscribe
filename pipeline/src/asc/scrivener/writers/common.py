@@ -1,13 +1,21 @@
 from __future__ import annotations
 
+import importlib
 import json
 from collections.abc import Mapping
 from typing import Any
 
-from asc.models.process.loader import load_key
 from asc.redis.key import RedisKey
 from asc.scrivener.connect import LedgerConnection
 from asc.scrivener.util import execute_and_commit
+
+
+MODEL_PATH_BY_KIND = {
+    "call": "asc.models.process.call.Call",
+    "result": "asc.models.process.result.StepResult",
+    "failure": "asc.models.process.failure.StepFailure",
+}
+
 
 def require_text(value: object, name: str) -> str:
     if not isinstance(value, str):
@@ -69,8 +77,34 @@ def step_number(task: Any) -> int:
     return task_number(task)
 
 
+def _model_class_for_key(key: str) -> type[Any]:
+    kind = redis_key(key).kind
+    try:
+        dotted = MODEL_PATH_BY_KIND[kind]
+    except KeyError as exc:
+        expected = ", ".join(sorted(MODEL_PATH_BY_KIND))
+        raise ValueError(f"no scrivener source loader for key kind {kind!r}; expected one of: {expected}") from exc
+
+    module_name, class_name = dotted.rsplit(".", 1)
+    module = importlib.import_module(module_name)
+    model_class = getattr(module, class_name)
+    return model_class
+
+
 def load_source_key(key: str) -> Any:
-    return load_key(key)
+    """Load the Redis object named by a task source key.
+
+    Scrivener receives a ScrivenerTask. The task points at the real object to
+    write through source_key: call:...:record, result:...:step.N, or
+    failure:...:step.N. Keep Redis access behind the model .load() contract.
+    """
+
+    source = require_text(key, "source_key")
+    model_class = _model_class_for_key(source)
+    load = getattr(model_class, "load", None)
+    if not callable(load):
+        raise TypeError(f"{model_class.__name__} has no load() classmethod")
+    return load(source)
 
 
 def load_task_source(task: Any) -> Any:
@@ -98,12 +132,7 @@ def json_text(value: object) -> str:
 
 
 def model_json(record: Any) -> str:
-    return json.dumps(
-        model_dict(record),
-        ensure_ascii=False,
-        separators=(",", ":"),
-        default=str,
-    )
+    return record.model_dump_json()
 
 
 def insert_row(conn: LedgerConnection, table: str, row: Mapping[str, Any]) -> None:

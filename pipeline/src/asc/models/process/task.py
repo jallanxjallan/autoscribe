@@ -16,6 +16,8 @@ from asc.redis.message_base import RedisMessage
 TaskStatus = Literal["queued", "claimed"]
 
 
+
+
 class _TaskBase(RedisMessage):
     """Shared shape for daemon tasks."""
 

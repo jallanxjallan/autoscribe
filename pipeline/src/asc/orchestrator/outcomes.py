@@ -10,7 +10,11 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Any
 
-from asc.models.process.task import ScrivenerTask, WorkerTask
+try:
+    from asc.models.process.task import ScrivenerTask, WorkerTask
+except ImportError:
+    from asc.models.process.scrivener_task import ScrivenerTask
+    from asc.models.process.worker_task import WorkerTask
 
 from .errors import OrchestratorContractError
 from .tasks import load_task, required_text, task_number_for

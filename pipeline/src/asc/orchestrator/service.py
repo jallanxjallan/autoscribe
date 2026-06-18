@@ -15,7 +15,11 @@ from __future__ import annotations
 
 from typing import Any, Protocol
 
-from asc.models.process.task import ScrivenerTask, WorkerTask
+try:
+    from asc.models.process.task import ScrivenerTask, WorkerTask
+except ImportError:
+    from asc.models.process.scrivener_task import ScrivenerTask
+    from asc.models.process.worker_task import WorkerTask
 
 from .outcomes import ScrivenerOutcome, WorkerOutcome, outcome_from_key
 from .tasks import (
@@ -147,7 +151,7 @@ class OrchestratorService:
         raise TypeError(f"unknown outcome type: {type(outcome).__name__}")
 
     def _route_after_scrivener_task(self, cursor: Any, task: ScrivenerTask) -> RouteDecision:
-        if task.action == "write_result":
+        if task.action in {"call_completed", "write_export", "export_written"}:
             return RouteDecision(
                 queue_name=None,
                 task=None,
@@ -185,7 +189,7 @@ class OrchestratorService:
                     cursor=cursor,
                     plan=plan,
                     step_number=next_step,
-                    input_key=task.input_key,
+                    input_key=task.source_key,
                 ),
                 reason=f"task {task_number} ledger row written; execute task {next_step}",
             )
