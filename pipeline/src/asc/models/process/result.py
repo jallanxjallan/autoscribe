@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from typing import Any, Literal
+from typing import Any, ClassVar
 
 from pydantic import ConfigDict, Field
 
@@ -9,35 +9,34 @@ from asc.redis.model_base import RedisModel
 
 
 class Result(RedisModel):
-    """Successful runtime payload for one worker-produced step result."""
+    """Successful payload for one worker-produced step result."""
 
-    model_config = ConfigDict(extra="allow")
+    model_config = ConfigDict(extra="forbid")
 
-    kind: Literal["result"] = "result"
+    kind: ClassVar[str] = "result"
+    suffix: ClassVar[str] = "step"
 
-    content: str | None = None
-    raw_json: Any = None
-
-    started_at: int | None = None
-    completed_at: int | None = None
+    content: str
+    raw_json: Any
+    started_at: int
+    completed_at: int
     created_at: int = Field(default_factory=timestamp)
+
 
 class Failure(RedisModel):
-    """Failed runtime payload for one worker-produced step result."""
+    """Failed payload for one worker-produced step result."""
 
-    model_config = ConfigDict(extra="allow")
+    model_config = ConfigDict(extra="forbid")
 
-    kind: Literal["failure"] = "failure"
+    kind: ClassVar[str] = "failure"
+    suffix: ClassVar[str] = "step"
 
-    content: str | None = None
-    failure_reason: str | None = None
-    raw_json: Any = None
-
-    started_at: int | None = None
-    completed_at: int | None = None
+    content: str
+    failure_reason: str
+    raw_json: Any
+    started_at: int
+    completed_at: int
     created_at: int = Field(default_factory=timestamp)
 
-StepResult = Result
-StepFailure = Failure
 
-__all__ = ["Result", "Failure", "StepResult", "StepFailure"]
+__all__ = ["Result", "Failure"]

@@ -1,8 +1,4 @@
-"""Daemon task records.
-
-A task is one concrete unit of work consumed by one execution daemon.
-The whole call may contain many plan steps and many daemon tasks.
-"""
+"""Daemon task records."""
 
 from __future__ import annotations
 
@@ -43,8 +39,6 @@ class _TaskBase(RedisMessage):
     @field_validator("task_number", mode="before")
     @classmethod
     def validate_task_number(cls, value: object) -> int:
-        if value in (None, ""):
-            return 0
         number = int(value)
         if number < 0:
             raise ValueError("task_number must be >= 0")
@@ -66,7 +60,7 @@ class _TaskBase(RedisMessage):
     @field_validator("claimed_at", mode="before")
     @classmethod
     def validate_claimed_at(cls, value: object) -> int | None:
-        if value in (None, ""):
+        if value is None:
             return None
         return int(value)
 
@@ -90,13 +84,11 @@ class WorkerTask(_TaskBase):
 
     engine: str
     handler: str
-    args_json: str = "{}"
+    args_json: str
 
     @field_validator("step_number", mode="before")
     @classmethod
     def validate_step_number(cls, value: object) -> int:
-        if value in (None, ""):
-            return 0
         number = int(value)
         if number < 0:
             raise ValueError("step_number must be >= 0")
@@ -104,9 +96,7 @@ class WorkerTask(_TaskBase):
 
     @field_validator("input_key", "output_key", mode="before")
     @classmethod
-    def validate_optional_key(cls, value: object) -> str:
-        if value in (None, ""):
-            return ""
+    def validate_required_key(cls, value: object) -> str:
         text = plain_non_empty_string(value, "Redis key")
         if ":" not in text:
             raise ValueError(f"expected full Redis key, got {text!r}")
@@ -115,10 +105,8 @@ class WorkerTask(_TaskBase):
     @field_validator("args_json", mode="before")
     @classmethod
     def validate_args_json(cls, value: object) -> str:
-        if value in (None, ""):
-            return "{}"
         if isinstance(value, str):
-            json.loads(value or "{}")
+            json.loads(value)
             return value
         if isinstance(value, Mapping):
             return json.dumps(value, ensure_ascii=False, separators=(",", ":"))
@@ -146,8 +134,4 @@ class ScrivenerTask(_TaskBase):
         return text
 
 
-__all__ = [
-    "TaskStatus",
-    "WorkerTask",
-    "ScrivenerTask",
-]
+__all__ = ["TaskStatus", "WorkerTask", "ScrivenerTask"]

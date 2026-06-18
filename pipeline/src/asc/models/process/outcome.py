@@ -1,8 +1,4 @@
-"""Daemon outcome records.
-
-Execution daemons consume tasks and post outcomes back to the orchestrator.
-The orchestrator is the only component that interprets outcome policy.
-"""
+"""Daemon outcome records."""
 
 from __future__ import annotations
 
@@ -23,7 +19,7 @@ OutcomeStatus = Literal["completed", "failed"]
 class _OutcomeBase(RedisMessage):
     """Shared shape for daemon outcomes."""
 
-    model_config = ConfigDict(extra="allow")
+    model_config = ConfigDict(extra="forbid")
 
     identity: str
     task_key: str
@@ -31,16 +27,16 @@ class _OutcomeBase(RedisMessage):
     action: str
     status: OutcomeStatus
 
-    task_number: int = 0
-    step_number: int = 0
+    task_number: int
+    step_number: int
 
-    output_model: str = ""
-    output_key: str = ""
+    output_model: str
+    output_key: str
 
-    message: str = ""
-    fail_message: str = ""
-    failure_reason: str = ""
-    raw_json: Any = None
+    message: str
+    fail_message: str
+    failure_reason: str
+    raw_json: Any
 
     created_at: int = Field(default_factory=timestamp)
 
@@ -49,20 +45,10 @@ class _OutcomeBase(RedisMessage):
     def validate_identity(cls, value: object) -> str:
         return redis_key_segment_text(value, "identity")
 
-    @field_validator("task_key", "cursor_key", mode="before")
+    @field_validator("task_key", "cursor_key", "output_key", mode="before")
     @classmethod
     def validate_required_key(cls, value: object) -> str:
         text = plain_non_empty_string(value, "Redis key")
-        if ":" not in text:
-            raise ValueError(f"expected full Redis key, got {text!r}")
-        return text
-
-    @field_validator("output_key", mode="before")
-    @classmethod
-    def validate_optional_key(cls, value: object) -> str:
-        if value in (None, ""):
-            return ""
-        text = plain_non_empty_string(value, "output_key")
         if ":" not in text:
             raise ValueError(f"expected full Redis key, got {text!r}")
         return text
@@ -75,8 +61,6 @@ class _OutcomeBase(RedisMessage):
     @field_validator("task_number", "step_number", mode="before")
     @classmethod
     def validate_number(cls, value: object) -> int:
-        if value in (None, ""):
-            return 0
         number = int(value)
         if number < 0:
             raise ValueError("task and step numbers must be >= 0")
@@ -85,8 +69,6 @@ class _OutcomeBase(RedisMessage):
     @field_validator("raw_json", mode="before")
     @classmethod
     def validate_raw_json(cls, value: object) -> object:
-        if value in (None, ""):
-            return None
         if isinstance(value, str):
             return json.loads(value)
         if isinstance(value, Mapping):
@@ -113,11 +95,7 @@ class ScrivenerOutcome(_OutcomeBase):
 
     kind: ClassVar[str] = "scrivener_outcome"
 
-    ledger_table: str = ""
+    ledger_table: str
 
 
-__all__ = [
-    "OutcomeStatus",
-    "ScrivenerOutcome",
-    "WorkerOutcome",
-]
+__all__ = ["OutcomeStatus", "ScrivenerOutcome", "WorkerOutcome"]
