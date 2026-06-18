@@ -4,14 +4,7 @@ from typing import Any
 
 from asc.scrivener.connect import LedgerConnection, connect
 from asc.scrivener.schema import ensure_ledger_schema
-from asc.scrivener.util import timestamp_now
-from asc.scrivener.writers.common import (
-    insert_row,
-    ledger_identity,
-    load_task_input,
-    model_json,
-    source_identity,
-)
+from asc.scrivener.writers.common import insert_row, ledger_identity, load_task_input, model_json, source_identity
 
 
 def insert_call_from_task(task: object) -> None:
@@ -33,13 +26,11 @@ def call_values(task: object, record: object | None = None) -> dict[str, Any]:
     if record is None:
         record = load_task_input(task)
 
-    created_at = getattr(record, "created_at", None) or getattr(task, "created_at", None) or timestamp_now()
-
     return {
         "identity": ledger_identity(task),
         "source_identity": source_identity(task),
         "source_json": model_json(record),
-        "created_at": int(created_at),
+        "created_at": int(record.created_at),
     }
 
 
