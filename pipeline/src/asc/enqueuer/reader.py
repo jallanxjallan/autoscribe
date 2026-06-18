@@ -1,5 +1,21 @@
 from __future__ import annotations
 
+
+# Enqueue accepts more than one external record shape, but there should be only
+# one internal enqueue path. The reader is the normalization boundary: inspect
+# record_type, hand the raw record to the matching handler, and require that
+# handler to return a validated EnqueueManifest containing the loaded Plan and
+# ephemeral Call. Most manifests will reference a persistent plan by slug, but a
+# handler may also accept an ephemeral plan carried as data in the record, save
+# it with a short TTL, and return that transient Plan object instead. This allows
+# convenience inputs such as webpage downloads or plain call records to select
+# default plans, and batch-specific manifests to carry one-off plans, without
+# creating parallel enqueue logic. Once a manifest reaches the service layer,
+# every input follows the same response_index, cursor, and queue construction
+# path.
+
+
+
 from collections.abc import Iterator, Mapping
 from dataclasses import dataclass
 from typing import Any, TextIO

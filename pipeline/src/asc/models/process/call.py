@@ -8,6 +8,7 @@ from pydantic import ConfigDict, Field, model_validator
 
 from asc.core.identity import generate_identity
 from asc.redis.model_base import RedisModel
+from asc.core.timestamp import timestamp
 
 
 class Call(RedisModel):
@@ -15,9 +16,11 @@ class Call(RedisModel):
 
     kind: ClassVar[str] = "call"
     suffix: ClassVar[str] = "record"
+
     identity: str = Field(default_factory=generate_identity)
     source_identity: str
     content: str
+    created_at: int = Field(default_factory=timestamp)
     blob_json: str = "{}"
 
     @model_validator(mode="after")

@@ -60,7 +60,7 @@ class _TaskBase(RedisMessage):
     @field_validator("claimed_at", mode="before")
     @classmethod
     def validate_claimed_at(cls, value: object) -> int | None:
-        if value is None:
+        if value is None or value == "":
             return None
         return int(value)
 
