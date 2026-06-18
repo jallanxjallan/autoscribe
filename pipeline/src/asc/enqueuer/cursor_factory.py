@@ -1,14 +1,13 @@
 from __future__ import annotations
 
-from asc.enqueuer.keys import ResolvedEnqueueKeys
 from asc.models.process.cursor import Cursor
 
 
-def build_runtime_cursor(keys: ResolvedEnqueueKeys) -> Cursor:
+def build_runtime_cursor(*, identity: str, call_key: str, plan_key: str) -> Cursor:
     return Cursor(
-        identity=keys.call_identity,
-        call_key=keys.call_key,
-        plan_key=keys.plan_key,
+        identity=identity,
+        call_key=call_key,
+        plan_key=plan_key,
     )
 
 

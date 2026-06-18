@@ -1,32 +1,46 @@
 from __future__ import annotations
 
-from collections.abc import Sequence
+from collections.abc import Mapping, Sequence
+from dataclasses import dataclass
 from typing import Any
 
 from asc.models.control.plan import Plan
+from asc.state.slugmap import SlugKeyResolver
 
 
-def load_runnable_plan_step_count(plan_key: str) -> int:
-    """Load a plan and return its step count.
+@dataclass(frozen=True, slots=True)
+class LoadedPlan:
+    slug: str
+    key: str
+    plan: Plan
+    step_count: int
 
-    Enqueuer only proves that a plan has at least one step. It does not
-    materialize step records or interpret step content; that belongs downstream
-    to the orchestrator/worker path.
-    """
 
+def load_plan_from_manifest_record(record: Mapping[str, Any]) -> LoadedPlan:
+    """Resolve and validate the persistent plan referenced by a manifest row."""
+
+    plan_slug = record["plan_slug"]
+    plan_key = SlugKeyResolver().resolve(plan_slug, expected_kind="plan")
     plan = Plan.load(plan_key)
-    steps = getattr(plan, "steps", None)
-    if not _is_step_sequence(steps):
+    step_count = _step_count(plan, plan_key=plan_key)
+
+    return LoadedPlan(
+        slug=str(plan_slug),
+        key=plan_key,
+        plan=plan,
+        step_count=step_count,
+    )
+
+
+def _step_count(plan: Plan, *, plan_key: str) -> int:
+    steps = getattr(plan, "steps")
+    if not isinstance(steps, Sequence) or isinstance(steps, (str, bytes, bytearray)):
         raise ValueError(f"plan steps must be a list: {plan_key}")
 
-    step_count = len(steps)
-    if step_count < 1:
+    count = len(steps)
+    if count < 1:
         raise ValueError(f"plan has no steps: {plan_key}")
-    return step_count
+    return count
 
 
-def _is_step_sequence(value: Any) -> bool:
-    return isinstance(value, Sequence) and not isinstance(value, (str, bytes, bytearray))
-
-
-__all__ = ["load_runnable_plan_step_count"]
+__all__ = ["LoadedPlan", "load_plan_from_manifest_record"]

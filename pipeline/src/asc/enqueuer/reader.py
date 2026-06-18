@@ -4,21 +4,29 @@ from collections.abc import Iterator, Mapping
 from dataclasses import dataclass
 from typing import Any, TextIO
 
+from asc.enqueuer.call import create_call_from_manifest_record
+from asc.enqueuer.plan import LoadedPlan, load_plan_from_manifest_record
+from asc.models.process.call import Call
 from asc.streams.ndjson import iter_ndjson_records
 
 
 @dataclass(frozen=True, slots=True)
 class EnqueueRecord:
-    """One run-spec row: one call slug paired with one plan slug.
+    """One validated run manifest row.
 
-    ``call_slug`` is canonical. ``prompt_slug`` is accepted only at this stream
-    boundary so older run manifests can still be read without leaking the alias
-    into the rest of enqueuer.
+    The stream record itself is a manifest. The reader splits that manifest into
+    its persistent plan reference and ephemeral document Call before handing the
+    objects to the enqueue service.
     """
 
-    call_slug: str
-    plan_slug: str
+    record_type: str
+    plan: LoadedPlan
+    call: Call
     raw_record: Mapping[str, Any]
+
+    @property
+    def source_identity(self) -> str:
+        return str(self.call.source_identity)
 
 
 def iter_enqueue_records(stream: TextIO) -> Iterator[EnqueueRecord]:
@@ -31,16 +39,27 @@ def iter_enqueue_records(stream: TextIO) -> Iterator[EnqueueRecord]:
                 f"enqueue stream row {parsed.line_number} must be a JSON object"
             )
 
-        try:
-            yield EnqueueRecord(
-                call_slug=_required_call_slug(raw),
-                plan_slug=_required_slug(raw, "plan_slug"),
-                raw_record=raw,
-            )
-        except Exception as exc:
+        record_type = raw["record_type"]
+
+        ALLOWED_RECORD_TYPES = {
+            "dispatch-run-manifest",
+            "call"
+        }
+
+        record_type = raw["record_type"]
+
+        if record_type not in ALLOWED_RECORD_TYPES:
             raise ValueError(
-                f"invalid enqueue record on line {parsed.line_number}: {exc}"
-            ) from exc
+                f"unsupported record_type: {record_type!r}"
+            )
+
+        yield EnqueueRecord(
+            record_type=record_type,
+            plan=load_plan_from_manifest_record(raw),
+            call=create_call_from_manifest_record(raw),
+            raw_record=raw,
+        )
+        
 
     if not seen:
         raise ValueError("no enqueue records found")
@@ -48,22 +67,6 @@ def iter_enqueue_records(stream: TextIO) -> Iterator[EnqueueRecord]:
 
 def load_enqueue_records(stream: TextIO) -> list[EnqueueRecord]:
     return list(iter_enqueue_records(stream))
-
-
-def _required_call_slug(record: Mapping[str, Any]) -> str:
-    value = record.get("call_slug")
-    if value is None:
-        value = record.get("prompt_slug")
-    if not isinstance(value, str) or not value.strip():
-        raise ValueError("enqueue record must include call_slug or prompt_slug")
-    return value.strip()
-
-
-def _required_slug(record: Mapping[str, Any], field: str) -> str:
-    value = record.get(field)
-    if not isinstance(value, str) or not value.strip():
-        raise ValueError(f"enqueue record must include {field}")
-    return value.strip()
 
 
 __all__ = ["EnqueueRecord", "iter_enqueue_records", "load_enqueue_records"]
