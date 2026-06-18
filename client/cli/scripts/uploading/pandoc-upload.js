@@ -14,7 +14,7 @@ function defaultsArgs(defaults) {
   const values = asArray(defaults).filter(Boolean);
 
   if (values.length === 0) {
-    throw new Error('runPandocUpload requires at least one defaults file');
+    throw new Error('pandoc invocation requires at least one defaults file');
   }
 
   return values.map((value) => `--defaults=${value}`);
@@ -159,29 +159,30 @@ function metadataCommandParts(metadata) {
   };
 }
 
+function pandocBin() {
+  const value = process.env.OBSIDIAN_PANDOC_BIN;
+  if (!value) {
+    throw new Error('OBSIDIAN_PANDOC_BIN is not set');
+  }
+  return value;
+}
+
 function runPandocUpload({ cwd = process.cwd(), input, defaults, metadata = {} }) {
   if (!input) {
     throw new Error('runPandocUpload requires input');
   }
 
-  
   const metadataParts = metadataCommandParts(metadata);
 
   try {
     const args = [
-      
       ...defaultsArgs(defaults),
       ...metadataParts.args,
       '--output=/dev/null',
       input,
     ];
 
-    const pandocBin = process.env.OBSIDIAN_PANDOC_BIN;
-    if (!pandocBin) {
-      throw new Error('OBSIDIAN_PANDOC_BIN is not set');
-    }
-
-    execFileSync(pandocBin, args, {
+    execFileSync(pandocBin(), args, {
       cwd,
       stdio: ['ignore', 'inherit', 'inherit'],
     });
@@ -192,6 +193,34 @@ function runPandocUpload({ cwd = process.cwd(), input, defaults, metadata = {} }
   }
 }
 
+function runPandocCapture({ cwd = process.cwd(), input, defaults, metadata = {} }) {
+  if (!input) {
+    throw new Error('runPandocCapture requires input');
+  }
+
+  const metadataParts = metadataCommandParts(metadata);
+
+  try {
+    const args = [
+      ...defaultsArgs(defaults),
+      ...metadataParts.args,
+      '--output=-',
+      input,
+    ];
+
+    return execFileSync(pandocBin(), args, {
+      cwd,
+      encoding: 'utf8',
+      stdio: ['ignore', 'pipe', 'inherit'],
+    });
+  } finally {
+    if (metadataParts.tempDir) {
+      fs.rmSync(metadataParts.tempDir, { recursive: true, force: true });
+    }
+  }
+}
+
 module.exports = {
   runPandocUpload,
+  runPandocCapture,
 };
