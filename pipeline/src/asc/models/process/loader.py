@@ -1,28 +1,17 @@
-"""Process model loading from Redis keys.
-
-Current key shape::
-
-    kind:<identity>:suffix
-
-This module intentionally keeps only the minimal local parsing needed for this
-pass.  The next refactor should move kind/identity extraction back into
-``RedisKey`` so model loading does not split raw strings directly.
-"""
+"""Process model loading from Redis keys."""
 
 from __future__ import annotations
 
 from importlib import import_module
 from typing import Any
 
+from asc.redis.key import RedisKey
 
-def key_kind(key: str) -> str:
+
+def key_kind(key: str | RedisKey) -> str:
     """Return the model kind from a full Redis key."""
 
-    text = str(key or "").strip()
-    parts = text.split(":", 2)
-    if len(parts) != 3 or not all(parts):
-        raise ValueError(f"expected Redis key shaped kind:identity:suffix, got {key!r}")
-    return parts[0]
+    return (key if isinstance(key, RedisKey) else RedisKey(str(key).strip())).kind
 
 
 def pascal_case(value: str) -> str:

@@ -3,7 +3,7 @@
 Queues carry Redis keys, not hydrated model state.
 
 * Enqueue may place one fresh cursor key on the orchestrator queue.
-* The orchestrator activates that cursor in ``state:runtime:active``.
+* The orchestrator activates that cursor in ``state:cursor:active``.
 * After activation, every daemon handoff is a task key.
 * Workers and scrivener return completed task keys to the orchestrator.
 

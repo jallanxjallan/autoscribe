@@ -11,6 +11,7 @@ from dataclasses import dataclass
 from typing import Any
 
 from asc.models.process.loader import load_key
+from asc.redis.key import RedisKey
 from asc.models.process.task import ScrivenerTask, WorkerTask
 
 from .errors import OrchestratorContractError
@@ -46,11 +47,17 @@ def required_key(value: object, field_name: str) -> str:
     return text
 
 
+def key_kind(key: str) -> str:
+    try:
+        return RedisKey(required_text(key, "Redis key")).kind
+    except Exception as exc:
+        raise OrchestratorContractError(f"invalid Redis key: {key!r}") from exc
+
+
 def is_cursor_key(key: str) -> bool:
     """Return True when a queue token is a fresh cursor handoff."""
 
-    text = required_text(key, "cursor_key")
-    return text.startswith("cursor:") or text.endswith(":cursor")
+    return key_kind(key) == "cursor"
 
 
 def cursor_key_for(cursor: Any) -> str:
@@ -76,7 +83,7 @@ def load_task(task_key: str) -> WorkerTask | ScrivenerTask:
     if isinstance(task, (WorkerTask, ScrivenerTask)):
         return task
     raise OrchestratorContractError(
-        f"orchestrator expected runtime task key, got {type(task).__name__}: {key}"
+        f"orchestrator expected process task key, got {type(task).__name__}: {key}"
     )
 
 
@@ -93,12 +100,12 @@ def runtime_task_key_for(task: WorkerTask | ScrivenerTask) -> str:
         except TypeError:
             return required_key(key_for_identity(), "task.key_for_identity()")
 
-    return f"{kind}:{identity}"
+    return str(RedisKey.from_parts(kind, identity))
 
 
 def task_key_has_kind(key: str, kind: object) -> bool:
     expected = required_text(kind, "task.kind")
-    return required_text(key, "task_key").split(":", 1)[0] == expected
+    return key_kind(key) == expected
 
 
 def assert_task_key_for_queue(*, queue_name: str | None, task_key: str) -> str:
@@ -162,6 +169,7 @@ __all__ = [
     "assert_task_key_for_queue",
     "cursor_key_for",
     "is_cursor_key",
+    "key_kind",
     "load_task",
     "make_scrivener_call_task",
     "make_scrivener_result_task",

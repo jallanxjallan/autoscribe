@@ -9,6 +9,7 @@ from __future__ import annotations
 from typing import Any
 
 from asc.models.process.task import ScrivenerTask, WorkerTask
+from asc.redis.key import RedisKey
 
 
 def _required_text(value: object, field_name: str) -> str:
@@ -29,7 +30,7 @@ def cursor_key_for(cursor: Any) -> str:
             return value.strip()
 
     identity = _required_text(getattr(cursor, "identity", None), "cursor.identity")
-    return f"runtime:{identity}:cursor"
+    return str(RedisKey.from_parts("cursor", identity, "index"))
 
 
 def task_number_for(task: Any) -> int:

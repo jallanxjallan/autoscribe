@@ -3,6 +3,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 
 from asc.enqueuer.reader import EnqueueRecord
+from asc.redis.key import RedisKey
 from asc.state.slugmap import SlugKeyResolver
 
 
@@ -25,10 +26,7 @@ def resolve_enqueue_keys(record: EnqueueRecord) -> ResolvedEnqueueKeys:
 
 
 def identity_from_key(key: str) -> str:
-    parts = key.strip().split(":")
-    if len(parts) != 3 or not all(parts):
-        raise ValueError(f"invalid Redis model key: {key!r}")
-    return parts[1]
+    return RedisKey(key).identity
 
 
 __all__ = ["ResolvedEnqueueKeys", "identity_from_key", "resolve_enqueue_keys"]

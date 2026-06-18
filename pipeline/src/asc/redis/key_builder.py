@@ -11,13 +11,14 @@ def build_key(*parts: str) -> str:
 
     Redis keys must be shaped as:
 
-        namespace:identity[:segment...]
+        kind:identity[:suffix...]
 
-    The first two segments are mandatory. Any additional segments are allowed
-    and are treated as path/component/detail segments owned by the caller.
+    The first segment is the canonical model/control kind. The second segment
+    is the shared identity. Any remaining segments are suffix/detail segments
+    owned by the caller.
     """
     if len(parts) < MIN_PARTS:
-        raise ValueError("Redis keys must have at least namespace and identity segments")
+        raise ValueError("Redis keys must have at least kind and identity segments")
 
     normalized: list[str] = []
     for index, value in enumerate(parts, start=1):

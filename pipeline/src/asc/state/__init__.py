@@ -1,4 +1,4 @@
-"""Redis-backed runtime custody state.
+"""Redis-backed process custody state.
 
 Invariant:
     one daemon, one inbound queue
@@ -9,7 +9,7 @@ Queues:
     state:scrivener:queue     -> cursor keys for scrivener
 
 Non-queue state:
-    state:runtime:active      -> active cursor watchdog zset
+    state:cursor:active      -> active cursor watchdog zset
     state:slugmap            -> slug -> Redis key resolver
 
 All daemon queues contain cursor keys only. Job/instruction records, when

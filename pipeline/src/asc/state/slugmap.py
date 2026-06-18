@@ -32,14 +32,11 @@ def _require_key(value: object, *, field_name: str = "key") -> str:
 
 
 def _key_kind(key: str) -> str:
-    return _require_key(key).split(":")[0]
+    return RedisKey(_require_key(key)).kind
 
 
 def _key_identity(key: str) -> str:
-    parts = _require_key(key).split(":")
-    if len(parts) != 3 or not all(parts):
-        raise ValueError(f"invalid Redis model key: {key}")
-    return parts[1]
+    return RedisKey(_require_key(key)).identity
 
 
 class SlugMap(FixedRedisHashIndex):

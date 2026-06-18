@@ -11,6 +11,7 @@ import json
 from typing import Any, Mapping
 
 from asc.models.process.task import WorkerTask
+from asc.redis.key import RedisKey
 
 
 def _required_text(value: object, field_name: str) -> str:
@@ -34,7 +35,7 @@ def cursor_key_for(cursor: Any) -> str:
 def content_key(identity: str, task_number: int) -> str:
     if task_number < 1:
         raise ValueError(f"invalid content task: {task_number}")
-    return f"content:{identity}:{int(task_number)}"
+    return str(RedisKey.from_parts("result", _required_text(identity, "identity"), f"step.{int(task_number)}"))
 
 
 def task_identity(call_identity: str, action: str, task_number: int) -> str:

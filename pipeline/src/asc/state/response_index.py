@@ -4,13 +4,14 @@ from collections.abc import Mapping
 from typing import Any
 
 from asc.redis.index_base import RedisIndex
+from asc.redis.key import RedisKey
 
 
 EMPTY_RESPONSE_SLOT = ""
 
 
 class ResponseIndex(RedisIndex):
-    """Runtime response-slot index for one call."""
+    """Response-slot index for one call."""
 
     @classmethod
     def for_identity(cls, identity: str) -> "ResponseIndex":
@@ -35,7 +36,7 @@ def response_index_key(identity: str) -> str:
     identity = str(identity).strip()
     if not identity:
         raise ValueError("identity must be non-empty")
-    return f"runtime:{identity}:responses"
+    return str(RedisKey.from_parts("response_index", identity, "slots"))
 
 
 def initialize_response_index(
@@ -44,7 +45,7 @@ def initialize_response_index(
     call_key: str,
     terminal_step: int,
 ) -> str:
-    """Create the fixed response index for one runtime call.
+    """Create the fixed response index for one call.
 
     Slot 0 is the original call key. Each planned step owns the matching output
     slot, so step 1 writes slot 1, step 2 writes slot 2, etc.
@@ -87,7 +88,7 @@ def response_output_slot(current_step: int) -> int:
 
 
 def response_output_key(identity: str, current_step: int) -> str:
-    return f"runtime:{identity}:response.{int(current_step)}"
+    return str(RedisKey.from_parts("result", str(identity).strip(), f"step.{int(current_step)}"))
 
 
 def record_response_output(index_key: str, current_step: int, output_key: str) -> None:

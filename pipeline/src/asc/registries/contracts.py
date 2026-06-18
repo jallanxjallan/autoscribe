@@ -48,23 +48,29 @@ MODEL_CONTRACTS: dict[str, ModelContractRef] = {
         import_paths=("asc.models.control.plan.PlanRecord",),
         purpose="Typed plan control records consumed by control upload.",
     ),
-    "runtime:call": ModelContractRef(
-        group="runtime",
+    "process:call": ModelContractRef(
+        group="process",
         name="call",
-        import_paths=("asc.models.runtime.call.CallRecord",),
-        purpose="Runtime call record materialized by enqueue.",
+        import_paths=("asc.models.process.call.Call",),
+        purpose="Process call record materialized by enqueue.",
     ),
-    "runtime:step": ModelContractRef(
-        group="runtime",
-        name="step",
-        import_paths=("asc.models.runtime.step.RuntimeStepRecord",),
-        purpose="Runtime atomic step record consumed by workers.",
+    "process:cursor": ModelContractRef(
+        group="process",
+        name="cursor",
+        import_paths=("asc.models.process.cursor.Cursor",),
+        purpose="Process cursor/baton consumed by the orchestrator.",
     ),
-    "runtime:content": ModelContractRef(
-        group="runtime",
-        name="content",
-        import_paths=("asc.models.runtime.content.RuntimeContentRecord",),
-        purpose="Runtime content record consumed and produced by workers.",
+    "process:result": ModelContractRef(
+        group="process",
+        name="result",
+        import_paths=("asc.models.process.result.Result",),
+        purpose="Process step result produced by workers.",
+    ),
+    "process:failure": ModelContractRef(
+        group="process",
+        name="failure",
+        import_paths=("asc.models.process.result.Failure",),
+        purpose="Process step failure produced by workers.",
     ),
     "export:pending-export": ModelContractRef(
         group="export",

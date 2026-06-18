@@ -42,25 +42,38 @@ class RedisKey:
         return tuple(self.key.split(self.SEP))
 
     @property
-    def namespace(self) -> str:
+    def kind(self) -> str:
+        """Canonical model selector: the first Redis key segment."""
         return self.parts[0]
 
     @property
-    def domain(self) -> str:
-        """Backward-compatible alias for namespace."""
-        return self.namespace
-
-    @property
     def identity(self) -> str:
+        """Shared process/object identity: the second Redis key segment."""
         return self.parts[1]
 
     @property
+    def suffix(self) -> str:
+        """Remaining key detail after kind and identity, or an empty string."""
+        return self.SEP.join(self.parts[2:])
+
+    @property
     def segments(self) -> tuple[str, ...]:
+        """Suffix segments after kind and identity."""
         return self.parts[2:]
 
     @property
+    def namespace(self) -> str:
+        """Compatibility alias for kind."""
+        return self.kind
+
+    @property
+    def domain(self) -> str:
+        """Compatibility alias for kind."""
+        return self.kind
+
+    @property
     def classifier(self) -> str | None:
-        """Backward-compatible alias for the first extra segment."""
+        """Compatibility alias for the first suffix segment."""
         return self.segments[0] if self.segments else None
 
     @classmethod
@@ -90,7 +103,7 @@ class RedisKey:
             raise ValueError("expire() requires non-negative int seconds")
         return bool(self._r().expire(self.key, seconds))
 
-    # Raw string helpers are intentionally minimal. Runtime records should use hashes.
+    # Raw string helpers are intentionally minimal. Process records should use hashes.
 
     def get(self) -> str | None:
         return self._r().get(self.key)

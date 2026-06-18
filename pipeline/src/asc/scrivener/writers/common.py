@@ -1,19 +1,13 @@
 from __future__ import annotations
 
-import importlib
 import json
 from collections.abc import Mapping
 from typing import Any
 
+from asc.models.process.loader import load_key
+from asc.redis.key import RedisKey
 from asc.scrivener.connect import LedgerConnection
 from asc.scrivener.util import execute_and_commit
-
-_RUNTIME_MODELS: dict[str, tuple[str, str]] = {
-    "call": ("asc.models.runtime.call", "CallRecord"),
-    "result": ("asc.models.runtime.result", "StepResult"),
-    "failure": ("asc.models.runtime.result", "StepFailure"),
-}
-
 
 def require_text(value: object, name: str) -> str:
     if not isinstance(value, str):
@@ -24,14 +18,8 @@ def require_text(value: object, name: str) -> str:
     return value
 
 
-def split_key(key: str) -> tuple[str, str, str]:
-    parts = key.split(":", 2)
-    if len(parts) != 3:
-        raise ValueError(f"invalid redis key shape, expected kind:identity:suffix: {key!r}")
-    kind, identity, suffix = (part.strip() for part in parts)
-    if not kind or not identity or not suffix:
-        raise ValueError(f"invalid redis key shape, expected kind:identity:suffix: {key!r}")
-    return kind, identity, suffix
+def redis_key(key: str) -> RedisKey:
+    return RedisKey(require_text(key, "Redis key"))
 
 
 def task_source_key(task: Any) -> str:
@@ -43,13 +31,11 @@ def source_key(task: Any) -> str:
 
 
 def source_kind(task: Any) -> str:
-    kind, _identity, _suffix = split_key(task_source_key(task))
-    return kind
+    return redis_key(task_source_key(task)).kind
 
 
 def source_identity(task: Any) -> str:
-    _kind, identity, _suffix = split_key(task_source_key(task))
-    return identity
+    return redis_key(task_source_key(task)).identity
 
 
 def ledger_identity(task: Any) -> str:
@@ -84,10 +70,7 @@ def step_number(task: Any) -> int:
 
 
 def load_source_key(key: str) -> Any:
-    kind, _identity, _suffix = split_key(key)
-    module_name, class_name = _RUNTIME_MODELS[kind]
-    model = getattr(importlib.import_module(module_name), class_name)
-    return model.load(key)
+    return load_key(key)
 
 
 def load_task_source(task: Any) -> Any:
@@ -148,7 +131,7 @@ __all__ = [
     "source_identity",
     "source_key",
     "source_kind",
-    "split_key",
+    "redis_key",
     "step_number",
     "task_action",
     "task_number",

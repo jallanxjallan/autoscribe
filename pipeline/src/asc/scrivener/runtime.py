@@ -48,7 +48,7 @@ def run_once(
 
     # Return the completed task key to orchestrator. Orchestrator can load the
     # task, recover cursor_key from it, and route the next task without mutating
-    # RuntimeCursor.
+    # Cursor.
     orchestrator_queue.insert(task_key)
 
     return ScrivenerRunReport(

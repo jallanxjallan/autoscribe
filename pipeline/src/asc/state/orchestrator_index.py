@@ -8,9 +8,9 @@ from typing import Iterable
 from asc.redis.key import RedisKey
 
 
-RUNTIME_ACTIVE_INDEX_KEY = "state:runtime:active"
-# Backward-compatible name for older imports.
-ORCHESTRATOR_DUE_INDEX_KEY = RUNTIME_ACTIVE_INDEX_KEY
+ACTIVE_CURSOR_INDEX_KEY = "state:cursor:active"
+ORCHESTRATOR_DUE_INDEX_KEY = ACTIVE_CURSOR_INDEX_KEY
+RUNTIME_ACTIVE_INDEX_KEY = ACTIVE_CURSOR_INDEX_KEY
 DEFAULT_STALE_AFTER_SECONDS = 30.0
 
 
@@ -33,12 +33,12 @@ DueCursor = ActiveCursor
 
 
 def _index() -> RedisKey:
-    return RedisKey(RUNTIME_ACTIVE_INDEX_KEY)
+    return RedisKey(ACTIVE_CURSOR_INDEX_KEY)
 
 
 def _clean_key(cursor_key: str) -> str:
     if not isinstance(cursor_key, str) or not cursor_key.strip():
-        raise TypeError("cursor_key must be a non-empty RuntimeCursor key")
+        raise TypeError("cursor_key must be a non-empty Cursor key")
     if ":" not in cursor_key:
         raise ValueError("cursor_key must be a full Redis key, not a bare identity")
     return cursor_key.strip()
@@ -49,11 +49,11 @@ def _score(score: float | None = None) -> float:
 
 
 def active_index_key() -> str:
-    return RUNTIME_ACTIVE_INDEX_KEY
+    return ACTIVE_CURSOR_INDEX_KEY
 
 
 def due_index_key() -> str:
-    return RUNTIME_ACTIVE_INDEX_KEY
+    return ACTIVE_CURSOR_INDEX_KEY
 
 
 def touch(cursor_key: str, *, score: float | None = None) -> int:
@@ -170,6 +170,7 @@ __all__ = [
     "DEFAULT_STALE_AFTER_SECONDS",
     "DueCursor",
     "ORCHESTRATOR_DUE_INDEX_KEY",
+    "ACTIVE_CURSOR_INDEX_KEY",
     "RUNTIME_ACTIVE_INDEX_KEY",
     "active_index_key",
     "claim_due",
