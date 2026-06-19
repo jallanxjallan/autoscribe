@@ -4,11 +4,10 @@ from collections.abc import Iterable
 from typing import TextIO
 
 from asc.enqueuer.call import call_identity, call_key, promote_call_ttl
-from asc.enqueuer.cursor_factory import build_runtime_cursor, save_runtime_cursor
+from asc.enqueuer.factories import build_runtime_cursor, save_runtime_cursor, build_response_index
 from asc.enqueuer.queue import enqueue_cursor
 from asc.enqueuer.reader import EnqueueRecord, iter_enqueue_records
 from asc.enqueuer.report import EnqueuedCall, EnqueueReport
-from asc.enqueuer.response_index import create_response_index
 
 
 def enqueue_from_stream(stream: TextIO) -> EnqueueReport:
@@ -26,7 +25,7 @@ def enqueue_record(record: EnqueueRecord) -> EnqueuedCall:
     identity = call_identity(call)
     stored_call_key = call_key(call)
 
-    create_response_index(
+    build_response_index(
         identity=identity,
         call_key=stored_call_key,
         total_steps=plan.step_count,
