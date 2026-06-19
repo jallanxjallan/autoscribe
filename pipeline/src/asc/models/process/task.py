@@ -125,15 +125,36 @@ class ScrivenerTask(_TaskBase):
     kind: ClassVar[str] = "scrivener_task"
 
     source_key: str
-    ledger_table: str
+    plan_key: str
+    args_json: str
+    ttl_seconds: int | None = None
 
-    @field_validator("source_key", mode="before")
+    @field_validator("source_key", "plan_key", mode="before")
     @classmethod
-    def validate_source_key(cls, value: object) -> str:
-        text = plain_non_empty_string(value, "source_key")
+    def validate_required_key(cls, value: object) -> str:
+        text = plain_non_empty_string(value, "Redis key")
         if ":" not in text:
             raise ValueError(f"expected full Redis key, got {text!r}")
         return text
 
+    @field_validator("args_json", mode="before")
+    @classmethod
+    def validate_args_json(cls, value: object) -> str:
+        if isinstance(value, str):
+            json.loads(value)
+            return value
+        if isinstance(value, Mapping):
+            return json.dumps(value, ensure_ascii=False, separators=(",", ":"))
+        raise ValueError("args_json must be JSON or a mapping")
+
+    @field_validator("ttl_seconds", mode="before")
+    @classmethod
+    def validate_ttl_seconds(cls, value: object) -> int | None:
+        if value is None or value == "":
+            return None
+        ttl = int(value)
+        if ttl <= 0:
+            raise ValueError("ttl_seconds must be > 0")
+        return ttl
 
 __all__ = ["TaskStatus", "WorkerTask", "ScrivenerTask"]

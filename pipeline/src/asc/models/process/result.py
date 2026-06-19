@@ -8,7 +8,7 @@ from asc.core.timestamp import timestamp
 from asc.redis.model_base import RedisModel
 
 
-class Result(RedisModel):
+class Success(RedisModel):
     """Successful payload for one worker-produced step result."""
 
     model_config = ConfigDict(extra="forbid")
@@ -18,8 +18,6 @@ class Result(RedisModel):
 
     content: str
     raw_json: Any
-    started_at: int
-    completed_at: int
     created_at: int = Field(default_factory=timestamp)
 
 
@@ -34,8 +32,6 @@ class Failure(RedisModel):
     content: str
     failure_reason: str
     raw_json: Any
-    started_at: int
-    completed_at: int
     created_at: int = Field(default_factory=timestamp)
 
 
