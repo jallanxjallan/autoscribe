@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import json
-import sys
 from collections.abc import Iterable, Mapping
 from typing import Any
 
@@ -26,7 +25,11 @@ from asc.scrivener.lifecycle import (
 )
 from asc.scrivener.schema_dump import schema_columns, schema_sql
 
-app = typer.Typer(help="Inspect and maintain the Scrivener ledger.")
+app = typer.Typer(
+    no_args_is_help=True,
+    add_completion=False,
+    help="Inspect and maintain the Scrivener ledger.",
+)
 
 
 @app.command("path")
@@ -85,6 +88,18 @@ def rotate_command() -> None:
         f"steps={report.old_deleted_steps} "
         f"exports={report.old_deleted_exports}"
     )
+
+
+@app.command("rotate-db")
+def rotate_db_command() -> None:
+    """Compatibility alias for ``rotate``.
+
+    The old storage command renamed the SQLite file and initialized a blank
+    database.  Ledger rotation now belongs to ``asc.scrivener.lifecycle`` so
+    pending export custody can be carried into the fresh active ledger.
+    """
+
+    rotate_command()
 
 
 @app.command("schema")
