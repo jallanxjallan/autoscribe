@@ -4,6 +4,7 @@ const { createInternalLink } = require("./internal-link");
 const { forceCurrentLeafPresentation } = require("./workspace");
 const { createSelectionModel } = require("./selection-model");
 const { createStateStore } = require("../selections/selection-state");
+const { writeManifest } = require("./operation-manifest");
 
 function defaultSerializeRow(row, index) {
   return {
@@ -85,6 +86,60 @@ function buildSavedSelectionRecord({
   return record;
 }
 
+async function saveDataviewSelection(api, config = {}) {
+  if (!api || typeof api !== "object") {
+    throw new Error("saveDataviewSelection requires the selection query api.");
+  }
+
+  const options = api.options ?? {};
+  const operation = config.operation ?? options.namespace;
+
+  if (!operation || typeof operation !== "string") {
+    throw new Error("saveDataviewSelection requires an operation or options.namespace.");
+  }
+
+  const selectedRows = api.getSelectedRows();
+  const serializeRow = config.serializeRow ?? options.serializeRow ?? defaultSerializeRow;
+  const items = selectedRows.map((row, index) => serializeRow(row, index));
+
+  const manifestOptions = {
+    selection_source: config.selectionSource ?? operation,
+    selection_kind: config.selectionKind ?? options.selectionKind,
+    selection_key: config.selectionKey ?? options.selectionKey,
+    ...(config.options && typeof config.options === "object" ? config.options : {})
+  };
+
+  if (typeof config.savedSelectionExtras === "function") {
+    Object.assign(manifestOptions, config.savedSelectionExtras({
+      rows: items,
+      selectedRows,
+      items,
+      api,
+      options
+    }));
+  }
+
+  const { manifestPath, manifest } = writeManifest({
+    app: api.app,
+    operation,
+    queryName: config.queryName ?? options.title ?? operation,
+    namespace: config.namespace ?? options.namespace ?? operation,
+    options: manifestOptions,
+    items,
+    extra: config.extra ?? {}
+  });
+
+  if (config.saveState !== false && typeof api.saveCurrentState === "function") {
+    await api.saveCurrentState({ quiet: true, action: config.action ?? "manifest" });
+  }
+
+  if (config.notify !== false && typeof api.notify === "function") {
+    api.notify(`Saved ${items.length} selected item(s) to ${manifestPath}`);
+  }
+
+  return { manifestPath, manifest, items };
+}
+
 async function renderSelectionQuery(rawOptions) {
   const options = {
     stateVersion: 2,
@@ -164,6 +219,9 @@ async function renderSelectionQuery(rawOptions) {
       getDisplayedRows: model.getDisplayedRows,
       getSortMode: model.getSortMode,
       saveCurrentState,
+      saveDataviewSelection(config = {}) {
+        return saveDataviewSelection(getApi(), config);
+      },
       reloadSavedState,
       clearSavedState,
       render,
@@ -662,5 +720,6 @@ async function renderSelectionQuery(rawOptions) {
 }
 
 module.exports = {
-  renderSelectionQuery
+  renderSelectionQuery,
+  saveDataviewSelection,
 };

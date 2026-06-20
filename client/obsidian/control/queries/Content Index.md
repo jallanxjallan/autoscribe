@@ -37,7 +37,6 @@ const { loader, queryPath, vaultName } = runtime;
 
 const { renderSelectionQuery } = loader.requireControl("scripts/lib/selection-query.js");
 const { setTriState } = loader.requireControl("scripts/lib/dom.js");
-const { getManifestPath, writeJsonFile } = loader.requireControl("scripts/lib/operation-manifest.js");
 
 const {
   buildTocGroups,
@@ -159,44 +158,23 @@ function renderGroupedResults(parent, displayedRows, api) {
 }
 
 async function saveSelectionManifest(api) {
-  const selectedRows = api.getSelectedRows();
-  const items = selectedRows.map((row, index) => serializeTocRow(row, index));
-  const extras = tocSavedSelectionExtras({ rows: items, tocPath: CONFIG.tocPath });
-
-  const timestamp = new Date().toISOString();
-  const vaultRoot = app.vault.adapter.getBasePath?.() || app.vault.adapter.basePath;
-  const manifestPath = getManifestPath(app, "content-index");
-  const manifest = {
-    type: "operation_manifest",
-    recordType: "operation_manifest",
-    timestamp,
-    savedAt: timestamp,
-    saved_at: timestamp,
+  await api.saveDataviewSelection({
     operation: "content-index",
     queryName: "Content Index",
     namespace: "content-index",
-    vaultName,
-    vault: vaultName,
-    vaultRoot,
-    queryPath,
+    selectionSource: "content-index",
+    selectionKind: "toc-entry",
+    selectionKey: "id",
+    serializeRow: serializeTocRow,
     options: {
-      selection_source: "content-index",
-      selection_kind: "toc-entry",
-      selection_key: "id",
       contents_prefix: CONFIG.contentsPrefix,
       toc_path: CONFIG.tocPath,
-      default_component: CONFIG.defaultComponent,
-      ...extras
+      default_component: CONFIG.defaultComponent
     },
-    count: items.length,
-    items
-  };
-  writeJsonFile(manifestPath, manifest);
-
-
-  await api.saveCurrentState({ quiet: true, action: "manifest" });
-  api.notify(`Saved ${items.length} selected item(s) to ${manifestPath}`);
-
+    savedSelectionExtras({ rows }) {
+      return tocSavedSelectionExtras({ rows, tocPath: CONFIG.tocPath });
+    }
+  });
 }
 
 
