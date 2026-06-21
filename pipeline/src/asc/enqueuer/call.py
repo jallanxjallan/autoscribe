@@ -56,19 +56,9 @@ def _call_payload(record: Mapping[str, Any]) -> dict[str, Any]:
     }
 
 
-def call_identity(call: Call) -> str:
-    return str(call.identity)
-
-
-def call_key(call: Call) -> str:
-    return str(call.redis_key)
-
-
 __all__ = [
     "ENQUEUED_CALL_TTL_SECONDS",
     "PROBATIONARY_CALL_TTL_SECONDS",
-    "call_identity",
-    "call_key",
     "create_call_from_manifest_record",
     "expire_call",
     "promote_call_ttl",

@@ -16,8 +16,7 @@ from asc.models.process.call import Call
 from asc.streams.ndjson import iter_ndjson_records
 
 
-DISPATCH_RUN_MANIFEST = "dispatch-run-manifest"
-ALLOWED_RECORD_TYPES = frozenset({DISPATCH_RUN_MANIFEST})
+
 
 
 @dataclass(frozen=True, slots=True)
@@ -51,8 +50,7 @@ def iter_enqueue_records(stream: TextIO) -> Iterator[EnqueueRecord]:
                 f"enqueue stream row {parsed.line_number} missing required field: record_type"
             ) from exc
 
-        if record_type not in ALLOWED_RECORD_TYPES:
-            raise ValueError(f"unsupported record_type: {record_type!r}")
+       
 
         yield EnqueueRecord(
             record_type=record_type,
@@ -70,8 +68,6 @@ def load_enqueue_records(stream: TextIO) -> list[EnqueueRecord]:
 
 
 __all__ = [
-    "ALLOWED_RECORD_TYPES",
-    "DISPATCH_RUN_MANIFEST",
     "EnqueueRecord",
     "iter_enqueue_records",
     "load_enqueue_records",
