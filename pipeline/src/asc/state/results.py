@@ -1,26 +1,26 @@
 # asc/state/results_index.py
 """Redis-backed results index.
 
-An LLM call can produce either a Response or a Failure.
+A call step can produce either a Response or a Failure.
 
 Key shape:
 
-    results:<call_ulid>:index
+    results:<identity>:index
 
 Slot meaning:
 
-    slot 0  = original call record key
-    slot 1  = step 1 marker/result/failure key
-    slot 2  = step 2 marker/result/failure key
+    slot 0  = initial input record key
+    slot 1  = step 1 marker/result key
+    slot 2  = step 2 marker/result key
     ...
 
 The results index is only a three-state slot ledger:
 
     empty string  -> not yet dispatched
     marker key    -> step is in flight
-    produced key  -> step completed
+    result key    -> step produced a Response or Failure
 
-It does not know what marker or produced keys contain.
+It does not know what marker or result keys contain.
 """
 
 from __future__ import annotations
@@ -43,71 +43,59 @@ class ResultsIndex(RedisIndex):
     SUFFIX: ClassVar[str] = RESULTS_INDEX_SUFFIX
     EMPTY_SLOT: ClassVar[str] = EMPTY_RESULT_SLOT
 
-    @classmethod
-    def key_for(cls, identity: str) -> str:
-        """Return the results-index key for a call/process identity."""
+    @property
+    def redis_key(self) -> RedisKey:
+        """Return the bound results-index Redis key."""
 
-        clean_identity = cls._require_text(identity, field_name="identity")
-        return str(
-            RedisKey(
-                kind=cls.KIND,
-                identity=clean_identity,
-                suffix=cls.SUFFIX,
+        if isinstance(self.key, RedisKey):
+            return self.key
+        return RedisKey(str(self.key))
+
+    @classmethod
+    def from_identity(cls, identity: str) -> ResultsIndex:
+        """Bind a results index from a process identity."""
+
+        return cls(
+            str(
+                RedisKey(
+                    kind=cls.KIND,
+                    identity=cls._require_text(identity, field_name="identity"),
+                    suffix=cls.SUFFIX,
+                )
             )
         )
 
     @classmethod
-    def from_identity(cls, identity: str) -> ResultsIndex:
-        """Bind a results index from a call/process identity."""
-
-        return cls(cls.key_for(identity))
-
-    @classmethod
     def create(
         cls,
-        identity: str,
         *,
-        call_key: str,
+        call_key: RedisKey,
         total_steps: int,
         ttl_seconds: int | None = None,
     ) -> ResultsIndex:
-        """Create, initialize, and return a bound results index."""
+        """Create, initialize, and return a bound results index.
 
-        index = cls.from_identity(identity)
-        index.initialize(
-            call_key=call_key,
-            total_steps=total_steps,
-            ttl_seconds=ttl_seconds,
-        )
-        return index
-
-    def initialize(
-        self,
-        *,
-        call_key: str,
-        total_steps: int,
-        ttl_seconds: int | None = None,
-    ) -> None:
-        """Initialize result slots.
-
-        Existing contents are deleted first. Slot 0 receives the original call
-        key. Slots 1..total_steps are initialized as empty strings.
+        The call key supplies the process identity. Existing contents are deleted
+        first. Slot 0 stores the full call key string. Slots 1..total_steps are
+        initialized as empty strings.
         """
 
-        source_key = self._require_text(call_key, field_name="call_key")
+        index = cls.from_identity(call_key.identity)
         steps = _required_int(total_steps, "total_steps")
 
         if steps < 0:
             raise ValueError("total_steps must be >= 0")
 
-        self.delete()
-        self.key.hset(field="0", value=source_key)
+        index.delete()
+        index.key.hset(field="0", value=str(call_key))
 
         for slot in range(1, steps + 1):
-            self.key.hset(field=str(slot), value=self.EMPTY_SLOT)
+            index.key.hset(field=str(slot), value=cls.EMPTY_SLOT)
 
         if ttl_seconds is not None:
-            self._r().expire(str(self.key), int(ttl_seconds))
+            index._r().expire(str(index.key), int(ttl_seconds))
+
+        return index
 
     def slots(self) -> dict[int, str]:
         """Return all slots as ``{slot_number: key_text}``."""
@@ -206,16 +194,19 @@ class ResultsIndex(RedisIndex):
         slot: int,
         *,
         expected_marker_key: str,
-        produced_key: str,
+        result_key: str,
     ) -> None:
-        """Move a slot from expected marker to produced key."""
+        """Move a slot from expected marker to result key.
+
+        ``result_key`` may point to either a Response or a Failure record.
+        """
 
         slot_number = _required_int(slot, "slot")
         expected = self._require_text(
             expected_marker_key,
             field_name="expected_marker_key",
         )
-        produced = self._require_text(produced_key, field_name="produced_key")
+        result = self._require_text(result_key, field_name="result_key")
 
         current = self.get_slot(slot_number)
         if current is None:
@@ -229,7 +220,7 @@ class ResultsIndex(RedisIndex):
                 f"actual={actual!r} index={self.key}"
             )
 
-        self.set_slot(slot_number, produced)
+        self.set_slot(slot_number, result)
 
     def next_empty_slot(self) -> int | None:
         """Return the next empty slot, or ``None`` if all slots are occupied."""
