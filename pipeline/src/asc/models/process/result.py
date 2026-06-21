@@ -8,12 +8,12 @@ from asc.core.timestamp import timestamp
 from asc.redis.model_base import RedisModel
 
 
-class Success(RedisModel):
+class Response(RedisModel):
     """Successful payload for one worker-produced step result."""
 
     model_config = ConfigDict(extra="forbid")
 
-    kind: ClassVar[str] = "result"
+    kind: ClassVar[str] = "response"
     suffix: ClassVar[str] = "step"
 
     content: str

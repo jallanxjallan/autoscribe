@@ -1,7 +1,7 @@
 """Short-lived process marker for worker steps in progress.
 
 A response-index step slot stores this model's Redis key after the orchestrator
-assigns a worker task and before the worker returns a result or failure.  The
+assigns a worker task and before the worker returns a response or failure. The
 marker points back to the actual worker task key and carries a timestamp for
 watchdogs.
 """
@@ -18,30 +18,27 @@ from asc.redis.key import RedisKey
 from asc.redis.model_base import RedisModel
 
 
-DEFAULT_IN_PROCESS_TTL_SECONDS = 60 * 60
+DEFAULT_PENDING_TTL_SECONDS = 60 * 60
 
 
-class InProcess(RedisModel):
+class Pending(RedisModel):
     """Short-lived marker for a worker-owned step slot.
 
     Key shape:
-        in_process:<process_identity>:step.<step_number>
+        pending:<process_identity>:step.<step_number>
 
-    The model is deliberately tiny.  It is watchdog/process-progress state, not
-    worker output.  A worker outcome should replace the corresponding response
-    index slot with a result or failure key.
+    The model is deliberately tiny. It is watchdog/process-progress state, not
+    worker output. A worker outcome should replace the corresponding response
+    index slot with a response or failure key.
     """
 
     model_config = ConfigDict(extra="forbid")
 
-    # ``RedisModel.domain`` is not used for this model's key construction; the
-    # marker kind is the first Redis key segment by design.
-    domain: ClassVar[str] = "in_process"
-    kind: ClassVar[str] = "in_process"
-    suffix_prefix: ClassVar[str] = "step"
-    default_ttl_seconds: ClassVar[int] = DEFAULT_IN_PROCESS_TTL_SECONDS
+    kind: ClassVar[str] = "pending"
+    suffix: ClassVar[str] = "step"
+    default_ttl_seconds: ClassVar[int] = DEFAULT_PENDING_TTL_SECONDS
 
-    type: Literal["in_process"] = "in_process"
+    type: Literal["pending"] = "pending"
 
     identity: str
     step_number: int = Field(ge=1)
@@ -81,24 +78,17 @@ class InProcess(RedisModel):
         number = int(step_number)
         if number < 1:
             raise ValueError("step_number must be >= 1")
-        return RedisKey.from_parts(cls.kind, identity, f"{cls.suffix_prefix}.{number}")
+        return RedisKey.from_parts(cls.kind, identity, f"{cls.suffix}.{number}")
 
     @classmethod
     def key_for_identity(cls, identity: str) -> RedisKey:
-        raise TypeError("InProcess requires step_number; use key_for_step(identity, step_number)")
+        raise TypeError(
+            "Pending requires step_number; use key_for_step(identity, step_number)"
+        )
 
     @property
     def redis_key(self) -> RedisKey:
         return self.key_for_step(self.identity, self.step_number)
-
-    def save(self, ttl_seconds: int | None = DEFAULT_IN_PROCESS_TTL_SECONDS) -> str:
-        key = self.redis_key
-        key.hset(mapping=self.dump_redis())
-        if ttl_seconds is not None and int(ttl_seconds) > 0:
-            key.expire(int(ttl_seconds))
-        return str(key)
-
-    overwrite = save
 
     @classmethod
     def load(
@@ -107,7 +97,7 @@ class InProcess(RedisModel):
         step_number: int | None = None,
         *,
         require: bool = True,
-    ) -> "InProcess | None":
+    ) -> "Pending | None":
         if step_number is None:
             key = value if isinstance(value, RedisKey) else RedisKey(str(value))
         else:
@@ -121,4 +111,4 @@ class InProcess(RedisModel):
         return cls.load_redis(raw)
 
 
-__all__ = ["DEFAULT_IN_PROCESS_TTL_SECONDS", "InProcess"]
+__all__ = ["DEFAULT_PENDING_TTL_SECONDS", "Pending"]
