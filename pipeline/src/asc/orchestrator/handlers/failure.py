@@ -12,35 +12,34 @@ can decide retry vs terminal failure without changing the inbox contract.
 
 from __future__ import annotations
 
-from ..context import OrchestratorContext
+from asc.models.process.cursor import Cursor
+from asc.models.process.result import Failure
+from asc.scrivener import inbox as scrivener_inbox
+from asc.state.results import ResultsIndex
+
 from ..errors import OrchestratorContractError
 from ..keys import RuntimeKey, response_step_number
-from ..tasks import make_scrivener_call_failed, task_key
+from ..tasks import make_scrivener_call_failed
 
 
-def handle(posted: RuntimeKey, context: OrchestratorContext) -> None:
+def handle(posted: RuntimeKey) -> None:
     step_number = response_step_number(posted)
-    expected = context.store.result_key_for_step(
-        identity=posted.identity,
-        step_number=step_number,
-    )
+    expected = str(ResultsIndex(f"results:{posted.identity}:index").get(step_number))
     if expected != posted.raw:
         raise OrchestratorContractError(
             f"posted failure is not canonical for step {step_number}: "
             f"posted={posted.raw!r} results_index={expected!r}"
         )
 
-    failure = context.store.load_failure(posted.raw)
-    cursor = context.store.load_cursor_for_identity(posted.identity)
-
+    cursor = Cursor.load(f"cursor:{posted.identity}:index")
     task = make_scrivener_call_failed(
         cursor=cursor,
         failure_key=posted.raw,
         failed_at_step=step_number,
-        failure=failure,
+        failure=Failure.load(posted.raw),
     )
-    key = context.store.save_task(task)
-    context.scrivener_inbox.post(key or task_key(task))
+    task.save()
+    scrivener_inbox.post(str(task.key))
 
 
 __all__ = ["handle"]

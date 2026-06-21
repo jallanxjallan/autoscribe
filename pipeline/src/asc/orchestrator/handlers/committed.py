@@ -7,64 +7,64 @@ scrivener task.
 
 from __future__ import annotations
 
+from asc.models.control.plan import Plan
+from asc.models.process.cursor import Cursor
+from asc.scrivener import inbox as scrivener_inbox
+from asc.state.results import ResultsIndex
+from asc.worker import inbox as worker_inbox
+
 from ..contracts import COMMITTED_CALL_SUFFIX, COMMITTED_COMPLETED_SUFFIX, COMMITTED_FAILED_SUFFIX
-from ..context import OrchestratorContext
 from ..errors import OrchestratorContractError
 from ..keys import RuntimeKey, committed_step_number
 from ..tasks import (
     make_scrivener_call_completed,
     make_worker_step,
     plan_step_count,
-    task_key,
 )
 
 
-def handle(posted: RuntimeKey, context: OrchestratorContext) -> None:
+def handle(posted: RuntimeKey) -> None:
     suffix = posted.require_suffix()
 
     if suffix in {COMMITTED_COMPLETED_SUFFIX, COMMITTED_FAILED_SUFFIX}:
         return
 
-    cursor = context.store.load_cursor_for_identity(posted.identity)
+    cursor = Cursor.load(f"cursor:{posted.identity}:index")
 
     if suffix == COMMITTED_CALL_SUFFIX:
-        plan = context.store.load_plan(cursor.plan_key)
-        total_steps = plan_step_count(plan)
-        _after_call_committed(context=context, cursor=cursor, plan=plan, total_steps=total_steps)
+        plan = Plan.load(cursor.plan_key)
+        _after_call_committed(cursor=cursor, plan=plan, total_steps=plan_step_count(plan))
         return
 
     step_number = committed_step_number(posted)
-    plan = context.store.load_plan(cursor.plan_key)
-    total_steps = plan_step_count(plan)
+    plan = Plan.load(cursor.plan_key)
     _after_step_committed(
-        context=context,
         cursor=cursor,
         plan=plan,
-        total_steps=total_steps,
+        total_steps=plan_step_count(plan),
         step_number=step_number,
     )
 
 
-def _after_call_committed(*, context: OrchestratorContext, cursor: object, plan: object, total_steps: int) -> None:
+def _after_call_committed(*, cursor: object, plan: object, total_steps: int) -> None:
     if total_steps < 1:
         task = make_scrivener_call_completed(cursor=cursor, completed_after_step=0)
-        key = context.store.save_task(task)
-        context.scrivener_inbox.post(key or task_key(task))
+        task.save()
+        scrivener_inbox.post(str(task.key))
         return
 
     task = make_worker_step(
         cursor=cursor,
         plan=plan,
         step_number=1,
-        input_key=context.store.input_key_for_step(identity=cursor.identity, step_number=1),
+        input_key=str(ResultsIndex(f"results:{cursor.identity}:index").input_key_for_step(1)),
     )
-    key = context.store.save_task(task)
-    context.worker_inbox.post(key or task_key(task))
+    task.save()
+    worker_inbox.post(str(task.key))
 
 
 def _after_step_committed(
     *,
-    context: OrchestratorContext,
     cursor: object,
     plan: object,
     total_steps: int,
@@ -78,18 +78,18 @@ def _after_step_committed(
     next_step = step_number + 1
     if next_step > total_steps:
         task = make_scrivener_call_completed(cursor=cursor, completed_after_step=step_number)
-        key = context.store.save_task(task)
-        context.scrivener_inbox.post(key or task_key(task))
+        task.save()
+        scrivener_inbox.post(str(task.key))
         return
 
     task = make_worker_step(
         cursor=cursor,
         plan=plan,
         step_number=next_step,
-        input_key=context.store.input_key_for_step(identity=cursor.identity, step_number=next_step),
+        input_key=str(ResultsIndex(f"results:{cursor.identity}:index").input_key_for_step(next_step)),
     )
-    key = context.store.save_task(task)
-    context.worker_inbox.post(key or task_key(task))
+    task.save()
+    worker_inbox.post(str(task.key))
 
 
 __all__ = ["handle"]

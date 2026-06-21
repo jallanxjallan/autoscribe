@@ -11,15 +11,24 @@ Run forever from imported code:
 from __future__ import annotations
 
 from dataclasses import dataclass
+from typing import Any
 
 from asc.state.daemon import DEFAULT_CLAIM_TIMEOUT_SECONDS, configure_logging, run_daemon
 
-from .wiring import build_service
+from . import inbox
+from .contracts import ORCHESTRATOR_POST_KINDS
+from .errors import OrchestratorContractError
+from .handlers import HANDLERS
+from .keys import RuntimeKey
 
 
 @dataclass(frozen=True, slots=True)
 class OrchestratorRunReport:
     claimed: bool
+
+
+def _claimed_key(claimed: Any) -> str:
+    return str(getattr(claimed, "key", claimed)).strip()
 
 
 def run_once(
@@ -30,12 +39,21 @@ def run_once(
 ) -> OrchestratorRunReport:
     """Claim and route one orchestrator inbox item."""
 
-    claimed = build_service().run_once(
-        timeout=timeout,
-        empty_limit=empty_limit,
-        wait=wait,
-    )
-    return OrchestratorRunReport(claimed=bool(claimed))
+    del timeout, empty_limit, wait
+
+    claimed = inbox.claim()
+    if claimed is None:
+        return OrchestratorRunReport(claimed=False)
+
+    posted = RuntimeKey.parse(_claimed_key(claimed))
+    if posted.kind not in ORCHESTRATOR_POST_KINDS:
+        expected = ", ".join(sorted(ORCHESTRATOR_POST_KINDS))
+        raise OrchestratorContractError(
+            f"orchestrator claimed unsupported kind {posted.kind!r}; expected {expected}: {posted.raw}"
+        )
+
+    HANDLERS[posted.kind](posted)
+    return OrchestratorRunReport(claimed=True)
 
 
 def run_forever(

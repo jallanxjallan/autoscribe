@@ -18,21 +18,21 @@ from ..contracts import WORKER_EXECUTE_STEP
 def make_worker_step(*, cursor: Any, plan: Any, step_number: int, input_key: str) -> WorkerTask:
     step_number = int(step_number)
     args = dict(plan_args_for_step(plan, step_number))
-    args.setdefault("results_index_key", f"results:{cursor.identity}:index")
-    args.setdefault("success_key", f"response:{cursor.identity}:{step_number}")
-    args.setdefault("failure_key", f"failure:{cursor.identity}:{step_number}")
+    args.setdefault("results_index_key", str(f"results:{cursor.identity}:index"))
+    args.setdefault("success_key", str(f"response:{cursor.identity}:{step_number}"))
+    args.setdefault("failure_key", str(f"failure:{cursor.identity}:{step_number}"))
     return WorkerTask(
         identity=f"{cursor.identity}.worker.{WORKER_EXECUTE_STEP}.{step_number}",
-        cursor_key=cursor.key,
+        cursor_key=str(cursor.redis_key),
         action=WORKER_EXECUTE_STEP,
         task_number=step_number,
         step_number=step_number,
         engine=step_engine_key(args.get("engine"), step_number=step_number),
         handler=step_handler_key(args, step_number=step_number),
         input_model="Call" if step_number == 1 else "Response",
-        input_key=input_key,
+        input_key=str(input_key),
         output_model="Result",
-        output_key=f"results:{cursor.identity}:index",
+        output_key=str(f"results:{cursor.identity}:index"),
         args_json=json.dumps(args, ensure_ascii=False, separators=(",", ":")),
     )
 
