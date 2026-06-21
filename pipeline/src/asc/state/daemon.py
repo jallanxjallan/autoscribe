@@ -21,6 +21,12 @@ ReportT = TypeVar("ReportT", bound=RunReport)
 RunOnce = Callable[..., ReportT]
 
 
+def configure_logging() -> None:
+    """Shared logging setup for all package daemons."""
+
+    logging.basicConfig(level=os.environ.get("AUTOSCRIBE_LOG_LEVEL", "INFO"))
+
+
 def idle_empty_limit(*, timeout: int | None = None, idle_seconds: int | None = None) -> int:
     """Return how many empty blocking-claim cycles make up the idle window."""
 
@@ -42,13 +48,19 @@ def run_daemon(
     This function owns the daemon loop: it always uses the blocking claim path,
     never switches to non-blocking drain mode, and exits only after the configured
     idle window or an explicit process interruption/error.
+
+    ``empty_limit=None`` means "compute the default idle window from ``timeout``."
+    An explicit ``empty_limit`` is always respected, including values smaller
+    than the computed default — callers are allowed to shorten the idle window.
     """
 
     actual_timeout = max(1, int(timeout or DEFAULT_CLAIM_TIMEOUT_SECONDS))
-    actual_empty_limit = max(
-        int(empty_limit or 0),
-        idle_empty_limit(timeout=actual_timeout),
-    )
+
+    if empty_limit is None:
+        actual_empty_limit = idle_empty_limit(timeout=actual_timeout)
+    else:
+        actual_empty_limit = max(1, int(empty_limit))
+
     waited = actual_timeout * actual_empty_limit
 
     log.info(
@@ -83,6 +95,7 @@ __all__ = [
     "DEFAULT_CLAIM_TIMEOUT_SECONDS",
     "DEFAULT_IDLE_SECONDS",
     "RunReport",
+    "configure_logging",
     "idle_empty_limit",
     "run_daemon",
 ]

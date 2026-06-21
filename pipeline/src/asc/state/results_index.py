@@ -1,8 +1,11 @@
-"""Redis-backed response index.
+# asc/state/results_index.py
+"""Redis-backed results index.
+
+An LLM call can produce either a Response or a Failure.
 
 Key shape:
 
-    response:<call_ulid>:index
+    results:<call_ulid>:index
 
 Slot meaning:
 
@@ -11,7 +14,7 @@ Slot meaning:
     slot 2  = step 2 marker/result/failure key
     ...
 
-The response index is only a three-state slot ledger:
+The results index is only a three-state slot ledger:
 
     empty string  -> not yet dispatched
     marker key    -> step is in flight
@@ -28,41 +31,21 @@ from asc.redis.index_base import RedisIndex
 from asc.redis.key import RedisKey
 
 
-RESPONSE_INDEX_KIND = "response"
-RESPONSE_INDEX_SUFFIX = "index"
-EMPTY_RESPONSE_SLOT = ""
+RESULTS_INDEX_KIND = "results"
+RESULTS_INDEX_SUFFIX = "index"
+EMPTY_RESULT_SLOT = ""
 
 
-def create_response_index(
-    identity: str,
-    *,
-    call_key: str,
-    total_steps: int,
-    ttl_seconds: int | None = None,
-) -> str:
-    """Create a response index and return its Redis key.
+class ResultsIndex(RedisIndex):
+    """Redis HASH adapter for results-index slots."""
 
-    ``identity`` is the call ULID / process identity.
-    """
-
-    index = ResponseIndex.from_identity(identity)
-    index.initialize(
-        call_key=call_key,
-        total_steps=total_steps,
-        ttl_seconds=ttl_seconds,
-    )
-    return str(index)
-
-
-class ResponseIndex(RedisIndex):
-    """Redis HASH adapter for response-index slots."""
-
-    KIND: ClassVar[str] = RESPONSE_INDEX_KIND
-    SUFFIX: ClassVar[str] = RESPONSE_INDEX_SUFFIX
+    KIND: ClassVar[str] = RESULTS_INDEX_KIND
+    SUFFIX: ClassVar[str] = RESULTS_INDEX_SUFFIX
+    EMPTY_SLOT: ClassVar[str] = EMPTY_RESULT_SLOT
 
     @classmethod
     def key_for(cls, identity: str) -> str:
-        """Return the response-index key for a call/process identity."""
+        """Return the results-index key for a call/process identity."""
 
         clean_identity = cls._require_text(identity, field_name="identity")
         return str(
@@ -74,10 +57,29 @@ class ResponseIndex(RedisIndex):
         )
 
     @classmethod
-    def from_identity(cls, identity: str) -> ResponseIndex:
-        """Bind a response index from a call/process identity."""
+    def from_identity(cls, identity: str) -> ResultsIndex:
+        """Bind a results index from a call/process identity."""
 
         return cls(cls.key_for(identity))
+
+    @classmethod
+    def create(
+        cls,
+        identity: str,
+        *,
+        call_key: str,
+        total_steps: int,
+        ttl_seconds: int | None = None,
+    ) -> ResultsIndex:
+        """Create, initialize, and return a bound results index."""
+
+        index = cls.from_identity(identity)
+        index.initialize(
+            call_key=call_key,
+            total_steps=total_steps,
+            ttl_seconds=ttl_seconds,
+        )
+        return index
 
     def initialize(
         self,
@@ -86,12 +88,10 @@ class ResponseIndex(RedisIndex):
         total_steps: int,
         ttl_seconds: int | None = None,
     ) -> None:
-        """Initialize response slots.
+        """Initialize result slots.
 
-        Existing contents are deleted first.
-
-        Slot 0 receives the original call key.
-        Slots 1..total_steps are initialized as empty strings.
+        Existing contents are deleted first. Slot 0 receives the original call
+        key. Slots 1..total_steps are initialized as empty strings.
         """
 
         source_key = self._require_text(call_key, field_name="call_key")
@@ -101,11 +101,10 @@ class ResponseIndex(RedisIndex):
             raise ValueError("total_steps must be >= 0")
 
         self.delete()
-
         self.key.hset(field="0", value=source_key)
 
         for slot in range(1, steps + 1):
-            self.key.hset(field=str(slot), value=EMPTY_RESPONSE_SLOT)
+            self.key.hset(field=str(slot), value=self.EMPTY_SLOT)
 
         if ttl_seconds is not None:
             self._r().expire(str(self.key), int(ttl_seconds))
@@ -125,7 +124,7 @@ class ResponseIndex(RedisIndex):
                 slot = int(slot_text)
             except ValueError as exc:
                 raise ValueError(
-                    f"invalid response index slot {slot_text!r}: {self.key}"
+                    f"invalid results index slot {slot_text!r}: {self.key}"
                 ) from exc
 
             slots[slot] = _decode(raw_value).strip()
@@ -150,19 +149,17 @@ class ResponseIndex(RedisIndex):
         text = self._require_text(value, field_name="value")
 
         if not self.exists():
-            raise ValueError(f"response index does not exist: {self.key}")
+            raise ValueError(f"results index does not exist: {self.key}")
 
         if self.get_slot(slot_number) is None:
-            raise ValueError(f"response index missing slot {slot_number}: {self.key}")
+            raise ValueError(f"results index missing slot {slot_number}: {self.key}")
 
         self.key.hset(field=str(slot_number), value=text)
 
     def input_key_for_step(self, step_number: int) -> str:
         """Return the input key for a worker step.
 
-        Step 1 reads slot 0.
-        Step 2 reads slot 1.
-        Step N reads slot N - 1.
+        Step 1 reads slot 0. Step 2 reads slot 1. Step N reads slot N - 1.
         """
 
         step = _required_int(step_number, "step_number")
@@ -175,35 +172,30 @@ class ResponseIndex(RedisIndex):
 
         if value is None:
             raise ValueError(
-                f"response index missing input slot {previous_slot}: {self.key}"
+                f"results index missing input slot {previous_slot}: {self.key}"
             )
 
         text = value.strip()
         if not text:
             raise ValueError(
-                f"response index input slot {previous_slot} is empty: {self.key}"
+                f"results index input slot {previous_slot} is empty: {self.key}"
             )
 
         return text
 
     def claim_slot(self, slot: int, marker_key: str) -> None:
-        """Move a slot from empty to in-flight marker.
-
-        Mechanical transition:
-
-            empty -> marker
-        """
+        """Move a slot from empty to in-flight marker."""
 
         slot_number = _required_int(slot, "slot")
         marker = self._require_text(marker_key, field_name="marker_key")
 
         current = self.get_slot(slot_number)
         if current is None:
-            raise ValueError(f"response index missing slot {slot_number}: {self.key}")
+            raise ValueError(f"results index missing slot {slot_number}: {self.key}")
 
         if current.strip():
             raise ValueError(
-                "response index slot is already occupied: "
+                "results index slot is already occupied: "
                 f"slot={slot_number} value={current!r} index={self.key}"
             )
 
@@ -216,12 +208,7 @@ class ResponseIndex(RedisIndex):
         expected_marker_key: str,
         produced_key: str,
     ) -> None:
-        """Move a slot from expected marker to produced key.
-
-        Guardrail transition:
-
-            expected_marker -> produced_key
-        """
+        """Move a slot from expected marker to produced key."""
 
         slot_number = _required_int(slot, "slot")
         expected = self._require_text(
@@ -232,12 +219,12 @@ class ResponseIndex(RedisIndex):
 
         current = self.get_slot(slot_number)
         if current is None:
-            raise ValueError(f"response index missing slot {slot_number}: {self.key}")
+            raise ValueError(f"results index missing slot {slot_number}: {self.key}")
 
         actual = current.strip()
         if actual != expected:
             raise ValueError(
-                "response index slot marker mismatch: "
+                "results index slot marker mismatch: "
                 f"slot={slot_number} expected={expected!r} "
                 f"actual={actual!r} index={self.key}"
             )
@@ -249,7 +236,7 @@ class ResponseIndex(RedisIndex):
 
         slots = self.slots()
         if not slots:
-            raise ValueError(f"response index is missing or empty: {self.key}")
+            raise ValueError(f"results index is missing or empty: {self.key}")
 
         for slot in sorted(slots):
             if not str(slots[slot]).strip():
@@ -267,7 +254,7 @@ class ResponseIndex(RedisIndex):
 
         slots = self.slots()
         if not slots:
-            raise ValueError(f"response index is missing or empty: {self.key}")
+            raise ValueError(f"results index is missing or empty: {self.key}")
 
         last = ""
         for slot in sorted(slots):
@@ -277,7 +264,7 @@ class ResponseIndex(RedisIndex):
             last = value
 
         if not last:
-            raise ValueError(f"response index has no filled slots: {self.key}")
+            raise ValueError(f"results index has no filled slots: {self.key}")
 
         return last
 
@@ -298,9 +285,8 @@ def _decode(value: Any) -> str:
 
 
 __all__ = [
-    "EMPTY_RESPONSE_SLOT",
-    "RESPONSE_INDEX_KIND",
-    "RESPONSE_INDEX_SUFFIX",
-    "ResponseIndex",
-    "create_response_index",
+    "RESULTS_INDEX_KIND",
+    "RESULTS_INDEX_SUFFIX",
+    "EMPTY_RESULT_SLOT",
+    "ResultsIndex",
 ]

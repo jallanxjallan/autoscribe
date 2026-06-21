@@ -1,20 +1,16 @@
-# asc/state/queue.py
-"""Redis-backed process custody state.
+"""Generic Redis LIST plumbing for package-owned queues and inboxes.
 
-Invariant:
-    one daemon, one inbound queue
+This module deliberately does not define named AutoScribe queues. Owning
+packages declare their own fixed Redis keys, for example::
 
-Queues:
-    state:orchestrator:queue  -> cursor keys for orchestrator
-    state:worker:queue        -> cursor keys for workers
-    state:scrivener:queue     -> cursor keys for scrivener
+    class Inbox(RedisQueue):
+        KEY = "control:orchestrator:inbox"
 
-Non-queue state:
-    state:cursor:active      -> active cursor watchdog zset
-    state:slugmap            -> slug -> Redis key resolver
+    class Queue(RedisQueue):
+        KEY = "control:worker:queue"
 
-All daemon queues contain cursor keys only. Job/instruction records, when
-needed, live outside the queues and are derived from the cursor identity.
+``asc.state`` provides only the reusable LIST mechanics: validation, insert,
+claim, blocking claim, peek, remove, count, and clear.
 """
 
 
@@ -30,10 +26,9 @@ from asc.redis.index_base import FixedRedisIndex
 class QueuedKey:
     """One claimed daemon queue item.
 
-    Daemon queues contain full Redis keys. Only orchestrator ingress from enqueue
-    may be a cursor key; after activation, all daemon handoff items are job keys.
-    The score is a local claim timestamp for diagnostics; LIST queues do not
-    persist per-item scores.
+    Queue entries are full Redis keys. The owning package decides whether those
+    keys are cursors, tasks, markers, or another model kind. The score is a local
+    claim timestamp for diagnostics; LIST queues do not persist per-item scores.
     """
 
     key: str
