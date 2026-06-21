@@ -1,16 +1,17 @@
-# asc/workers/engines/loader.py
 from __future__ import annotations
 
-import importlib
 from typing import Any, Protocol
 
 
 class EngineCall(Protocol):
-    def __call__(self, content: str) -> str: ...
+    def __call__(self, content: str) -> object: ...
 
 
 def load_engine_call(engine_name: str, *, args: dict[str, Any]) -> EngineCall:
-    """Load a worker-local engine adapter.
+    """Load the worker engine adapter for the local-script smoke-test scope.
+
+    LLM/RAG adapter routing is intentionally out of path until the local-script
+    worker path is green end-to-end.
 
     DEBT: move engine-name compatibility and adapter registry into
     asc.registries once the current pipeline stabilizes.
@@ -22,8 +23,13 @@ def load_engine_call(engine_name: str, *, args: dict[str, Any]) -> EngineCall:
     if not normalized:
         raise ValueError("engine name must be non-empty")
 
-    module = importlib.import_module(f"asc.workers.engines.{normalized}")
-    make_call = getattr(module, "make_call")
+    if normalized != "scripts":
+        raise ValueError(
+            f"worker engine {engine_name!r} is outside the local-script smoke-test scope"
+        )
+
+    from asc.workers.engines.scripts import make_call
+
     call = make_call(args=args)
     if not callable(call):
         raise TypeError(f"engine {engine_name!r} make_call(...) did not return a callable")

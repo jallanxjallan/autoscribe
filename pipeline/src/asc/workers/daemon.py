@@ -17,14 +17,19 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
-from asc.state.daemon import DEFAULT_CLAIM_TIMEOUT_SECONDS, configure_logging, run_daemon
+from asc.state.daemon import DEFAULT_CLAIM_TIMEOUT_SECONDS, configure_logging, idle_empty_limit, run_daemon
+from asc.workers import inbox as worker_inbox
+from asc.workers.execute import WorkerExecutor
 
-from .runtime import run_once as _run_once_raw
+DEFAULT_EMPTY_LIMIT = idle_empty_limit(timeout=DEFAULT_CLAIM_TIMEOUT_SECONDS)
 
 
 @dataclass(frozen=True, slots=True)
 class WorkerRunReport:
     claimed: bool
+    cursor_key: str | None = None
+    task_key: str | None = None
+    output_key: str | None = None
 
 
 def run_once(
@@ -33,22 +38,32 @@ def run_once(
     empty_limit: int | None = None,
     wait: bool = False,
 ) -> WorkerRunReport:
-    """Wrap the runtime's bare claim result so this conforms to RunReport.
+    """Claim and execute one worker task."""
 
-    This only wraps the existing return value — it doesn't change what
-    `.runtime.run_once` actually returns. If the runtime carries more
-    detail (job key, cursor, etc.) that isn't being surfaced here, that's
-    a `workers/runtime.py` change, not something this wrapper invents.
-    """
+    if wait:
+        claimed = worker_inbox.block_claim(timeout=timeout or 0, empty_limit=empty_limit)
+    else:
+        claimed = worker_inbox.claim()
+    if claimed is None:
+        return WorkerRunReport(claimed=False)
 
-    claimed = _run_once_raw(timeout=timeout, empty_limit=empty_limit, wait=wait)
-    return WorkerRunReport(claimed=bool(claimed))
+    task_key = str(claimed).strip()
+    if not task_key:
+        raise ValueError("worker claimed an empty task key")
+
+    result = WorkerExecutor().execute(task_key)
+    return WorkerRunReport(
+        claimed=True,
+        cursor_key=result.cursor_key,
+        task_key=result.task_key,
+        output_key=result.output_key,
+    )
 
 
 def run_forever(
     *,
     timeout: int = DEFAULT_CLAIM_TIMEOUT_SECONDS,
-    empty_limit: int | None = None,
+    empty_limit: int | None = DEFAULT_EMPTY_LIMIT,
 ) -> None:
     """Run the worker daemon loop until idle shutdown or interruption."""
 
