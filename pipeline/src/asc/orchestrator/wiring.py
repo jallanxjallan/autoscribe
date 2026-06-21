@@ -4,11 +4,12 @@ from __future__ import annotations
 
 from typing import Any
 
+from .context import OrchestratorContext
 from .service import OrchestratorService
 
 
-class ModuleQueue:
-    """Adapter for state queue modules exposing claim()/insert()."""
+class QueueAdapter:
+    """Adapter for the orchestrator's own state queue module."""
 
     def __init__(self, module: Any) -> None:
         self.module = module
@@ -25,10 +26,9 @@ class ModuleQueue:
             if callable(daemon_claim):
                 return daemon_claim(timeout=timeout, empty_limit=empty_limit)
 
-            if timeout is not None:
-                block_claim = getattr(self.module, "block_claim", None)
-                if callable(block_claim):
-                    return block_claim(timeout=timeout)
+            block_claim = getattr(self.module, "block_claim", None)
+            if callable(block_claim):
+                return block_claim(timeout=timeout)
 
         drain_claim = getattr(self.module, "daemon_drain_claim", None)
         if callable(drain_claim):
@@ -36,49 +36,62 @@ class ModuleQueue:
 
         return self.module.claim()
 
-    def insert(self, cursor_key: str) -> int:
-        return int(self.module.insert(cursor_key))
+
+class InboxAdapter:
+    """Adapter for worker/scrivener public inbox modules."""
+
+    def __init__(self, module: Any) -> None:
+        self.module = module
+
+    def post(self, key: str) -> str:
+        return str(self.module.post(key))
 
 
 class RedisStore:
-    def load_cursor(self, key: str) -> Any:
+    def load_cursor_for_identity(self, identity: str) -> Any:
         from asc.models.process.cursor import Cursor
 
-        return Cursor.load(key)
+        return Cursor.load(f"cursor:{identity}:index")
 
     def load_plan(self, key: str) -> Any:
         from asc.models.control.plan import Plan
 
         return Plan.load(key)
 
-    def save_task(self, task: Any) -> None:
-        task.save()
-        return None
+    def result_key_for_step(self, *, identity: str, step_number: int) -> str:
+        from asc.state.results import ResultsIndex
 
-    def touch_active_cursor(self, cursor_key: str) -> None:
-        try:
-            from asc.state import orchestrator_index
-        except Exception:
-            return
-        orchestrator_index.touch(cursor_key)
+        return str(ResultsIndex(f"results:{identity}:index").get(int(step_number)))
 
-    def bump_terminal_cursor(self, cursor_key: str) -> None:
-        try:
-            from asc.state import orchestrator_index
-        except Exception:
-            return
-        orchestrator_index.reschedule(
-            cursor_key,
-            delay_seconds=60.0 * 60.0 * 24.0 * 365.0 * 10.0,
-        )
+    def input_key_for_step(self, *, identity: str, step_number: int) -> str:
+        from asc.state.results import ResultsIndex
+
+        return str(ResultsIndex(f"results:{identity}:index").input_key_for_step(int(step_number)))
+
+    def load_failure(self, key: str) -> Any:
+        from asc.models.process.failure import Failure
+
+        return Failure.load(key)
+
+    def save_task(self, task: Any) -> str:
+        saved = task.save()
+        return str(saved or task.key)
 
 
 def build_service() -> OrchestratorService:
-    from asc.state import orchestrator_queue, scrivener_queue, worker_queue
+    from asc.orchestrator import inbox as orchestrator_inbox  # noqa: F401 - documents public contract
+    from asc.scrivener import inbox as scrivener_inbox
+    from asc.state import orchestrator_queue
+    from asc.worker import inbox as worker_inbox
 
     return OrchestratorService(
-        store=RedisStore(),
-        orchestrator_queue=ModuleQueue(orchestrator_queue),
-        worker_queue=ModuleQueue(worker_queue),
-        scrivener_queue=ModuleQueue(scrivener_queue),
+        queue=QueueAdapter(orchestrator_queue),
+        context=OrchestratorContext(
+            store=RedisStore(),
+            worker_inbox=InboxAdapter(worker_inbox),
+            scrivener_inbox=InboxAdapter(scrivener_inbox),
+        ),
     )
+
+
+__all__ = ["InboxAdapter", "QueueAdapter", "RedisStore", "build_service"]

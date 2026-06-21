@@ -10,40 +10,15 @@ Long-running daemon use is explicit from an importer:
 
 from __future__ import annotations
 
-import logging
-import os
-from dataclasses import dataclass
+from asc.state.daemon import DEFAULT_CLAIM_TIMEOUT_SECONDS, configure_logging, run_daemon
 
-from asc.state.daemon import DEFAULT_CLAIM_TIMEOUT_SECONDS, idle_empty_limit, run_daemon
-from .wiring import build_service
-
-
-DEFAULT_EMPTY_LIMIT = idle_empty_limit(timeout=DEFAULT_CLAIM_TIMEOUT_SECONDS)
-
-
-@dataclass(frozen=True, slots=True)
-class OrchestratorRunReport:
-    claimed: bool
-
-
-def configure_logging() -> None:
-    logging.basicConfig(level=os.environ.get("AUTOSCRIBE_LOG_LEVEL", "INFO"))
-
-
-def run_once(
-    *,
-    timeout: int | None = None,
-    empty_limit: int | None = None,
-    wait: bool = False,
-) -> OrchestratorRunReport:
-    claimed = build_service().run_once(timeout=timeout, empty_limit=empty_limit, wait=wait)
-    return OrchestratorRunReport(claimed=claimed)
+from .runtime import OrchestratorRunReport, run_once
 
 
 def run_forever(
     *,
     timeout: int = DEFAULT_CLAIM_TIMEOUT_SECONDS,
-    empty_limit: int = DEFAULT_EMPTY_LIMIT,
+    empty_limit: int | None = None,
 ) -> None:
     configure_logging()
     run_daemon(
