@@ -1,20 +1,10 @@
 from __future__ import annotations
 
-
-# Enqueue accepts more than one external record shape, but there should be only
-# one internal enqueue path. The reader is the normalization boundary: inspect
-# record_type, hand the raw record to the matching handler, and require that
-# handler to return a validated EnqueueManifest containing the loaded Plan and
-# ephemeral Call. Most manifests will reference a persistent plan by slug, but a
-# handler may also accept an ephemeral plan carried as data in the record, save
-# it with a short TTL, and return that transient Plan object instead. This allows
-# convenience inputs such as webpage downloads or plain call records to select
-# default plans, and batch-specific manifests to carry one-off plans, without
-# creating parallel enqueue logic. Once a manifest reaches the service layer,
-# every input follows the same response_index, cursor, and queue construction
-# path.
-
-
+# Enqueue accepts external records at the normalization boundary only. The
+# current supported input is a dispatch-run manifest row. Future convenience
+# inputs, such as pure call records or webpage-download records, should be
+# normalized here into this same EnqueueRecord shape rather than adding another
+# enqueue path in the service.
 
 from collections.abc import Iterator, Mapping
 from dataclasses import dataclass
@@ -26,14 +16,13 @@ from asc.models.process.call import Call
 from asc.streams.ndjson import iter_ndjson_records
 
 
+DISPATCH_RUN_MANIFEST = "dispatch-run-manifest"
+ALLOWED_RECORD_TYPES = frozenset({DISPATCH_RUN_MANIFEST})
+
+
 @dataclass(frozen=True, slots=True)
 class EnqueueRecord:
-    """One validated run manifest row.
-
-    The stream record itself is a manifest. The reader splits that manifest into
-    its persistent plan reference and ephemeral document Call before handing the
-    objects to the enqueue service.
-    """
+    """One validated run manifest row split into enqueue-ready objects."""
 
     record_type: str
     plan: LoadedPlan
@@ -55,19 +44,15 @@ def iter_enqueue_records(stream: TextIO) -> Iterator[EnqueueRecord]:
                 f"enqueue stream row {parsed.line_number} must be a JSON object"
             )
 
-        record_type = raw["record_type"]
-
-        ALLOWED_RECORD_TYPES = {
-            "dispatch-run-manifest",
-            "call"
-        }
-
-        record_type = raw["record_type"]
+        try:
+            record_type = str(raw["record_type"])
+        except KeyError as exc:
+            raise ValueError(
+                f"enqueue stream row {parsed.line_number} missing required field: record_type"
+            ) from exc
 
         if record_type not in ALLOWED_RECORD_TYPES:
-            raise ValueError(
-                f"unsupported record_type: {record_type!r}"
-            )
+            raise ValueError(f"unsupported record_type: {record_type!r}")
 
         yield EnqueueRecord(
             record_type=record_type,
@@ -75,7 +60,6 @@ def iter_enqueue_records(stream: TextIO) -> Iterator[EnqueueRecord]:
             call=create_call_from_manifest_record(raw),
             raw_record=raw,
         )
-        
 
     if not seen:
         raise ValueError("no enqueue records found")
@@ -85,4 +69,10 @@ def load_enqueue_records(stream: TextIO) -> list[EnqueueRecord]:
     return list(iter_enqueue_records(stream))
 
 
-__all__ = ["EnqueueRecord", "iter_enqueue_records", "load_enqueue_records"]
+__all__ = [
+    "ALLOWED_RECORD_TYPES",
+    "DISPATCH_RUN_MANIFEST",
+    "EnqueueRecord",
+    "iter_enqueue_records",
+    "load_enqueue_records",
+]

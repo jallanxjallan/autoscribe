@@ -19,14 +19,18 @@ class LoadedPlan:
 def load_plan_from_manifest_record(record: Mapping[str, Any]) -> LoadedPlan:
     """Resolve and validate the persistent plan referenced by a manifest row."""
 
-    plan_slug = record["plan_slug"]
+    try:
+        plan_slug = record["plan_slug"]
+    except KeyError as exc:
+        raise ValueError("manifest record missing required field: plan_slug") from exc
+
     plan_key = SlugKeyResolver().resolve(plan_slug, expected_kind="plan")
     plan = Plan.load(plan_key)
     step_count = _step_count(plan, plan_key=plan_key)
 
     return LoadedPlan(
         slug=str(plan_slug),
-        key=plan_key,
+        key=str(plan_key),
         plan=plan,
         step_count=step_count,
     )
