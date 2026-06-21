@@ -25,7 +25,7 @@ def create_results_index(
         ttl_seconds=ttl_seconds,
     )
     results_index.set_slot(0, call_identity)
-    return results_index
+    return results_index.redis_key
 
 
 __all__ = ["create_results_index"]
