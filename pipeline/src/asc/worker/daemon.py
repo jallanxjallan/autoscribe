@@ -11,13 +11,12 @@ Imported behavior:
 runs the long-lived daemon loop.
 """
 
-from __future__ import annotations
 
 from dataclasses import dataclass
 
 from asc.state.daemon import DEFAULT_CLAIM_TIMEOUT_SECONDS, configure_logging, run_daemon
-from asc.workers import inbox as worker_inbox
-from asc.workers.execute import WorkerExecutor
+from asc.worker import inbox as worker_inbox
+from asc.worker.execute import WorkerExecutor
 
 
 @dataclass(frozen=True, slots=True)

@@ -11,7 +11,6 @@ This keeps deployment flexibility intact:
 - local development can rely on ~/.secrets.env
 """
 
-from __future__ import annotations
 
 import os
 from pathlib import Path

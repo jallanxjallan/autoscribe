@@ -1,6 +1,3 @@
-from __future__ import annotations
-
-
 PENDING_EXPORTS_VIEW = "pending_exports"
 
 

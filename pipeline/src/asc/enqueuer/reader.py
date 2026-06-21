@@ -1,5 +1,3 @@
-from __future__ import annotations
-
 # Enqueue accepts external records at the normalization boundary only. The
 # current supported input is a dispatch-run manifest row. Future convenience
 # inputs, such as pure call records or webpage-download records, should be

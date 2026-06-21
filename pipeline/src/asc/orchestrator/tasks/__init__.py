@@ -1,6 +1,5 @@
 """Task factories for orchestrator routing."""
 
-from __future__ import annotations
 
 from .scrivener import (
     make_scrivener_call_completed,

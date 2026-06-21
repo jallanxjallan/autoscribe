@@ -4,7 +4,6 @@ The enqueuer owns creation of the cursor and results index.  The orchestrator
 observes the cursor post and sends the first ledger task to scrivener.
 """
 
-from __future__ import annotations
 
 from asc.models.process.cursor import Cursor
 from asc.scrivener import inbox as scrivener_inbox

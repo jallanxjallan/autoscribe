@@ -1,5 +1,3 @@
-from __future__ import annotations
-
 from typing import Any, Callable, Mapping
 
 from asc.models.process.result import Failure, Response

@@ -1,5 +1,3 @@
-from __future__ import annotations
-
 import typer
 
 from asc.cli.control import app as control_app

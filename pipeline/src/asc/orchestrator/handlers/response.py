@@ -5,7 +5,6 @@ assigned results-index slot.  The orchestrator verifies the canonical
 results-index entry for the step, then asks scrivener to commit it to the ledger.
 """
 
-from __future__ import annotations
 
 from asc.models.process.cursor import Cursor
 from asc.scrivener import inbox as scrivener_inbox

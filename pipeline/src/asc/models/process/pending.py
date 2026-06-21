@@ -6,7 +6,6 @@ marker points back to the actual worker task key and carries a timestamp for
 watchdogs.
 """
 
-from __future__ import annotations
 
 from typing import ClassVar, Literal
 

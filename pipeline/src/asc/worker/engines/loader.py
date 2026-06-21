@@ -1,5 +1,3 @@
-from __future__ import annotations
-
 from typing import Any, Protocol
 
 
@@ -28,7 +26,7 @@ def load_engine_call(engine_name: str, *, args: dict[str, Any]) -> EngineCall:
             f"worker engine {engine_name!r} is outside the local-script smoke-test scope"
         )
 
-    from asc.workers.engines.scripts import make_call
+    from asc.worker.engines.scripts import make_call
 
     call = make_call(args=args)
     if not callable(call):

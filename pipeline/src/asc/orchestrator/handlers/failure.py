@@ -10,7 +10,6 @@ orchestrator tasks scrivener to record the stopped call.  A later policy module
 can decide retry vs terminal failure without changing the inbox contract.
 """
 
-from __future__ import annotations
 
 from asc.models.process.cursor import Cursor
 from asc.models.process.result import Failure

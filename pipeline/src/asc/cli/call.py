@@ -1,5 +1,3 @@
-from __future__ import annotations
-
 from asc.core.identity import generate_identity
 from asc.enqueuer.reader import EnqueueRecord
 from asc.models.process.call import Call

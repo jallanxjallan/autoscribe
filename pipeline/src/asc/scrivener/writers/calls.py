@@ -1,16 +1,20 @@
-from __future__ import annotations
-
 """Ledger writer for call records.
 
 DEBT: CALLS_TABLE belongs in asc.scrivener.contracts or asc.scrivener.schema
-once table/action/model mappings are centralized next week.
+once table/action/model mappings are centralized.
 """
 
 from typing import Any
 
 from asc.scrivener.connect import LedgerConnection, connect
 from asc.scrivener.schema import ensure_ledger_schema
-from asc.scrivener.writers.common import insert_row, load_source_key, model_json, redis_key
+from asc.scrivener.writers.common import (
+    insert_row,
+    load_task_record,
+    model_json,
+    optional_domain_identity,
+    task_call_identity,
+)
 
 
 CALLS_TABLE = "calls"
@@ -27,18 +31,25 @@ def insert_call_from_task_with_connection(*, conn: LedgerConnection, task: objec
 
 
 def insert_call(*, conn: LedgerConnection, task: object) -> None:
-    record = load_source_key(task.source_key)
+    record = load_task_record(task)
     insert_row(conn, CALLS_TABLE, call_values(task, record))
 
 
-def call_values(task: object, record: object | None = None) -> dict[str, Any]:
+def call_values(task: Any, record: object | None = None) -> dict[str, Any]:
     if record is None:
-        record = load_source_key(task.source_key)
+        record = load_task_record(task)
 
-    key = redis_key(task.source_key)
+    call_identity = task_call_identity(task)
+    source_identity = optional_domain_identity(
+        record,
+        "source_identity",
+        "record_identity",
+        "document_identity",
+    ) or call_identity
+
     return {
-        "identity": key.identity,
-        "source_identity": key.identity,
+        "identity": call_identity,
+        "source_identity": source_identity,
         "source_json": model_json(record),
         "created_at": int(record.created_at),
     }

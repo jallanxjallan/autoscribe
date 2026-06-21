@@ -1,5 +1,3 @@
-from __future__ import annotations
-
 from typing import TypeVar
 
 from asc.redis.model_base import RedisRecord

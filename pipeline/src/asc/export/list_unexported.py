@@ -1,5 +1,3 @@
-from __future__ import annotations
-
 """Deprecated import shim for pending export listing.
 
 Use asc.export.pending_exports directly. This module intentionally contains no

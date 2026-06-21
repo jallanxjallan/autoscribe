@@ -5,7 +5,6 @@ fact that the ledger accepted something, then routes the next worker or terminal
 scrivener task.
 """
 
-from __future__ import annotations
 
 from asc.models.control.plan import Plan
 from asc.models.process.cursor import Cursor

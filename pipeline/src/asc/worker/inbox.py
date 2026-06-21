@@ -4,7 +4,6 @@ External packages should import only this module and call post(key). The key is
 the message. No caller should know the worker inbox implementation.
 """
 
-from __future__ import annotations
 
 from asc.redis.key import RedisKey
 from asc.state.queue import RedisQueue

@@ -8,7 +8,6 @@ Run forever from imported code:
     run_forever()
 """
 
-from __future__ import annotations
 
 from dataclasses import dataclass
 

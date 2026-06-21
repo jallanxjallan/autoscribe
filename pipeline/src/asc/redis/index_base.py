@@ -1,5 +1,3 @@
-from __future__ import annotations
-
 from typing import Callable, ClassVar, Literal, overload
 
 from asc.redis.key import RedisKey

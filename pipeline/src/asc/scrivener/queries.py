@@ -1,5 +1,3 @@
-from __future__ import annotations
-
 from asc.scrivener.util import insert_sql
 
 

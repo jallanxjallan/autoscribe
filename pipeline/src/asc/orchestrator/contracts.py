@@ -9,7 +9,6 @@ and failure state to make routing decisions, but it does not create or mutate
 those objects.
 """
 
-from __future__ import annotations
 
 CURSOR = "cursor"
 RESPONSE = "response"

@@ -5,7 +5,6 @@ split strings directly.  When RedisKey grows final kind/identity/suffix helpers,
 this file should become almost trivial.
 """
 
-from __future__ import annotations
 
 from dataclasses import dataclass
 

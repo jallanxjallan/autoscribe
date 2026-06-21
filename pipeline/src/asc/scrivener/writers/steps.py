@@ -1,16 +1,19 @@
-from __future__ import annotations
-
 """Ledger writer for step result/failure records.
 
 DEBT: STEPS_TABLE, STEP_STATUS_BY_MODEL_NAME, and STEP_FAILURE_NAMES belong in
-asc.scrivener.contracts or asc.registries once the string contracts are gathered
-next week. They stay local here for the temporary drop-in bundle.
+asc.scrivener.contracts or asc.registries once the string contracts are gathered.
 """
 
 from typing import Any
 
 from asc.scrivener.connect import LedgerConnection
-from asc.scrivener.writers.common import insert_row, load_source_key, model_json, redis_key
+from asc.scrivener.writers.common import (
+    insert_row,
+    load_task_record,
+    model_json,
+    task_call_identity,
+    task_record_key_text,
+)
 
 
 STEPS_TABLE = "steps"
@@ -24,23 +27,22 @@ STEP_FAILURE_NAMES = {"Failure", "StepFailure"}
 
 
 def insert_step(*, conn: LedgerConnection, task: object) -> None:
-    record = load_source_key(task.source_key)
+    record = load_task_record(task)
     insert_row(conn, STEPS_TABLE, step_values(task, record))
 
 
-def step_values(task: object, record: object | None = None) -> dict[str, Any]:
+def step_values(task: Any, record: object | None = None) -> dict[str, Any]:
     if record is None:
-        record = load_source_key(task.source_key)
+        record = load_task_record(task)
 
-    number = int(task.task_number)
-    if number <= 0:
-        raise ValueError(f"ledger step_number must be > 0: {number}")
+    step_number = int(task.task_number)
+    if step_number <= 0:
+        raise ValueError(f"ledger step_number must be > 0: {step_number}")
 
-    key = redis_key(task.source_key)
     return {
-        "identity": key.identity,
-        "step_number": number,
-        "result_key": task.source_key,
+        "identity": task_call_identity(task),
+        "step_number": step_number,
+        "result_key": task_record_key_text(task),
         "status": step_status(record),
         "content": record.content,
         "fail_message": failure_message(record),
@@ -59,8 +61,7 @@ def step_status(record: object) -> str:
 
 
 def failure_message(record: object) -> str | None:
-    name = type(record).__name__
-    if name not in STEP_FAILURE_NAMES:
+    if type(record).__name__ not in STEP_FAILURE_NAMES:
         return None
     return record.fail_message
 

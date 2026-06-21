@@ -5,7 +5,6 @@ split execution into worker.llm, worker.script, worker.rag, etc. without turning
 orchestrator task construction into a mixed-purpose junk drawer.
 """
 
-from __future__ import annotations
 
 import json
 from typing import Any, Mapping

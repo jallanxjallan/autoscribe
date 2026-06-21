@@ -1,5 +1,3 @@
-from __future__ import annotations
-
 from asc.scrivener.connect import connect
 from asc.scrivener.queries import SELECT_CALL_SQL, SELECT_CALLS_SQL
 from asc.scrivener.schema import drop_user_objects, ensure_ledger_schema

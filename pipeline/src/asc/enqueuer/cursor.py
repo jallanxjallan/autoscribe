@@ -1,5 +1,3 @@
-from __future__ import annotations
-
 from asc.models.process.cursor import Cursor
 from asc.orchestrator.inbox import post
 from asc.redis.key import RedisKey

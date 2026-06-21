@@ -23,7 +23,6 @@ The results index is only a three-state slot ledger:
 It does not know what marker or result keys contain.
 """
 
-from __future__ import annotations
 
 from typing import Any, ClassVar
 

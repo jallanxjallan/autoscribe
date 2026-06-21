@@ -1,5 +1,3 @@
-from __future__ import annotations
-
 from asc.redis.key import RedisKey
 from asc.state.results import ResultsIndex
 

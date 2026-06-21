@@ -1,5 +1,3 @@
-from __future__ import annotations
-
 """Compatibility imports for NDJSON stream helpers.
 
 The canonical implementation now lives in ``asc.streams.parser`` because the
