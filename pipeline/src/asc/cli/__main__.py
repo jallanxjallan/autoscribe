@@ -4,8 +4,7 @@ import typer
 
 from asc.cli.control import app as control_app
 from asc.cli.enqueue import app as enqueue_app
-# from asc.cli.export import app as export_app
-from asc.cli.ledger import app as ledger_app
+from asc.cli.export import app as export_app
 from asc.cli.registry import app as registry_app
 from asc.cli.run import app as run_app
 from asc.cli.storage import app as storage_app
@@ -45,22 +44,16 @@ app.add_typer(
 )
 
 app.add_typer(
-    ledger_app,
-    name="ledger",
-    help="Manage and inspect the SQLite ledger.",
-)
-
-app.add_typer(
     storage_app,
     name="storage",
     help="Manage storage, ledger rotation, and result persistence.",
 )
 
-# app.add_typer(
-#     export_app,
-#     name="export",
-#     help="Export completed results.",
-# )
+app.add_typer(
+    export_app,
+    name="export",
+    help="Export completed results.",
+)
 
 app.add_typer(
     registry_app,

@@ -5,16 +5,23 @@ from typing import TextIO
 
 import typer
 
-from asc.export.export_result import mark_result_exported, write_extracted_result_record
-from asc.export.pending_exports import pending_export_records
-from asc.scrivener.connect import connect
-
-
 app = typer.Typer(
     add_completion=False,
     no_args_is_help=True,
     help="Export and write back completed ledger results.",
 )
+
+# DEBT(2026-06): export is intentionally offline during the queue/inbox/runtime
+# refactor. Replace this stub when the export-by-vault refactor resumes.
+
+'''
+
+from asc.export.export_result import mark_result_exported, write_extracted_result_record
+from asc.export.pending_exports import pending_export_records
+from asc.scrivener.connect import connect
+
+
+
 
 
 def _text(value: object) -> str:
@@ -143,6 +150,8 @@ def update_exports(
             export_message=export_message,
         )
 
-
+'''
 if __name__ == "__main__":
     app()
+	
+

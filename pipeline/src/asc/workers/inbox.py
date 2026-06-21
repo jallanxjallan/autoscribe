@@ -1,44 +1,44 @@
+"""Public inbox for worker tasks.
+
+External packages should import only this module and call post(key). The key is
+the message. No caller should know the worker inbox implementation.
+"""
+
 from __future__ import annotations
 
-from asc.state.queues import QueueManager
+from asc.redis.key import RedisKey
+from asc.state.queue import RedisQueue
+
 
 WORKER_INBOX_KEY = "control:worker:inbox"
 
-_inbox = QueueManager(WORKER_INBOX_KEY)
+worker_inbox = RedisQueue(WORKER_INBOX_KEY)
 
 
-def insert(task_key: str) -> int:
-    """Insert a worker task key into the worker inbox."""
-
-    return _inbox.insert(task_key)
+def post(key: str | RedisKey) -> str:
+    raw = str(key).strip()
+    if not raw:
+        raise ValueError("worker inbox expected a non-empty task key")
+    worker_inbox.insert(raw)
+    return raw
 
 
 def claim() -> str | None:
-    """Claim one worker task key without blocking."""
-
-    claimed = _inbox.claim()
-    if claimed is None:
-        return None
-    return str(getattr(claimed, "key", claimed))
+    return worker_inbox.claim()
 
 
-def block_claim(*, timeout: int = 0, empty_limit: int | None = None) -> str | None:
-    """Claim one worker task key using the blocking daemon path."""
-
-    claimed = _inbox.daemon_claim(timeout=timeout, empty_limit=empty_limit)
-    if claimed is None:
-        return None
-    return str(getattr(claimed, "key", claimed))
+def count() -> int:
+    return worker_inbox.count()
 
 
-# Shared daemon runner vocabulary.
-daemon_claim = block_claim
+def clear() -> int:
+    return worker_inbox.clear()
 
 
 __all__ = [
     "WORKER_INBOX_KEY",
-    "block_claim",
+    "post",
     "claim",
-    "daemon_claim",
-    "insert",
+    "count",
+    "clear",
 ]

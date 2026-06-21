@@ -1,13 +1,11 @@
 """Worker daemon entrypoint.
 
 Command-line behavior:
-
     python -m asc.workers.daemon
 
 runs one worker claim cycle and exits.
 
 Imported behavior:
-
     from asc.workers.daemon import run_forever
 
 runs the long-lived daemon loop.
@@ -17,11 +15,9 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
-from asc.state.daemon import DEFAULT_CLAIM_TIMEOUT_SECONDS, configure_logging, idle_empty_limit, run_daemon
+from asc.state.daemon import DEFAULT_CLAIM_TIMEOUT_SECONDS, configure_logging, run_daemon
 from asc.workers import inbox as worker_inbox
 from asc.workers.execute import WorkerExecutor
-
-DEFAULT_EMPTY_LIMIT = idle_empty_limit(timeout=DEFAULT_CLAIM_TIMEOUT_SECONDS)
 
 
 @dataclass(frozen=True, slots=True)
@@ -41,13 +37,16 @@ def run_once(
     """Claim and execute one worker task."""
 
     if wait:
-        claimed = worker_inbox.block_claim(timeout=timeout or 0, empty_limit=empty_limit)
+        claimed = worker_inbox.block_claim(
+            timeout=timeout or 0,
+            empty_limit=empty_limit,
+        )
     else:
         claimed = worker_inbox.claim()
     if claimed is None:
         return WorkerRunReport(claimed=False)
 
-    task_key = str(claimed).strip()
+    task_key = str(getattr(claimed, "key", claimed)).strip()
     if not task_key:
         raise ValueError("worker claimed an empty task key")
 
@@ -63,7 +62,7 @@ def run_once(
 def run_forever(
     *,
     timeout: int = DEFAULT_CLAIM_TIMEOUT_SECONDS,
-    empty_limit: int | None = DEFAULT_EMPTY_LIMIT,
+    empty_limit: int | None = None,
 ) -> None:
     """Run the worker daemon loop until idle shutdown or interruption."""
 

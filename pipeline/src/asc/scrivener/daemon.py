@@ -13,8 +13,8 @@ from __future__ import annotations
 from dataclasses import dataclass
 
 from asc.models.process.task import ScrivenerTask
-from asc.orchestrator.inbox import insert as insert_orchestrator_inbox
-from asc.scrivener.inbox import scrivener_queue
+from asc.orchestrator import inbox as orchestrator_inbox
+from asc.scrivener import inbox as scrivener_inbox
 from asc.scrivener.write import write_task
 from asc.state.daemon import DEFAULT_CLAIM_TIMEOUT_SECONDS, configure_logging, run_daemon
 
@@ -33,10 +33,15 @@ def run_once(
     empty_limit: int | None = None,
     wait: bool = False,
 ) -> ScrivenerRunReport:
+    """Claim and execute one scrivener task."""
+
     if wait:
-        claimed = scrivener_queue.daemon_claim(timeout=timeout, empty_limit=empty_limit)
+        claimed = scrivener_inbox.block_claim(
+            timeout=timeout or 0,
+            empty_limit=empty_limit,
+        )
     else:
-        claimed = scrivener_queue.claim()
+        claimed = scrivener_inbox.claim()
     if claimed is None:
         return ScrivenerRunReport(claimed=False)
 
@@ -53,7 +58,7 @@ def run_once(
 
     # Return the completed task key through the orchestrator inbox.
     # Orchestrator owns the inbox boundary; state only supplies Redis plumbing.
-    insert_orchestrator_inbox(task_key)
+    orchestrator_inbox.post(task_key)
 
     return ScrivenerRunReport(
         claimed=True,
@@ -68,6 +73,8 @@ def run_forever(
     timeout: int = DEFAULT_CLAIM_TIMEOUT_SECONDS,
     empty_limit: int | None = None,
 ) -> None:
+    """Run the scrivener daemon loop until idle shutdown or interruption."""
+
     configure_logging()
     run_daemon(
         name="scrivener",
@@ -78,6 +85,8 @@ def run_forever(
 
 
 def main() -> None:
+    """Run one scrivener cycle from the command line."""
+
     configure_logging()
     report = run_once(timeout=0, empty_limit=0, wait=False)
     print(

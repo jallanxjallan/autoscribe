@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from typing import Any, Callable, Mapping
 
-from asc.models.process.result import Failure, Success
+from asc.models.process.result import Failure, Response
 from asc.registries.extensions import load_transform
 
 ENGINE = "scripts"
@@ -52,11 +52,11 @@ def _script_component(value: object) -> str:
     return f"scripts.{key}"
 
 
-def make_call(*, args: dict[str, Any]) -> Callable[[str], Success | Failure]:
+def make_call(*, args: dict[str, Any]) -> Callable[[str], Response | Failure]:
     script = _script_component(args.get("script"))
     transform = load_transform(script)
 
-    def call(content: str) -> Success | Failure:
+    def call(content: str) -> Response | Failure:
         try:
             output = transform(content)
         except Exception as exc:
@@ -71,7 +71,7 @@ def make_call(*, args: dict[str, Any]) -> Callable[[str], Success | Failure]:
                 },
             )
 
-        return Success(
+        return Response(
             content=output,
             raw_json={
                 "engine": ENGINE,
