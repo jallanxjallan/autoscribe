@@ -1,17 +1,22 @@
 """Public inbox for orchestrator posts.
 
-External packages should import only this module and call post(key).  The key is
-the message.  No caller should know the orchestrator queue implementation.
+External packages should import only this module and call post(key). The key is
+the message. No caller should know the orchestrator inbox implementation.
 """
 
 from __future__ import annotations
 
 from asc.redis.key import RedisKey
-from asc.state import orchestrator_queue
+from asc.state.queue import RedisQueue
 
 from .contracts import ORCHESTRATOR_POST_KINDS
 from .errors import OrchestratorContractError
 from .keys import RuntimeKey
+
+
+ORCHESTRATOR_INBOX_KEY = "control:orchestrator:inbox"
+
+orchestrator_inbox = RedisQueue(ORCHESTRATOR_INBOX_KEY)
 
 
 def post(key: str | RedisKey) -> str:
@@ -21,8 +26,26 @@ def post(key: str | RedisKey) -> str:
         raise OrchestratorContractError(
             f"orchestrator inbox expected one of {expected}; got {posted.kind!r}: {posted.raw}"
         )
-    orchestrator_queue.insert(posted.raw)
+    orchestrator_inbox.insert(posted.raw)
     return posted.raw
 
 
-__all__ = ["post"]
+def claim() -> str | None:
+    return orchestrator_inbox.claim()
+
+
+def count() -> int:
+    return orchestrator_inbox.count()
+
+
+def clear() -> int:
+    return orchestrator_inbox.clear()
+
+
+__all__ = [
+    "ORCHESTRATOR_INBOX_KEY",
+    "post",
+    "claim",
+    "count",
+    "clear",
+]

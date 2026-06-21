@@ -10,18 +10,13 @@ Run forever from imported code:
 
 from __future__ import annotations
 
-import logging
-import os
 from dataclasses import dataclass
 
 from asc.models.process.task import ScrivenerTask
+from asc.orchestrator.inbox import insert as insert_orchestrator_inbox
+from asc.scrivener.inbox import scrivener_queue
 from asc.scrivener.write import write_task
-from asc.state import orchestrator_queue, scrivener_queue
-from asc.state.daemon import DEFAULT_CLAIM_TIMEOUT_SECONDS, idle_empty_limit, run_daemon
-
-log = logging.getLogger(__name__)
-
-DEFAULT_EMPTY_LIMIT = idle_empty_limit(timeout=DEFAULT_CLAIM_TIMEOUT_SECONDS)
+from asc.state.daemon import DEFAULT_CLAIM_TIMEOUT_SECONDS, configure_logging, run_daemon
 
 
 @dataclass(frozen=True, slots=True)
@@ -56,10 +51,9 @@ def run_once(
 
     write_task(task)
 
-    # Return the completed task key to orchestrator. Orchestrator can load the
-    # task, recover cursor_key from it, and route the next task without mutating
-    # Cursor.
-    orchestrator_queue.insert(task_key)
+    # Return the completed task key through the orchestrator inbox.
+    # Orchestrator owns the inbox boundary; state only supplies Redis plumbing.
+    insert_orchestrator_inbox(task_key)
 
     return ScrivenerRunReport(
         claimed=True,
@@ -71,9 +65,10 @@ def run_once(
 
 def run_forever(
     *,
-    timeout: int | None = DEFAULT_CLAIM_TIMEOUT_SECONDS,
-    empty_limit: int | None = DEFAULT_EMPTY_LIMIT,
+    timeout: int = DEFAULT_CLAIM_TIMEOUT_SECONDS,
+    empty_limit: int | None = None,
 ) -> None:
+    configure_logging()
     run_daemon(
         name="scrivener",
         run_once=run_once,
@@ -82,16 +77,13 @@ def run_forever(
     )
 
 
-def main() -> ScrivenerRunReport:
-    logging.basicConfig(level=os.environ.get("AUTOSCRIBE_LOG_LEVEL", "INFO"))
-    report = run_once()
-    log.info(
-        "scrivener claimed=%s task_key=%s action=%s",
-        report.claimed,
-        report.task_key,
-        report.action,
+def main() -> None:
+    configure_logging()
+    report = run_once(timeout=0, empty_limit=0, wait=False)
+    print(
+        f"scrivener claimed={report.claimed} "
+        f"task_key={report.task_key} action={report.action}"
     )
-    return report
 
 
 if __name__ == "__main__":

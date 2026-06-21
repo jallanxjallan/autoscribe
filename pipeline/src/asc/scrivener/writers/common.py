@@ -7,6 +7,7 @@ checkpoint. Move it to asc.registries next week when the model/action/table
 contracts are consolidated.
 """
 
+
 import importlib
 from collections.abc import Mapping
 from typing import Any
