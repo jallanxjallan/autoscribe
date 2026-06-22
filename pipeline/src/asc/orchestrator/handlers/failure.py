@@ -1,44 +1,33 @@
-"""Handle a posted failure key.
+"""Handle a worker failure notice.
 
-A worker failure is still a results-index fact.  The worker writes the failure
-object into the assigned slot and posts the failure key.  The orchestrator
-verifies that the key is canonical for the step, loads the failure payload, and
-then applies failure policy.
-
-Failure policy is deliberately boring for this draft: no retry yet.  The
-orchestrator tasks scrivener to record the stopped call.  A later policy module
-can decide retry vs terminal failure without changing the inbox contract.
+A failure notice is ``failure:<worker_task_identity>``. Failure is the one worker
+notice where the orchestrator opens the produced record, because failure policy
+needs to know what happened. Processing-chain context still comes from the
+worker task, not from the failure payload or the notice key.
 """
 
 
 from asc.models.process.cursor import Cursor
 from asc.models.process.result import Failure
+from asc.models.process.task import WorkerTask
 from asc.scrivener import inbox as scrivener_inbox
-from asc.state.results import ResultsIndex
 
-from ..errors import OrchestratorContractError
-from ..keys import RuntimeKey, response_step_number
 from ..tasks import make_scrivener_call_failed
 
 
-def handle(posted: RuntimeKey) -> None:
-    step_number = response_step_number(posted)
-    expected = str(ResultsIndex(f"results:{posted.identity}:index").get(step_number))
-    if expected != posted.raw:
-        raise OrchestratorContractError(
-            f"posted failure is not canonical for step {step_number}: "
-            f"posted={posted.raw!r} results_index={expected!r}"
-        )
+def handle(identity: str) -> None:
+    task = WorkerTask.load(WorkerTask.key_for_identity(identity))
+    cursor = Cursor.load(task.cursor_key)
+    failure_key = str(Failure.key_for_identity(identity))
 
-    cursor = Cursor.load(f"cursor:{posted.identity}:index")
-    task = make_scrivener_call_failed(
+    scrivener_task = make_scrivener_call_failed(
         cursor=cursor,
-        failure_key=posted.raw,
-        failed_at_step=step_number,
-        failure=Failure.load(posted.raw),
+        failure_key=failure_key,
+        failed_at_step=task.step_number,
+        failure=Failure.load(failure_key),
     )
-    task.save()
-    scrivener_inbox.post(str(task.key))
+    scrivener_task.save()
+    scrivener_inbox.post(str(scrivener_task.redis_key))
 
 
 __all__ = ["handle"]

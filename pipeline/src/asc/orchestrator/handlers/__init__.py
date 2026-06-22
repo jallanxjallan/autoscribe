@@ -1,14 +1,13 @@
 from collections.abc import Callable
 
 from ..contracts import COMMITTED, CURSOR, FAILURE, RESPONSE
-from ..keys import RuntimeKey
 
 from .committed import handle as handle_committed
 from .cursor import handle as handle_cursor
 from .failure import handle as handle_failure
 from .response import handle as handle_response
 
-Handler = Callable[[RuntimeKey], None]
+Handler = Callable[[str], None]
 
 HANDLERS: dict[str, Handler] = {
     CURSOR: handle_cursor,

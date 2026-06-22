@@ -13,7 +13,6 @@ class Call(RedisModel):
     model_config = ConfigDict(extra="allow")
 
     kind: ClassVar[str] = "call"
-    suffix: ClassVar[str] = "record"
 
     identity: str = Field(default_factory=generate_identity)
     source_identity: str

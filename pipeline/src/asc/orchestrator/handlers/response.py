@@ -1,37 +1,30 @@
-"""Handle a worker-produced response key.
+"""Handle a worker response notice.
 
-The worker owns writing the response object and inserting that key into the
-assigned results-index slot.  The orchestrator verifies the canonical
-results-index entry for the step, then asks scrivener to commit it to the ledger.
+A response notice is ``response:<worker_task_identity>``. The orchestrator does
+not open the response payload. It loads the worker task, which carries the
+processing-chain context and the response output key, then asks scrivener to
+commit that response.
 """
 
 
 from asc.models.process.cursor import Cursor
+from asc.models.process.task import WorkerTask
 from asc.scrivener import inbox as scrivener_inbox
-from asc.state.results import ResultsIndex
 
-from ..errors import OrchestratorContractError
-from ..keys import RuntimeKey, response_step_number
 from ..tasks import make_scrivener_write_step
 
 
-def handle(posted: RuntimeKey) -> None:
-    step_number = response_step_number(posted)
-    expected = str(ResultsIndex(f"results:{posted.identity}:index").get(step_number))
-    if expected != posted.raw:
-        raise OrchestratorContractError(
-            f"posted response is not canonical for step {step_number}: "
-            f"posted={posted.raw!r} results_index={expected!r}"
-        )
+def handle(identity: str) -> None:
+    task = WorkerTask.load(WorkerTask.key_for_identity(identity))
+    cursor = Cursor.load(task.cursor_key)
 
-    cursor = Cursor.load(f"cursor:{posted.identity}:index")
-    task = make_scrivener_write_step(
+    scrivener_task = make_scrivener_write_step(
         cursor=cursor,
-        response_key=posted.raw,
-        step_number=step_number,
+        response_key=task.output_key,
+        step_number=task.step_number,
     )
-    task.save()
-    scrivener_inbox.post(str(task.key))
+    scrivener_task.save()
+    scrivener_inbox.post(str(scrivener_task.redis_key))
 
 
 __all__ = ["handle"]

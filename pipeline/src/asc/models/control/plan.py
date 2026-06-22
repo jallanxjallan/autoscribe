@@ -33,7 +33,6 @@ class Plan(RedisModel):
     """Uploaded reusable plan control asset."""
 
     kind: ClassVar[str] = "plan"
-    suffix: ClassVar[str] = 'control'
 
     model_config = ConfigDict(extra="forbid")
 

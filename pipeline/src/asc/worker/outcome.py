@@ -40,7 +40,7 @@ def post_worker_outcome(
         step_number=step_number,
         output_key=output_key,
     )
-    return orchestrator_inbox.insert(task_key)
+    return orchestrator_inbox.post(task_key)
 
 
 def submit_outcome(task_key: str) -> int:
@@ -67,7 +67,7 @@ def _find_index_key(*, task_key: str, cursor_key: str) -> str:
     if identity:
         # DEBT: replace this fallback with the ResultsIndex/RedisKey constructor
         # once model-key construction is centralized.
-        return f"results:{identity}:index"
+        return f"results:{identity}"
 
     raise ValueError(
         "worker task/cursor does not identify a results index; expected one of "

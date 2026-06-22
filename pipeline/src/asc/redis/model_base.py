@@ -12,10 +12,9 @@ T = TypeVar("T", bound="RedisModel")
 class RedisModel(BaseModel):
     """Shared behavior for Redis-backed Pydantic hash records.
 
-    Subclasses define a required kind and may define an optional suffix:
+    Subclasses define a required kind. Model keys use the two-segment shape::
 
-        kind only       -> kind:identity
-        kind + suffix   -> kind:identity:suffix
+        kind:identity
 
     This class deliberately does not guess whether a string is an identity or
     a full Redis key. Model instances build keys from their own identity.
@@ -23,7 +22,6 @@ class RedisModel(BaseModel):
     """
 
     kind: ClassVar[str]
-    suffix: ClassVar[str | None] = None
 
     @staticmethod
     def _require_text(value: object, *, field_name: str) -> str:
@@ -42,13 +40,6 @@ class RedisModel(BaseModel):
         )
 
     @classmethod
-    def redis_suffix(cls) -> str | None:
-        value = getattr(cls, "suffix", None)
-        if value is None:
-            return None
-        return cls._require_text(value, field_name=f"{cls.__name__}.suffix")
-
-    @classmethod
     def redis_key_from_raw(cls, value: str | RedisKey) -> RedisKey:
         """Parse a full Redis key string or pass through a RedisKey object.
 
@@ -64,10 +55,7 @@ class RedisModel(BaseModel):
     @classmethod
     def key_for_identity(cls, identity: str) -> RedisKey:
         identity = cls._require_text(identity, field_name="identity")
-        suffix = cls.redis_suffix()
-        if suffix is None:
-            return RedisKey.from_parts(cls.redis_kind(), identity)
-        return RedisKey(kind=cls.redis_kind(), identity=identity, suffix=suffix)
+        return RedisKey.from_parts(cls.redis_kind(), identity)
 
     @classmethod
     def load(cls: type[T], key: str | RedisKey) -> T:
@@ -113,7 +101,6 @@ class RedisModel(BaseModel):
 
 
 # Compatibility alias for code that still imports the old segmented-name base.
-# RedisModel now handles both standalone and suffixed records directly.
 RedisArtifact = RedisModel
 
 

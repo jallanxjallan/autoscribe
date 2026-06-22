@@ -1,12 +1,12 @@
-"""Public queue contract for the orchestrator.
+"""Public inbox contract for the orchestrator.
 
-The orchestrator queue carries Redis keys only.  The key kind selects the
-handler; the identity is the call/process identity; the suffix is interpreted by
-that handler and verified against canonical state before routing continues.
+The orchestrator inbox carries Redis keys only. The key kind selects the
+handler. The handler loads the posted record and reads model fields to decide
+what happened and how routing should continue.
 
-The orchestrator owns only its queue.  It may read cursor, plan, results-index,
-and failure state to make routing decisions, but it does not create or mutate
-those objects.
+The orchestrator owns only its inbox boundary. It may read cursor, plan,
+results-index, committed, response, and failure records to make routing
+decisions, but it should not infer operational meaning from Redis key suffixes.
 """
 
 
@@ -17,11 +17,6 @@ FAILURE = "failure"
 
 ORCHESTRATOR_POST_KINDS = frozenset({CURSOR, RESPONSE, COMMITTED, FAILURE})
 
-COMMITTED_CALL_SUFFIX = "call"
-COMMITTED_COMPLETED_SUFFIX = "completed"
-COMMITTED_FAILED_SUFFIX = "failed"
-COMMITTED_STEP_PREFIX = "step."
-
 SCRIVENER_WRITE_CALL = "write_call"
 SCRIVENER_WRITE_STEP = "write_step"
 SCRIVENER_CALL_COMPLETED = "call_completed"
@@ -31,10 +26,6 @@ WORKER_EXECUTE_STEP = "execute_step"
 
 __all__ = [
     "COMMITTED",
-    "COMMITTED_CALL_SUFFIX",
-    "COMMITTED_COMPLETED_SUFFIX",
-    "COMMITTED_FAILED_SUFFIX",
-    "COMMITTED_STEP_PREFIX",
     "CURSOR",
     "FAILURE",
     "ORCHESTRATOR_POST_KINDS",
