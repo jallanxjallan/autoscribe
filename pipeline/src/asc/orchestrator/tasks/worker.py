@@ -5,7 +5,6 @@ split execution into worker.llm, worker.script, worker.rag, etc. without turning
 orchestrator task construction into a mixed-purpose junk drawer.
 """
 
-
 import json
 from typing import Any, Mapping
 
@@ -16,12 +15,16 @@ from ..contracts import WORKER_EXECUTE_STEP
 
 def make_worker_step(*, cursor: Any, plan: Any, step_number: int, input_key: str) -> WorkerTask:
     step_number = int(step_number)
+    task_identity = f"{cursor.identity}.worker.{WORKER_EXECUTE_STEP}.{step_number}"
+    response_key = f"response:{task_identity}"
+    failure_key = f"failure:{task_identity}"
+
     args = dict(plan_args_for_step(plan, step_number))
-    args.setdefault("results_index_key", str(f"results:{cursor.identity}:index"))
-    args.setdefault("success_key", str(f"response:{cursor.identity}:{step_number}"))
-    args.setdefault("failure_key", str(f"failure:{cursor.identity}:{step_number}"))
+    args.setdefault("success_key", response_key)
+    args.setdefault("failure_key", failure_key)
+
     return WorkerTask(
-        identity=f"{cursor.identity}.worker.{WORKER_EXECUTE_STEP}.{step_number}",
+        identity=task_identity,
         cursor_key=str(cursor.redis_key),
         action=WORKER_EXECUTE_STEP,
         task_number=step_number,
@@ -31,7 +34,7 @@ def make_worker_step(*, cursor: Any, plan: Any, step_number: int, input_key: str
         input_model="Call" if step_number == 1 else "Response",
         input_key=str(input_key),
         output_model="Result",
-        output_key=str(f"results:{cursor.identity}:index"),
+        output_key=response_key,
         args_json=json.dumps(args, ensure_ascii=False, separators=(",", ":")),
     )
 

@@ -16,6 +16,7 @@ class Call(RedisModel):
 
     identity: str = Field(default_factory=generate_identity)
     source_identity: str
+    plan_key: str
     content: str
     created_at: int = Field(default_factory=timestamp)
     blob_json: str = "{}"

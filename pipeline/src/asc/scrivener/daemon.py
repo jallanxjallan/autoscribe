@@ -55,17 +55,12 @@ def run_once(
 
     write_task(task)
 
-    committed = Committed(
-        identity=task.identity,
-        task_key=task.raw_key,
-        cursor_key=task.cursor_key,
-        action=task.action,
-    )
+    committed = Committed(identity=task.identity)
     committed.save()
 
-    # Return the completed task key through the orchestrator inbox.
-    # Orchestrator owns the inbox boundary; state only supplies Redis plumbing.
     orchestrator_inbox.post(str(committed.redis_key))
+
+    
 
     return ScrivenerRunReport(
         claimed=True,

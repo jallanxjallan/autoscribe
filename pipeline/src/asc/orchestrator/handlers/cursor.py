@@ -1,22 +1,16 @@
-"""Handle a newly posted cursor notice.
+"""Legacy cursor notices are no longer part of the public orchestrator contract.
 
-The enqueuer owns creation of the cursor and results index. The orchestrator
-receives a ``cursor:<identity>`` notice, loads the cursor record, and sends the
-first ledger task to scrivener.
+Enqueuer now posts ``call:<identity>``. The call handler creates the cursor and
+results index inside orchestrator-owned runtime state.
 """
 
-
-from asc.models.process.cursor import Cursor
-from asc.scrivener import inbox as scrivener_inbox
-
-from ..tasks import make_scrivener_write_call
+from ..errors import OrchestratorContractError
 
 
 def handle(identity: str) -> None:
-    cursor = Cursor.load(Cursor.key_for_identity(identity))
-    task = make_scrivener_write_call(cursor)
-    task.save()
-    scrivener_inbox.post(str(task.redis_key))
+    raise OrchestratorContractError(
+        f"cursor notices are no longer accepted; post call:{identity} instead"
+    )
 
 
 __all__ = ["handle"]

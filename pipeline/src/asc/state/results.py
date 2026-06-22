@@ -5,7 +5,7 @@ A call step can produce either a Response or a Failure.
 
 Key shape:
 
-    results:<identity>:index
+    results:<identity>
 
 Slot meaning:
 
@@ -31,7 +31,6 @@ from asc.redis.key import RedisKey
 
 
 RESULTS_INDEX_KIND = "results"
-RESULTS_INDEX_SUFFIX = "index"
 EMPTY_RESULT_SLOT = ""
 
 
@@ -39,7 +38,6 @@ class ResultsIndex(RedisIndex):
     """Redis HASH adapter for results-index slots."""
 
     KIND: ClassVar[str] = RESULTS_INDEX_KIND
-    SUFFIX: ClassVar[str] = RESULTS_INDEX_SUFFIX
     EMPTY_SLOT: ClassVar[str] = EMPTY_RESULT_SLOT
 
     @property
@@ -59,7 +57,6 @@ class ResultsIndex(RedisIndex):
                 RedisKey(
                     kind=cls.KIND,
                     identity=cls._require_text(identity, field_name="identity"),
-                    suffix=cls.SUFFIX,
                 )
             )
         )
@@ -170,6 +167,30 @@ class ResultsIndex(RedisIndex):
 
         return text
 
+    def insert_step_key(self, step_number: int, key: str) -> None:
+        """Insert a supplied key into the supplied step slot.
+
+        Step N writes slot N. The caller supplies both values; this method does
+        not parse the key or infer the step number from any key suffix.
+        """
+
+        self.claim_slot(step_number, key)
+
+    def replace_step_key(
+        self,
+        step_number: int,
+        *,
+        expected_key: str,
+        replacement_key: str,
+    ) -> None:
+        """Replace the current supplied step key after checking the expected key."""
+
+        self.complete_slot(
+            step_number,
+            expected_marker_key=expected_key,
+            result_key=replacement_key,
+        )
+
     def claim_slot(self, slot: int, marker_key: str) -> None:
         """Move a slot from empty to in-flight marker."""
 
@@ -276,7 +297,6 @@ def _decode(value: Any) -> str:
 
 __all__ = [
     "RESULTS_INDEX_KIND",
-    "RESULTS_INDEX_SUFFIX",
     "EMPTY_RESULT_SLOT",
     "ResultsIndex",
 ]

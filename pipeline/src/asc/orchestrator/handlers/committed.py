@@ -5,7 +5,6 @@ not opened as a record. Its identity points to the scrivener task that produced
 the notice; the task carries the action, cursor, and step context.
 """
 
-
 from asc.models.control.plan import Plan
 from asc.models.process.cursor import Cursor
 from asc.models.process.task import ScrivenerTask
@@ -61,14 +60,7 @@ def _after_call_committed(*, cursor: Cursor, plan: Plan, total_steps: int) -> No
         scrivener_inbox.post(str(task.redis_key))
         return
 
-    task = make_worker_step(
-        cursor=cursor,
-        plan=plan,
-        step_number=1,
-        input_key=str(ResultsIndex(f"results:{cursor.identity}").input_key_for_step(1)),
-    )
-    task.save()
-    worker_inbox.post(str(task.redis_key))
+    _dispatch_worker_step(cursor=cursor, plan=plan, step_number=1)
 
 
 def _after_step_committed(
@@ -90,13 +82,19 @@ def _after_step_committed(
         scrivener_inbox.post(str(task.redis_key))
         return
 
+    _dispatch_worker_step(cursor=cursor, plan=plan, step_number=next_step)
+
+
+def _dispatch_worker_step(*, cursor: Cursor, plan: Plan, step_number: int) -> None:
+    results = ResultsIndex.from_identity(cursor.identity)
     task = make_worker_step(
         cursor=cursor,
         plan=plan,
-        step_number=next_step,
-        input_key=str(ResultsIndex(f"results:{cursor.identity}").input_key_for_step(next_step)),
+        step_number=step_number,
+        input_key=results.input_key_for_step(step_number),
     )
     task.save()
+    results.insert_step_key(step_number, str(task.redis_key))
     worker_inbox.post(str(task.redis_key))
 
 

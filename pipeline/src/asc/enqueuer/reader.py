@@ -13,6 +13,7 @@ from asc.enqueuer.plan import LoadedPlan, load_plan_from_manifest_record
 from asc.models.process.call import Call
 from asc.streams.ndjson import iter_ndjson_records
 
+
 @dataclass(frozen=True, slots=True)
 class EnqueueRecord:
     """One validated run manifest row split into enqueue-ready objects."""
@@ -44,12 +45,12 @@ def iter_enqueue_records(stream: TextIO) -> Iterator[EnqueueRecord]:
                 f"enqueue stream row {parsed.line_number} missing required field: record_type"
             ) from exc
 
-       
+        plan = load_plan_from_manifest_record(raw)
 
         yield EnqueueRecord(
             record_type=record_type,
-            plan=load_plan_from_manifest_record(raw),
-            call=create_call_from_manifest_record(raw),
+            plan=plan,
+            call=create_call_from_manifest_record(raw, plan_key=plan.raw_key),
             raw_record=raw,
         )
 

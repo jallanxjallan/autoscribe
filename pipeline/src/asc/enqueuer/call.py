@@ -2,7 +2,6 @@ from collections.abc import Mapping
 from typing import Any
 
 from asc.models.process.call import Call
-from asc.redis.key import RedisKey
 
 
 MANIFEST_FIELDS = frozenset({"record_type", "plan_slug"})
@@ -10,7 +9,11 @@ PROBATIONARY_CALL_TTL_SECONDS = 5 * 60
 ENQUEUED_CALL_TTL_SECONDS = 60 * 60 * 24 * 30
 
 
-def create_call_from_manifest_record(record: Mapping[str, Any]) -> Call:
+def create_call_from_manifest_record(
+    record: Mapping[str, Any],
+    *,
+    plan_key: str,
+) -> Call:
     """Create and persist the ephemeral Call carried by one run manifest row.
 
     The enqueue stream row is a dispatch manifest, not a stored Call record.
@@ -18,9 +21,13 @@ def create_call_from_manifest_record(record: Mapping[str, Any]) -> Call:
     and save it with a short probationary TTL. If the full enqueue succeeds,
     the service promotes the Call TTL. If enqueue fails midway, the orphaned
     Call expires quickly.
+
+    The resolved plan key is stored on the Call so the orchestrator can open the
+    Call, open the Plan, and initialize runtime state without enqueue-time cursor
+    or results-index creation.
     """
 
-    call = Call(**_call_payload(record))
+    call = Call(**_call_payload(record, plan_key=plan_key))
     call.save()
     expire_call(call, PROBATIONARY_CALL_TTL_SECONDS)
     return call
@@ -36,7 +43,7 @@ def expire_call(call: Call, ttl_seconds: int) -> None:
     call.redis_key.expire(ttl_seconds)
 
 
-def _call_payload(record: Mapping[str, Any]) -> dict[str, Any]:
+def _call_payload(record: Mapping[str, Any], *, plan_key: str) -> dict[str, Any]:
     payload = dict(record)
     for field in MANIFEST_FIELDS:
         payload.pop(field, None)
@@ -50,6 +57,7 @@ def _call_payload(record: Mapping[str, Any]) -> dict[str, Any]:
     return {
         "source_identity": source_identity,
         "content": content,
+        "plan_key": str(plan_key),
         **payload,
     }
 

@@ -5,11 +5,8 @@ from dataclasses import dataclass
 class EnqueuedCall:
     call: str
     source_identity: str
-    cursor_key: str
     call_key: str
     plan_key: str
-    results_index_key: str
-    cursor_index_key: str
     step_count: int
 
 
