@@ -1,35 +1,26 @@
-"""Handle a worker response notice.
+"""Legacy top-level orchestrator handler.
 
-A response notice is ``response:<worker_task_identity>``. The orchestrator loads
-the worker task, records the response key in the results index, then asks
-scrivener to commit that response.
+The public orchestrator inbox now accepts only call:<identity> and
+outcome:<identity>. This module is intentionally not imported by
+orchestrator.handlers.HANDLERS. Keep it only as a short-term reference while
+the old committed/response/failure/cursor message kinds are removed.
 """
 
-from asc.models.process.cursor import Cursor
-from asc.models.process.task import WorkerTask
-from asc.scrivener import inbox as scrivener_inbox
-from asc.state.results import ResultsIndex
+"""Handle worker response notices.
 
-from ..tasks import make_scrivener_write_step
+Worker response routing is parked while the smoke target is limited to:
+    orchestrator -> scrivener -> orchestrator
+
+Re-enable this module when the generic worker Task/Outcome shape is wired in.
+"""
+
+from ..errors import OrchestratorContractError
 
 
 def handle(identity: str) -> None:
-    task = WorkerTask.load(WorkerTask.key_for_identity(identity))
-    cursor = Cursor.load(task.cursor_key)
-
-    ResultsIndex.from_identity(cursor.identity).replace_step_key(
-        task.step_number,
-        expected_key=str(task.redis_key),
-        replacement_key=task.output_key,
+    raise OrchestratorContractError(
+        f"worker response notices are parked for this smoke cycle: response:{identity}"
     )
-
-    scrivener_task = make_scrivener_write_step(
-        cursor=cursor,
-        response_key=task.output_key,
-        step_number=task.step_number,
-    )
-    scrivener_task.save()
-    scrivener_inbox.post(str(scrivener_task.redis_key))
 
 
 __all__ = ["handle"]

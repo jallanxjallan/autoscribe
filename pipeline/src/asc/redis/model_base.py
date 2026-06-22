@@ -83,7 +83,7 @@ class RedisModel(BaseModel):
     @property
     def raw_key(self) -> str:
         return self.redis_key.raw_key
-    
+
     def dump_json(self) -> dict[str, str]:
         dumped = self.model_dump(mode="json")
         return {
@@ -91,20 +91,13 @@ class RedisModel(BaseModel):
             for field_name, value in dumped.items()
         }
 
-
-
-def save(self, key: str | RedisKey | None = None) -> str:
-    redis_key = (
-        self.redis_key
-        if key is None
-        else self.__class__.redis_key_from_raw(key)
-    )
-    redis_key.hset(mapping=self.dump(output="redis"))
-    return redis_key.raw_key
-
     def save(self, key: str | RedisKey | None = None) -> str:
-        redis_key = self.redis_key if key is None else self.__class__.redis_key_from_raw(key)
-        redis_key.hset(mapping=self.dump_redis())
+        redis_key = (
+            self.redis_key
+            if key is None
+            else self.__class__.redis_key_from_raw(key)
+        )
+        redis_key.hset(mapping=self.dump_json())
         return redis_key.raw_key
 
     def overwrite(self, key: str | RedisKey | None = None) -> str:

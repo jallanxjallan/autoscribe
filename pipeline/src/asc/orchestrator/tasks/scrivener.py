@@ -32,21 +32,21 @@ def make_scrivener_write_call(cursor: Any) -> Task:
     )
 
 
-def make_scrivener_write_step(*, cursor: Any) -> Task:
+def make_scrivener_write_step(*, cursor: Any, **_ignored: Any) -> Task:
     return _scrivener_task(
         cursor=cursor,
         action=SCRIVENER_WRITE_STEP,
     )
 
 
-def make_scrivener_call_completed(*, cursor: Any) -> Task:
+def make_scrivener_call_completed(*, cursor: Any, **_ignored: Any) -> Task:
     return _scrivener_task(
         cursor=cursor,
         action=SCRIVENER_CALL_COMPLETED,
     )
 
 
-def make_scrivener_call_failed(*, cursor: Any) -> Task:
+def make_scrivener_call_failed(*, cursor: Any, **_ignored: Any) -> Task:
     return _scrivener_task(
         cursor=cursor,
         action=SCRIVENER_CALL_FAILED,

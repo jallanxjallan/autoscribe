@@ -1,51 +1,26 @@
-"""Handle a worker failure notice.
+"""Legacy top-level orchestrator handler.
 
-A failure notice is ``failure:<worker_task_identity>``. The orchestrator opens
-the worker task for processing-chain context, records the failure key in the
-results index, then asks scrivener to commit the terminal failure.
+The public orchestrator inbox now accepts only call:<identity> and
+outcome:<identity>. This module is intentionally not imported by
+orchestrator.handlers.HANDLERS. Keep it only as a short-term reference while
+the old committed/response/failure/cursor message kinds are removed.
 """
 
-import json
+"""Handle worker failure notices.
 
-from asc.models.process.cursor import Cursor
-from asc.models.process.result import Failure
-from asc.models.process.task import WorkerTask
-from asc.scrivener import inbox as scrivener_inbox
-from asc.state.results import ResultsIndex
+Worker failure routing is parked while the smoke target is limited to:
+    orchestrator -> scrivener -> orchestrator
 
-from ..tasks import make_scrivener_call_failed
+Re-enable this module when the generic worker Task/Outcome shape is wired in.
+"""
+
+from ..errors import OrchestratorContractError
 
 
 def handle(identity: str) -> None:
-    task = WorkerTask.load(WorkerTask.key_for_identity(identity))
-    cursor = Cursor.load(task.cursor_key)
-    failure_key = _failure_key(task)
-
-    ResultsIndex.from_identity(cursor.identity).replace_step_key(
-        task.step_number,
-        expected_key=str(task.redis_key),
-        replacement_key=failure_key,
+    raise OrchestratorContractError(
+        f"worker failure notices are parked for this smoke cycle: failure:{identity}"
     )
-
-    scrivener_task = make_scrivener_call_failed(
-        cursor=cursor,
-        failure_key=failure_key,
-        failed_at_step=task.step_number,
-        failure=Failure.load(failure_key),
-    )
-    scrivener_task.save()
-    scrivener_inbox.post(str(scrivener_task.redis_key))
-
-
-def _failure_key(task: WorkerTask) -> str:
-    try:
-        args = json.loads(task.args_json or "{}")
-    except json.JSONDecodeError:
-        args = {}
-    key = args.get("failure_key")
-    if key:
-        return str(key)
-    return str(Failure.key_for_identity(task.identity))
 
 
 __all__ = ["handle"]

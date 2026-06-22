@@ -1,21 +1,21 @@
 """Public inbox contract for the orchestrator.
 
-The orchestrator inbox carries Redis keys only. The key kind selects the
-handler. The handler loads the posted record and reads model fields to decide
-what happened and how routing should continue.
+The orchestrator inbox carries Redis keys only. The key kind selects the broad
+message class only. Model fields carry the routing semantics.
 
-Runtime state is orchestrator-owned. Enqueuer posts call keys; workers and
-scrivener post notices. Cursor and results-index mutation stays inside
-orchestrator handlers.
+Current public kinds:
+    call     start or resume orchestration for a Call record
+    outcome  result of a queued Task
+
+Task-specific routing belongs inside the outcome handler, using fields such as
+package, action, and result.
 """
 
 
 CALL = "call"
-RESPONSE = "response"
-COMMITTED = "committed"
-FAILURE = "failure"
+OUTCOME = "outcome"
 
-ORCHESTRATOR_POST_KINDS = frozenset({CALL, RESPONSE, COMMITTED, FAILURE})
+ORCHESTRATOR_POST_KINDS = frozenset({CALL, OUTCOME})
 
 SCRIVENER_WRITE_CALL = "write_call"
 SCRIVENER_WRITE_STEP = "write_step"
@@ -26,10 +26,8 @@ WORKER_EXECUTE_STEP = "execute_step"
 
 __all__ = [
     "CALL",
-    "COMMITTED",
-    "FAILURE",
+    "OUTCOME",
     "ORCHESTRATOR_POST_KINDS",
-    "RESPONSE",
     "SCRIVENER_CALL_COMPLETED",
     "SCRIVENER_CALL_FAILED",
     "SCRIVENER_WRITE_CALL",

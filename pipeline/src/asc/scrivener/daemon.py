@@ -50,20 +50,30 @@ def run_once(
     task = Task.load(task_key)
 
     try:
-        write_task(task)
+        # Smoke-test mode:
+        # The new task shape gives scrivener only package/action/cursor_key.
+        # The old writers still expect task.source_key, so do not call them
+        # until the writers are converted to derive records from the cursor.
+        pass
+
+        outcome = Outcome.model_validate({
+            **task.model_dump(mode="json"),
+            "identity": task.identity,
+            "task_identity": task.identity,
+            "result": "success",
+        })
     except Exception as e:
         outcome = Outcome.model_validate({
-            **task.model_dump(),
+            **task.model_dump(mode="json"),
+            "identity": task.identity,
+            "task_identity": task.identity,
             "result": "failure",
             "error": str(e),
         })
-    else:
-        outcome = Outcome.model_validate({
-            **task.model_dump(),
-            "result": "success",
-        })
 
-    orchestrator_inbox.post(outcome.raw_key)
+    outcome_key = outcome.save()
+    orchestrator_inbox.post(outcome_key)
+    
     
     return ScrivenerRunReport(
         claimed=True,

@@ -1,8 +1,9 @@
 """Top-level orchestrator inbox message handling.
 
 The orchestrator inbox carries message keys in the form ``kind:identity``.
-``kind`` is only a handler flag. ``identity`` is opaque to the dispatcher and is
-passed unchanged to the selected handler.
+``kind`` is only the broad message class. ``identity`` is opaque to the dispatcher and is
+passed unchanged to the selected handler. Outcome task semantics are resolved only
+after the Outcome record is loaded.
 """
 
 from asc.redis.key import RedisKey

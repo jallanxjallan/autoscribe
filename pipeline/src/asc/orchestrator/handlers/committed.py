@@ -1,13 +1,22 @@
+"""Legacy top-level orchestrator handler.
+
+The public orchestrator inbox now accepts only call:<identity> and
+outcome:<identity>. This module is intentionally not imported by
+orchestrator.handlers.HANDLERS. Keep it only as a short-term reference while
+the old committed/response/failure/cursor message kinds are removed.
+"""
+
 """Handle a scrivener committed notice.
 
-A committed notice is ``committed:<scrivener_task_identity>``. The notice key is
-not opened as a record. Its identity points to the scrivener task that produced
-the notice; the task carries the action, cursor, and step context.
+A committed notice is ``committed:<task_identity>``. For this smoke cycle,
+the identity points back to the generic scrivener Task that produced the
+Outcome. Worker dispatch is deliberately parked after the committed notice is
+handled.
 """
 
 from asc.models.control.plan import Plan
 from asc.models.process.cursor import Cursor
-from asc.models.process.task import ScrivenerTask
+from asc.models.process.task import Task
 from asc.orchestrator.contracts import (
     SCRIVENER_CALL_COMPLETED,
     SCRIVENER_CALL_FAILED,
@@ -15,19 +24,13 @@ from asc.orchestrator.contracts import (
     SCRIVENER_WRITE_STEP,
 )
 from asc.scrivener import inbox as scrivener_inbox
-from asc.state.results import ResultsIndex
-from asc.worker import inbox as worker_inbox
 
 from ..errors import OrchestratorContractError
-from ..tasks import (
-    make_scrivener_call_completed,
-    make_worker_step,
-    plan_step_count,
-)
+from ..tasks import make_scrivener_call_completed, plan_step_count
 
 
 def handle(identity: str) -> None:
-    task = ScrivenerTask.load(ScrivenerTask.key_for_identity(identity))
+    task = Task.load(Task.key_for_identity(identity))
 
     if task.action in {SCRIVENER_CALL_COMPLETED, SCRIVENER_CALL_FAILED}:
         return
@@ -86,16 +89,15 @@ def _after_step_committed(
 
 
 def _dispatch_worker_step(*, cursor: Cursor, plan: Plan, step_number: int) -> None:
-    results = ResultsIndex.from_identity(cursor.identity)
-    task = make_worker_step(
-        cursor=cursor,
-        plan=plan,
-        step_number=step_number,
-        input_key=results.input_key_for_step(step_number),
-    )
-    task.save()
-    results.insert_step_key(step_number, str(task.redis_key))
-    worker_inbox.post(str(task.redis_key))
+    """Worker dispatch is deliberately parked for the current smoke cycle.
+
+    The temporary target is only:
+        orchestrator -> scrivener -> orchestrator
+
+    Once the generic worker task shape is wired back in, this function should
+    create the next generic worker Task and post it to the worker inbox.
+    """
+    return None
 
 
 __all__ = ["handle"]

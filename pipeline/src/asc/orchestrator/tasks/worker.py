@@ -8,35 +8,17 @@ orchestrator task construction into a mixed-purpose junk drawer.
 import json
 from typing import Any, Mapping
 
-from asc.models.process.task import WorkerTask
 
-from ..contracts import WORKER_EXECUTE_STEP
+PARKED_WORKER_FACTORY = """
+def make_worker_step(*, cursor: Any, plan: Any, step_number: int, input_key: str):
+    '''Parked old WorkerTask factory.
 
-
-def make_worker_step(*, cursor: Any, plan: Any, step_number: int, input_key: str) -> WorkerTask:
-    step_number = int(step_number)
-    task_identity = f"{cursor.identity}.worker.{WORKER_EXECUTE_STEP}.{step_number}"
-    response_key = f"response:{task_identity}"
-    failure_key = f"failure:{task_identity}"
-
-    args = dict(plan_args_for_step(plan, step_number))
-    args.setdefault("success_key", response_key)
-    args.setdefault("failure_key", failure_key)
-
-    return WorkerTask(
-        identity=task_identity,
-        cursor_key=str(cursor.redis_key),
-        action=WORKER_EXECUTE_STEP,
-        task_number=step_number,
-        step_number=step_number,
-        engine=step_engine_key(args.get("engine"), step_number=step_number),
-        handler=step_handler_key(args, step_number=step_number),
-        input_model="Call" if step_number == 1 else "Response",
-        input_key=str(input_key),
-        output_model="Result",
-        output_key=response_key,
-        args_json=json.dumps(args, ensure_ascii=False, separators=(",", ":")),
-    )
+    This was the previous expanded task shape. It filled engine, handler,
+    input/output keys, and args_json in orchestrator. The new task shape should
+    let the worker executor load the cursor and derive execution details itself.
+    '''
+    ...
+"""
 
 
 def plan_step_count(plan: Any) -> int:
@@ -94,6 +76,5 @@ def step_handler_key(args: Mapping[str, Any], *, step_number: int) -> str:
 
 
 __all__ = [
-    "make_worker_step",
     "plan_step_count",
 ]
