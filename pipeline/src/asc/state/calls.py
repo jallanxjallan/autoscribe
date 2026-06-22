@@ -30,11 +30,11 @@ from asc.redis.index_base import RedisIndex
 from asc.redis.key import RedisKey
 
 
-RESULTS_INDEX_KIND = "results"
+RESULTS_INDEX_KIND = "calls"
 EMPTY_RESULT_SLOT = ""
 
 
-class ResultsIndex(RedisIndex):
+class CallIndex(RedisIndex):
     """Redis HASH adapter for results-index slots."""
 
     KIND: ClassVar[str] = RESULTS_INDEX_KIND
@@ -49,7 +49,7 @@ class ResultsIndex(RedisIndex):
         return RedisKey(str(self.key))
 
     @classmethod
-    def from_identity(cls, identity: str) -> "ResultsIndex":
+    def from_identity(cls, identity: str) -> "CallIndex":
         """Bind a results index from a process identity."""
 
         return cls(
@@ -68,7 +68,7 @@ class ResultsIndex(RedisIndex):
         call_key: RedisKey,
         total_steps: int,
         ttl_seconds: int | None = None,
-    ) -> "ResultsIndex":
+    ) -> "CallIndex":
         """Create, initialize, and return a bound results index.
 
         The call key supplies the process identity. Existing contents are deleted

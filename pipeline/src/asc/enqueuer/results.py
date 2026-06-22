@@ -1,6 +1,6 @@
 from asc.models.process.call import Call
 from asc.redis.key import RedisKey
-from asc.state.results import ResultsIndex
+from asc.state.calls import ResultsIndex
 
 
 def create_results_index(
