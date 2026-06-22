@@ -38,6 +38,10 @@ def run_once(
         return OrchestratorRunReport(claimed=False)
 
     handle_message(claimed)
+    WorkerTask -> Task(package="worker", action="...")
+ScrivenerTask -> Task(package="scrivener", action="...")
+Committed -> Outcome(result="success")
+failure marker -> Outcome(result="failure", error_code=..., error_message=...)
     return OrchestratorRunReport(claimed=True)
 
 

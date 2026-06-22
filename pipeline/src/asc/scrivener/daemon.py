@@ -10,8 +10,7 @@ Run forever from imported code:
 
 from dataclasses import dataclass
 
-from asc.models.process.event import Committed
-from asc.models.process.task import ScrivenerTask
+from asc.models.process.task import Task, Outcome
 from asc.orchestrator import inbox as orchestrator_inbox
 from asc.scrivener import inbox as scrivener_inbox
 from asc.scrivener.write import write_task
@@ -21,7 +20,7 @@ from asc.state.daemon import DEFAULT_CLAIM_TIMEOUT_SECONDS, configure_logging, r
 @dataclass(frozen=True, slots=True)
 class ScrivenerRunReport:
     claimed: bool
-    cursor_key: str | None = None
+    # cursor_key: str | None = None
     task_key: str | None = None
     action: str | None = None
 
@@ -48,23 +47,27 @@ def run_once(
     if not task_key:
         raise ValueError("scrivener claimed an empty task key")
 
-    task = ScrivenerTask.load(task_key)
-    cursor_key = task.cursor_key
-    if not cursor_key:
-        raise ValueError(f"scrivener task has no cursor_key: {task_key}")
+    task = Task.load(task_key)
 
-    write_task(task)
+    try:
+        write_task(task)
+    except Exception as e:
+        outcome = Outcome.model_validate({
+            **task.model_dump(),
+            "result": "failure",
+            "error": str(e),
+        })
+    else:
+        outcome = Outcome.model_validate({
+            **task.model_dump(),
+            "result": "success",
+        })
 
-    committed = Committed(identity=task.identity)
-    committed.save()
-
-    orchestrator_inbox.post(str(committed.redis_key))
-
+    orchestrator_inbox.post(outcome.raw_key)
     
-
     return ScrivenerRunReport(
         claimed=True,
-        cursor_key=cursor_key,
+        # cursor_key=task.cursor_key,
         task_key=task_key,
         action=task.action,
     )

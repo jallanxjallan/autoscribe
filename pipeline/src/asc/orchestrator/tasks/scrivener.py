@@ -1,10 +1,10 @@
 """Scrivener task factories used by orchestrator handlers."""
 
+from __future__ import annotations
 
-import json
 from typing import Any
 
-from asc.models.process.task import ScrivenerTask
+from asc.models.process.task import Task
 
 from ..contracts import (
     SCRIVENER_CALL_COMPLETED,
@@ -14,69 +14,42 @@ from ..contracts import (
 )
 
 
-def make_scrivener_write_call(cursor: Any) -> ScrivenerTask:
-    return ScrivenerTask(
-        identity=f"{cursor.identity}.scrivener.{SCRIVENER_WRITE_CALL}.0",
+SCRIVENER_PACKAGE = "scrivener"
+
+
+def _scrivener_task(*, cursor: Any, action: str) -> Task:
+    return Task(
+        package=SCRIVENER_PACKAGE,
+        action=action,
+        cursor_key=str(cursor.redis_key),
+    )
+
+
+def make_scrivener_write_call(cursor: Any) -> Task:
+    return _scrivener_task(
+        cursor=cursor,
         action=SCRIVENER_WRITE_CALL,
-        source_key=str(cursor.call_key),
-        cursor_key=str(cursor.redis_key),
-        plan_key=str(cursor.plan_key),
-        task_number=0,
-        args_json="{}",
-        ttl_seconds=None,
     )
 
 
-def make_scrivener_write_step(*, cursor: Any, response_key: str, step_number: int) -> ScrivenerTask:
-    return ScrivenerTask(
-        identity=f"{cursor.identity}.scrivener.{SCRIVENER_WRITE_STEP}.{int(step_number)}",
+def make_scrivener_write_step(*, cursor: Any) -> Task:
+    return _scrivener_task(
+        cursor=cursor,
         action=SCRIVENER_WRITE_STEP,
-        source_key=str(response_key),
-        cursor_key=str(cursor.redis_key),
-        plan_key=str(cursor.plan_key),
-        task_number=int(step_number),
-        args_json="{}",
-        ttl_seconds=None,
     )
 
 
-def make_scrivener_call_completed(*, cursor: Any, completed_after_step: int) -> ScrivenerTask:
-    task_number = int(completed_after_step) + 1
-    return ScrivenerTask(
-        identity=f"{cursor.identity}.scrivener.{SCRIVENER_CALL_COMPLETED}.{task_number}",
+def make_scrivener_call_completed(*, cursor: Any) -> Task:
+    return _scrivener_task(
+        cursor=cursor,
         action=SCRIVENER_CALL_COMPLETED,
-        source_key=str(cursor.call_key),
-        cursor_key=str(cursor.redis_key),
-        plan_key=str(cursor.plan_key),
-        task_number=task_number,
-        args_json=json.dumps(
-            {"completed_after_step": int(completed_after_step)},
-            ensure_ascii=False,
-            separators=(",", ":"),
-        ),
-        ttl_seconds=None,
     )
 
 
-def make_scrivener_call_failed(*, cursor: Any, failure_key: str, failed_at_step: int, failure: Any) -> ScrivenerTask:
-    step_number = int(failed_at_step)
-    return ScrivenerTask(
-        identity=f"{cursor.identity}.scrivener.{SCRIVENER_CALL_FAILED}.{step_number}",
+def make_scrivener_call_failed(*, cursor: Any) -> Task:
+    return _scrivener_task(
+        cursor=cursor,
         action=SCRIVENER_CALL_FAILED,
-        source_key=str(failure_key),
-        cursor_key=str(cursor.redis_key),
-        plan_key=str(cursor.plan_key),
-        task_number=step_number,
-        args_json=json.dumps(
-            {
-                "failed_at_step": step_number,
-                "failure_key": str(failure_key),
-                "failure_repr": repr(failure),
-            },
-            ensure_ascii=False,
-            separators=(",", ":"),
-        ),
-        ttl_seconds=None,
     )
 
 
