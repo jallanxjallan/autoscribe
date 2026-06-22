@@ -6,15 +6,24 @@ from pydantic import BaseModel
 from asc.redis.key import RedisKey
 
 
-T = TypeVar("T", bound="RedisHashModel")
+T = TypeVar("T", bound="RedisModel")
 
 
-class RedisHashModel(BaseModel):
+class RedisModel(BaseModel):
     """Shared behavior for Redis-backed Pydantic hash records.
 
-    This class deliberately does not define a key shape. Subclasses choose
-    whether identity resolves to a standalone key or a segmented artifact key.
+    Subclasses define a required kind and may define an optional suffix:
+
+        kind only       -> kind:identity
+        kind + suffix   -> kind:identity:suffix
+
+    This class deliberately does not guess whether a string is an identity or
+    a full Redis key. Model instances build keys from their own identity.
+    Loading and explicit save targets accept full raw keys or RedisKey objects.
     """
+
+    kind: ClassVar[str]
+    suffix: ClassVar[str | None] = None
 
     @staticmethod
     def _require_text(value: object, *, field_name: str) -> str:
@@ -26,30 +35,46 @@ class RedisHashModel(BaseModel):
         return value
 
     @classmethod
-    def resolve_key(cls, value: str | RedisKey) -> RedisKey:
+    def redis_kind(cls) -> str:
+        return cls._require_text(
+            getattr(cls, "kind", None),
+            field_name=f"{cls.__name__}.kind",
+        )
+
+    @classmethod
+    def redis_suffix(cls) -> str | None:
+        value = getattr(cls, "suffix", None)
+        if value is None:
+            return None
+        return cls._require_text(value, field_name=f"{cls.__name__}.suffix")
+
+    @classmethod
+    def redis_key_from_raw(cls, value: str | RedisKey) -> RedisKey:
+        """Parse a full Redis key string or pass through a RedisKey object.
+
+        This intentionally does not accept bare identities. Use
+        key_for_identity(identity) when constructing a key from model identity.
+        """
+
         if isinstance(value, RedisKey):
             return value
 
-        text = cls._require_text(value, field_name="redis key or identity")
-
-        # A full Redis key has at least kind + identity. Anything without a
-        # separator is treated as a bare identity and passed through the
-        # subclass key policy.
-        if RedisKey.SEP in text:
-            return RedisKey(text)
-
-        return cls.key_for_identity(text)
+        return RedisKey(cls._require_text(value, field_name="redis key"))
 
     @classmethod
     def key_for_identity(cls, identity: str) -> RedisKey:
-        raise NotImplementedError(f"{cls.__name__} must define key_for_identity()")
+        identity = cls._require_text(identity, field_name="identity")
+        suffix = cls.redis_suffix()
+        if suffix is None:
+            return RedisKey.from_parts(cls.redis_kind(), identity)
+        return RedisKey(kind=cls.redis_kind(), identity=identity, suffix=suffix)
 
     @classmethod
-    def load(cls: type[T], value: str | RedisKey) -> T:
-        key = cls.resolve_key(value)
-        raw = key.hgetall()
+    def load(cls: type[T], key: str | RedisKey) -> T:
+        redis_key = cls.redis_key_from_raw(key)
+        raw = redis_key.hgetall()
         if not raw:
-            raise RuntimeError(f"Redis hash record missing: {key}")
+            raise RuntimeError(f"Redis hash record missing: {redis_key}")
         return cls.load_redis(raw)
 
     @classmethod
@@ -67,6 +92,10 @@ class RedisHashModel(BaseModel):
     def redis_key(self) -> RedisKey:
         return self.__class__.key_for_identity(self.redis_identity)
 
+    @property
+    def raw_key(self) -> str:
+        return self.redis_key.raw_key
+
     def dump_redis(self) -> dict[str, str]:
         dumped = self.model_dump(mode="json")
         return {
@@ -74,74 +103,25 @@ class RedisHashModel(BaseModel):
             for key, value in dumped.items()
         }
 
-    def save(self, value: str | RedisKey | None = None) -> str:
-        key = self.redis_key if value is None else self.__class__.resolve_key(value)
-        key.hset(mapping=self.dump_redis())
-        return str(key)
+    def save(self, key: str | RedisKey | None = None) -> str:
+        redis_key = self.redis_key if key is None else self.__class__.redis_key_from_raw(key)
+        redis_key.hset(mapping=self.dump_redis())
+        return redis_key.raw_key
 
-    def overwrite(self, value: str | RedisKey | None = None) -> str:
-        return self.save(value)
-
-
-class RedisRecord(RedisHashModel):
-    """Standalone Redis hash model using kind:identity.
-
-    Use this for records whose Redis identity is their own object identity.
-    Ephemeral process-control messages should normally use RedisMessage from
-    asc.redis.message_base, which is a semantic alias over this shape.
-    """
-
-    kind: ClassVar[str]
-
-    @classmethod
-    def redis_kind(cls) -> str:
-        return cls._require_text(
-            getattr(cls, "kind", None),
-            field_name=f"{cls.__name__}.kind",
-        )
-
-    @classmethod
-    def key_for_identity(cls, identity: str) -> RedisKey:
-        identity = cls._require_text(identity, field_name="identity")
-        return RedisKey.from_parts(cls.redis_kind(), identity)
+    def overwrite(self, key: str | RedisKey | None = None) -> str:
+        return self.save(key)
 
 
-class RedisArtifact(RedisRecord):
-    """Segmented Redis hash model using kind:identity:suffix.
-
-    Use this for durable artifacts that are owned by an external identity,
-    such as call-owned cursor, index, result, or failure records.
-    """
-
-    suffix: ClassVar[str]
-
-    @classmethod
-    def redis_suffix(cls) -> str:
-        return cls._require_text(
-            getattr(cls, "suffix", None),
-            field_name=f"{cls.__name__}.suffix",
-        )
-
-    @classmethod
-    def key_for_identity(cls, identity: str) -> RedisKey:
-        identity = cls._require_text(identity, field_name="identity")
-        return RedisKey.from_parts(
-            cls.redis_kind(),
-            identity,
-            cls.redis_suffix(),
-        )
-
-
-# Backward-compatible name for existing durable data models.
-# Existing model classes that inherit RedisModel keep their current
-# kind:identity:suffix key shape and do not need to be renamed.
-RedisModel = RedisArtifact
-RedisSegmentedModel = RedisArtifact
+# Compatibility alias for code that still imports the old segmented-name base.
+# RedisModel now handles both standalone and suffixed records directly.
+RedisArtifact = RedisModel
 
 
 def _redis_value(value: Any, *, field_name: str) -> str:
     if value is None:
         return ""
+    if isinstance(value, RedisKey):
+        return value.raw_key
     if isinstance(value, bool):
         return "true" if value else "false"
     if isinstance(value, (str, int, float)):
@@ -155,10 +135,4 @@ def _redis_value(value: Any, *, field_name: str) -> str:
         ) from exc
 
 
-__all__ = [
-    "RedisHashModel",
-    "RedisRecord",
-    "RedisArtifact",
-    "RedisSegmentedModel",
-    "RedisModel",
-]
+__all__ = ["RedisModel", "RedisArtifact"]

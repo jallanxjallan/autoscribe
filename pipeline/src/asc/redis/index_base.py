@@ -24,10 +24,21 @@ class RedisIndex:
 
     KEY: ClassVar[str]
 
-    def __init__(self, key: str | None = None) -> None:
-        key_str = key if key is not None else self._default_key()
-        self.key = RedisKey(key_str)
+    def __init__(self, key: str | RedisKey | None = None) -> None:
+        if key is None:
+            self.key = RedisKey(self._default_key())
+            return
 
+        if isinstance(key, RedisKey):
+            self.key = key
+            return
+
+        if isinstance(key, str):
+            self.key = RedisKey(key)
+            return
+
+        raise TypeError("key must be a str, RedisKey, or None")
+    
     @classmethod
     def _default_key(cls) -> str:
         key = getattr(cls, "KEY", None)
@@ -44,8 +55,12 @@ class RedisIndex:
             raise ValueError(f"{field_name} must be a non-empty string")
         return value
 
+    @property
+    def raw_key(self) -> str:
+        return self.key.raw_key
+
     def __str__(self) -> str:
-        return str(self.key)
+        return self.raw_key
 
     def _r(self):
         return self.key._r()
@@ -116,13 +131,13 @@ class FixedRedisHashIndex(FixedRedisIndex):
     def bind_pointer(
         self,
         field: str,
-        value: str,
+        value: str | RedisKey,
         *,
         overwrite: bool = False,
         collision_label: str = "field",
     ) -> str:
         field = self._require_text(field, field_name="field")
-        value = self._require_text(value, field_name="value")
+        value = as_raw_key(value)
         existing = self.resolve_pointer(field)
 
         if existing is not None and existing != value and not overwrite:

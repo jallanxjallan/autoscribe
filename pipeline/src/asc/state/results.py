@@ -51,7 +51,7 @@ class ResultsIndex(RedisIndex):
         return RedisKey(str(self.key))
 
     @classmethod
-    def from_identity(cls, identity: str) -> ResultsIndex:
+    def from_identity(cls, identity: str) -> "ResultsIndex":
         """Bind a results index from a process identity."""
 
         return cls(
@@ -71,7 +71,7 @@ class ResultsIndex(RedisIndex):
         call_key: RedisKey,
         total_steps: int,
         ttl_seconds: int | None = None,
-    ) -> ResultsIndex:
+    ) -> "ResultsIndex":
         """Create, initialize, and return a bound results index.
 
         The call key supplies the process identity. Existing contents are deleted

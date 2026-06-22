@@ -73,7 +73,7 @@ class RedisKey:
         self.key = key_text
 
     @classmethod
-    def from_parts(cls, *parts: str) -> RedisKey:
+    def from_parts(cls, *parts: str) -> "RedisKey":
         return cls(build_key(*parts))
 
     @classmethod
@@ -187,6 +187,10 @@ class RedisKey:
         """Compatibility alias for the first suffix segment."""
 
         return self.segments[0] if self.segments else None
+    
+    @property
+    def raw_key(self) -> str:
+        return self.key
 
     def __str__(self) -> str:
         return self.key
@@ -366,5 +370,6 @@ __all__ = [
     "MIN_PARTS",
     "SEP",
     "RedisKey",
+    "as_raw_key",
     "build_key",
 ]

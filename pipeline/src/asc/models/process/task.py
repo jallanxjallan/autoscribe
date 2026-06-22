@@ -15,12 +15,11 @@ from asc.redis.message_base import RedisMessage
 TaskStatus = Literal["queued", "claimed"]
 
 
-
-
 class _TaskBase(RedisMessage):
     """Shared shape for daemon tasks."""
 
     model_config = ConfigDict(extra="forbid")
+    kind: ClassVar[str] = "task"
 
     identity: str
     task_number: int
@@ -73,7 +72,6 @@ class _TaskBase(RedisMessage):
 class WorkerTask(_TaskBase):
     """Task consumed by the worker daemon."""
 
-    kind: ClassVar[str] = "worker_task"
 
     step_number: int
 
@@ -120,8 +118,6 @@ class WorkerTask(_TaskBase):
 
 class ScrivenerTask(_TaskBase):
     """Task consumed by the scrivener daemon."""
-
-    kind: ClassVar[str] = "scrivener_task"
 
     source_key: str
     plan_key: str

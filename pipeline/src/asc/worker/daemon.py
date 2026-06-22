@@ -45,7 +45,7 @@ def run_once(
     if claimed is None:
         return WorkerRunReport(claimed=False)
 
-    task_key = str(getattr(claimed, "key", claimed)).strip()
+    task_key = claimed.strip()
     if not task_key:
         raise ValueError("worker claimed an empty task key")
 

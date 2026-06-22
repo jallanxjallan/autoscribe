@@ -33,4 +33,4 @@ class Failure(RedisModel):
     created_at: int = Field(default_factory=timestamp)
 
 
-__all__ = ["Result", "Failure"]
+__all__ = ["Response", "Failure"]
