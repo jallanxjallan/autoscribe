@@ -13,7 +13,6 @@ packages declare their own fixed Redis keys, for example::
 claim, blocking claim, peek, remove, count, and clear.
 """
 
-
 from collections.abc import Sequence
 from dataclasses import dataclass
 import os
@@ -28,7 +27,7 @@ class QueuedKey:
 
     Queue entries are full Redis keys. The owning package decides whether those
     keys are cursors, tasks, markers, or another model kind. The score is a local
-    claim timestamp for diagnostics; LIST queues do not persist per-item scores.
+    timestamp for diagnostics; LIST queues do not persist per-item scores.
     """
 
     key: str
@@ -143,9 +142,11 @@ class RedisQueue(FixedRedisIndex):
         """
 
         cycle_timeout = daemon_timeout_seconds() if timeout is None else max(1, int(timeout))
-        idle_limit = daemon_empty_limit(timeout=cycle_timeout)
-        requested_limit = idle_limit if empty_limit is None else max(1, int(empty_limit))
-        max_empty = max(idle_limit, requested_limit)
+        max_empty = daemon_empty_limit(timeout=cycle_timeout)
+        if empty_limit is not None:
+            max_empty = int(empty_limit)
+        if max_empty <= 0:
+            return None
 
         for _ in range(max_empty):
             claimed = self.block_claim(timeout=cycle_timeout)
@@ -179,66 +180,11 @@ class RedisQueue(FixedRedisIndex):
         return int(self.delete())
 
 
-def insert(queue: RedisQueue, key: str) -> int:
-    return queue.insert(key)
-
-
-def insert_many(queue: RedisQueue, keys: Sequence[str]) -> int:
-    return queue.insert_many(keys)
-
-
-def claim(queue: RedisQueue) -> QueuedKey | None:
-    return queue.claim()
-
-
-def block_claim(queue: RedisQueue, *, timeout: int = 0) -> QueuedKey | None:
-    return queue.block_claim(timeout=timeout)
-
-
-def daemon_claim(
-    queue: RedisQueue,
-    *,
-    timeout: int | None = None,
-    empty_limit: int | None = None,
-) -> QueuedKey | None:
-    return queue.daemon_claim(timeout=timeout, empty_limit=empty_limit)
-
-
-def daemon_drain_claim(queue: RedisQueue) -> QueuedKey | None:
-    return queue.daemon_drain_claim()
-
-
-def peek(queue: RedisQueue) -> QueuedKey | None:
-    return queue.peek()
-
-
-def remove(queue: RedisQueue, key: str) -> int:
-    return queue.remove(key)
-
-
-def count(queue: RedisQueue) -> int:
-    return queue.count()
-
-
-def clear(queue: RedisQueue) -> int:
-    return queue.clear()
-
-
 __all__ = [
     "QueuedKey",
     "RedisQueue",
-    "block_claim",
-    "daemon_claim",
-    "daemon_drain_claim",
     "daemon_empty_limit",
     "daemon_idle_seconds",
     "daemon_timeout_seconds",
-    "claim",
-    "clear",
-    "count",
-    "insert",
-    "insert_many",
-    "peek",
-    "remove",
     "require_queue_key",
 ]
