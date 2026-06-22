@@ -33,7 +33,7 @@ def promote_call_ttl(call: Call) -> None:
 def expire_call(call: Call, ttl_seconds: int) -> None:
     if ttl_seconds < 1:
         raise ValueError("ttl_seconds must be positive")
-    RedisKey(str(call.redis_key)).expire(ttl_seconds)
+    call.redis_key.expire(ttl_seconds)
 
 
 def _call_payload(record: Mapping[str, Any]) -> dict[str, Any]:

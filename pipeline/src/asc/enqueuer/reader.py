@@ -13,10 +13,6 @@ from asc.enqueuer.plan import LoadedPlan, load_plan_from_manifest_record
 from asc.models.process.call import Call
 from asc.streams.ndjson import iter_ndjson_records
 
-
-
-
-
 @dataclass(frozen=True, slots=True)
 class EnqueueRecord:
     """One validated run manifest row split into enqueue-ready objects."""
