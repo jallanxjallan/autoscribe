@@ -13,20 +13,19 @@ runs the long-lived daemon loop.
 
 from dataclasses import dataclass
 
-from asc.models.process.task import Outcome, Task
+from asc.models.process.task import Task
 from asc.orchestrator import inbox as orchestrator_inbox
 from asc.state.daemon import DEFAULT_CLAIM_TIMEOUT_SECONDS, configure_logging, run_daemon
 from asc.worker import inbox as worker_inbox
 from asc.worker.execute import WorkerExecutor
 
 
-@dataclass(slots=True)
+@dataclass(frozen=True, slots=True)
 class WorkerRunReport:
     claimed: bool
     cursor_key: str | None = None
     task_key: str | None = None
     output_key: str | None = None
-    outcome_key: str | None = None
     action: str | None = None
 
 
@@ -39,7 +38,7 @@ def run_once(
     """Claim and execute one worker task."""
 
     if wait:
-        claimed = worker_inbox.block_claim(
+        claimed = worker_inbox.daemon_claim(
             timeout=timeout or 0,
             empty_limit=empty_limit,
         )
@@ -49,43 +48,26 @@ def run_once(
     if claimed is None:
         return WorkerRunReport(claimed=False)
 
-    task_key = claimed.strip()
+    task_key = claimed
     if not task_key:
         raise ValueError("worker claimed an empty task key")
 
+    # Print immediately after the atomic claim. If execution crashes before a
+    # result key is posted, this is the exact key to repost for retry testing.
+    print(f"worker claimed_task_key={task_key}", flush=True)
+
     task = Task.load(task_key)
-    output_key: str | None = None
+    result = WorkerExecutor().execute(task_key)
 
-    try:
-        result = WorkerExecutor().execute(task_key)
-        output_key = result.output_key
-
-        outcome = Outcome.model_validate({
-            **task.model_dump(mode="json"),
-            "identity": task.identity,
-            "task_identity": task.identity,
-            "result": "success",
-            "output_key": output_key,
-        })
-
-    except Exception as e:
-        outcome = Outcome.model_validate({
-            **task.model_dump(mode="json"),
-            "identity": task.identity,
-            "task_identity": task.identity,
-            "result": "failure",
-            "error": str(e),
-        })
-
-    outcome_key = outcome.save()
-    orchestrator_inbox.post(outcome_key)
+    # Worker posts only the saved response/failure key. The orchestrator owns
+    # result-index insertion and next-step routing.
+    orchestrator_inbox.post(result.output_key)
 
     return WorkerRunReport(
         claimed=True,
-        cursor_key=task.cursor_key,
+        cursor_key=getattr(task, "cursor_key", None),
         task_key=task_key,
-        output_key=output_key,
-        outcome_key=outcome_key,
+        output_key=result.output_key,
         action=task.action,
     )
 
@@ -114,7 +96,7 @@ def main() -> None:
     print(
         f"worker claimed={report.claimed} "
         f"task_key={report.task_key} action={report.action} "
-        f"output_key={report.output_key} outcome_key={report.outcome_key}"
+        f"output_key={report.output_key}"
     )
 
 

@@ -21,7 +21,6 @@ import subprocess
 import sys
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any
 
 import typer
 
@@ -43,7 +42,7 @@ class ManagedDaemon:
 
 DAEMONS: tuple[ManagedDaemon, ...] = (
     ManagedDaemon(name="orchestrator", module="asc.orchestrator.daemon"),
-    ManagedDaemon(name="worker", module="asc.workers.daemon"),
+    ManagedDaemon(name="worker", module="asc.worker.daemon"),
     ManagedDaemon(name="scrivener", module="asc.scrivener.daemon"),
 )
 

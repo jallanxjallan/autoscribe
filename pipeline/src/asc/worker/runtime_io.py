@@ -2,6 +2,7 @@ import json
 from typing import Any
 
 from asc.redis.key import RedisKey
+from asc.redis.primitives.hashes import hgetall
 
 
 CONTENT_FIELDS = (
@@ -22,7 +23,7 @@ def load_runtime_content(key: str) -> str:
     if not isinstance(key, str) or not key.strip():
         raise ValueError("runtime input key must be non-empty")
 
-    data = RedisKey(key.strip()).hgetall()
+    data = hgetall(RedisKey(key.strip()))
     if not data:
         raise ValueError(f"runtime input key is missing or empty: {key}")
 

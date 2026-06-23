@@ -10,19 +10,18 @@ Run forever from imported code:
 
 from dataclasses import dataclass
 
-from asc.models.process.task import Task, Outcome
 from asc.orchestrator import inbox as orchestrator_inbox
 from asc.scrivener import inbox as scrivener_inbox
-from asc.scrivener.write import write_task
+from asc.scrivener.execute import ScrivenerExecutor
 from asc.state.daemon import DEFAULT_CLAIM_TIMEOUT_SECONDS, configure_logging, run_daemon
 
 
 @dataclass(frozen=True, slots=True)
 class ScrivenerRunReport:
     claimed: bool
-    # cursor_key: str | None = None
     task_key: str | None = None
     action: str | None = None
+    output_key: str | None = None
 
 
 def run_once(
@@ -40,46 +39,22 @@ def run_once(
         )
     else:
         claimed = scrivener_inbox.claim()
+
     if claimed is None:
         return ScrivenerRunReport(claimed=False)
 
-    task_key = claimed
+    task_key = str(claimed).strip()
     if not task_key:
         raise ValueError("scrivener claimed an empty task key")
 
-    task = Task.load(task_key)
+    result = ScrivenerExecutor().execute(task_key)
+    orchestrator_inbox.post(result.output_key)
 
-    try:
-        # Smoke-test mode:
-        # The new task shape gives scrivener only package/action/cursor_key.
-        # The old writers still expect task.source_key, so do not call them
-        # until the writers are converted to derive records from the cursor.
-        pass
-
-        outcome = Outcome.model_validate({
-            **task.model_dump(mode="json"),
-            "identity": task.identity,
-            "task_identity": task.identity,
-            "result": "success",
-        })
-    except Exception as e:
-        outcome = Outcome.model_validate({
-            **task.model_dump(mode="json"),
-            "identity": task.identity,
-            "task_identity": task.identity,
-            "result": "failure",
-            "error": str(e),
-        })
-
-    outcome_key = outcome.save()
-    orchestrator_inbox.post(outcome_key)
-    
-    
     return ScrivenerRunReport(
         claimed=True,
-        # cursor_key=task.cursor_key,
-        task_key=task_key,
-        action=task.action,
+        task_key=result.task_key,
+        action=result.action,
+        output_key=result.output_key,
     )
 
 
@@ -90,6 +65,7 @@ def run_forever(
 ) -> None:
     """Run the scrivener daemon loop until idle shutdown or interruption."""
 
+    configure_logging()
     run_daemon(
         name="scrivener",
         run_once=lambda **kwargs: run_once(wait=True, **kwargs),
@@ -105,7 +81,8 @@ def main() -> None:
     report = run_once()
     print(
         f"scrivener claimed={report.claimed} "
-        f"task_key={report.task_key} action={report.action}"
+        f"task_key={report.task_key} action={report.action} "
+        f"output_key={report.output_key}"
     )
 
 

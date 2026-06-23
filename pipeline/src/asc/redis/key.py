@@ -12,30 +12,50 @@ class RedisKey:
 
         kind:identity[:suffix...]
 
-    RedisKey owns the Redis client access point, but not Redis command
-    primitives. Hash/list/zset helpers belong in the modules that use them.
+    Construction supports either a complete raw key string:
+
+        RedisKey("call:01ABC:record")
+
+    or labelled key parts:
+
+        RedisKey(kind="call", identity="01ABC", suffix="record")
+        RedisKey(kind="call", identity="01ABC", segments=("record",))
+
+    RedisKey owns key parsing/validation and the Redis client access point, but
+    not Redis command primitives. Hash/list/zset helpers belong in the modules
+    that use them.
     """
 
     SEP: ClassVar[str] = SEP
     MIN_PARTS: ClassVar[int] = MIN_PARTS
 
-    def __init__(self, raw_key: str) -> None:
+    def __init__(
+        self,
+        raw_key: str | None = None,
+        *,
+        kind: str | None = None,
+        identity: str | None = None,
+        suffix: str | None = None,
+        segments: tuple[str, ...] | list[str] | None = None,
+    ) -> None:
+        if raw_key is not None and (kind is not None or identity is not None):
+            raise ValueError("RedisKey accepts either raw_key or labelled parts, not both")
+
+        if raw_key is None:
+            raw_key = self._raw_from_labelled_parts(
+                kind=kind,
+                identity=identity,
+                suffix=suffix,
+                segments=segments,
+            )
+
         if not isinstance(raw_key, str):
             raise TypeError("RedisKey requires a string")
 
         raw_key = raw_key.strip()
         parts = tuple(raw_key.split(self.SEP))
 
-        if len(parts) < self.MIN_PARTS:
-            raise ValueError("Redis keys must have at least kind and identity segments")
-
-        for index, part in enumerate(parts, start=1):
-            if not part:
-                raise ValueError(f"Redis key segment {index} must be non-empty")
-            if part != part.strip():
-                raise ValueError(
-                    f"Redis key segment {index} has surrounding whitespace"
-                )
+        self._validate_parts(parts)
 
         self.raw_key = raw_key
         self.parts = parts
@@ -43,23 +63,51 @@ class RedisKey:
     @classmethod
     def from_parts(cls, *parts: str | None) -> "RedisKey":
         clean_parts = tuple(part for part in parts if part is not None)
+        cls._validate_parts(clean_parts)
+        return cls(SEP.join(clean_parts))
 
-        if len(clean_parts) < MIN_PARTS:
+    @classmethod
+    def _raw_from_labelled_parts(
+        cls,
+        *,
+        kind: str | None,
+        identity: str | None,
+        suffix: str | None,
+        segments: tuple[str, ...] | list[str] | None,
+    ) -> str:
+        if kind is None:
+            raise ValueError("RedisKey labelled construction requires kind")
+        if identity is None:
+            raise ValueError("RedisKey labelled construction requires identity")
+
+        if suffix is not None and segments is not None:
+            raise ValueError("RedisKey accepts suffix or segments, not both")
+
+        if segments is None:
+            extra_parts: tuple[str, ...] = (suffix,) if suffix is not None else ()
+        else:
+            extra_parts = tuple(segments)
+
+        return SEP.join((kind, identity, *extra_parts))
+
+    @classmethod
+    def _validate_parts(cls, parts: tuple[str, ...]) -> None:
+        if len(parts) < cls.MIN_PARTS:
             raise ValueError("Redis keys must have at least kind and identity segments")
 
-        for index, part in enumerate(clean_parts, start=1):
+        for index, part in enumerate(parts, start=1):
             if not isinstance(part, str):
                 raise TypeError(f"Redis key segment {index} must be a string")
-            if not part.strip():
+            if not part:
                 raise ValueError(f"Redis key segment {index} must be non-empty")
             if part != part.strip():
                 raise ValueError(
                     f"Redis key segment {index} has surrounding whitespace"
                 )
-            if SEP in part:
-                raise ValueError(f"Redis key segment {index} must not contain {SEP!r}")
-
-        return cls(SEP.join(clean_parts))
+            if cls.SEP in part:
+                raise ValueError(
+                    f"Redis key segment {index} must not contain {cls.SEP!r}"
+                )
 
     @property
     def kind(self) -> str:
@@ -72,6 +120,12 @@ class RedisKey:
     @property
     def segments(self) -> tuple[str, ...]:
         return self.parts[2:]
+
+    @property
+    def suffix(self) -> str | None:
+        if not self.segments:
+            return None
+        return self.SEP.join(self.segments)
 
     def _r(self):
         from asc.redis.client import get_client
