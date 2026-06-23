@@ -6,9 +6,29 @@ from asc.models.control.plan import Plan
 from asc.state.slugmap import SlugKeyResolver
 
 
+# Future modification note:
+# This module currently resolves manifest rows that reference persistent plans
+# already uploaded and stored separately. It will later also handle ephemeral
+# plans: plan content uploaded inline with the calls, containing instruction and
+# script references that are valid only for that run and should not be stored as
+# permanent reusable Plan records.
+#
+# When that work is done, keep this module as the enqueue-time plan-normalizing
+# boundary. It should return the plan key or plan object needed by Call creation,
+# but it should not create runtime cursors, call indexes, step indexes, worker
+# tasks, or orchestrator state. Those are orchestrator/handler responsibilities.
+
+
 @dataclass(frozen=True, slots=True)
 class LoadedPlan:
-    """A manifest-resolved Plan plus enqueue-time validation metadata."""
+    """A manifest-resolved Plan plus enqueue-time validation metadata.
+
+    Future cleanup note:
+    step_count is now report/validation metadata only. The orchestrator call
+    handler reloads the plan and creates the runtime indexes. If reports no
+    longer need step_count, this can be slimmed down to a resolved plan slug/key
+    wrapper.
+    """
 
     slug: str
     plan: Plan

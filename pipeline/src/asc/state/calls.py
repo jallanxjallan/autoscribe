@@ -30,17 +30,15 @@ from asc.redis.index_base import RedisIndex
 from asc.redis.key import RedisKey
 
 
-RESULTS_INDEX_KIND = "calls"
-EMPTY_RESULT_SLOT = ""
 
 
 class CallIndex(RedisIndex):
     """Redis HASH adapter for results-index slots."""
 
-    KIND: ClassVar[str] = RESULTS_INDEX_KIND
-    EMPTY_SLOT: ClassVar[str] = EMPTY_RESULT_SLOT
-
-    @property
+    KIND: ClassVar[str] = 'call'
+    SUFFIX: ClassVar[str] = 'index'
+    EMPTY_SLOT: ClassVar[str] = ''
+    
     def redis_key(self) -> RedisKey:
         """Return the bound results-index Redis key."""
 
@@ -57,6 +55,7 @@ class CallIndex(RedisIndex):
                 RedisKey(
                     kind=cls.KIND,
                     identity=cls._require_text(identity, field_name="identity"),
+                    suffix=cls.SUFFIX
                 )
             )
         )

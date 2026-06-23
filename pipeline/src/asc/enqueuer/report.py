@@ -1,6 +1,13 @@
 from dataclasses import dataclass
 
 
+# Future modification note:
+# step_count is currently retained as enqueue reporting metadata. Because the
+# orchestrator call handler now reloads the plan and owns runtime step/index
+# initialization, this field can be removed later if the CLI/reporting layer no
+# longer displays it.
+
+
 @dataclass(frozen=True, slots=True)
 class EnqueuedCall:
     call: str

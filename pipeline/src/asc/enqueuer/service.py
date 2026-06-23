@@ -7,6 +7,12 @@ from asc.enqueuer.report import EnqueuedCall, EnqueueReport
 from asc.orchestrator.inbox import post as post_to_orchestrator
 
 
+# Future modification note:
+# This service should remain deliberately thin. Enqueue creates persisted calls,
+# posts call notices to the orchestrator inbox, and promotes successful call TTLs.
+# Runtime setup is now owned by orchestrator.handlers.call.
+
+
 def enqueue_from_stream(stream: TextIO) -> EnqueueReport:
     return enqueue_records(iter_enqueue_records(stream))
 

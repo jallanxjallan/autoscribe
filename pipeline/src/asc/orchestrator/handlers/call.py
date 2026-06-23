@@ -7,7 +7,7 @@ those Step keys in the call/results index, and schedules the initial scrivener
 """
 
 from asc.models.control.plan import Plan
-from asc.models.process.call import Call
+from asc.models.process.call import CallRecord
 from asc.models.process.cursor import Cursor
 from asc.scrivener import inbox as scrivener_inbox
 from asc.state.cursor import active_cursor_index, set_cursor_key
@@ -17,7 +17,7 @@ from ..tasks import make_scrivener_write_call, materialize_plan_steps, plan_step
 
 
 def handle(identity: str) -> None:
-    call = Call.load(f"call:{identity}")
+    call = CallRecord.load(f"call:{identity}")
     plan_key = str(call.plan_key)
     plan = Plan.load(plan_key)
     total_steps = plan_step_count(plan)

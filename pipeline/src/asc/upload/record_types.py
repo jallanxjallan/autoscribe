@@ -2,7 +2,7 @@ from typing import Final
 
 from asc.models.control.instruction import Instruction
 from asc.models.control.plan import Plan
-from asc.models.process.call import Call
+from asc.models.process.call import CallRecord
 from asc.redis.model_base import RedisModel
 
 RECORD_TYPE_ALIASES: Final[dict[str, str]] = {
@@ -20,7 +20,7 @@ RECORD_TYPE_ALIASES: Final[dict[str, str]] = {
 
 MODEL_BY_RECORD_TYPE: Final[dict[str, type[RedisModel]]] = {
     "instruction": Instruction,
-    "call": Call,
+    "call": CallRecord,
     "plan": Plan,
 }
 

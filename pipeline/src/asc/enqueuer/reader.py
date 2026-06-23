@@ -1,8 +1,8 @@
 # Enqueue accepts external records at the normalization boundary only. The
 # current supported input is a dispatch-run manifest row. Future convenience
-# inputs, such as pure call records or webpage-download records, should be
-# normalized here into this same EnqueueRecord shape rather than adding another
-# enqueue path in the service.
+# inputs, such as pure call records, webpage-download records, or manifest rows
+# carrying ephemeral inline plans, should be normalized here into this same
+# EnqueueRecord shape rather than adding another enqueue path in the service.
 
 from collections.abc import Iterator, Mapping
 from dataclasses import dataclass
@@ -10,7 +10,7 @@ from typing import Any, TextIO
 
 from asc.enqueuer.call import create_call_from_manifest_record
 from asc.enqueuer.plan import LoadedPlan, load_plan_from_manifest_record
-from asc.models.process.call import Call
+from asc.models.process.call import CallRecord
 from asc.streams.ndjson import iter_ndjson_records
 
 
@@ -20,7 +20,7 @@ class EnqueueRecord:
 
     record_type: str
     plan: LoadedPlan
-    call: Call
+    call: CallRecord
     raw_record: Mapping[str, Any]
 
     @property

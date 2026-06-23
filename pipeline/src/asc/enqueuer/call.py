@@ -1,7 +1,7 @@
 from collections.abc import Mapping
 from typing import Any
 
-from asc.models.process.call import Call
+from asc.models.process.call import CallRecord
 
 
 MANIFEST_FIELDS = frozenset({"record_type", "plan_slug"})
@@ -9,11 +9,18 @@ PROBATIONARY_CALL_TTL_SECONDS = 5 * 60
 ENQUEUED_CALL_TTL_SECONDS = 60 * 60 * 24 * 30
 
 
+# Future modification note:
+# Keep this module focused on creating and TTL-managing the persisted CallRecord
+# at the enqueue boundary. Do not reintroduce cursor creation, call-index/results
+# initialization, step materialization, or task scheduling here; those now belong
+# to the orchestrator call handler.
+
+
 def create_call_from_manifest_record(
     record: Mapping[str, Any],
     *,
     plan_key: str,
-) -> Call:
+) -> CallRecord:
     """Create and persist the ephemeral Call carried by one run manifest row.
 
     The enqueue stream row is a dispatch manifest, not a stored Call record.
@@ -27,17 +34,17 @@ def create_call_from_manifest_record(
     or results-index creation.
     """
 
-    call = Call(**_call_payload(record, plan_key=plan_key))
+    call = CallRecord(**_call_payload(record, plan_key=plan_key))
     call.save()
     expire_call(call, PROBATIONARY_CALL_TTL_SECONDS)
     return call
 
 
-def promote_call_ttl(call: Call) -> None:
+def promote_call_ttl(call: CallRecord) -> None:
     expire_call(call, ENQUEUED_CALL_TTL_SECONDS)
 
 
-def expire_call(call: Call, ttl_seconds: int) -> None:
+def expire_call(call: CallRecord, ttl_seconds: int) -> None:
     if ttl_seconds < 1:
         raise ValueError("ttl_seconds must be positive")
     call.redis_key.expire(ttl_seconds)

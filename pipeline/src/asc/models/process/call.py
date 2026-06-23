@@ -9,10 +9,11 @@ from asc.redis.model_base import RedisModel
 from asc.core.timestamp import timestamp
 
 
-class Call(RedisModel):
+class CallRecord(RedisModel):
     model_config = ConfigDict(extra="allow")
 
     kind: ClassVar[str] = "call"
+    suffix: ClassVar[str] = "record"
 
     identity: str = Field(default_factory=generate_identity)
     source_identity: str
