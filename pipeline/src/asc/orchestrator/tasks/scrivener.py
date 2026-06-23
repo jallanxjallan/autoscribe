@@ -4,6 +4,8 @@ from __future__ import annotations
 
 from typing import Any
 
+import ulid
+
 from asc.models.process.task import Task
 
 from ..contracts import (
@@ -17,39 +19,39 @@ from ..contracts import (
 SCRIVENER_PACKAGE = "scrivener"
 
 
-def _scrivener_task(*, cursor: Any, action: str) -> Task:
-    return Task(
-        package=SCRIVENER_PACKAGE,
-        action=action,
-        cursor_key=str(cursor.redis_key),
-    )
-
-
 def make_scrivener_write_call(cursor: Any) -> Task:
-    return _scrivener_task(
-        cursor=cursor,
+    return Task(
+        identity=str(ulid.new()),
+        package=SCRIVENER_PACKAGE,
         action=SCRIVENER_WRITE_CALL,
+        cursor_key=cursor.raw_key,
     )
 
 
 def make_scrivener_write_step(*, cursor: Any, **_ignored: Any) -> Task:
-    return _scrivener_task(
-        cursor=cursor,
+    return Task(
+        identity=str(ulid.new()),
+        package=SCRIVENER_PACKAGE,
         action=SCRIVENER_WRITE_STEP,
+        cursor_key=cursor.raw_key,
     )
 
 
 def make_scrivener_call_completed(*, cursor: Any, **_ignored: Any) -> Task:
-    return _scrivener_task(
-        cursor=cursor,
+    return Task(
+        identity=str(ulid.new()),
+        package=SCRIVENER_PACKAGE,
         action=SCRIVENER_CALL_COMPLETED,
+        cursor_key=cursor.raw_key,
     )
 
 
 def make_scrivener_call_failed(*, cursor: Any, **_ignored: Any) -> Task:
-    return _scrivener_task(
-        cursor=cursor,
+    return Task(
+        identity=str(ulid.new()),
+        package=SCRIVENER_PACKAGE,
         action=SCRIVENER_CALL_FAILED,
+        cursor_key=cursor.raw_key,
     )
 
 

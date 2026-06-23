@@ -2,7 +2,7 @@
 
 The orchestrator compiles a Plan into short-lived Step records once, stores the
 Step keys in the call/results index, and sends Worker tasks containing only the
-Call key plus the Step key.  Workers should not load or unpack the Plan.
+Call key plus the Step key. Workers should not load or unpack the Plan.
 """
 
 from __future__ import annotations
@@ -10,6 +10,8 @@ from __future__ import annotations
 import json
 from collections.abc import Mapping
 from typing import Any
+
+import ulid
 
 from asc.models.process.step import Step
 from asc.models.process.task import Task
@@ -30,21 +32,18 @@ def make_worker_step(
 ) -> Task:
     """Create the compact Worker task for one materialized Step."""
 
-    step_number = int(step_number)
-    data: dict[str, object] = {
-        "identity": _task_identity(call_key=call_key, step_number=step_number),
-        "package": WORKER_PACKAGE,
-        "action": WORKER_EXECUTE_STEP,
-        "source_key": str(step_key),
-        "call_key": str(call_key),
-        "step_key": str(step_key),
-        "task_number": step_number,
-        "args_json": "{}",
-        "ttl_seconds": None,
-    }
-    if cursor_key is not None:
-        data["cursor_key"] = str(cursor_key)
-    return Task(**data)
+    return Task(
+        identity=str(ulid.new()),
+        package=WORKER_PACKAGE,
+        action=WORKER_EXECUTE_STEP,
+        source_key=step_key,
+        call_key=call_key,
+        step_key=step_key,
+        task_number=int(step_number),
+        args_json="{}",
+        ttl_seconds=None,
+        **({"cursor_key": cursor_key} if cursor_key is not None else {}),
+    )
 
 
 def materialize_plan_steps(
@@ -57,12 +56,12 @@ def materialize_plan_steps(
 ) -> list[str]:
     """Save Step records for every Plan step and put their keys in the index."""
 
-    call = RedisKey(str(call_key))
+    call = call_key if isinstance(call_key, RedisKey) else RedisKey(call_key)
     step_keys: list[str] = []
 
     for step_number, raw_step in enumerate(plan_steps(plan), start=1):
         step = make_step_record(
-            call_key=str(call),
+            call_key=call.raw_key,
             cursor_key=cursor_key,
             call_identity=call.identity,
             step_number=step_number,
@@ -70,9 +69,8 @@ def materialize_plan_steps(
             ttl_seconds=ttl_seconds,
         )
         step.save()
-        step_key = str(step.redis_key)
-        call_index.set_slot(step_number, step_key)
-        step_keys.append(step_key)
+        call_index.set_slot(step_number, step.raw_key)
+        step_keys.append(step.raw_key)
 
     return step_keys
 
@@ -91,8 +89,7 @@ def make_step_record(
     step = _mapping(raw_step, field_name=f"plan step {step_number}")
     args = _mapping(step.get("args", {}), field_name=f"plan step {step_number} args")
 
-    data: dict[str, Any] = {}
-    data.update(step)
+    data: dict[str, Any] = {**step}
     for key, value in args.items():
         data.setdefault(key, value)
 
@@ -183,11 +180,6 @@ def step_instruction_keys(args: Mapping[str, Any]) -> list[str]:
             seen.add(value)
             unique.append(value)
     return unique
-
-
-def _task_identity(*, call_key: str, step_number: int) -> str:
-    call = RedisKey(str(call_key))
-    return f"{call.identity}.worker.{WORKER_EXECUTE_STEP}.{int(step_number)}"
 
 
 def _mapping(value: Any, *, field_name: str) -> dict[str, Any]:
