@@ -15,7 +15,8 @@ results index inside orchestrator-owned runtime state.
 from ..errors import OrchestratorContractError
 
 
-def handle(identity: str) -> None:
+def handle(key: object) -> None:
+    identity = getattr(key, "identity", str(key))
     raise OrchestratorContractError(
         f"cursor notices are no longer accepted; post call:{identity} instead"
     )

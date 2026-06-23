@@ -30,8 +30,8 @@ from ..errors import OrchestratorContractError
 from ..tasks import make_scrivener_call_completed, make_worker_step
 
 
-def handle(identity: str) -> None:
-    outcome = Outcome.load(Outcome.key_for_identity(identity))
+def handle(key: RedisKey) -> None:
+    outcome = Outcome.load(_outcome_key(key))
 
     if outcome.result == "failure":
         _handle_failed_outcome(outcome)
@@ -53,6 +53,12 @@ def handle(identity: str) -> None:
     raise OrchestratorContractError(
         f"unknown outcome package {outcome.package!r}: {outcome.raw_key}"
     )
+
+
+def _outcome_key(key: RedisKey) -> str:
+    if getattr(key, "suffix", ""):
+        return str(key)
+    return Outcome.key_for_identity(key.identity)
 
 
 def _handle_scrivener_success(outcome: Outcome) -> None:

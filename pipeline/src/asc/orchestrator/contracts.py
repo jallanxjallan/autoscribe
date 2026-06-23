@@ -1,10 +1,12 @@
 """Public inbox contract for the orchestrator.
 
 The orchestrator inbox carries Redis keys only. The key kind selects the broad
-message class only. Model fields carry the routing semantics.
+message class only. Identity and suffix are opaque to the dispatcher; model
+fields carry the routing semantics.
 
 Current public kinds:
     call     start or resume orchestration for a Call record
+             accepts call:<identity> and call:<identity>:record
     outcome  result of a queued Task
 
 Task-specific routing belongs inside the outcome handler, using fields such as

@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from typing import Any
 
-import ulid
+
 
 from asc.models.process.task import Task
 
@@ -21,7 +21,6 @@ SCRIVENER_PACKAGE = "scrivener"
 
 def make_scrivener_write_call(cursor: Any) -> Task:
     return Task(
-        identity=str(ulid.new()),
         package=SCRIVENER_PACKAGE,
         action=SCRIVENER_WRITE_CALL,
         cursor_key=cursor.raw_key,
@@ -30,7 +29,6 @@ def make_scrivener_write_call(cursor: Any) -> Task:
 
 def make_scrivener_write_step(*, cursor: Any, **_ignored: Any) -> Task:
     return Task(
-        identity=str(ulid.new()),
         package=SCRIVENER_PACKAGE,
         action=SCRIVENER_WRITE_STEP,
         cursor_key=cursor.raw_key,
@@ -39,7 +37,6 @@ def make_scrivener_write_step(*, cursor: Any, **_ignored: Any) -> Task:
 
 def make_scrivener_call_completed(*, cursor: Any, **_ignored: Any) -> Task:
     return Task(
-        identity=str(ulid.new()),
         package=SCRIVENER_PACKAGE,
         action=SCRIVENER_CALL_COMPLETED,
         cursor_key=cursor.raw_key,
@@ -48,7 +45,6 @@ def make_scrivener_call_completed(*, cursor: Any, **_ignored: Any) -> Task:
 
 def make_scrivener_call_failed(*, cursor: Any, **_ignored: Any) -> Task:
     return Task(
-        identity=str(ulid.new()),
         package=SCRIVENER_PACKAGE,
         action=SCRIVENER_CALL_FAILED,
         cursor_key=cursor.raw_key,

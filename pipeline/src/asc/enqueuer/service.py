@@ -26,7 +26,7 @@ def enqueue_record(record: EnqueueRecord) -> EnqueuedCall:
     plan = record.plan.plan
 
     post_to_orchestrator(str(call.redis_key))
-    promote_call_ttl(call)
+    # promote_call_ttl(call)
 
     return EnqueuedCall(
         call=call.redis_key.identity,

@@ -17,7 +17,8 @@ Re-enable this module when the generic worker Task/Outcome shape is wired in.
 from ..errors import OrchestratorContractError
 
 
-def handle(identity: str) -> None:
+def handle(key: object) -> None:
+    identity = getattr(key, "identity", str(key))
     raise OrchestratorContractError(
         f"worker failure notices are parked for this smoke cycle: failure:{identity}"
     )
