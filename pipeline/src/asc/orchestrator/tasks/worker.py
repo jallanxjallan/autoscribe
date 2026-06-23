@@ -1,8 +1,9 @@
 """Worker task and materialized step factories used by orchestrator handlers.
 
-The orchestrator compiles a Plan into short-lived Step records once, stores the
-Step keys in the call/results index, and sends Worker tasks containing only the
-Call key plus the Step key. Workers should not load or unpack the Plan.
+The orchestrator compiles a Plan into short-lived Step records once and stores
+Step keys in the call/results index. Worker tasks conform to the compact Task
+model: package, action, and cursor_key only. The worker loads the cursor and
+uses process state to derive the current call, step, and result slot.
 """
 
 from __future__ import annotations
@@ -10,8 +11,6 @@ from __future__ import annotations
 import json
 from collections.abc import Mapping
 from typing import Any
-
-import ulid
 
 from asc.models.process.step import Step
 from asc.models.process.task import Task
@@ -25,24 +24,22 @@ WORKER_PACKAGE = "worker"
 
 def make_worker_step(
     *,
-    call_key: str,
-    step_key: str,
-    step_number: int,
-    cursor_key: str | None = None,
+    cursor_key: str,
+    call_key: str | None = None,
+    step_key: str | None = None,
+    step_number: int | None = None,
+    **_ignored: Any,
 ) -> Task:
-    """Create the compact Worker task for one materialized Step."""
+    """Create the compact Worker task for the cursor's current step.
+
+    Older call sites may still pass call_key, step_key, or step_number, but the
+    Task model no longer stores those fields. They are intentionally ignored.
+    """
 
     return Task(
-        identity=str(ulid.new()),
         package=WORKER_PACKAGE,
         action=WORKER_EXECUTE_STEP,
-        source_key=step_key,
-        call_key=call_key,
-        step_key=step_key,
-        task_number=int(step_number),
-        args_json="{}",
-        ttl_seconds=None,
-        **({"cursor_key": cursor_key} if cursor_key is not None else {}),
+        cursor_key=cursor_key,
     )
 
 

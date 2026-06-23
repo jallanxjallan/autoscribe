@@ -1,7 +1,9 @@
 from typing import Any
 
 from asc.redis.key import RedisKey
+from asc.redis.primitives import keys
 from asc.state.slugmap import SlugMap
+
 
 CONTROL_KIND_TO_REGISTRY = {
     "instruction": "instructions",
@@ -25,7 +27,8 @@ def build_control_snapshot() -> dict[str, Any]:
 
     for slug, full_key in slugmap.list().items():
         key = RedisKey(full_key)
-        if not key.exists():
+
+        if not keys.exists(key):
             slugmap.delete(slug)
             stale[slug] = full_key
             continue
@@ -59,15 +62,6 @@ def _snapshot_record(*, slug: str, key: RedisKey, kind: str) -> dict[str, Any]:
     identity = _identity_from_key(key)
     if identity:
         record["identity"] = identity
-
-    # stored = key.hgetall()
-    # if isinstance(stored, dict):
-    #     label = _first_text(stored, "label", "title", "name")
-    #     description = _first_text(stored, "description")
-    #     if label:
-    #         record["label"] = label
-    #     if description:
-    #         record["description"] = description
 
     return record
 

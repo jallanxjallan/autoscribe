@@ -4,8 +4,6 @@ from __future__ import annotations
 
 from typing import Any
 
-
-
 from asc.models.process.task import Task
 
 from ..contracts import (
@@ -20,35 +18,43 @@ SCRIVENER_PACKAGE = "scrivener"
 
 
 def make_scrivener_write_call(cursor: Any) -> Task:
-    return Task(
-        package=SCRIVENER_PACKAGE,
+    return _make_scrivener_task(
         action=SCRIVENER_WRITE_CALL,
-        cursor_key=cursor.raw_key,
+        cursor=cursor,
     )
 
 
 def make_scrivener_write_step(*, cursor: Any, **_ignored: Any) -> Task:
-    return Task(
-        package=SCRIVENER_PACKAGE,
+    return _make_scrivener_task(
         action=SCRIVENER_WRITE_STEP,
-        cursor_key=cursor.raw_key,
+        cursor=cursor,
     )
 
 
 def make_scrivener_call_completed(*, cursor: Any, **_ignored: Any) -> Task:
-    return Task(
-        package=SCRIVENER_PACKAGE,
+    return _make_scrivener_task(
         action=SCRIVENER_CALL_COMPLETED,
-        cursor_key=cursor.raw_key,
+        cursor=cursor,
     )
 
 
 def make_scrivener_call_failed(*, cursor: Any, **_ignored: Any) -> Task:
+    return _make_scrivener_task(
+        action=SCRIVENER_CALL_FAILED,
+        cursor=cursor,
+    )
+
+
+def _make_scrivener_task(*, action: str, cursor: Any) -> Task:
     return Task(
         package=SCRIVENER_PACKAGE,
-        action=SCRIVENER_CALL_FAILED,
-        cursor_key=cursor.raw_key,
+        action=action,
+        cursor_key=_cursor_key(cursor),
     )
+
+
+def _cursor_key(cursor: Any) -> str:
+    return str(getattr(cursor, "raw_key", cursor))
 
 
 __all__ = [

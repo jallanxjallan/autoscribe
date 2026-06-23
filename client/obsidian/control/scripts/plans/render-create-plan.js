@@ -84,8 +84,36 @@ async function copyText(text) {
 
 function hydrateControl(saved, liveRecords, valueField = 'slug') {
   if (!saved) return null;
+
+  if (typeof saved === 'string') {
+    return liveRecords.find((record) => (
+      record[valueField] || record.slug || record.key
+    ) === saved) || { [valueField]: saved, key: saved, slug: saved };
+  }
+
   const savedId = saved[valueField] || saved.slug || saved.key;
   return liveRecords.find((record) => (record[valueField] || record.slug || record.key) === savedId) || saved;
+}
+
+const STEP_CONTRACT_ARG_KEYS = new Set([
+  'index',
+  'kind',
+  'label',
+  'instructions',
+  'instruction_slugs',
+  'engine',
+  'script',
+  'rag_profile',
+  'model',
+]);
+
+function argsForEditor(args) {
+  const compact = {};
+  for (const [key, value] of Object.entries(args || {})) {
+    if (STEP_CONTRACT_ARG_KEYS.has(key)) continue;
+    compact[key] = value;
+  }
+  return compact;
 }
 
 function isScriptEngine(engine) {
@@ -189,7 +217,7 @@ function planToScreenSteps(plan, { engines, instructions, scripts, ragProfiles }
       script: hydrateControl(step.script, scripts, 'key'),
       rag_profile: hydrateControl(step.rag_profile, ragProfiles, 'key'),
       model: step.model || step.args?.model || '',
-      argsJson: JSON.stringify(step.args || {}, null, 2),
+      argsJson: JSON.stringify(argsForEditor(step.args || {}), null, 2),
       instructions: (step.instructions || step.instruction_slugs || [])
         .map((ins) => hydrateControl(typeof ins === 'string' ? { slug: ins } : ins, instructions, 'slug'))
         .filter(Boolean),
