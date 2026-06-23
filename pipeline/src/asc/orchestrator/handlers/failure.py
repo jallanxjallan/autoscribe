@@ -1,27 +1,19 @@
-"""Legacy top-level orchestrator handler.
-
-The public orchestrator inbox now accepts only call:<identity> and
-outcome:<identity>. This module is intentionally not imported by
-orchestrator.handlers.HANDLERS. Keep it only as a short-term reference while
-the old committed/response/failure/cursor message kinds are removed.
-"""
-
 """Handle worker failure notices.
 
-Worker failure routing is parked while the smoke target is limited to:
-    orchestrator -> scrivener -> orchestrator
-
-Re-enable this module when the generic worker Task/Outcome shape is wired in.
+A worker failure key is a normal orchestrator inbox message. The worker has
+already saved the failure record. This handler acknowledges the notice and
+returns cleanly; later routing policy can decide whether to continue, retry,
+skip, or stop.
 """
 
-from ..errors import OrchestratorContractError
+from asc.redis.key import RedisKey
 
 
-def handle(key: object) -> None:
-    identity = getattr(key, "identity", str(key))
-    raise OrchestratorContractError(
-        f"worker failure notices are parked for this smoke cycle: failure:{identity}"
-    )
+def handle(key: RedisKey) -> bool:
+    """Acknowledge a worker failure result without crashing the daemon."""
+
+    print(f"orchestrator worker_failure_key={key.raw_key}")
+    return True
 
 
 __all__ = ["handle"]

@@ -1,85 +1,105 @@
-"""Top-level orchestrator inbox message handling.
+"""Orchestrator inbox contract and message router.
 
-The orchestrator inbox carries Redis keys. The Redis key kind selects the broad
-message class. The identity and suffix are otherwise opaque to the dispatcher and
-are passed unchanged to the selected handler.
+The inbox hot path stays intentionally cheap: validate and branch with simple
+string operations. Handler modules may do heavier model/key loading after the
+message kind is known.
 """
 
+from importlib import import_module
+
+from asc.orchestrator.errors import OrchestratorContractError
 from asc.redis.key import RedisKey
 
-from .contracts import ORCHESTRATOR_POST_KINDS
-from .errors import OrchestratorContractError
+
+HANDLER_MODULES = {
+    "call": "asc.orchestrator.handlers.call",
+    "committed": "asc.orchestrator.handlers.committed",
+    "outcome": "asc.orchestrator.handlers.outcome",
+    "response": "asc.orchestrator.handlers.response",
+    "failure": "asc.orchestrator.handlers.failure",
+}
+
+ALLOWED_POST_KINDS = frozenset(HANDLER_MODULES)
 
 
-def parse_message_key(key: str | RedisKey) -> RedisKey:
-    """Return a RedisKey for an orchestrator inbox message.
+def require_post_key(key: str | RedisKey) -> tuple[str, str]:
+    """Validate a key before posting it to the orchestrator inbox.
 
-    Orchestrator posts may be either two-segment notices such as
-    ``outcome:<identity>`` or canonical three-segment record keys such as
-    ``call:<identity>:record``. The dispatcher cares only about ``kind``.
+    Returns ``(raw, kind)`` so callers on the hot path do not have to split the
+    same key twice.
     """
 
     raw = str(key).strip()
     if not raw:
-        raise OrchestratorContractError("orchestrator message key must be non-empty")
+        raise OrchestratorContractError("orchestrator inbox expected a non-empty key")
 
-    try:
-        parsed = key if isinstance(key, RedisKey) else RedisKey(raw)
-    except ValueError as exc:
+    kind, sep, rest = raw.partition(":")
+    if not sep or not kind or not rest:
         raise OrchestratorContractError(
-            f"orchestrator message must be a Redis key: {raw!r}"
-        ) from exc
-
-    if not parsed.kind or not parsed.identity:
-        raise OrchestratorContractError(
-            f"orchestrator message must have non-empty kind and identity: {raw!r}"
+            f"orchestrator inbox expected kind:identity key; got {raw!r}"
         )
 
-    return parsed
+    identity = rest.split(":", 1)[0]
+    if not identity:
+        raise OrchestratorContractError(
+            f"orchestrator inbox expected non-empty identity; got {raw!r}"
+        )
+
+    if kind not in ALLOWED_POST_KINDS:
+        allowed = ", ".join(sorted(ALLOWED_POST_KINDS))
+        raise OrchestratorContractError(
+            f"orchestrator inbox expected one of {allowed}; got {kind!r}: {raw}"
+        )
+
+    return raw, kind
 
 
-def split_message_key(key: str | RedisKey) -> tuple[str, str]:
-    """Return ``(kind, identity)`` from an orchestrator message key.
+def key_kind(raw_key: str | RedisKey) -> str:
+    """Return the first key segment for lightweight logging or metrics.
 
-    The suffix, when present, is deliberately ignored. This keeps older callers
-    that only need broad routing semantics working while allowing canonical
-    record keys like ``call:<identity>:record`` through the inbox.
+    This helper validates only enough to prove that a first segment exists. Use
+    ``require_post_key`` on the posting/routing path.
     """
 
-    parsed = parse_message_key(key)
-    return parsed.kind, parsed.identity
-
-
-def require_post_key(key: str | RedisKey) -> str:
-    """Validate and return a normalized orchestrator inbox message key."""
-
-    parsed = parse_message_key(key)
-    if parsed.kind not in ORCHESTRATOR_POST_KINDS:
-        expected = ", ".join(sorted(ORCHESTRATOR_POST_KINDS))
+    raw = str(raw_key).strip()
+    kind, sep, _rest = raw.partition(":")
+    if not sep or not kind:
         raise OrchestratorContractError(
-            f"orchestrator inbox expected one of {expected}; "
-            f"got {parsed.kind!r}: {parsed}"
+            f"orchestrator expected kind:identity key; got {raw!r}"
         )
-    return str(parsed)
+    return kind
 
 
-def handle_message(key: str | RedisKey) -> None:
-    """Dispatch one orchestrator inbox message to its kind handler."""
+def handle_message(raw_key: str | RedisKey) -> None:
+    """Route one claimed orchestrator inbox key.
 
-    posted_key = parse_message_key(require_post_key(key))
+    Branching is done from the kind already computed by ``require_post_key``.
+    RedisKey construction happens only after the handler kind is known.
+    """
 
-    from .handlers import HANDLERS
+    raw, kind = require_post_key(raw_key)
+    module_name = HANDLER_MODULES[kind]
 
     try:
-        handler = HANDLERS[posted_key.kind]
-    except KeyError as exc:
-        expected = ", ".join(sorted(HANDLERS))
+        module = import_module(module_name)
+    except ModuleNotFoundError as exc:
         raise OrchestratorContractError(
-            f"no orchestrator handler for kind {posted_key.kind!r}; "
-            f"expected {expected}: {posted_key}"
+            f"orchestrator handler module is missing for {kind!r}: {module_name}"
         ) from exc
 
-    handler(posted_key)
+    handle = getattr(module, "handle", None)
+    if not callable(handle):
+        raise OrchestratorContractError(
+            f"orchestrator handler module has no callable handle(): {module_name}"
+        )
+
+    handle(RedisKey(raw))
 
 
-__all__ = ["handle_message", "parse_message_key", "require_post_key", "split_message_key"]
+__all__ = [
+    "ALLOWED_POST_KINDS",
+    "HANDLER_MODULES",
+    "require_post_key",
+    "key_kind",
+    "handle_message",
+]

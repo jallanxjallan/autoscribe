@@ -24,7 +24,7 @@ def _message_key(claimed: QueuedKey | str | None) -> str | None:
 
 
 def post(key: str | RedisKey) -> str:
-    raw = require_post_key(key)
+    raw, _kind = require_post_key(key)
     orchestrator_inbox.insert(raw)
     return raw
 
