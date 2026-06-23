@@ -1,15 +1,24 @@
-"""Scrivener execution boundary.
+"""Scrivener execution boundary."""
 
-The scrivener daemon owns claiming one task key and posting the saved output key
-back to the orchestrator. This module owns loading the task, running the ledger
-writer, and converting boundary failures into Outcome records.
-"""
+from __future__ import annotations
 
+import importlib
 from dataclasses import dataclass
 from typing import Any
 
-from asc.models.process.task import Committed, Outcome, Task
+from asc.models.process.task import Committed, Failure, ScrivenerTask
 from asc.redis.key import RedisKey
+from asc.scrivener.connect import connect
+from asc.scrivener.maps import (
+    CALLS_TABLE,
+    EXPORTS_TABLE,
+    LEDGER_FIELDS,
+    MODEL_PATH_BY_KEY_KIND,
+    STEPS_TABLE,
+    STEP_STATUS_BY_KEY_KIND,
+)
+from asc.scrivener.schema import ensure_ledger_schema
+from asc.scrivener.sql import insert_row
 
 
 @dataclass(frozen=True, slots=True)
@@ -24,19 +33,27 @@ class ScrivenerExecutor:
     def execute(self, task_key: str) -> ScrivenerResult:
         task_key = _required_text(task_key, "scrivener task key")
 
-        task: Task | None = None
+        task: ScrivenerTask | None = None
         try:
-            task = Task.load(task_key)
+            task = ScrivenerTask.load(task_key)
+            record = load_record_key(task.data_key)
+            data = row_for(table=task.table, data_key=task.data_key, record=record)
 
-            # Smoke-test mode:
-            # Re-enable this once scrivener writers understand the current
-            # task/cursor/step contract.
-            # write_task(task)
+            with connect() as conn:
+                ensure_ledger_schema(conn)
+                insert_row(conn, table=task.table, data=data)
 
-            output = _committed(task=task, task_key=task_key)
+            output = Committed.from_task(task, task_key=task_key)
 
         except Exception as exc:
-            output = _failure_outcome(task_key=task_key, task=task, exc=exc)
+            output = Failure.from_exception(
+                task_key=task_key,
+                task=task,
+                exc=exc,
+                boundary="scrivener.execute",
+                data_key=getattr(task, "data_key", None),
+                table=getattr(task, "table", None),
+            )
 
         output_key = output.save()
         return ScrivenerResult(
@@ -47,40 +64,133 @@ class ScrivenerExecutor:
         )
 
 
-def _committed(*, task: Task, task_key: str) -> Committed:
-    return Committed.from_task(task, task_key=task_key)
+def row_for(*, table: str, data_key: str, record: object) -> dict[str, Any]:
+    if table not in LEDGER_FIELDS:
+        raise ValueError(f"unknown scrivener ledger table: {table!r}")
+
+    if table == CALLS_TABLE:
+        return call_row(data_key=data_key, record=record)
+
+    if table == STEPS_TABLE:
+        return step_row(data_key=data_key, record=record)
+
+    if table == EXPORTS_TABLE:
+        return export_row(data_key=data_key, record=record)
+
+    raise ValueError(f"unsupported scrivener ledger table: {table!r}")
 
 
-def _failure_outcome(*, task_key: str, task: Task | None, exc: Exception) -> Outcome:
-    payload: dict[str, Any]
-    identity: str
+def call_row(*, data_key: str, record: object) -> dict[str, Any]:
+    identity = RedisKey(data_key).identity
+    source_identity = _optional_domain_identity(
+        record,
+        "source_identity",
+        "record_identity",
+        "document_identity",
+    ) or identity
 
-    if task is not None:
-        payload = task.model_dump(mode="json")
-        identity = task.identity
-    else:
-        payload = {
-            "task_key": task_key,
-        }
-        identity = RedisKey(task_key).identity
+    return {
+        "identity": identity,
+        "source_identity": source_identity,
+        "source_json": _model_json(record),
+        "created_at": int(getattr(record, "created_at")),
+    }
 
-    package = _optional_text(getattr(task, "package", None)) if task else None
-    action = _optional_text(getattr(task, "action", None)) if task else None
 
-    return Outcome.model_validate(
-        {
-            **payload,
-            "identity": identity,
-            "task_identity": identity,
-            "task_key": task_key,
-            "package": package or "scrivener",
-            "action": action or "",
-            "result": "failure",
-            "error": str(exc),
-            "error_type": type(exc).__name__,
-            "scrivener_boundary": "execute",
-        }
-    )
+def step_row(*, data_key: str, record: object) -> dict[str, Any]:
+    key = RedisKey(data_key)
+    return {
+        "identity": key.identity,
+        "step_number": _positive_int(getattr(record, "step_number"), "step_number"),
+        "result_key": str(data_key),
+        "status": _step_status(data_key),
+        "content": getattr(record, "content"),
+        "fail_message": _failure_message(data_key=data_key, record=record),
+        "raw_json": _model_json(record),
+        "created_at": int(getattr(record, "created_at")),
+    }
+
+
+def export_row(*, data_key: str, record: object) -> dict[str, Any]:
+    identity = RedisKey(data_key).identity
+    source_identity = _optional_domain_identity(
+        record,
+        "source_identity",
+        "record_identity",
+        "document_identity",
+    ) or identity
+
+    return {
+        "identity": identity,
+        "source_identity": source_identity,
+        "final_step": _positive_int(getattr(record, "final_step"), "final_step"),
+        "result_key": str(data_key),
+        "exported_at": int(getattr(record, "exported_at")),
+        "export_message": getattr(record, "export_message"),
+        "created_at": int(getattr(record, "created_at")),
+    }
+
+
+def load_record_key(key: object) -> Any:
+    key_text = _required_text(key, "data_key")
+    runtime = RedisKey(key_text)
+    try:
+        dotted = MODEL_PATH_BY_KEY_KIND[runtime.kind]
+    except KeyError as exc:
+        expected = ", ".join(sorted(MODEL_PATH_BY_KEY_KIND))
+        raise ValueError(
+            f"no scrivener loader for key kind {runtime.kind!r}; expected one of: {expected}"
+        ) from exc
+
+    module_name, class_name = dotted.rsplit(".", 1)
+    module = importlib.import_module(module_name)
+    model_class = getattr(module, class_name)
+    load = getattr(model_class, "load", None)
+    if not callable(load):
+        raise TypeError(f"{model_class.__name__} has no load() classmethod")
+    return load(key_text)
+
+
+def _step_status(data_key: str) -> str:
+    kind = RedisKey(data_key).kind
+    try:
+        return STEP_STATUS_BY_KEY_KIND[kind]
+    except KeyError as exc:
+        expected = ", ".join(sorted(STEP_STATUS_BY_KEY_KIND))
+        raise ValueError(f"unsupported step data key kind: {kind!r}; expected one of: {expected}") from exc
+
+
+def _failure_message(*, data_key: str, record: object) -> str | None:
+    if _step_status(data_key) != "failed":
+        return None
+
+    for name in ("fail_message", "error", "message"):
+        value = getattr(record, name, None)
+        if value not in (None, ""):
+            return str(value)
+    return None
+
+
+def _model_json(record: object) -> str:
+    dump = getattr(record, "model_dump_json", None)
+    if not callable(dump):
+        raise TypeError(f"{type(record).__name__} has no model_dump_json()")
+    return dump()
+
+
+def _optional_domain_identity(obj: object, *names: str) -> str | None:
+    for name in names:
+        value = getattr(obj, name, None)
+        if value is not None:
+            return _required_text(value, name)
+    return None
+
+
+def _positive_int(value: object, field: str) -> int:
+    number = int(value)
+    if number < 1:
+        raise ValueError(f"{field} must be >= 1: {number}")
+    return number
 
 
 def _required_text(value: object, field: str) -> str:
@@ -91,9 +201,16 @@ def _required_text(value: object, field: str) -> str:
 
 
 def _optional_text(value: object) -> str | None:
-    text = "" if value is not None else ""
-    text = str(text).strip()
+    text = "" if value is None else str(value).strip()
     return text or None
 
 
-__all__ = ["ScrivenerExecutor", "ScrivenerResult"]
+__all__ = [
+    "ScrivenerExecutor",
+    "ScrivenerResult",
+    "call_row",
+    "export_row",
+    "load_record_key",
+    "row_for",
+    "step_row",
+]

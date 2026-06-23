@@ -47,7 +47,7 @@ def handle(key: RedisKey) -> None:
         call_index=call_index,
     )
 
-    task = make_scrivener_write_call(cursor)
+    task = make_scrivener_write_call(data_key=str(cursor))
     task.save()
     scrivener_inbox.post(str(task.redis_key))
 

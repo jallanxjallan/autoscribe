@@ -2,9 +2,8 @@
 
 from __future__ import annotations
 
-from typing import Any
-
-from asc.models.process.task import Task
+from asc.models.process.task import ScrivenerTask
+from asc.scrivener.maps import CALLS_TABLE, STEPS_TABLE
 
 from ..contracts import (
     SCRIVENER_CALL_COMPLETED,
@@ -17,47 +16,48 @@ from ..contracts import (
 SCRIVENER_PACKAGE = "scrivener"
 
 
-def make_scrivener_write_call(cursor: Any) -> Task:
+def make_scrivener_write_call(*, data_key: str) -> ScrivenerTask:
     return _make_scrivener_task(
         action=SCRIVENER_WRITE_CALL,
-        cursor=cursor,
+        table=CALLS_TABLE,
+        data_key=data_key,
     )
 
 
-def make_scrivener_write_step(*, cursor: Any, **_ignored: Any) -> Task:
+def make_scrivener_write_step(*, data_key: str) -> ScrivenerTask:
     return _make_scrivener_task(
         action=SCRIVENER_WRITE_STEP,
-        cursor=cursor,
+        table=STEPS_TABLE,
+        data_key=data_key,
     )
 
 
-def make_scrivener_call_completed(*, cursor: Any, **_ignored: Any) -> Task:
+def make_scrivener_call_completed(*, table: str, data_key: str) -> ScrivenerTask:
     return _make_scrivener_task(
         action=SCRIVENER_CALL_COMPLETED,
-        cursor=cursor,
+        table=table,
+        data_key=data_key,
     )
 
 
-def make_scrivener_call_failed(*, cursor: Any, **_ignored: Any) -> Task:
+def make_scrivener_call_failed(*, table: str, data_key: str) -> ScrivenerTask:
     return _make_scrivener_task(
         action=SCRIVENER_CALL_FAILED,
-        cursor=cursor,
+        table=table,
+        data_key=data_key,
     )
 
 
-def _make_scrivener_task(*, action: str, cursor: Any) -> Task:
-    return Task(
-        package=SCRIVENER_PACKAGE,
+def _make_scrivener_task(*, action: str, table: str, data_key: str) -> ScrivenerTask:
+    return ScrivenerTask(
         action=action,
-        cursor_key=_cursor_key(cursor),
+        table=table,
+        data_key=data_key,
     )
-
-
-def _cursor_key(cursor: Any) -> str:
-    return str(getattr(cursor, "raw_key", cursor))
 
 
 __all__ = [
+    "SCRIVENER_PACKAGE",
     "make_scrivener_call_completed",
     "make_scrivener_call_failed",
     "make_scrivener_write_call",
