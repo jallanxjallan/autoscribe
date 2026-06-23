@@ -1,8 +1,9 @@
 import time
 from collections.abc import Iterable
 from dataclasses import dataclass
-from typing import ClassVar, Literal, overload
+from typing import Any, ClassVar, Literal, overload
 
+from asc.redis.primitives import keys, zsets
 from asc.redis.index_base import FixedRedisHashIndex
 from asc.redis.key import RedisKey
 
@@ -51,7 +52,7 @@ class CursorIndex(FixedRedisHashIndex):
         normalized_identity = _require_text(identity, field_name="identity")
         normalized_key = _require_key(cursor_key, field_name="cursor_key")
 
-        self.key.hset(field=normalized_identity, value=normalized_key)
+        self.hset(field=normalized_identity, value=normalized_key)
         return normalized_key
 
     @overload
@@ -62,7 +63,7 @@ class CursorIndex(FixedRedisHashIndex):
 
     def get(self, identity: str, *, require: bool = False) -> str | None:
         normalized_identity = _require_text(identity, field_name="identity")
-        value = self.key.hget(normalized_identity)
+        value = self.hget(normalized_identity)
 
         if value is None:
             if require:
@@ -72,13 +73,13 @@ class CursorIndex(FixedRedisHashIndex):
         return _redis_text(value)
 
     def delete(self, identity: str) -> int:
-        return int(self.key.hdel(_require_text(identity, field_name="identity")))
+        return self.hdel(_require_text(identity, field_name="identity"))
 
     def has(self, identity: str) -> bool:
         return self.get(identity) is not None
 
     def list_cursors(self) -> dict[str, str]:
-        entries = self.key.hgetall()
+        entries = self.hgetall()
         return {
             _redis_text(identity): _redis_text(cursor_key)
             for identity, cursor_key in sorted(entries.items())
@@ -116,7 +117,35 @@ class ActiveCursorIndex:
         self.key = RedisKey(key or self.KEY)
 
     def __str__(self) -> str:
-        return str(self.key)
+        return self.raw_key
+
+    @property
+    def raw_key(self) -> str:
+        return self.key.raw_key
+
+    def zadd(self, mapping: dict[str, float]) -> int:
+        return zsets.zadd(self.key, mapping)
+
+    def zrangebyscore(
+        self,
+        min_score: float | str,
+        max_score: float | str,
+        **kwargs: Any,
+    ) -> list[Any]:
+        return zsets.zrangebyscore(
+            self.key,
+            min_score,
+            max_score,
+            **kwargs,
+        )
+
+    def zrem(self, *members: str) -> int:
+        cleaned = tuple(self.clean_cursor_key(member) for member in members)
+        return zsets.zrem(self.key, *cleaned)
+
+    def zcard(self) -> int:
+        return zsets.zcard(self.key)
+
 
     @staticmethod
     def clean_cursor_key(cursor_key: str) -> str:
@@ -127,7 +156,7 @@ class ActiveCursorIndex:
         return float(time.time() if score is None else score)
 
     def touch(self, cursor_key: str, *, score: float | None = None) -> int:
-        return int(self.key.zadd({self.clean_cursor_key(cursor_key): self.score(score)}))
+        return self.zadd({self.clean_cursor_key(cursor_key): self.score(score)})
 
     def schedule(self, cursor_key: str, *, score: float | None = None) -> int:
         return self.touch(cursor_key, score=score)
@@ -150,7 +179,7 @@ class ActiveCursorIndex:
             return []
 
         cutoff = self.score(now) - max(0.0, float(stale_after_seconds))
-        rows = self.key.zrangebyscore(
+        rows = self.zrangebyscore(
             "-inf",
             cutoff,
             start=0,
@@ -164,7 +193,7 @@ class ActiveCursorIndex:
         claimed: list[ActiveCursor] = []
         for raw_key, raw_score in rows:
             cursor_key = self.clean_cursor_key(_redis_text(raw_key))
-            self.key.zadd({cursor_key: lease_until})
+            self.zadd({cursor_key: lease_until})
             claimed.append(ActiveCursor(cursor_key=cursor_key, score=float(raw_score)))
         return claimed
 
@@ -191,7 +220,7 @@ class ActiveCursorIndex:
             return []
 
         cutoff = self.score(now) - max(0.0, float(stale_after_seconds))
-        rows = self.key.zrangebyscore(
+        rows = self.zrangebyscore(
             "-inf",
             cutoff,
             start=0,
@@ -216,20 +245,20 @@ class ActiveCursorIndex:
         return rows[0] if rows else None
 
     def remove(self, cursor_key: str) -> int:
-        return int(self.key.zrem(self.clean_cursor_key(cursor_key)))
+        return self.zrem(cursor_key)
 
     def count(self) -> int:
-        return int(self.key.zcard())
+        return self.zcard()
 
     def clear(self) -> int:
-        return int(self.key.delete())
+        return keys.delete(self.key)
 
     def scheduled(self, items: Iterable[str]) -> int:
         now = time.time()
         mapping = {self.clean_cursor_key(item): now for item in items}
         if not mapping:
             return 0
-        return int(self.key.zadd(mapping))
+        return self.zadd(mapping)
 
 
 _cursor_index = CursorIndex()

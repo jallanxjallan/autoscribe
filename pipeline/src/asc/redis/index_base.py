@@ -1,44 +1,22 @@
 from typing import Callable, ClassVar, Literal, overload
 
 from asc.redis.key import RedisKey
+from asc.redis.primitives import hashes, keys
 
 
 class RedisIndex:
-    """
-    Base class for Redis-backed operational indices.
-
-    Subclasses may either:
-    - define a fixed KEY class attribute, or
-    - pass an explicit key string to __init__.
-
-    Responsibilities:
-    - bind a RedisKey instance
-    - expose minimal existence / delete helpers
-    - provide common helpers for hash-backed pointer indexes
-
-    Non-responsibilities:
-    - semantic interpretation of index contents
-    - model loading policy
-    - key formatting policy beyond accepting a full key string
-    """
-
     KEY: ClassVar[str]
 
     def __init__(self, key: str | RedisKey | None = None) -> None:
         if key is None:
             self.key = RedisKey(self._default_key())
-            return
-
-        if isinstance(key, RedisKey):
+        elif isinstance(key, RedisKey):
             self.key = key
-            return
-
-        if isinstance(key, str):
+        elif isinstance(key, str):
             self.key = RedisKey(key)
-            return
+        else:
+            raise TypeError("key must be a str, RedisKey, or None")
 
-        raise TypeError("key must be a str, RedisKey, or None")
-    
     @classmethod
     def _default_key(cls) -> str:
         key = getattr(cls, "KEY", None)
@@ -62,38 +40,48 @@ class RedisIndex:
     def __str__(self) -> str:
         return self.raw_key
 
-    def _r(self):
-        return self.key._r()
-
     def exists(self) -> bool:
-        return self.key.exists()
+        return keys.exists(self.key)
 
     def delete(self) -> int:
-        return self.key.delete()
+        return keys.delete(self.key)
 
     def type(self) -> str:
-        return self.key.type()
+        return keys.type(self.key)
+
+    def ttl(self) -> int:
+        return keys.ttl(self.key)
+
+    def expire(self, seconds: int) -> bool:
+        return keys.expire(self.key, seconds)
 
 
 class FixedRedisIndex(RedisIndex):
-    """Index with a single fixed Redis key declared at class level."""
-
     pass
 
 
 class FixedRedisHashIndex(FixedRedisIndex):
-    """
-    Fixed-key HASH index storing string field -> string value pointers.
-
-    This is the common base for registries like:
-    - slug -> identity
-    - alias -> identity
-    - prompt_slug -> call_identity
-    """
-
     def hget(self, field: str) -> str | None:
         field = self._require_text(field, field_name="field")
-        return self.key.hget(field)
+        return hashes.hget(self.key, field)
+
+    def hset(self, *, field: str, value: str) -> int:
+        field = self._require_text(field, field_name="field")
+        value = self._require_text(value, field_name="value")
+        return hashes.hset(self.key, field=field, value=value)
+
+    def hdel(self, field: str) -> int:
+        field = self._require_text(field, field_name="field")
+        return hashes.hdel(self.key, field)
+
+    def hgetall(self) -> dict[str, str]:
+        return hashes.hgetall(self.key)
+
+    def hkeys(self) -> list[str]:
+        return hashes.hkeys(self.key)
+
+    def hlen(self) -> int:
+        return hashes.hlen(self.key)
 
     @overload
     def resolve_pointer(
@@ -121,7 +109,7 @@ class FixedRedisHashIndex(FixedRedisIndex):
         missing_label: str = "index",
     ) -> str | None:
         field = self._require_text(field, field_name="field")
-        value = self.key.hget(field)
+        value = self.hget(field)
 
         if value is None and require:
             raise KeyError(f"{missing_label} miss for {field}")
@@ -137,45 +125,41 @@ class FixedRedisHashIndex(FixedRedisIndex):
         collision_label: str = "field",
     ) -> str:
         field = self._require_text(field, field_name="field")
-        value = as_raw_key(value)
+        normalized_value = (
+            value.raw_key
+            if isinstance(value, RedisKey)
+            else self._require_text(value, field_name="value")
+        )
+
         existing = self.resolve_pointer(field)
 
-        if existing is not None and existing != value and not overwrite:
+        if existing is not None and existing != normalized_value and not overwrite:
             raise ValueError(
-                f"{collision_label} collision for {field}: {existing} != {value}"
+                f"{collision_label} collision for {field}: "
+                f"{existing} != {normalized_value}"
             )
 
-        self.key.hset(field=field, value=value)
-        return value
+        self.hset(field=field, value=normalized_value)
+        return normalized_value
 
     def has_pointer(self, field: str) -> bool:
         field = self._require_text(field, field_name="field")
-        return self.key.hget(field) is not None
+        return self.hget(field) is not None
 
     def delete_pointer(self, field: str) -> int:
         field = self._require_text(field, field_name="field")
-        return self.key.hdel(field)
+        return self.hdel(field)
 
     def prune_missing_values(
         self,
         *,
         exists: Callable[[str], bool],
     ) -> int:
-        """
-        Remove hash fields whose stored value no longer resolves.
-
-        Useful for maps like slug -> identity where the identity may later
-        point to a missing Redis record.
-        """
-        raw = self.key.hgetall()
         removed = 0
 
-        for field, value in raw.items():
-            if not isinstance(field, str) or not isinstance(value, str):
-                raise TypeError("hash index must contain str fields and str values")
-
+        for field, value in self.hgetall().items():
             if not exists(value):
-                self.key.hdel(field)
+                self.hdel(field)
                 removed += 1
 
         return removed

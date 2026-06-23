@@ -1,7 +1,7 @@
 from collections.abc import Iterable
 from typing import TextIO
 
-from asc.enqueuer.call import promote_call_ttl
+# from asc.enqueuer.call import promote_call_ttl
 from asc.enqueuer.reader import EnqueueRecord, iter_enqueue_records
 from asc.enqueuer.report import EnqueuedCall, EnqueueReport
 from asc.orchestrator.inbox import post as post_to_orchestrator

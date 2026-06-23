@@ -23,13 +23,13 @@ class CallRecord(RedisModel):
     blob_json: str = "{}"
 
     @model_validator(mode="after")
-    def validate_kind(self) -> "Call":
+    def validate_kind(self) -> "CallRecord":
         if self.kind != "call":
             raise ValueError(f"Call.kind must be 'call': {self.kind!r}")
         return self
 
     @model_validator(mode="after")
-    def gather_extra_fields(self) -> "Call":
+    def gather_extra_fields(self) -> "CallRecord":
         extras = dict(self.__pydantic_extra__ or {})
         if not extras:
             return self
@@ -43,4 +43,4 @@ class CallRecord(RedisModel):
         return self
 
 
-__all__ = ["Call"]
+__all__ = ["CallRecord"]

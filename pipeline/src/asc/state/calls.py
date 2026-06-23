@@ -5,7 +5,7 @@ A call step can produce either a Response or a Failure.
 
 Key shape:
 
-    results:<identity>
+    call:<identity>:index
 
 Slot meaning:
 
@@ -26,37 +26,41 @@ It does not know what marker or result keys contain.
 
 from typing import Any, ClassVar
 
-from asc.redis.index_base import RedisIndex
+from asc.redis.primitives import hashes, keys
+from asc.redis.index_base import FixedRedisHashIndex
 from asc.redis.key import RedisKey
 
 
-
-
-class CallIndex(RedisIndex):
+class CallIndex(FixedRedisHashIndex):
     """Redis HASH adapter for results-index slots."""
 
     KIND: ClassVar[str] = 'call'
     SUFFIX: ClassVar[str] = 'index'
     EMPTY_SLOT: ClassVar[str] = ''
     
-    def redis_key(self) -> RedisKey:
-        """Return the bound results-index Redis key."""
+    def hget(self, field: str) -> str | None:
+        field = self._require_text(field, field_name="field")
+        value = hashes.hget(self.key, field)
+        return None if value is None else _decode(value)
 
-        if isinstance(self.key, RedisKey):
-            return self.key
-        return RedisKey(str(self.key))
+    def hset(self, *, field: str, value: str) -> int:
+        field = self._require_text(field, field_name="field")
+        if not isinstance(value, str):
+            raise TypeError("value must be a string")
+        return hashes.hset(self.key, field=field, value=value)
+
+    def hgetall(self) -> dict[str, str]:
+        return {_decode(field): _decode(value) for field, value in hashes.hgetall(self.key).items()}
 
     @classmethod
     def from_identity(cls, identity: str) -> "CallIndex":
         """Bind a results index from a process identity."""
 
         return cls(
-            str(
-                RedisKey(
-                    kind=cls.KIND,
-                    identity=cls._require_text(identity, field_name="identity"),
-                    suffix=cls.SUFFIX
-                )
+            RedisKey.from_parts(
+                cls.KIND,
+                cls._require_text(identity, field_name="identity"),
+                cls.SUFFIX,
             )
         )
 
@@ -82,20 +86,20 @@ class CallIndex(RedisIndex):
             raise ValueError("total_steps must be >= 0")
 
         index.delete()
-        index.key.hset(field="0", value=str(call_key))
+        index.hset(field="0", value=call_key.raw_key)
 
         for slot in range(1, steps + 1):
-            index.key.hset(field=str(slot), value=cls.EMPTY_SLOT)
+            index.hset(field=str(slot), value=cls.EMPTY_SLOT)
 
         if ttl_seconds is not None:
-            index._r().expire(str(index.key), int(ttl_seconds))
+            keys.expire(index.key, int(ttl_seconds))
 
         return index
 
     def slots(self) -> dict[int, str]:
         """Return all slots as ``{slot_number: key_text}``."""
 
-        raw = self.key.hgetall()
+        raw = self.hgetall()
 
         slots: dict[int, str] = {}
         for raw_slot, raw_value in raw.items():
@@ -118,7 +122,7 @@ class CallIndex(RedisIndex):
         """Return a slot value, or ``None`` if the slot does not exist."""
 
         slot_number = _required_int(slot, "slot")
-        value = self.key.hget(str(slot_number))
+        value = self.hget(str(slot_number))
 
         if value is None:
             return None
@@ -137,7 +141,7 @@ class CallIndex(RedisIndex):
         if self.get_slot(slot_number) is None:
             raise ValueError(f"results index missing slot {slot_number}: {self.key}")
 
-        self.key.hset(field=str(slot_number), value=text)
+        self.hset(field=str(slot_number), value=text)
 
     def input_key_for_step(self, step_number: int) -> str:
         """Return the input key for a worker step.
@@ -295,7 +299,5 @@ def _decode(value: Any) -> str:
 
 
 __all__ = [
-    "RESULTS_INDEX_KIND",
-    "EMPTY_RESULT_SLOT",
-    "ResultsIndex",
+    "CallIndex",
 ]

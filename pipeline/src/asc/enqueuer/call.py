@@ -36,18 +36,20 @@ def create_call_from_manifest_record(
 
     call = CallRecord(**_call_payload(record, plan_key=plan_key))
     call.save()
-    expire_call(call, PROBATIONARY_CALL_TTL_SECONDS)
+    # expire_call(call, PROBATIONARY_CALL_TTL_SECONDS)
     return call
 
 
-def promote_call_ttl(call: CallRecord) -> None:
-    expire_call(call, ENQUEUED_CALL_TTL_SECONDS)
+# def promote_call_ttl(call: CallRecord) -> None:
+#     expire_call(call, ENQUEUED_CALL_TTL_SECONDS)
 
 
-def expire_call(call: CallRecord, ttl_seconds: int) -> None:
-    if ttl_seconds < 1:
-        raise ValueError("ttl_seconds must be positive")
-    call.redis_key.expire(ttl_seconds)
+# def expire_call(call: CallRecord, ttl_seconds: int) -> None:
+#     if ttl_seconds < 1:
+#         raise ValueError("ttl_seconds must be positive")
+#     call.redis_key.expire(ttl_seconds)
+
+
 
 
 def _call_payload(record: Mapping[str, Any], *, plan_key: str) -> dict[str, Any]:
