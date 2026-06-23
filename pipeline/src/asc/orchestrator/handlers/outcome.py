@@ -120,7 +120,7 @@ def _handle_failed_outcome(outcome: Outcome) -> None:
 
 
 def _next_step_key(call_index: CallIndex) -> str | None:
-    for slot, key in call_index.slots().items():
+    for slot, key in _ordered_slots(call_index):
         if slot == 0:
             continue
         key = str(key).strip()
@@ -130,11 +130,18 @@ def _next_step_key(call_index: CallIndex) -> str | None:
 
 
 def _slot_for_key(call_index: CallIndex, expected_key: str) -> int:
-    for slot, key in call_index.slots().items():
+    for slot, key in _ordered_slots(call_index):
         if str(key).strip() == expected_key:
             return slot
     raise OrchestratorContractError(
         f"call index does not contain step key {expected_key!r}: {call_index.redis_key}"
+    )
+
+
+def _ordered_slots(call_index: CallIndex) -> list[tuple[int, object]]:
+    return sorted(
+        ((int(slot), key) for slot, key in call_index.slots().items()),
+        key=lambda item: item[0],
     )
 
 

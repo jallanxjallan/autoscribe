@@ -15,7 +15,8 @@ from asc.scrivener import inbox as scrivener_inbox
 from asc.state.cursor import active_cursor_index, set_cursor_key
 from asc.state.calls import CallIndex
 
-from ..tasks import make_scrivener_write_call, materialize_plan_steps, plan_step_count
+from ..materialize import materialize_plan_steps, plan_step_count
+from ..tasks import make_scrivener_write_call
 
 
 def handle(key: RedisKey) -> None:

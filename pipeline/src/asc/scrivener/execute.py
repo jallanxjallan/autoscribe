@@ -1,14 +1,14 @@
 """Scrivener execution boundary.
 
-The scrivener daemon owns claiming one task key and posting the saved outcome
-key back to the orchestrator. This module owns loading the task, running the
-ledger writer, and converting boundary failures into Outcome records.
+The scrivener daemon owns claiming one task key and posting the saved output key
+back to the orchestrator. This module owns loading the task, running the ledger
+writer, and converting boundary failures into Outcome records.
 """
 
 from dataclasses import dataclass
 from typing import Any
 
-from asc.models.process.task import Outcome, Task
+from asc.models.process.task import Committed, Outcome, Task
 from asc.redis.key import RedisKey
 
 
@@ -18,36 +18,6 @@ class ScrivenerResult:
     task_key: str
     output_key: str
     action: str | None = None
-
-
-@dataclass(frozen=True, slots=True)
-class Committed:
-    """Local scrivener completion notice.
-
-    A committed key is just the completed task copied under committed:<identity>.
-    Its existence is the success signal.
-    """
-
-    task: Task
-    task_key: str
-
-    @property
-    def identity(self) -> str:
-        return self.task.identity
-
-    @property
-    def redis_key(self) -> RedisKey:
-        return RedisKey(kind="committed", identity=self.identity)
-
-    def save(self) -> str:
-        committed = self.task.model_copy(
-            update={
-                "identity": self.identity,
-                "task_identity": self.task.identity,
-                "task_key": self.task_key,
-            }
-        )
-        return committed.save(str(self.redis_key))
 
 
 class ScrivenerExecutor:
@@ -63,12 +33,12 @@ class ScrivenerExecutor:
             # task/cursor/step contract.
             # write_task(task)
 
-            outcome = _committed(task=task, task_key=task_key)
+            output = _committed(task=task, task_key=task_key)
 
         except Exception as exc:
-            outcome = _failure_outcome(task_key=task_key, task=task, exc=exc)
+            output = _failure_outcome(task_key=task_key, task=task, exc=exc)
 
-        output_key = outcome.save()
+        output_key = output.save()
         return ScrivenerResult(
             processed=1,
             task_key=task_key,
@@ -78,7 +48,7 @@ class ScrivenerExecutor:
 
 
 def _committed(*, task: Task, task_key: str) -> Committed:
-    return Committed(task=task, task_key=task_key)
+    return Committed.from_task(task, task_key=task_key)
 
 
 def _failure_outcome(*, task_key: str, task: Task | None, exc: Exception) -> Outcome:

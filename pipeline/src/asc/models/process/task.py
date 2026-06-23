@@ -1,4 +1,4 @@
-"""Short-lived daemon task and outcome records."""
+"""Short-lived daemon task and task result records."""
 
 from __future__ import annotations
 
@@ -64,6 +64,49 @@ class Task(RedisMessage):
     @field_serializer("created_at", "claimed_at")
     def serialize_optional_int(self, value: int | None) -> str:
         return "" if value is None else str(value)
+
+
+class Committed(Task):
+    """Successful task completion notice.
+
+    The committed record is the source task copied under committed:<task_identity>.
+    Its existence is the success signal. Routing should use cursor_key to recover
+    the call/process identity instead of deriving process identity from this key.
+    """
+
+    kind: ClassVar[str] = "committed"
+
+    task_identity: str
+    task_key: str
+    committed_at: int = Field(default_factory=timestamp)
+
+    @classmethod
+    def from_task(cls, task: Task, *, task_key: str) -> Self:
+        return cls.model_validate(
+            {
+                **task.model_dump(mode="json"),
+                "identity": task.identity,
+                "task_identity": task.identity,
+                "task_key": task_key,
+            }
+        )
+
+    @field_validator("task_identity", mode="before")
+    @classmethod
+    def validate_task_identity(cls, value: object) -> str:
+        return redis_key_segment_text(value, "task_identity")
+
+    @field_validator("task_key", mode="before")
+    @classmethod
+    def validate_task_key(cls, value: object) -> str:
+        text = str(value)
+        if not text:
+            raise ValueError("task_key must not be empty")
+        return text
+
+    @field_serializer("committed_at")
+    def serialize_committed_at(self, value: int) -> str:
+        return str(value)
 
 
 class Outcome(RedisMessage):
@@ -136,6 +179,7 @@ class Outcome(RedisMessage):
 
 
 __all__ = [
+    "Committed",
     "Outcome",
     "OutcomeResult",
     "Task",
