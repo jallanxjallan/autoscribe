@@ -49,7 +49,7 @@ MODEL_CONTRACTS: dict[str, ModelContractRef] = {
     "process:call": ModelContractRef(
         group="process",
         name="call",
-        import_paths=("asc.models.process.call.Call",),
+        import_paths=("asc.models.process.call.CallRecord",),
         purpose="Process call record materialized by enqueue.",
     ),
     "process:cursor": ModelContractRef(

@@ -36,9 +36,9 @@ LEDGER_FIELDS: dict[str, tuple[str, ...]] = {
 }
 
 MODEL_PATH_BY_KEY_KIND = {
-    "call": "asc.models.process.call.Call",
-    "response": "asc.models.process.result.Result",
-    "result": "asc.models.process.result.Result",
+    "call": "asc.models.process.call.CallRecord",
+    "response": "asc.models.process.result.Response",
+    "result": "asc.models.process.result.Response",
     "failure": "asc.models.process.result.Failure",
 }
 

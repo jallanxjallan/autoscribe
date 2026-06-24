@@ -19,7 +19,7 @@ from asc.scrivener.util import execute_and_commit
 
 
 MODEL_PATH_BY_KEY_KIND = {
-    "call": "asc.models.process.call.Call",
+    "call": "asc.models.process.call.CallRecord",
     "result": "asc.models.process.result.Result",
     "failure": "asc.models.process.result.Failure",
 }
