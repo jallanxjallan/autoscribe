@@ -1,15 +1,7 @@
-"""Legacy top-level orchestrator handler.
+"""Legacy cursor notices are no longer part of the orchestrator contract.
 
-The public orchestrator inbox now accepts only call:<identity> and
-outcome:<identity>. This module is intentionally not imported by
-orchestrator.handlers.HANDLERS. Keep it only as a short-term reference while
-the old committed/response/failure/cursor message kinds are removed.
-"""
-
-"""Legacy cursor notices are no longer part of the public orchestrator contract.
-
-Enqueuer now posts ``call:<identity>``. The call handler creates the cursor and
-results index inside orchestrator-owned runtime state.
+Enqueuer now posts ``call:<identity>``. The call handler creates the cursor,
+materializes plan steps, and schedules the initial Scrivener write.
 """
 
 from ..errors import OrchestratorContractError

@@ -2,7 +2,6 @@
 
 CALL = "call"
 COMMITTED = "committed"
-OUTCOME = "outcome"
 RESPONSE = "response"
 FAILURE = "failure"
 
@@ -10,7 +9,6 @@ ORCHESTRATOR_POST_KINDS = frozenset(
     {
         CALL,
         COMMITTED,
-        OUTCOME,
         RESPONSE,
         FAILURE,
     }
@@ -26,7 +24,6 @@ WORKER_EXECUTE_STEP = "execute_step"
 __all__ = [
     "CALL",
     "COMMITTED",
-    "OUTCOME",
     "RESPONSE",
     "FAILURE",
     "ORCHESTRATOR_POST_KINDS",

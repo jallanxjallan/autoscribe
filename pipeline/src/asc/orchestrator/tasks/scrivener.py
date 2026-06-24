@@ -13,8 +13,6 @@ from ..contracts import (
 )
 
 
-SCRIVENER_PACKAGE = "scrivener"
-
 
 def make_scrivener_write_call(*, data_key: str) -> ScrivenerTask:
     return _make_scrivener_task(
@@ -57,7 +55,6 @@ def _make_scrivener_task(*, action: str, table: str, data_key: str) -> Scrivener
 
 
 __all__ = [
-    "SCRIVENER_PACKAGE",
     "make_scrivener_call_completed",
     "make_scrivener_call_failed",
     "make_scrivener_write_call",

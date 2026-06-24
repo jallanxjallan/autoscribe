@@ -14,7 +14,6 @@ from asc.redis.key import RedisKey
 HANDLER_MODULES = {
     "call": "asc.orchestrator.handlers.call",
     "committed": "asc.orchestrator.handlers.committed",
-    "outcome": "asc.orchestrator.handlers.outcome",
     "response": "asc.orchestrator.handlers.response",
     "failure": "asc.orchestrator.handlers.failure",
 }

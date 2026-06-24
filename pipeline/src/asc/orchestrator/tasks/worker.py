@@ -8,8 +8,6 @@ from asc.redis.key import RedisKey
 from ..contracts import WORKER_EXECUTE_STEP
 
 
-WORKER_PACKAGE = "worker"
-
 
 def make_worker_step(
     *,
@@ -42,4 +40,4 @@ def _required_text(value: object, field_name: str) -> str:
     return text
 
 
-__all__ = ["WORKER_PACKAGE", "make_worker_step"]
+__all__ = ["make_worker_step"]

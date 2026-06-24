@@ -8,7 +8,7 @@ Canonical runtime facts are written elsewhere:
 
 - enqueuer creates the cursor/results index and writes the initial call/prompt
 - worker writes response or failure keys into assigned results-index slots
-- scrivener writes the ledger and posts outcome keys
+- scrivener writes the ledger and posts committed keys
 - orchestrator verifies posted keys against canonical state, then routes
 
 Failures remain in the results index.  The failure handler verifies that the
