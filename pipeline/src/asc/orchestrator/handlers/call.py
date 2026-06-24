@@ -41,10 +41,8 @@ def handle(key: RedisKey) -> None:
         total_steps=total_steps,
     )
     materialize_plan_steps(
-        call_key=call.redis_key,
-        cursor_key=cursor_key,
         plan=plan,
-        call_index=call_index,
+        index=call_index,
     )
 
     task = make_scrivener_write_call(data_key=str(call.redis_key))

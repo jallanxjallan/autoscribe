@@ -17,16 +17,17 @@ INSTRUCTION_SENTINEL = "\n\n--- ASC INSTRUCTION ---\n\n"
 
 
 class Step(RedisMessage):
-    """Materialized worker instruction for one call step.
+    """Materialized worker instruction for one plan step.
 
-    A Step is the compiled runtime form of one plan step. Workers receive the
-    Step key and the Call key; they do not reload or unpack the Plan.
+    A Step is the compiled runtime form of one plan step. It is reusable across
+    calls. Workers receive the Step key plus whatever call/data key is carried
+    by the WorkerTask.
 
-    Step keys are always two-segment keys:
+    Step keys use the Plan identity plus the numeric step suffix:
 
-        step:<identity>
+        step:<plan_identity>:<step_number>
 
-    The step number is data, not part of the key.
+    The step number is also stored as data for workers and ledger writes.
 
     Plan step definitions are flattened into top-level Step attributes before
     validation. This intentionally avoids args_json/instructions_json packing.
@@ -40,9 +41,8 @@ class Step(RedisMessage):
     instruction_sentinel: ClassVar[str] = INSTRUCTION_SENTINEL
 
     identity: str = Field(default_factory=generate_identity)
+    suffix: str
 
-    call_key: str
-    cursor_key: str
     step_number: int
 
     executor: str
@@ -55,8 +55,6 @@ class Step(RedisMessage):
     def from_step_definition(
         cls,
         *,
-        call_key: object,
-        cursor_key: object,
         step_number: object,
         step_definition: Mapping[str, Any],
         identity: object | None = None,
@@ -64,20 +62,13 @@ class Step(RedisMessage):
         """Build a Step from one plan step definition.
 
         The plan step definition is unpacked directly into Step attributes.
-        Runtime fields are supplied separately so the plan cannot silently
-        override them.
+        The Step identity should normally be the Plan identity. The suffix is
+        the numeric step number.
         """
 
-        forbidden = {"identity", "call_key", "cursor_key", "step_number"}
-        overlap = forbidden.intersection(step_definition)
-        if overlap:
-            names = ", ".join(sorted(overlap))
-            raise ValueError(f"step definition cannot provide runtime fields: {names}")
-
         data: dict[str, Any] = dict(step_definition)
-        data["call_key"] = call_key
-        data["cursor_key"] = cursor_key
         data["step_number"] = step_number
+        data["suffix"] = str(step_number)
 
         if identity is not None:
             data["identity"] = identity
@@ -115,15 +106,13 @@ class Step(RedisMessage):
     def validate_identity(cls, value: object) -> str:
         return redis_key_segment_text(value, "identity")
 
-    @field_validator("call_key", "cursor_key", mode="before")
+    @field_validator("suffix", mode="before")
     @classmethod
-    def validate_full_key(cls, value: object) -> str:
-        text = "" if value is None else str(value).strip()
-        if not text:
-            raise ValueError("runtime key fields must be non-empty")
-        if ":" not in text:
-            raise ValueError(f"expected full Redis key, got {text!r}")
-        return text
+    def validate_suffix(cls, value: object) -> str:
+        number = int(value)
+        if number < 1:
+            raise ValueError("step suffix must be >= 1")
+        return str(number)
 
     @field_validator("executor", "action", mode="before")
     @classmethod
