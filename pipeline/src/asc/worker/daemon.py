@@ -13,7 +13,7 @@ runs the long-lived daemon loop.
 
 from dataclasses import dataclass
 
-from asc.models.process.task import Task
+from asc.models.process.task import WorkerTask
 from asc.orchestrator import inbox as orchestrator_inbox
 from asc.state.daemon import DEFAULT_CLAIM_TIMEOUT_SECONDS, configure_logging, run_daemon
 from asc.worker import inbox as worker_inbox
@@ -23,7 +23,6 @@ from asc.worker.execute import WorkerExecutor
 @dataclass(frozen=True, slots=True)
 class WorkerRunReport:
     claimed: bool
-    cursor_key: str | None = None
     task_key: str | None = None
     output_key: str | None = None
     action: str | None = None
@@ -56,8 +55,8 @@ def run_once(
     # result key is posted, this is the exact key to repost for retry testing.
     print(f"worker claimed_task_key={task_key}", flush=True)
 
-    task = Task.load(task_key)
-    result = WorkerExecutor().execute(task_key)
+    task = WorkerTask.load(task_key)
+    result = WorkerExecutor().execute(task, task_key)
 
     # Worker posts only the saved response/failure key. The orchestrator owns
     # result-index insertion and next-step routing.
@@ -65,7 +64,6 @@ def run_once(
 
     return WorkerRunReport(
         claimed=True,
-        cursor_key=getattr(task, "cursor_key", None),
         task_key=task_key,
         output_key=result.output_key,
         action=task.action,

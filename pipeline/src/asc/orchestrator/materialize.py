@@ -7,7 +7,6 @@ construction lives in ``tasks.worker``.
 
 from __future__ import annotations
 
-import json
 from typing import Any
 
 from asc.models.process.step import Step
@@ -44,36 +43,20 @@ def make_step_record(
 ) -> Step:
     """Compile one plan step into a short-lived Step record."""
 
-    raw_step = plan.step_definition(step_number)
-    args = plan.step_args(step_number)
-    data: dict[str, Any] = {**raw_step, **args}
-
+    data: dict[str, Any] = plan.step_definition(step_number)
+    data.update(plan.step_args(step_number))
     data.update(
         {
-            "identity": step_identity(str(plan.identity), step_number),
-            "plan_identity": str(plan.identity),
+            "identity": str(plan.identity),
+            "suffix": str(step_number),
             "step_number": step_number,
             "executor": step_executor_key(plan, step_number),
             "action": step_action_key(data, plan, step_number),
-            "instructions_json": json.dumps(
-                step_instruction_keys(data),
-                ensure_ascii=False,
-                separators=(",", ":"),
-            ),
-            "args_json": json.dumps(
-                args,
-                ensure_ascii=False,
-                separators=(",", ":"),
-                default=str,
-            ),
             "ttl_seconds": ttl_seconds,
         }
     )
+
     return Step(**data)
-
-
-def step_identity(plan_identity: str, step_number: int) -> str:
-    return f"{plan_identity}.{step_number}"
 
 
 def plan_step_count(plan: Any) -> int:
@@ -98,15 +81,6 @@ def step_action_key(step: dict[str, Any], plan: Any, step_number: int) -> str:
     )
 
 
-def step_instruction_keys(step: dict[str, Any]) -> list[str]:
-    values: list[str] = []
-
-    for name in ("instruction_keys", "instruction_slugs", "instructions"):
-        values.extend(str(value) for value in step.get(name, []))
-
-    return list(dict.fromkeys(values))
-
-
 __all__ = [
     "make_step_record",
     "materialize_plan_steps",
@@ -114,6 +88,4 @@ __all__ = [
     "plan_steps",
     "step_action_key",
     "step_executor_key",
-    "step_identity",
-    "step_instruction_keys",
 ]
