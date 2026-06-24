@@ -1,6 +1,6 @@
 from typing import Any, Callable, Mapping
 
-from asc.models.process.result import Failure, Response
+from asc.models.process.result import Failure, Transform
 from asc.registries.extensions import load_transform
 
 ENGINE = "scripts"
@@ -50,11 +50,11 @@ def _script_component(value: object) -> str:
     return f"scripts.{key}"
 
 
-def make_call(*, args: dict[str, Any]) -> Callable[[str], Response | Failure]:
+def make_run(*, args: dict[str, Any]) -> Callable[[str], Transform | Failure]:
     script = _script_component(args.get("script"))
     transform = load_transform(script)
 
-    def call(content: str) -> Response | Failure:
+    def run(content: str) -> Transform | Failure:
         try:
             output = transform(content)
         except Exception as exc:
@@ -69,7 +69,7 @@ def make_call(*, args: dict[str, Any]) -> Callable[[str], Response | Failure]:
                 },
             )
 
-        return Response(
+        return Transform(
             content=output,
             raw_json={
                 "engine": ENGINE,
@@ -78,11 +78,11 @@ def make_call(*, args: dict[str, Any]) -> Callable[[str], Response | Failure]:
             },
         )
 
-    return call
+    return run
 
 
 def should_retry(exc: BaseException) -> bool:
     return False
 
 
-__all__ = ["ENGINE", "ENGINE_COMPONENT", "FatalScriptError", "make_call", "should_retry"]
+__all__ = ["ENGINE", "ENGINE_COMPONENT", "FatalScriptError", "make_run", "should_retry"]

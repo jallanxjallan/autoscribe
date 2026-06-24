@@ -6,7 +6,8 @@ import importlib
 from dataclasses import dataclass
 from typing import Any
 
-from asc.models.process.task import Committed, Failure, ScrivenerTask
+from asc.models.process.result import Committed, Failure
+from asc.models.process.task import ScrivenerTask
 from asc.redis.key import RedisKey
 from asc.scrivener.connect import connect
 from asc.scrivener.maps import (
@@ -46,7 +47,7 @@ class ScrivenerExecutor:
             output = Committed.from_task(task, task_key=task_key)
 
         except Exception as exc:
-            output = Failure.from_exception(
+            output = Failure.internal(
                 task_key=task_key,
                 task=task,
                 exc=exc,
@@ -164,7 +165,7 @@ def _failure_message(*, data_key: str, record: object) -> str | None:
     if _step_status(data_key) != "failed":
         return None
 
-    for name in ("fail_message", "error", "message"):
+    for name in ("content", "fail_message", "error", "message"):
         value = getattr(record, name, None)
         if value not in (None, ""):
             return str(value)

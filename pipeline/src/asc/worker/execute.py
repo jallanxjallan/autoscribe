@@ -15,11 +15,10 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Any
 
-from asc.models.process.result import Failure
+from asc.models.process.result import Failure, Result
 from asc.models.process.step import Step
 from asc.models.process.task import WorkerTask
-from asc.redis.key import RedisKey
-from asc.worker.engines import load_engine_call
+from asc.worker.engines import load_engine_run
 from asc.worker.runtime_io import load_runtime_content
 
 
@@ -36,26 +35,20 @@ class WorkerExecutor:
 
         try:
             input_content = load_runtime_content(task.data_key)
-            engine_call = load_engine_call(step.executor, args=_step_args(step))
-            outcome = engine_call(input_content)
+            engine_run = load_engine_run(step.executor, args=_step_args(step))
+            output = engine_run(input_content)
+            result = Result.from_worker_output(output, task=task, step=step, task_key=task_key)
         except Exception as exc:
-            outcome = _failure_for_exception(
+            result = Failure.internal(
                 task_key=task_key,
                 task=task,
-                step=step,
                 exc=exc,
+                boundary="worker.execute",
+                step_key=task.step_key,
+                data_key=task.data_key,
             )
 
-        output_key = _output_key(data_key=task.data_key, outcome=outcome)
-        outcome = _with_worker_fields(
-            outcome,
-            task=task,
-            step=step,
-            task_key=task_key,
-            output_key=output_key,
-        )
-        outcome.save(output_key)
-
+        output_key = result.save()
         return WorkerResult(
             processed=1,
             task_key=task_key,
@@ -68,7 +61,9 @@ def _step_args(step: Step) -> dict[str, Any]:
         "identity",
         "suffix",
         "call_key",
+        "number",
         "step_number",
+        "engine",
         "executor",
         "action",
         "instructions_json",
@@ -83,62 +78,6 @@ def _step_args(step: Step) -> dict[str, Any]:
         for name, value in step.model_dump(mode="python").items()
         if name not in excluded and value not in (None, "")
     }
-
-
-def _output_key(*, data_key: str, outcome: object) -> str:
-    kind = "failure" if isinstance(outcome, Failure) else "response"
-    identity = RedisKey(data_key).identity
-    return str(RedisKey(kind=kind, identity=identity))
-
-
-def _failure_for_exception(
-    *,
-    task_key: str,
-    task: WorkerTask,
-    step: Step,
-    exc: Exception,
-) -> Failure:
-    identity = RedisKey(task.data_key).identity
-
-    return Failure(
-        identity=identity,
-        content=str(exc),
-        failure_reason=type(exc).__name__,
-        raw_json={
-            "task_key": task_key,
-            "task_identity": task.identity,
-            "step_key": task.step_key,
-            "data_key": task.data_key,
-            "step_number": step.step_number,
-            "executor": step.executor,
-            "action": step.action,
-            "error": str(exc),
-            "error_type": type(exc).__name__,
-            "worker_boundary": "execute",
-        },
-    )
-
-
-def _with_worker_fields(
-    outcome: object,
-    *,
-    task: WorkerTask,
-    step: Step,
-    task_key: str,
-    output_key: str,
-) -> object:
-    return outcome.model_copy(
-        update={
-            "identity": RedisKey(output_key).identity,
-            "task_key": task_key,
-            "task_identity": task.identity,
-            "step_key": task.step_key,
-            "data_key": task.data_key,
-            "step_number": step.step_number,
-            "executor": step.executor,
-            "action": step.action,
-        }
-    )
 
 
 __all__ = ["WorkerExecutor", "WorkerResult"]
