@@ -35,7 +35,7 @@ class WorkerExecutor:
 
         try:
             input_content = load_runtime_content(task.data_key)
-            engine_run = load_engine_run(step.executor, args=_step_args(step))
+            engine_run = load_engine_run(step.engine, args=_step_args(step))
             output = engine_run(input_content)
             result = Result.from_worker_output(output, task=task, step=step, task_key=task_key)
         except Exception as exc:
