@@ -6,8 +6,8 @@ import importlib
 from dataclasses import dataclass
 from typing import Any
 
-from asc.models.process.result import Committed, Failure
-from asc.models.process.task import ScrivenerTask
+from asc.models.process.result import Failure
+from asc.models.process.task import Outcome, ScrivenerTask
 from asc.redis.key import RedisKey
 from asc.scrivener.connect import connect
 from asc.scrivener.maps import (
@@ -26,7 +26,7 @@ from asc.scrivener.sql import insert_row
 class ScrivenerResult:
     processed: int
     task_key: str
-    output_key: str
+    outcome_key: str
     action: str | None = None
 
 
@@ -44,10 +44,10 @@ class ScrivenerExecutor:
                 ensure_ledger_schema(conn)
                 insert_row(conn, table=task.table, data=data)
 
-            output = Committed.from_task(task, task_key=task_key)
+            outcome = Outcome.success(task_key=task_key, task=task)
 
         except Exception as exc:
-            output = Failure.internal(
+            failure = Failure.internal(
                 task_key=task_key,
                 task=task,
                 exc=exc,
@@ -55,12 +55,19 @@ class ScrivenerExecutor:
                 data_key=getattr(task, "data_key", None),
                 table=getattr(task, "table", None),
             )
+            failure_key = failure.save()
+            outcome = _failure_outcome(
+                task_key=task_key,
+                task=task,
+                failure_key=failure_key,
+                exc=exc,
+            )
 
-        output_key = output.save()
+        outcome_key = outcome.save()
         return ScrivenerResult(
             processed=1,
             task_key=task_key,
-            output_key=output_key,
+            outcome_key=outcome_key,
             action=_optional_text(getattr(task, "action", None)) if task else None,
         )
 
@@ -150,6 +157,40 @@ def load_record_key(key: object) -> Any:
     if not callable(load):
         raise TypeError(f"{model_class.__name__} has no load() classmethod")
     return load(key_text)
+
+
+def _failure_outcome(
+    *,
+    task_key: str,
+    task: ScrivenerTask | None,
+    failure_key: str,
+    exc: Exception,
+) -> Outcome:
+    if task is not None:
+        return Outcome.failure(
+            task_key=task_key,
+            task=task,
+            failure_key=failure_key,
+            error=str(exc),
+            error_type=type(exc).__name__,
+            boundary="scrivener.execute",
+        )
+
+    identity = RedisKey(task_key).identity
+    return Outcome.model_validate(
+        {
+            "identity": identity,
+            "task_identity": identity,
+            "task_key": task_key,
+            "package": "scrivener",
+            "action": "execute",
+            "status": "failure",
+            "failure_key": failure_key,
+            "error": str(exc),
+            "error_type": type(exc).__name__,
+            "boundary": "scrivener.execute",
+        }
+    )
 
 
 def _step_status(data_key: str) -> str:

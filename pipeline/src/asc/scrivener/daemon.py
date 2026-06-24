@@ -21,7 +21,7 @@ class ScrivenerRunReport:
     claimed: bool
     task_key: str | None = None
     action: str | None = None
-    output_key: str | None = None
+    outcome_key: str | None = None
 
 
 def run_once(
@@ -48,13 +48,13 @@ def run_once(
         raise ValueError("scrivener claimed an empty task key")
 
     result = ScrivenerExecutor().execute(task_key)
-    orchestrator_inbox.post(result.output_key)
+    orchestrator_inbox.post(result.outcome_key)
 
     return ScrivenerRunReport(
         claimed=True,
         task_key=result.task_key,
         action=result.action,
-        output_key=result.output_key,
+        outcome_key=result.outcome_key,
     )
 
 
@@ -82,7 +82,7 @@ def main() -> None:
     print(
         f"scrivener claimed={report.claimed} "
         f"task_key={report.task_key} action={report.action} "
-        f"output_key={report.output_key}"
+        f"outcome_key={report.outcome_key}"
     )
 
 
