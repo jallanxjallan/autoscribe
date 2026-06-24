@@ -45,16 +45,14 @@ def make_step_record(
 
     data: dict[str, Any] = plan.step_definition(step_number)
     data.update(plan.step_args(step_number))
-    data.update(
-        {
-            "identity": str(plan.identity),
-            "suffix": str(step_number),
-            "step_number": step_number,
-            "executor": step_executor_key(plan, step_number),
-            "action": step_action_key(data, plan, step_number),
-            "ttl_seconds": ttl_seconds,
-        }
-    )
+    data = {
+    "identity": str(plan.identity),
+    "step_number": step_number,
+    "engine": plan.step_engine(step_number),
+    "step_json": plan.step_definition(step_number),
+    "ttl_seconds": ttl_seconds,
+}
+
 
     return Step(**data)
 

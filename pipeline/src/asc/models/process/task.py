@@ -1,4 +1,4 @@
-"""Short-lived daemon task, success, and failure records."""
+"""Short-lived daemon task and daemon-boundary failure records."""
 
 from __future__ import annotations
 
@@ -90,54 +90,6 @@ class WorkerTask(Task):
         return _required_text(value, "runtime key")
 
 
-class Committed(Task):
-    """Successful task completion notice.
-
-    The committed record copies the concrete source task under
-    committed:<task_identity>. Its existence is the success signal.
-    """
-
-    kind: ClassVar[str] = "committed"
-
-    task_identity: str
-    task_key: str
-    committed_at: int = Field(default_factory=timestamp)
-
-    # Known subclass fields copied forward from ScrivenerTask/WorkerTask.
-    data_key: str | None = None
-    table: str | None = None
-    step_key: str | None = None
-
-    @classmethod
-    def from_task(cls, task: Task, *, task_key: str) -> Self:
-        return cls.model_validate(
-            {
-                **task.model_dump(mode="json"),
-                "identity": task.identity,
-                "task_identity": task.identity,
-                "task_key": task_key,
-            }
-        )
-
-    @field_validator("task_identity", mode="before")
-    @classmethod
-    def validate_task_identity(cls, value: object) -> str:
-        return redis_key_segment_text(value, "task_identity")
-
-    @field_validator("task_key", mode="before")
-    @classmethod
-    def validate_task_key(cls, value: object) -> str:
-        return _required_text(value, "task_key")
-
-    @field_serializer("committed_at")
-    def serialize_committed_at(self, value: int) -> str:
-        return str(value)
-
-    @field_serializer("data_key", "table", "step_key")
-    def serialize_optional_text(self, value: str | None) -> str:
-        return "" if value is None else str(value)
-
-
 class Failure(RedisMessage):
     """Arbitrary emergency/debug record for failed daemon boundaries.
 
@@ -217,7 +169,6 @@ def _required_text(value: object, field: str) -> str:
 
 
 __all__ = [
-    "Committed",
     "Failure",
     "ScrivenerTask",
     "Task",
