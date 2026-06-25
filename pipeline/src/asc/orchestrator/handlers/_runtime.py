@@ -7,12 +7,12 @@ from ..errors import OrchestratorContractError
 
 
 def call_index_for_data_key(data_key: str) -> CallIndex:
-    """Load the call index that belongs to a call-derived data key."""
+    """Load the call index that belongs to a call data key."""
 
-    key = RedisKey(required_text(data_key, "task.data_key"))
-    if key.kind not in {"call", "response", "transform", "retrieval", "failure"}:
+    key = RedisKey(required_text(data_key, "outcome.data_key"))
+    if key.kind != "call":
         raise OrchestratorContractError(
-            f"task data_key must be call-derived; got {data_key!r}"
+            f"outcome data_key must be a call key; got {data_key!r}"
         )
     return CallIndex.from_identity(key.identity)
 
@@ -28,8 +28,8 @@ def first_step_key(call_index: CallIndex) -> str | None:
 
 def next_step_key_after(call_index: CallIndex, current_slot: int) -> str | None:
     for slot, key in sorted(call_index.slots().items(), key=lambda item: int(item[0])):
-        slot_number = int(slot)
-        if slot_number <= current_slot:
+        slot = int(slot)
+        if slot <= current_slot:
             continue
         text = str(key).strip()
         if text and RedisKey(text).kind == "step":
@@ -37,37 +37,13 @@ def next_step_key_after(call_index: CallIndex, current_slot: int) -> str | None:
     return None
 
 
-def latest_data_key(call_index: CallIndex) -> str:
-    """Return the highest filled non-step slot in the call index.
-
-    The call index is the source of process position. Slot 0 is the original
-    call record. Step slots start as step keys and are replaced by the result or
-    failure key when that step has happened.
-    """
-
-    latest_slot = -1
-    latest_key = ""
-    for slot, key in call_index.slots().items():
-        text = str(key).strip()
-        if not text:
-            continue
-        if RedisKey(text).kind == "step":
-            continue
-        slot_number = int(slot)
-        if slot_number > latest_slot:
-            latest_slot = slot_number
-            latest_key = text
-
-    return required_text(latest_key, "call_index latest data key")
-
-
 def set_result_slot(call_index: CallIndex, *, step_number: int, result_key: str) -> None:
     if step_number < 1:
         raise OrchestratorContractError(
-            f"worker step slot must be positive; got {step_number!r}"
+            f"worker outcome step_number must be positive; got {step_number!r}"
         )
 
-    result_key = required_text(result_key, "outcome.output_key")
+    result_key = required_text(result_key, "outcome result/failure key")
     current = call_index.slots().get(step_number) or call_index.slots().get(str(step_number))
     if current and RedisKey(str(current)).kind != "step":
         raise OrchestratorContractError(
@@ -87,6 +63,12 @@ def slot_for_key(call_index: CallIndex, expected_key: str | RedisKey) -> int:
     )
 
 
+def required_int(value: object, field_name: str) -> int:
+    if value is None or value == "":
+        raise OrchestratorContractError(f"{field_name} must be non-empty")
+    return int(value)
+
+
 def required_text(value: object, field_name: str) -> str:
     text = "" if value is None else str(value).strip()
     if not text:
@@ -98,8 +80,8 @@ __all__ = [
     "call_index_for_data_key",
     "call_key_for_index",
     "first_step_key",
-    "latest_data_key",
     "next_step_key_after",
+    "required_int",
     "required_text",
     "set_result_slot",
     "slot_for_key",

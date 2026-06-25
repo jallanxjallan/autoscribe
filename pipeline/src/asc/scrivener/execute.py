@@ -16,10 +16,12 @@ from asc.scrivener.maps import (
     LEDGER_FIELDS,
     MODEL_PATH_BY_KEY_KIND,
     STEPS_TABLE,
-    STEP_STATUS_BY_KEY_KIND,
 )
 from asc.scrivener.schema import ensure_ledger_schema
 from asc.scrivener.sql import insert_row
+
+
+SUCCESS = "success"
 
 
 @dataclass(frozen=True, slots=True)
@@ -27,68 +29,50 @@ class ScrivenerResult:
     processed: int
     task_key: str
     outcome_key: str
-    action: str | None = None
+    action: str
 
 
 class ScrivenerExecutor:
     def execute(self, task_key: str) -> ScrivenerResult:
         task_key = _required_text(task_key, "scrivener task key")
+        task = ScrivenerTask.load(task_key)
+        record = load_record_key(task.data_key)
+        data = row_for(task=task, record=record)
 
-        task: ScrivenerTask | None = None
-        try:
-            task = ScrivenerTask.load(task_key)
-            record = load_record_key(task.data_key)
-            data = row_for(table=task.table, data_key=task.data_key, record=record)
+        with connect() as conn:
+            ensure_ledger_schema(conn)
+            insert_row(conn, table=task.table, data=data)
 
-            with connect() as conn:
-                ensure_ledger_schema(conn)
-                insert_row(conn, table=task.table, data=data)
-
-            outcome = Outcome.success(task_key=task_key, task=task)
-
-        except Exception as exc:
-            failure = Failure.internal(
-                task_key=task_key,
-                task=task,
-                exc=exc,
-                boundary="scrivener.execute",
-                data_key=getattr(task, "data_key", None),
-                table=getattr(task, "table", None),
-            )
-            failure_key = failure.save()
-            outcome = _failure_outcome(
-                task_key=task_key,
-                task=task,
-                failure_key=failure_key,
-                exc=exc,
-            )
-
+        outcome = Outcome.success(task=task, message=SUCCESS)
         outcome_key = outcome.save()
+
         return ScrivenerResult(
             processed=1,
             task_key=task_key,
             outcome_key=outcome_key,
-            action=_optional_text(getattr(task, "action", None)) if task else None,
+            action=task.action,
         )
 
 
-def row_for(*, table: str, data_key: str, record: object) -> dict[str, Any]:
+def row_for(*, task: ScrivenerTask, record: object) -> dict[str, Any]:
+    table = _required_text(task.table, "task.table")
     if table not in LEDGER_FIELDS:
         raise ValueError(f"unknown scrivener ledger table: {table!r}")
 
     if table == CALLS_TABLE:
-        return call_row(data_key=data_key, record=record)
+        return call_row(task=task, record=record)
 
     if table == STEPS_TABLE:
-        return step_row(data_key=data_key, record=record)
+        return step_row(task=task, record=record)
 
     if table == EXPORTS_TABLE:
-        return export_row(data_key=data_key, record=record)
+        return export_row(task=task, record=record)
 
     raise ValueError(f"unsupported scrivener ledger table: {table!r}")
 
 
-def call_row(*, data_key: str, record: object) -> dict[str, Any]:
+def call_row(*, task: ScrivenerTask, record: object) -> dict[str, Any]:
+    data_key = _required_text(task.data_key, "task.data_key")
     identity = RedisKey(data_key).identity
     source_identity = _optional_domain_identity(
         record,
@@ -105,21 +89,22 @@ def call_row(*, data_key: str, record: object) -> dict[str, Any]:
     }
 
 
-def step_row(*, data_key: str, record: object) -> dict[str, Any]:
-    key = RedisKey(data_key)
+def step_row(*, task: ScrivenerTask, record: object) -> dict[str, Any]:
+    data_key = _required_text(task.data_key, "task.data_key")
     return {
-        "identity": key.identity,
-        "step_number": _positive_int(getattr(record, "step_number"), "step_number"),
-        "result_key": str(data_key),
-        "status": _step_status(data_key),
+        "identity": RedisKey(data_key).identity,
+        "step_number": _positive_int(getattr(task, "step_number"), "task.step_number"),
+        "result_key": data_key,
+        "status": _step_status(record),
         "content": getattr(record, "content"),
-        "fail_message": _failure_message(data_key=data_key, record=record),
+        "fail_message": _failure_message(record),
         "raw_json": _model_json(record),
         "created_at": int(getattr(record, "created_at")),
     }
 
 
-def export_row(*, data_key: str, record: object) -> dict[str, Any]:
+def export_row(*, task: ScrivenerTask, record: object) -> dict[str, Any]:
+    data_key = _required_text(task.data_key, "task.data_key")
     identity = RedisKey(data_key).identity
     source_identity = _optional_domain_identity(
         record,
@@ -131,8 +116,8 @@ def export_row(*, data_key: str, record: object) -> dict[str, Any]:
     return {
         "identity": identity,
         "source_identity": source_identity,
-        "final_step": _positive_int(getattr(record, "final_step"), "final_step"),
-        "result_key": str(data_key),
+        "final_step": _positive_int(getattr(task, "final_step"), "task.final_step"),
+        "result_key": data_key,
         "exported_at": int(getattr(record, "exported_at")),
         "export_message": getattr(record, "export_message"),
         "created_at": int(getattr(record, "created_at")),
@@ -159,58 +144,16 @@ def load_record_key(key: object) -> Any:
     return load(key_text)
 
 
-def _failure_outcome(
-    *,
-    task_key: str,
-    task: ScrivenerTask | None,
-    failure_key: str,
-    exc: Exception,
-) -> Outcome:
-    if task is not None:
-        return Outcome.failure(
-            task_key=task_key,
-            task=task,
-            failure_key=failure_key,
-            error=str(exc),
-            error_type=type(exc).__name__,
-            boundary="scrivener.execute",
-        )
-
-    identity = RedisKey(task_key).identity
-    return Outcome.model_validate(
-        {
-            "identity": identity,
-            "task_identity": identity,
-            "task_key": task_key,
-            "package": "scrivener",
-            "action": "execute",
-            "status": "failure",
-            "failure_key": failure_key,
-            "error": str(exc),
-            "error_type": type(exc).__name__,
-            "boundary": "scrivener.execute",
-        }
-    )
+def _step_status(record: object) -> str:
+    return "failed" if isinstance(record, Failure) else "completed"
 
 
-def _step_status(data_key: str) -> str:
-    kind = RedisKey(data_key).kind
-    try:
-        return STEP_STATUS_BY_KEY_KIND[kind]
-    except KeyError as exc:
-        expected = ", ".join(sorted(STEP_STATUS_BY_KEY_KIND))
-        raise ValueError(f"unsupported step data key kind: {kind!r}; expected one of: {expected}") from exc
-
-
-def _failure_message(*, data_key: str, record: object) -> str | None:
-    if _step_status(data_key) != "failed":
+def _failure_message(record: object) -> str | None:
+    if not isinstance(record, Failure):
         return None
 
-    for name in ("content", "fail_message", "error", "message"):
-        value = getattr(record, name, None)
-        if value not in (None, ""):
-            return str(value)
-    return None
+    value = getattr(record, "content")
+    return str(value) if value not in (None, "") else None
 
 
 def _model_json(record: object) -> str:
@@ -240,11 +183,6 @@ def _required_text(value: object, field: str) -> str:
     if not text:
         raise ValueError(f"{field} must be non-empty")
     return text
-
-
-def _optional_text(value: object) -> str | None:
-    text = "" if value is None else str(value).strip()
-    return text or None
 
 
 __all__ = [

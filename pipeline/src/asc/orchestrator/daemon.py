@@ -10,16 +10,16 @@ Run forever from imported code:
 
 from dataclasses import dataclass
 
+from asc.orchestrator import inbox as orchestrator_inbox
+from asc.orchestrator.handle import handle, key_kind
 from asc.state.daemon import DEFAULT_CLAIM_TIMEOUT_SECONDS, configure_logging, run_daemon
-
-from . import inbox
-from .handler import handle_message
 
 
 @dataclass(frozen=True, slots=True)
 class OrchestratorRunReport:
     claimed: bool
-    item: str | None = None
+    post_key: str | None = None
+    kind: str | None = None
 
 
 def run_once(
@@ -28,18 +28,31 @@ def run_once(
     empty_limit: int | None = None,
     wait: bool = False,
 ) -> OrchestratorRunReport:
-    """Claim and route one orchestrator inbox item."""
+    """Claim and handle one orchestrator inbox message."""
 
     if wait:
-        claimed = inbox.daemon_claim(timeout=timeout, empty_limit=empty_limit)
+        claimed = orchestrator_inbox.daemon_claim(
+            timeout=timeout or 0,
+            empty_limit=empty_limit,
+        )
     else:
-        claimed = inbox.claim()
+        claimed = orchestrator_inbox.claim()
 
     if claimed is None:
         return OrchestratorRunReport(claimed=False)
 
-    handle_message(claimed)
-    return OrchestratorRunReport(claimed=True, item=claimed)
+    post_key = str(claimed).strip()
+    if not post_key:
+        raise ValueError("orchestrator claimed an empty post key")
+
+    kind = key_kind(post_key)
+    handle(post_key)
+
+    return OrchestratorRunReport(
+        claimed=True,
+        post_key=post_key,
+        kind=kind,
+    )
 
 
 def run_forever(
@@ -52,11 +65,7 @@ def run_forever(
     configure_logging()
     run_daemon(
         name="orchestrator",
-        run_once=lambda *, timeout=None, empty_limit=None, wait=True: run_once(
-            timeout=timeout,
-            empty_limit=empty_limit,
-            wait=True,
-        ),
+        run_once=lambda **kwargs: run_once(wait=True, **kwargs),
         timeout=timeout,
         empty_limit=empty_limit,
     )
@@ -67,10 +76,10 @@ def main() -> None:
 
     configure_logging()
     report = run_once()
-    if report.item is None:
-        print(f"orchestrator claimed={report.claimed}")
-    else:
-        print(f"orchestrator claimed={report.claimed} item={report.item}")
+    print(
+        f"orchestrator claimed={report.claimed} "
+        f"post_key={report.post_key} kind={report.kind}"
+    )
 
 
 if __name__ == "__main__":

@@ -1,8 +1,8 @@
-"""Short-lived daemon task, daemon outcomes, and daemon-boundary failure records."""
+"""Short-lived daemon tasks and daemon outcomes."""
 
 from __future__ import annotations
 
-from typing import Any, ClassVar, Literal, Self
+from typing import ClassVar, Literal, Self
 
 from pydantic import ConfigDict, Field, field_serializer, field_validator
 
@@ -10,7 +10,6 @@ from asc.core.identity import generate_identity
 from asc.core.timestamp import timestamp
 from asc.models.helpers.plain import redis_key_segment_text
 from asc.redis.message_base import RedisMessage
-from asc.redis.key import RedisKey
 
 
 TaskPackage = Literal["worker", "scrivener"]
@@ -92,141 +91,38 @@ class WorkerTask(Task):
 
 
 class Outcome(RedisMessage):
-    """Uniform daemon completion envelope consumed by orchestrator.
+    """Thin daemon task completion signal.
 
-    Outcome is intentionally permissive. It is a copied task envelope plus the
-    daemon completion fields needed for routing. Package-specific task fields
-    are extra data, not part of the Outcome schema, so WorkerTask and
-    ScrivenerTask can change without forcing this model to drift.
+    Outcome uses the associated task identity. It does not copy task fields and
+    does not carry engine-specific result payloads.
     """
 
-    model_config = ConfigDict(extra="allow")
+    model_config = ConfigDict(extra="forbid")
 
     kind: ClassVar[str] = "outcome"
 
     identity: str
     status: OutcomeStatus
-    output_key: str
-
-    completed_at: int = Field(default_factory=timestamp)
+    message: str
+    created_at: int = Field(default_factory=timestamp)
 
     @classmethod
-    def success(
-        cls,
-        *,
-        task_key: str,
-        task: ScrivenerTask | WorkerTask,
-        output_key: str,
-        **extra: Any,
-    ) -> Self:
+    def success(cls, *, task: Task, message: str) -> Self:
         return cls.model_validate(
             {
-                **task.model_dump(mode="json"),
-                **extra,
                 "identity": task.identity,
-                "task_identity": task.identity,
-                "task_key": task_key,
                 "status": "success",
-                "output_key": output_key,
-                "result_key": output_key,
+                "message": message,
             }
         )
 
     @classmethod
-    def failure(
-        cls,
-        *,
-        task_key: str,
-        task: ScrivenerTask | WorkerTask,
-        output_key: str,
-        **extra: Any,
-    ) -> Self:
+    def failure(cls, *, task: Task, message: str) -> Self:
         return cls.model_validate(
             {
-                **task.model_dump(mode="json"),
-                **extra,
                 "identity": task.identity,
-                "task_identity": task.identity,
-                "task_key": task_key,
                 "status": "failure",
-                "output_key": output_key,
-                "failure_key": output_key,
-            }
-        )
-
-    @field_validator("identity", mode="before")
-    @classmethod
-    def validate_identity_segment(cls, value: object) -> str:
-        return redis_key_segment_text(value, "identity")
-
-    @field_validator("output_key", mode="before")
-    @classmethod
-    def validate_output_key(cls, value: object) -> str:
-        return _required_text(value, "output_key")
-
-    @field_validator("completed_at", mode="before")
-    @classmethod
-    def validate_completed_at(cls, value: object) -> int:
-        if value is None or value == "":
-            return timestamp()
-        return int(value)
-
-    @field_serializer("completed_at")
-    def serialize_completed_at(self, value: int) -> str:
-        return str(value)
-
-
-class Failure(RedisMessage):
-    """Arbitrary emergency/debug record for failed daemon boundaries.
-
-    Failure is intentionally permissive. Normal routing should only need the key
-    kind and identity; humans inspect the rest when something breaks.
-    """
-
-    model_config = ConfigDict(extra="allow")
-
-    kind: ClassVar[str] = "failure"
-
-    identity: str
-    task_identity: str | None = None
-    task_key: str | None = None
-    package: str | None = None
-    action: str | None = None
-
-    error: str
-    error_type: str
-    boundary: str
-    failed_at: int = Field(default_factory=timestamp)
-
-    @classmethod
-    def from_exception(
-        cls,
-        *,
-        task_key: str,
-        task: Task | None,
-        exc: Exception,
-        boundary: str,
-        **extra: Any,
-    ) -> Self:
-        if task is None:
-            identity = RedisKey(task_key).identity
-            payload: dict[str, Any] = {}
-        else:
-            identity = task.identity
-            payload = task.model_dump(mode="json")
-
-        return cls.model_validate(
-            {
-                **payload,
-                **extra,
-                "identity": identity,
-                "task_identity": identity,
-                "task_key": task_key,
-                "package": getattr(task, "package", None) or extra.get("package"),
-                "action": getattr(task, "action", None) or extra.get("action"),
-                "error": str(exc),
-                "error_type": type(exc).__name__,
-                "boundary": boundary,
+                "message": message,
             }
         )
 
@@ -235,15 +131,21 @@ class Failure(RedisMessage):
     def validate_identity(cls, value: object) -> str:
         return redis_key_segment_text(value, "identity")
 
-    @field_validator("failed_at", mode="before")
+    @field_validator("status", mode="before")
     @classmethod
-    def validate_failed_at(cls, value: object) -> int:
-        if value is None or value == "":
-            return timestamp()
-        return int(value)
+    def validate_status(cls, value: object) -> str:
+        text = "" if value is None else str(value).strip()
+        if text not in {"success", "failure"}:
+            raise ValueError(f"outcome status must be success or failure: {text!r}")
+        return text
 
-    @field_serializer("failed_at")
-    def serialize_failed_at(self, value: int) -> str:
+    @field_validator("message", mode="before")
+    @classmethod
+    def validate_message(cls, value: object) -> str:
+        return _required_text(value, "message")
+
+    @field_serializer("created_at")
+    def serialize_created_at(self, value: int) -> str:
         return str(value)
 
 
@@ -254,19 +156,8 @@ def _required_text(value: object, field: str) -> str:
     return text
 
 
-def _optional_text(value: object) -> str | None:
-    if value is None or value == "":
-        return None
-
-    text = str(value).strip()
-    if not text:
-        return None
-
-    return text
-
 
 __all__ = [
-    "Failure",
     "Outcome",
     "OutcomeStatus",
     "ScrivenerTask",

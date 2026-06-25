@@ -38,14 +38,10 @@ LEDGER_FIELDS: dict[str, tuple[str, ...]] = {
 MODEL_PATH_BY_KEY_KIND = {
     "call": "asc.models.process.call.CallRecord",
     "response": "asc.models.process.result.Response",
+    "transform": "asc.models.process.result.Transform",
+    "retrieval": "asc.models.process.result.Retrieval",
     "result": "asc.models.process.result.Response",
     "failure": "asc.models.process.result.Failure",
-}
-
-STEP_STATUS_BY_KEY_KIND = {
-    "response": "completed",
-    "result": "completed",
-    "failure": "failed",
 }
 
 __all__ = [
@@ -54,5 +50,4 @@ __all__ = [
     "LEDGER_FIELDS",
     "MODEL_PATH_BY_KEY_KIND",
     "STEPS_TABLE",
-    "STEP_STATUS_BY_KEY_KIND",
 ]
