@@ -88,7 +88,7 @@ def _save_outcome(
         "status": status,
         "result": status,
         "output_key": output_key,
-        "step_number": _step_number(task=task, step=step),
+        "step_number": _step_number(step=step),
         "result_key": "" if status == "failure" else output_key,
         "failure_key": output_key if status == "failure" else "",
     }
@@ -97,17 +97,11 @@ def _save_outcome(
     return outcome.save()
 
 
-def _step_number(*, task: WorkerTask, step: Step | None) -> str:
-    if step is not None:
-        value = getattr(step, "step_number", None) or getattr(step, "number", None)
-        if value not in (None, ""):
-            return str(value)
+def _step_number(*, step: Step | None) -> str:
+    if step is None:
+        raise ValueError("worker outcome requires loaded step with mandatory step_number")
 
-    suffix = getattr(task, "step_key", "").rsplit(":", 1)[-1]
-    if suffix:
-        return suffix
-
-    return ""
+    return str(step.step_number)
 
 
 def _payload_for_model(model: type[Any], payload: dict[str, Any]) -> dict[str, Any]:
@@ -124,26 +118,10 @@ def _payload_for_model(model: type[Any], payload: dict[str, Any]) -> dict[str, A
 
 
 def _step_args(step: Step) -> dict[str, Any]:
-    excluded = {
-        "identity",
-        "suffix",
-        "call_key",
-        "number",
-        "step_number",
-        "engine",
-        "executor",
-        "action",
-        "instructions_json",
-        "args_json",
-        "ttl_seconds",
-        "created_at",
-        "updated_at",
-    }
-
     return {
         name: value
         for name, value in step.model_dump(mode="python").items()
-        if name not in excluded and value not in (None, "")
+        if value not in (None, "")
     }
 
 

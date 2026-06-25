@@ -1,6 +1,5 @@
 from typing import Any, Callable, Mapping
 
-from asc.models.process.result import Failure, Transform
 from asc.registries.extensions import load_transform
 
 ENGINE = "scripts"
@@ -43,40 +42,30 @@ def _script_component(value: object) -> str:
     if key.startswith("scripts."):
         return key
 
-    # Accept older values that were stored as module-ish paths.
     if key.startswith("asc.scripts."):
         return key.removeprefix("asc.")
 
     return f"scripts.{key}"
 
 
-def make_run(*, args: dict[str, Any]) -> Callable[[str], Transform | Failure]:
+def make_run(*, args: dict[str, Any]) -> Callable[[str], dict[str, Any]]:
     script = _script_component(args.get("script"))
     transform = load_transform(script)
 
-    def run(content: str) -> Transform | Failure:
+    def run(content: str) -> dict[str, Any]:
         try:
             output = transform(content)
         except Exception as exc:
-            return Failure(
-                content=content,
-                failure_reason=type(exc).__name__,
-                raw_json={
-                    "engine": ENGINE,
-                    "script": script,
-                    "args": args,
-                    "error": str(exc),
-                },
-            )
+            raise FatalScriptError(f"{script}: {exc}") from exc
 
-        return Transform(
-            content=output,
-            raw_json={
+        return {
+            "content": output,
+            "raw_json": {
                 "engine": ENGINE,
                 "script": script,
                 "args": args,
             },
-        )
+        }
 
     return run
 

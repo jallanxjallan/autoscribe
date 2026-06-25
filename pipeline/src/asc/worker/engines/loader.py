@@ -8,9 +8,12 @@ class EngineRun(Protocol):
 def load_engine_run(engine_name: str, *, args: dict[str, Any]) -> EngineRun:
     """Load a worker engine run callable.
 
-    The worker boundary runs engines. It does not assume that every successful
-    engine run is an LLM Response. Engines return first-class process result
-    models such as Response, Transform, Retrieval, or Failure.
+    The worker boundary supplies the flattened Step fields as ``args``. Engines
+    may cherry-pick the fields they need and ignore the rest.
+
+    Engines should return raw engine payloads, not process result envelopes. The
+    worker executor owns task/step custody context and wraps successful payloads
+    into Response, Transform, Retrieval, or Failure records.
 
     DEBT: move engine-name compatibility and adapter registry into
     asc.registries once the current pipeline stabilizes.

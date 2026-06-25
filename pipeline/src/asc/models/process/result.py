@@ -13,115 +13,50 @@ from asc.redis.model_base import RedisModel
 class Result(RedisModel):
     """Base class for successful worker output.
 
+    Engines instantiate concrete result objects with only the payload produced
+    by that engine. The worker executor owns runtime custody metadata and passes
+    the Redis address at save time:
+
+    - identity: source call identity
+    - suffix: producing step number
+
     Successful worker results have three concrete Redis key kinds:
 
     - response: successful LLM completion
     - transform: successful script transform
     - retrieval: successful RAG/retrieval operation
-
-    The output key identity is the source call identity. The suffix is the
-    step number, so all results derived from a call can be scanned by identity
-    and each result can be tied back to the producing step.
     """
 
-    model_config = ConfigDict(extra="forbid")
+    model_config = ConfigDict(extra="allow")
 
     kind: ClassVar[str] = "result"
 
-    identity: str
-    task_key: str
-    task_identity: str
-    data_key: str
-    step_key: str
-    step_number: int
-    executor: str
-    action: str
     content: str
-    raw_json: Any
+    raw_json: Any = Field(default_factory=dict)
     created_at: int = Field(default_factory=timestamp)
 
     @classmethod
-    def from_worker_output(
-        cls,
-        output: object,
-        *,
-        task: Any,
-        step: Any,
-        task_key: str,
-    ) -> Result | Failure:
-        if isinstance(output, Failure):
-            return output.with_worker_context(task=task, step=step, task_key=task_key)
-
-        if isinstance(output, Result):
-            return output.with_worker_context(task=task, step=step, task_key=task_key)
-
-        result_class = result_class_for_step(step)
-        payload = payload_from_output(output)
-        return result_class(
-            identity=RedisKey(task.data_key).identity,
-            task_key=task_key,
-            task_identity=task.identity,
-            data_key=task.data_key,
-            step_key=task.step_key,
-            step_number=_step_number(step),
-            executor=_step_executor(step),
-            action=_step_action(step),
-            content=payload["content"],
-            raw_json=payload["raw_json"],
-        )
-
-    @property
-    def output_key(self) -> str:
+    def output_key_for(cls, *, identity: object, suffix: object) -> str:
         return str(
             RedisKey(
-                kind=self.kind,
-                identity=self.identity,
-                suffix=str(self.step_number),
+                kind=cls.kind,
+                identity=_identity(identity),
+                suffix=_suffix(suffix),
             )
         )
 
-    def save(self, key: object | None = None) -> str:  # type: ignore[override]
-        output_key = self.output_key if key is None else str(key)
+    def save(self, *, identity: object, suffix: object) -> str:  # type: ignore[override]
+        output_key = self.output_key_for(identity=identity, suffix=suffix)
         super().save(output_key)
         return output_key
 
-    def with_worker_context(self, *, task: Any, step: Any, task_key: str) -> Self:
-        return self.model_copy(
-            update={
-                "identity": RedisKey(task.data_key).identity,
-                "task_key": task_key,
-                "task_identity": task.identity,
-                "data_key": task.data_key,
-                "step_key": task.step_key,
-                "step_number": _step_number(step),
-                "executor": _step_executor(step),
-                "action": _step_action(step),
-            }
-        )
-
-    @field_validator("identity", "task_identity", mode="before")
+    @field_validator("content", mode="before")
     @classmethod
-    def validate_identity_fields(cls, value: object) -> str:
-        return redis_key_segment_text(value, "identity")
+    def validate_content(cls, value: object) -> str:
+        return "" if value is None else str(value)
 
-    @field_validator("task_key", "data_key", "step_key", "executor", "action", mode="before")
-    @classmethod
-    def validate_text_fields(cls, value: object) -> str:
-        text = "" if value is None else str(value).strip()
-        if not text:
-            raise ValueError("result text fields must not be empty")
-        return text
-
-    @field_validator("step_number", mode="before")
-    @classmethod
-    def validate_step_number(cls, value: object) -> int:
-        number = int(value)
-        if number < 1:
-            raise ValueError(f"step_number must be >= 1: {number}")
-        return number
-
-    @field_serializer("created_at", "step_number")
-    def serialize_int(self, value: int) -> str:
+    @field_serializer("created_at")
+    def serialize_created_at(self, value: int) -> str:
         return str(value)
 
 
@@ -150,24 +85,19 @@ class Failure(RedisModel):
     ``failure_type`` field distinguishes internal boundary errors from failed
     external calls. Failures carry content so the chain can continue when the
     orchestrator policy allows it.
+
+    Like successful results, failures carry only failure payload. The executor
+    passes identity and suffix at save time.
     """
 
-    model_config = ConfigDict(extra="forbid")
+    model_config = ConfigDict(extra="allow")
 
     kind: ClassVar[str] = "failure"
 
-    identity: str
     failure_type: str
     content: str
     failure_reason: str
-    raw_json: Any
-    task_key: str | None = None
-    task_identity: str | None = None
-    data_key: str | None = None
-    step_key: str | None = None
-    step_number: int | None = None
-    executor: str | None = None
-    action: str | None = None
+    raw_json: Any = Field(default_factory=dict)
     boundary: str | None = None
     created_at: int = Field(default_factory=timestamp)
 
@@ -201,17 +131,18 @@ class Failure(RedisModel):
         raw_json: Any,
     ) -> ExternalFailure:
         return ExternalFailure(
-            identity=RedisKey(task.data_key).identity,
-            task_key=task_key,
-            task_identity=task.identity,
-            data_key=task.data_key,
-            step_key=task.step_key,
-            step_number=_step_number(step),
-            executor=_step_executor(step),
-            action=_step_action(step),
             content=content,
             failure_reason=failure_reason,
-            raw_json=raw_json,
+            raw_json={
+                "task_key": task_key,
+                "task_identity": getattr(task, "identity", None),
+                "data_key": getattr(task, "data_key", None),
+                "step_key": getattr(task, "step_key", None),
+                "step_number": getattr(step, "step_number", None),
+                "executor": getattr(step, "executor", None) or getattr(step, "engine", None),
+                "action": getattr(step, "action", None),
+                "provider": raw_json,
+            },
         )
 
     @classmethod
@@ -232,77 +163,31 @@ class Failure(RedisModel):
             **context,
         )
 
-    @property
-    def output_key(self) -> str:
-        suffix = None if self.step_number is None else str(self.step_number)
-        return str(RedisKey(kind=self.kind, identity=self.identity, suffix=suffix))
+    @classmethod
+    def output_key_for(cls, *, identity: object, suffix: object) -> str:
+        return str(
+            RedisKey(
+                kind=cls.kind,
+                identity=_identity(identity),
+                suffix=_suffix(suffix),
+            )
+        )
 
-    def save(self, key: object | None = None) -> str:  # type: ignore[override]
-        output_key = self.output_key if key is None else str(key)
+    def save(self, *, identity: object, suffix: object) -> str:  # type: ignore[override]
+        output_key = self.output_key_for(identity=identity, suffix=suffix)
         super().save(output_key)
         return output_key
 
-    def with_worker_context(self, *, task: Any, step: Any, task_key: str) -> Self:
-        return self.model_copy(
-            update={
-                "identity": RedisKey(task.data_key).identity,
-                "task_key": task_key,
-                "task_identity": task.identity,
-                "data_key": task.data_key,
-                "step_key": task.step_key,
-                "step_number": _step_number(step),
-                "executor": _step_executor(step),
-                "action": _step_action(step),
-            }
-        )
-
-    @field_validator("identity", mode="before")
-    @classmethod
-    def validate_identity(cls, value: object) -> str:
-        return redis_key_segment_text(value, "identity")
-
-    @field_validator("task_identity", mode="before")
-    @classmethod
-    def validate_optional_identity(cls, value: object) -> str | None:
-        if value is None:
-            return None
-        return redis_key_segment_text(value, "task_identity")
-
-    @field_validator(
-        "failure_type",
-        "content",
-        "failure_reason",
-        "task_key",
-        "data_key",
-        "step_key",
-        "executor",
-        "action",
-        "boundary",
-        mode="before",
-    )
+    @field_validator("failure_type", "content", "failure_reason", "boundary", mode="before")
     @classmethod
     def validate_optional_text(cls, value: object) -> str | None:
         if value is None:
             return None
         return str(value).strip()
 
-    @field_validator("step_number", mode="before")
-    @classmethod
-    def validate_optional_step_number(cls, value: object) -> int | None:
-        if value in (None, ""):
-            return None
-        number = int(value)
-        if number < 1:
-            raise ValueError(f"step_number must be >= 1: {number}")
-        return number
-
     @field_serializer("created_at")
     def serialize_created_at(self, value: int) -> str:
         return str(value)
-
-    @field_serializer("step_number")
-    def serialize_optional_step_number(self, value: int | None) -> str:
-        return "" if value is None else str(value)
 
 
 class InternalFailure(Failure):
@@ -320,13 +205,10 @@ class InternalFailure(Failure):
         boundary: str,
         **context: Any,
     ) -> Self:
-        data_key = context.get("data_key") or getattr(task, "data_key", None)
-        identity = RedisKey(data_key).identity if data_key else RedisKey(task_key).identity
-
         raw_json = {
             "task_key": task_key,
             "task_identity": getattr(task, "identity", None),
-            "data_key": data_key,
+            "data_key": context.get("data_key") or getattr(task, "data_key", None),
             "step_key": context.get("step_key") or getattr(task, "step_key", None),
             "table": context.get("table") or getattr(task, "table", None),
             "error": str(exc),
@@ -336,11 +218,6 @@ class InternalFailure(Failure):
         raw_json.update({key: value for key, value in context.items() if key not in raw_json})
 
         return cls(
-            identity=identity,
-            task_key=task_key,
-            task_identity=getattr(task, "identity", None),
-            data_key=data_key,
-            step_key=raw_json.get("step_key"),
             content=str(exc),
             failure_reason=type(exc).__name__,
             raw_json=raw_json,
@@ -399,62 +276,20 @@ class Committed(RedisModel):
         return str(value)
 
 
-def result_class_for_step(step: Any) -> type[Result]:
-    executor = _step_executor(step).lower()
-    if executor in {"script", "transform"}:
-        return Transform
-    if executor in {"rag", "retrieval"}:
-        return Retrieval
-    return Response
+def _identity(value: object) -> str:
+    return redis_key_segment_text(value, "identity")
 
 
-def payload_from_output(output: object) -> dict[str, Any]:
-    if isinstance(output, str):
-        return {"content": output, "raw_json": output}
+def _suffix(value: object) -> str:
+    text = "" if value is None else str(value).strip()
+    if not text:
+        raise ValueError("result suffix must not be empty")
 
-    if isinstance(output, dict):
-        content = output.get("content") or output.get("text") or output.get("message") or ""
-        return {"content": str(content), "raw_json": output}
-
-    content = getattr(output, "content", None)
-    if content is not None:
-        raw_json = getattr(output, "raw_json", None)
-        if raw_json is None:
-            dump = getattr(output, "model_dump", None)
-            raw_json = dump(mode="json") if callable(dump) else output
-        return {"content": str(content), "raw_json": raw_json}
-
-    return {"content": str(output), "raw_json": output}
-
-
-def _step_number(step: Any) -> int:
-    value = getattr(step, "step_number", None)
-    if value is None:
-        value = getattr(step, "number")
-    number = int(value)
+    number = int(text)
     if number < 1:
-        raise ValueError(f"step_number must be >= 1: {number}")
-    return number
+        raise ValueError(f"result suffix must be >= 1: {number}")
 
-
-def _step_executor(step: Any) -> str:
-    value = getattr(step, "executor", None)
-    if value in (None, ""):
-        value = getattr(step, "engine", None)
-    text = "" if value is None else str(value).strip()
-    if not text:
-        raise ValueError("step executor must not be empty")
-    return text
-
-
-def _step_action(step: Any) -> str:
-    value = getattr(step, "action", None)
-    if value in (None, ""):
-        value = _step_executor(step)
-    text = "" if value is None else str(value).strip()
-    if not text:
-        raise ValueError("step action must not be empty")
-    return text
+    return str(number)
 
 
 __all__ = [
@@ -466,6 +301,4 @@ __all__ = [
     "Result",
     "Retrieval",
     "Transform",
-    "payload_from_output",
-    "result_class_for_step",
 ]

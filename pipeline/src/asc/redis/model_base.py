@@ -22,8 +22,18 @@ class RedisModel(BaseModel):
         return RedisKey(value)
 
     @classmethod
-    def key_for_identity(cls, identity: str) -> RedisKey:
-        return RedisKey.from_parts(cls.kind, identity, cls.suffix)
+    def key_for_identity(
+        cls,
+        identity: str,
+        *,
+        kind: str | None = None,
+        suffix: str | None = None,
+    ) -> RedisKey:
+        return RedisKey.from_parts(
+            cls.kind if kind is None else kind,
+            identity,
+            cls.suffix if suffix is None else suffix,
+        )
 
     @classmethod
     def load(cls: type[T], key: str | RedisKey) -> T:
@@ -69,13 +79,38 @@ class RedisModel(BaseModel):
             for field_name, value in dumped.items()
         }
 
-    def save(self, key: str | RedisKey | None = None) -> str:
-        redis_key = self.redis_key if key is None else self.__class__.redis_key_from_raw(key)
+    def save(
+        self,
+        key: str | RedisKey | None = None,
+        *,
+        kind: str | None = None,
+        identity: str | None = None,
+        suffix: str | None = None,
+    ) -> str:
+        if key is not None and any(value is not None for value in (kind, identity, suffix)):
+            raise ValueError("save() accepts either a raw key or key parts, not both")
+
+        redis_key = (
+            self.__class__.key_for_identity(
+                self.identity if identity is None else identity,
+                kind=kind,
+                suffix=suffix,
+            )
+            if key is None
+            else self.__class__.redis_key_from_raw(key)
+        )
         hashes.hset(redis_key, mapping=self.dump_json())
         return redis_key.raw_key
 
-    def overwrite(self, key: str | RedisKey | None = None) -> str:
-        return self.save(key)
+    def overwrite(
+        self,
+        key: str | RedisKey | None = None,
+        *,
+        kind: str | None = None,
+        identity: str | None = None,
+        suffix: str | None = None,
+    ) -> str:
+        return self.save(key, kind=kind, identity=identity, suffix=suffix)
 
     def exists(self) -> bool:
         return keys.exists(self.redis_key)
