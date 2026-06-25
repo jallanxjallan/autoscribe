@@ -25,6 +25,7 @@ class WorkerRunReport:
     claimed: bool
     task_key: str | None = None
     output_key: str | None = None
+    outcome_key: str | None = None
     action: str | None = None
 
 
@@ -58,14 +59,16 @@ def run_once(
     task = WorkerTask.load(task_key)
     result = WorkerExecutor().execute(task, task_key)
 
-    # Worker posts only the saved response/failure key. The orchestrator owns
-    # result-index insertion and next-step routing.
-    orchestrator_inbox.post(result.output_key)
+    # Worker persists the action-specific result/failure record, then posts the
+    # saved outcome key. The orchestrator opens the outcome and owns index
+    # insertion plus next-step routing.
+    orchestrator_inbox.post(result.outcome_key)
 
     return WorkerRunReport(
         claimed=True,
         task_key=task_key,
         output_key=result.output_key,
+        outcome_key=result.outcome_key,
         action=task.action,
     )
 
@@ -94,7 +97,7 @@ def main() -> None:
     print(
         f"worker claimed={report.claimed} "
         f"task_key={report.task_key} action={report.action} "
-        f"output_key={report.output_key}"
+        f"output_key={report.output_key} outcome_key={report.outcome_key}"
     )
 
 

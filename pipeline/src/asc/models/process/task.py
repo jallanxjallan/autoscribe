@@ -94,37 +94,19 @@ class WorkerTask(Task):
 class Outcome(RedisMessage):
     """Uniform daemon completion envelope consumed by orchestrator.
 
-    Outcome is orchestration state. It tells orchestrator which task completed,
-    whether it succeeded, and where the daemon wrote the concrete artifact.
-
-    Worker success points result_key at response/transform/retrieval.
-    Worker failure points failure_key at failure.
-    Scrivener success may have no result_key because the ledger write itself is
-    the useful side effect.
+    Outcome is intentionally permissive. It is a copied task envelope plus the
+    daemon completion fields needed for routing. Package-specific task fields
+    are extra data, not part of the Outcome schema, so WorkerTask and
+    ScrivenerTask can change without forcing this model to drift.
     """
 
-    model_config = ConfigDict(extra="forbid")
+    model_config = ConfigDict(extra="allow")
 
     kind: ClassVar[str] = "outcome"
 
     identity: str
-    task_identity: str
-    task_key: str
-
-    package: TaskPackage
-    action: str
     status: OutcomeStatus
-
-    data_key: str | None = None
-    step_key: str | None = None
-    step_number: int | None = None
-
-    result_key: str | None = None
-    failure_key: str | None = None
-
-    error: str | None = None
-    error_type: str | None = None
-    boundary: str | None = None
+    output_key: str
 
     completed_at: int = Field(default_factory=timestamp)
 
@@ -134,21 +116,19 @@ class Outcome(RedisMessage):
         *,
         task_key: str,
         task: ScrivenerTask | WorkerTask,
-        result_key: str | None = None,
-        step_number: int | None = None,
+        output_key: str,
+        **extra: Any,
     ) -> Self:
         return cls.model_validate(
             {
+                **task.model_dump(mode="json"),
+                **extra,
                 "identity": task.identity,
                 "task_identity": task.identity,
                 "task_key": task_key,
-                "package": task.package,
-                "action": task.action,
                 "status": "success",
-                "data_key": task.data_key,
-                "step_key": task.step_key if isinstance(task, WorkerTask) else None,
-                "step_number": step_number,
-                "result_key": result_key,
+                "output_key": output_key,
+                "result_key": output_key,
             }
         )
 
@@ -158,61 +138,31 @@ class Outcome(RedisMessage):
         *,
         task_key: str,
         task: ScrivenerTask | WorkerTask,
-        failure_key: str,
-        error: str | None = None,
-        error_type: str | None = None,
-        boundary: str | None = None,
-        step_number: int | None = None,
+        output_key: str,
+        **extra: Any,
     ) -> Self:
         return cls.model_validate(
             {
+                **task.model_dump(mode="json"),
+                **extra,
                 "identity": task.identity,
                 "task_identity": task.identity,
                 "task_key": task_key,
-                "package": task.package,
-                "action": task.action,
                 "status": "failure",
-                "data_key": task.data_key,
-                "step_key": task.step_key if isinstance(task, WorkerTask) else None,
-                "step_number": step_number,
-                "failure_key": failure_key,
-                "error": error,
-                "error_type": error_type,
-                "boundary": boundary,
+                "output_key": output_key,
+                "failure_key": output_key,
             }
         )
 
-    @field_validator("identity", "task_identity", mode="before")
+    @field_validator("identity", mode="before")
     @classmethod
     def validate_identity_segment(cls, value: object) -> str:
         return redis_key_segment_text(value, "identity")
 
-    @field_validator("action", mode="before")
+    @field_validator("output_key", mode="before")
     @classmethod
-    def validate_action(cls, value: object) -> str:
-        return redis_key_segment_text(value, "action")
-
-    @field_validator(
-        "task_key",
-        "data_key",
-        "step_key",
-        "result_key",
-        "failure_key",
-        "error",
-        "error_type",
-        "boundary",
-        mode="before",
-    )
-    @classmethod
-    def validate_optional_text(cls, value: object) -> str | None:
-        return _optional_text(value)
-
-    @field_validator("step_number", mode="before")
-    @classmethod
-    def validate_step_number(cls, value: object) -> int | None:
-        if value is None or value == "":
-            return None
-        return int(value)
+    def validate_output_key(cls, value: object) -> str:
+        return _required_text(value, "output_key")
 
     @field_validator("completed_at", mode="before")
     @classmethod
@@ -220,22 +170,6 @@ class Outcome(RedisMessage):
         if value is None or value == "":
             return timestamp()
         return int(value)
-
-    @field_serializer(
-        "data_key",
-        "step_key",
-        "result_key",
-        "failure_key",
-        "error",
-        "error_type",
-        "boundary",
-    )
-    def serialize_optional_text(self, value: str | None) -> str:
-        return "" if value is None else value
-
-    @field_serializer("step_number")
-    def serialize_step_number(self, value: int | None) -> str:
-        return "" if value is None else str(value)
 
     @field_serializer("completed_at")
     def serialize_completed_at(self, value: int) -> str:
