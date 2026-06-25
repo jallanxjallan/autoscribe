@@ -16,6 +16,7 @@ from dataclasses import dataclass
 from typing import Any
 
 from asc.models.process.result import Failure, Result
+from asc.redis.key import RedisKey
 from asc.models.process.step import Step
 from asc.models.process.task import Outcome, WorkerTask
 from asc.worker.engines import load_engine_run
@@ -41,25 +42,17 @@ class WorkerExecutor:
             output = engine_run(input_content)
             result = Result.from_worker_output(output, task=task, step=step, task_key=task_key)
         except Exception as exc:
-            result = Failure.internal(
-                task_key=task_key,
+            result = _failure_for_exception(
                 task=task,
+                task_key=task_key,
+                step=step,
                 exc=exc,
-                boundary="worker.execute",
-                step_key=task.step_key,
-                data_key=task.data_key,
             )
-            if step is not None:
-                result = result.with_worker_context(task=task, step=step, task_key=task_key)
 
-        output_key = result.save()
-        outcome_key = _save_outcome(
-            task=task,
-            task_key=task_key,
-            output_key=output_key,
-            result=result,
-            step=step,
-        )
+        identity = _result_identity(task)
+        suffix = _result_suffix(task=task, step=step)
+        output_key = _save_result(result=result, identity=identity, suffix=suffix)
+        outcome_key = _save_outcome(task=task, output_key=output_key, result=result)
 
         return WorkerResult(
             processed=1,
@@ -72,49 +65,84 @@ class WorkerExecutor:
 def _save_outcome(
     *,
     task: WorkerTask,
-    task_key: str,
     output_key: str,
     result: Result | Failure,
-    step: Step | None,
 ) -> str:
-    status = "failure" if isinstance(result, Failure) else "success"
-    payload = {
-        **task.model_dump(mode="json"),
-        "identity": task.identity,
-        "task_identity": task.identity,
-        "task_key": task_key,
-        "package": "worker",
-        "action": task.action,
-        "status": status,
-        "result": status,
-        "output_key": output_key,
-        "step_number": _step_number(step=step),
-        "result_key": "" if status == "failure" else output_key,
-        "failure_key": output_key if status == "failure" else "",
-    }
+    if isinstance(result, Failure):
+        outcome = Outcome.failure(task=task, message=output_key)
+    else:
+        outcome = Outcome.success(task=task, message=output_key)
 
-    outcome = Outcome.model_validate(_payload_for_model(Outcome, payload))
     return outcome.save()
 
 
-def _step_number(*, step: Step | None) -> str:
-    if step is None:
-        raise ValueError("worker outcome requires loaded step with mandatory step_number")
+def _failure_for_exception(
+    *,
+    task: WorkerTask,
+    task_key: str,
+    step: Step | None,
+    exc: Exception,
+) -> Failure:
+    raw_json = {
+        "task_key": task_key,
+        "task_identity": task.identity,
+        "data_key": task.data_key,
+        "step_key": task.step_key,
+        "step_number": _result_suffix(task=task, step=step),
+        "error": str(exc),
+        "error_type": type(exc).__name__,
+        "boundary": "worker.execute",
+    }
 
-    return str(step.step_number)
+    return Failure.model_validate(
+        {
+            "identity": _result_identity(task),
+            "failure_type": "internal",
+            "content": str(exc),
+            "failure_reason": type(exc).__name__,
+            "raw_json": raw_json,
+            "task_key": task_key,
+            "task_identity": task.identity,
+            "data_key": task.data_key,
+            "step_key": task.step_key,
+            "step_number": _result_suffix(task=task, step=step),
+            "boundary": "worker.execute",
+        }
+    )
 
 
-def _payload_for_model(model: type[Any], payload: dict[str, Any]) -> dict[str, Any]:
-    config = getattr(model, "model_config", {})
-    allows_extra = isinstance(config, dict) and config.get("extra") == "allow"
-    if allows_extra:
-        return payload
+def _save_result(*, result: Result | Failure, identity: str, suffix: str) -> str:
+    try:
+        return result.save(identity=identity, suffix=suffix)
+    except TypeError:
+        output_key = _output_key(result=result, identity=identity, suffix=suffix)
+        return result.save(output_key)
 
-    fields = getattr(model, "model_fields", None)
-    if not fields:
-        return payload
 
-    return {key: value for key, value in payload.items() if key in fields}
+def _output_key(*, result: Result | Failure, identity: str, suffix: str) -> str:
+    output_key_for = getattr(result, "output_key_for", None)
+    if callable(output_key_for):
+        return str(output_key_for(identity=identity, suffix=suffix))
+
+    return str(RedisKey(kind=result.kind, identity=identity, suffix=suffix))
+
+
+def _result_identity(task: WorkerTask) -> str:
+    return RedisKey(task.data_key).identity
+
+
+def _result_suffix(*, task: WorkerTask, step: Step | None) -> str:
+    if step is not None:
+        for name in ("step_number", "number"):
+            value = getattr(step, name, None)
+            if value not in (None, ""):
+                return str(value)
+
+    suffix = RedisKey(task.step_key).suffix
+    if not suffix:
+        raise ValueError(f"worker task step_key has no step suffix: {task.step_key!r}")
+
+    return str(suffix)
 
 
 def _step_args(step: Step) -> dict[str, Any]:
