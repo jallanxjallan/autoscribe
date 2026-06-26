@@ -19,7 +19,7 @@ from asc.models.process.result import Failure, Response, Result, Retrieval, Tran
 from asc.models.process.step import Step
 from asc.models.process.task import Outcome, WorkerTask
 from asc.redis.key import RedisKey
-from asc.worker.engines import load_engine_run
+from asc.worker.engines import load_engine_run, normalize_engine_kind
 from asc.worker.runtime_io import load_runtime_content
 
 
@@ -38,6 +38,9 @@ class WorkerExecutor:
         engine_run = load_engine_run(step.engine, args=_step_args(step))
         result_class = _result_class_for_step(step)
 
+        identity = _result_identity(task)
+        suffix = _result_suffix(task=task, step=step)
+
         try:
             output = engine_run(input_content)
         except Exception as exc:
@@ -51,10 +54,8 @@ class WorkerExecutor:
             result = _result_from_engine_output(
                 output=output,
                 result_class=result_class,
+                identity=identity,
             )
-
-        identity = _result_identity(task)
-        suffix = _result_suffix(task=task, step=step)
 
         output_key = result.save(identity=identity, suffix=suffix)
         outcome_key = _save_outcome(task=task, output_key=output_key, result=result)
@@ -71,6 +72,7 @@ def _result_from_engine_output(
     *,
     output: object,
     result_class: type[Result],
+    identity: str,
 ) -> Result | Failure:
     if isinstance(output, (Result, Failure)):
         return output
@@ -78,13 +80,14 @@ def _result_from_engine_output(
     payload = _payload_from_output(output)
 
     return result_class(
+        identity=identity,
         content=payload["content"],
         raw_json=payload["raw_json"],
     )
 
 
 def _result_class_for_step(step: Step) -> type[Result]:
-    engine = str(step.engine).strip().lower()
+    engine = normalize_engine_kind(step.engine)
 
     if engine == "llm":
         return Response

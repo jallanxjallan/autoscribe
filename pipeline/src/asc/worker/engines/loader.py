@@ -5,6 +5,25 @@ class EngineRun(Protocol):
     def __call__(self, content: str) -> object: ...
 
 
+def normalize_engine_kind(engine_name: object) -> str:
+    """Return the worker engine kind for a registry or plan engine value.
+
+    Registry snapshots may carry importable component keys such as
+    ``engines.scripts`` while worker execution deals in engine kinds such as
+    ``script``. Keep that compatibility at the worker boundary until plan
+    materialization stores canonical engine kinds directly.
+    """
+
+    normalized = str(engine_name).strip().lower()
+    if normalized.startswith("engines."):
+        normalized = normalized.split(".", 1)[1]
+
+    if normalized == "scripts":
+        return "script"
+
+    return normalized
+
+
 def load_engine_run(engine_name: str, *, args: dict[str, Any]) -> EngineRun:
     """Load a worker engine run callable.
 
@@ -19,13 +38,11 @@ def load_engine_run(engine_name: str, *, args: dict[str, Any]) -> EngineRun:
     asc.registries once the current pipeline stabilizes.
     """
 
-    normalized = engine_name.strip()
-    if normalized.startswith("engines."):
-        normalized = normalized.split(".", 1)[1]
+    normalized = normalize_engine_kind(engine_name)
     if not normalized:
         raise ValueError("engine name must be non-empty")
 
-    if normalized == "scripts":
+    if normalized == "script":
         from asc.worker.engines.scripts import make_run
     elif normalized == "llm":
         from asc.worker.engines.llm import make_run
@@ -40,4 +57,4 @@ def load_engine_run(engine_name: str, *, args: dict[str, Any]) -> EngineRun:
     return run
 
 
-__all__ = ["EngineRun", "load_engine_run"]
+__all__ = ["EngineRun", "load_engine_run", "normalize_engine_kind"]
