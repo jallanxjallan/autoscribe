@@ -3,10 +3,9 @@
 from __future__ import annotations
 
 import sqlite3
-from collections.abc import Mapping
+from collections.abc import Mapping, Sequence
 from typing import Any
 
-from asc.scrivener.connect import LedgerConnection
 from asc.scrivener.maps import LEDGER_FIELDS
 from asc.scrivener.util import execute_and_commit
 
@@ -16,7 +15,7 @@ class ScrivenerWriteError(RuntimeError):
 
 
 def insert_row(
-    conn: LedgerConnection,
+    conn: object,
     *,
     table: str,
     data: Mapping[str, Any],
@@ -38,16 +37,30 @@ def insert_row(
     placeholders = ", ".join("?" for _ in expected)
     sql = f'INSERT INTO "{table}" ({columns}) VALUES ({placeholders})'
     values = tuple(data[name] for name in expected)
+    execute_update(conn, sql, values, table=table, data=data)
 
+
+def execute_update(
+    conn: object,
+    sql: str,
+    values: Sequence[Any],
+    *,
+    table: str | None = None,
+    data: Mapping[str, Any] | None = None,
+) -> None:
     try:
-        execute_and_commit(conn, sql, values)
+        execute_and_commit(conn, sql, tuple(values))
     except sqlite3.Error as exc:
+        details = ""
+        if table is not None:
+            details += f" table={table!r}"
+        if data is not None:
+            details += f" data={dict(data)!r}"
         message = (
-            "sqlite rejected scrivener write: "
-            f"table={table!r} data={dict(data)!r} "
-            f"sqlite_error={str(exc)!r}"
+            "sqlite rejected scrivener write:"
+            f"{details} sqlite_error={str(exc)!r}"
         )
         raise ScrivenerWriteError(message) from exc
 
 
-__all__ = ["ScrivenerWriteError", "insert_row"]
+__all__ = ["ScrivenerWriteError", "execute_update", "insert_row"]
