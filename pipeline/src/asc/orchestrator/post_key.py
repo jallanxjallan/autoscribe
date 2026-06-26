@@ -1,28 +1,17 @@
-"""Orchestrator inbox contract and message router.
+"""Shared orchestrator post-key validation.
 
-The orchestrator accepts only runtime call notices and daemon outcomes:
-
-    call:<identity>[:record]
-    outcome:<task_identity>
-
-All daemon completion routing is driven by the Outcome record, not by artifact
-key kinds such as response, failure, committed, transform, or retrieval.
+This module has no handler imports. Inbox modules may import it without pulling
+in the live orchestrator router and its downstream package dependencies.
 """
 
-from asc.orchestrator.errors import OrchestratorContractError
 from asc.redis.key import RedisKey
 
-from .contracts import CALL, ORCHESTRATOR_POST_KINDS, OUTCOME
-from .handlers import call as call_handler
-from .handlers import outcome as outcome_handler
+from .contracts import ORCHESTRATOR_POST_KINDS
+from .errors import OrchestratorContractError
 
 
 def require_post_key(key: str | RedisKey) -> tuple[str, str]:
-    """Validate a key before posting it to the orchestrator inbox.
-
-    Returns ``(raw, kind)`` so callers on the hot path do not have to split the
-    same key twice.
-    """
+    """Validate a claimed or posted orchestrator inbox key."""
 
     raw = str(key).strip()
     if not raw:
@@ -61,25 +50,4 @@ def key_kind(raw_key: str | RedisKey) -> str:
     return kind
 
 
-def handle_message(raw_key: str | RedisKey) -> None:
-    """Route one claimed orchestrator inbox key."""
-
-    raw, kind = require_post_key(raw_key)
-    key = RedisKey(raw)
-
-    if kind == CALL:
-        call_handler.handle(key)
-        return
-
-    if kind == OUTCOME:
-        outcome_handler.handle(key)
-        return
-
-    raise OrchestratorContractError(f"unhandled orchestrator post kind {kind!r}")
-
-
-__all__ = [
-    "key_kind",
-    "handle_message",
-    "require_post_key",
-]
+__all__ = ["key_kind", "require_post_key"]

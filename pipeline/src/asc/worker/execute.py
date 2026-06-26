@@ -15,10 +15,10 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Any
 
-from asc.models.process.result import Failure, Result
-from asc.redis.key import RedisKey
+from asc.models.process.result import Failure, Response, Result, Retrieval, Transform
 from asc.models.process.step import Step
 from asc.models.process.task import Outcome, WorkerTask
+from asc.redis.key import RedisKey
 from asc.worker.engines import load_engine_run
 from asc.worker.runtime_io import load_runtime_content
 
@@ -33,25 +33,30 @@ class WorkerResult:
 
 class WorkerExecutor:
     def execute(self, task: WorkerTask, task_key: str) -> WorkerResult:
-        step: Step | None = None
+        step = Step.load(task.step_key)
+        input_content = load_runtime_content(task.data_key)
+        engine_run = load_engine_run(step.engine, args=_step_args(step))
+        result_class = _result_class_for_step(step)
 
         try:
-            step = Step.load(task.step_key)
-            input_content = load_runtime_content(task.data_key)
-            engine_run = load_engine_run(step.engine, args=_step_args(step))
             output = engine_run(input_content)
-            result = Result.from_worker_output(output, task=task, step=step, task_key=task_key)
         except Exception as exc:
-            result = _failure_for_exception(
+            result: Result | Failure = _runtime_failure(
                 task=task,
                 task_key=task_key,
                 step=step,
                 exc=exc,
             )
+        else:
+            result = _result_from_engine_output(
+                output=output,
+                result_class=result_class,
+            )
 
         identity = _result_identity(task)
         suffix = _result_suffix(task=task, step=step)
-        output_key = _save_result(result=result, identity=identity, suffix=suffix)
+
+        output_key = result.save(identity=identity, suffix=suffix)
         outcome_key = _save_outcome(task=task, output_key=output_key, result=result)
 
         return WorkerResult(
@@ -60,6 +65,96 @@ class WorkerExecutor:
             output_key=output_key,
             outcome_key=outcome_key,
         )
+
+
+def _result_from_engine_output(
+    *,
+    output: object,
+    result_class: type[Result],
+) -> Result | Failure:
+    if isinstance(output, (Result, Failure)):
+        return output
+
+    payload = _payload_from_output(output)
+
+    return result_class(
+        content=payload["content"],
+        raw_json=payload["raw_json"],
+    )
+
+
+def _result_class_for_step(step: Step) -> type[Result]:
+    engine = str(step.engine).strip().lower()
+
+    if engine == "llm":
+        return Response
+
+    if engine == "script":
+        return Transform
+
+    if engine == "rag":
+        return Retrieval
+
+    raise ValueError(f"unsupported worker step engine: {step.engine!r}")
+
+
+def _payload_from_output(output: object) -> dict[str, object]:
+    if isinstance(output, dict):
+        content = output.get("content")
+        if content is None:
+            content = output.get("text")
+        if content is None:
+            content = str(output)
+
+        return {
+            "content": content,
+            "raw_json": output,
+        }
+
+    if isinstance(output, bytes):
+        text = output.decode("utf-8")
+        return {
+            "content": text,
+            "raw_json": {"content": text},
+        }
+
+    return {
+        "content": "" if output is None else str(output),
+        "raw_json": {"content": output},
+    }
+
+
+def _runtime_failure(
+    *,
+    task: WorkerTask,
+    task_key: str,
+    step: Step,
+    exc: Exception,
+) -> Failure:
+    step_number = _result_suffix(task=task, step=step)
+
+    raw_json = {
+        "task_key": task_key,
+        "task_identity": task.identity,
+        "data_key": task.data_key,
+        "step_key": task.step_key,
+        "step_number": step_number,
+        "engine": step.engine,
+        "error": str(exc),
+        "error_type": type(exc).__name__,
+        "boundary": "worker.runtime",
+    }
+
+    return Failure.model_validate(
+        {
+            "identity": _result_identity(task),
+            "failure_type": "runtime",
+            "content": str(exc),
+            "failure_reason": type(exc).__name__,
+            "raw_json": raw_json,
+            "boundary": "worker.runtime",
+        }
+    )
 
 
 def _save_outcome(
@@ -76,67 +171,15 @@ def _save_outcome(
     return outcome.save()
 
 
-def _failure_for_exception(
-    *,
-    task: WorkerTask,
-    task_key: str,
-    step: Step | None,
-    exc: Exception,
-) -> Failure:
-    raw_json = {
-        "task_key": task_key,
-        "task_identity": task.identity,
-        "data_key": task.data_key,
-        "step_key": task.step_key,
-        "step_number": _result_suffix(task=task, step=step),
-        "error": str(exc),
-        "error_type": type(exc).__name__,
-        "boundary": "worker.execute",
-    }
-
-    return Failure.model_validate(
-        {
-            "identity": _result_identity(task),
-            "failure_type": "internal",
-            "content": str(exc),
-            "failure_reason": type(exc).__name__,
-            "raw_json": raw_json,
-            "task_key": task_key,
-            "task_identity": task.identity,
-            "data_key": task.data_key,
-            "step_key": task.step_key,
-            "step_number": _result_suffix(task=task, step=step),
-            "boundary": "worker.execute",
-        }
-    )
-
-
-def _save_result(*, result: Result | Failure, identity: str, suffix: str) -> str:
-    try:
-        return result.save(identity=identity, suffix=suffix)
-    except TypeError:
-        output_key = _output_key(result=result, identity=identity, suffix=suffix)
-        return result.save(output_key)
-
-
-def _output_key(*, result: Result | Failure, identity: str, suffix: str) -> str:
-    output_key_for = getattr(result, "output_key_for", None)
-    if callable(output_key_for):
-        return str(output_key_for(identity=identity, suffix=suffix))
-
-    return str(RedisKey(kind=result.kind, identity=identity, suffix=suffix))
-
-
 def _result_identity(task: WorkerTask) -> str:
     return RedisKey(task.data_key).identity
 
 
-def _result_suffix(*, task: WorkerTask, step: Step | None) -> str:
-    if step is not None:
-        for name in ("step_number", "number"):
-            value = getattr(step, name, None)
-            if value not in (None, ""):
-                return str(value)
+def _result_suffix(*, task: WorkerTask, step: Step) -> str:
+    for name in ("step_number", "number"):
+        value = getattr(step, name, None)
+        if value not in (None, ""):
+            return str(value)
 
     suffix = RedisKey(task.step_key).suffix
     if not suffix:

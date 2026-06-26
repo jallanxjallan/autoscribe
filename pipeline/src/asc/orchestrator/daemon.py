@@ -11,7 +11,8 @@ Run forever from imported code:
 from dataclasses import dataclass
 
 from asc.orchestrator import inbox as orchestrator_inbox
-from asc.orchestrator.handle import handle, key_kind
+from asc.orchestrator.handle import handle
+from asc.orchestrator.post_key import key_kind
 from asc.state.daemon import DEFAULT_CLAIM_TIMEOUT_SECONDS, configure_logging, run_daemon
 
 

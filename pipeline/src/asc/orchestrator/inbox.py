@@ -7,7 +7,7 @@ the message. No caller should know the orchestrator inbox implementation.
 from asc.redis.key import RedisKey
 from asc.state.queue import QueuedKey, RedisQueue
 
-from .handler import require_post_key
+from .post_key import require_post_key
 
 
 ORCHESTRATOR_INBOX_KEY = "control:orchestrator:inbox"

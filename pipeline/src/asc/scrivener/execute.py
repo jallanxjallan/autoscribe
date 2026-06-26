@@ -25,33 +25,85 @@ SUCCESS = "success"
 
 
 @dataclass(frozen=True, slots=True)
-class ScrivenerResult:
-    processed: int
+class _ExecutionReport:
     task_key: str
     outcome_key: str
     action: str
 
 
 class ScrivenerExecutor:
-    def execute(self, task_key: str) -> ScrivenerResult:
+    def execute(self, task_key: str) -> _ExecutionReport:
         task_key = _required_text(task_key, "scrivener task key")
         task = ScrivenerTask.load(task_key)
-        record = load_record_key(task.data_key)
-        data = row_for(task=task, record=record)
 
-        with connect() as conn:
-            ensure_ledger_schema(conn)
-            insert_row(conn, table=task.table, data=data)
+        try:
+            record = load_record_key(task.data_key)
+            data = row_for(task=task, record=record)
 
-        outcome = Outcome.success(task=task, message=SUCCESS)
-        outcome_key = outcome.save()
+            with connect() as conn:
+                ensure_ledger_schema(conn)
+                insert_row(conn, table=task.table, data=data)
+        except Exception as exc:
+            outcome_key = _save_failure_outcome(
+                task=task,
+                task_key=task_key,
+                exc=exc,
+            )
+        else:
+            outcome = Outcome.success(task=task, message=SUCCESS)
+            outcome_key = outcome.save()
 
-        return ScrivenerResult(
-            processed=1,
+        return _ExecutionReport(
             task_key=task_key,
             outcome_key=outcome_key,
             action=task.action,
         )
+
+
+def _save_failure_outcome(
+    *,
+    task: ScrivenerTask,
+    task_key: str,
+    exc: Exception,
+) -> str:
+    failure = _scrivener_failure(
+        task=task,
+        task_key=task_key,
+        exc=exc,
+    )
+    failure_key = failure.save(identity=task.identity)
+    outcome = Outcome.failure(task=task, message=failure_key)
+    return outcome.save()
+
+
+def _scrivener_failure(
+    *,
+    task: ScrivenerTask,
+    task_key: str,
+    exc: Exception,
+) -> Failure:
+    error = str(exc)
+    raw_json = {
+        "task_key": task_key,
+        "task_identity": task.identity,
+        "data_key": task.data_key,
+        "table": task.table,
+        "action": task.action,
+        "error": error,
+        "error_type": type(exc).__name__,
+        "boundary": "scrivener.ledger",
+    }
+
+    return Failure.model_validate(
+        {
+            "identity": task.identity,
+            "failure_type": "scrivener",
+            "content": error,
+            "failure_reason": type(exc).__name__,
+            "raw_json": raw_json,
+            "boundary": "scrivener.ledger",
+        }
+    )
 
 
 def row_for(*, task: ScrivenerTask, record: object) -> dict[str, Any]:
@@ -187,7 +239,6 @@ def _required_text(value: object, field: str) -> str:
 
 __all__ = [
     "ScrivenerExecutor",
-    "ScrivenerResult",
     "call_row",
     "export_row",
     "load_record_key",
