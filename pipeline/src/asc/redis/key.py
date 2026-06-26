@@ -18,12 +18,12 @@ class RedisKey:
 
     or labelled key parts:
 
+        RedisKey(kind="call", identity="01ABC")
         RedisKey(kind="call", identity="01ABC", suffix="record")
         RedisKey(kind="call", identity="01ABC", segments=("record",))
 
-    RedisKey owns key parsing/validation and the Redis client access point, but
-    not Redis command primitives. Hash/list/zset helpers belong in the modules
-    that use them.
+    The suffix/segments are optional. Two-segment keys are first-class keys,
+    not a special case.
     """
 
     SEP: ClassVar[str] = SEP
@@ -35,8 +35,8 @@ class RedisKey:
         *,
         kind: str | None = None,
         identity: str | None = None,
-        suffix: str | None = None,
-        segments: tuple[str, ...] | list[str] | None = None,
+        suffix: str | int | None = None,
+        segments: tuple[str | int | None, ...] | list[str | int | None] | None = None,
     ) -> None:
         if raw_key is not None and (kind is not None or identity is not None):
             raise ValueError("RedisKey accepts either raw_key or labelled parts, not both")
@@ -61,8 +61,8 @@ class RedisKey:
         self.parts = parts
 
     @classmethod
-    def from_parts(cls, *parts: str | None) -> "RedisKey":
-        clean_parts = tuple(part for part in parts if part is not None)
+    def from_parts(cls, *parts: str | int | None) -> "RedisKey":
+        clean_parts = tuple(str(part) for part in parts if part is not None)
         cls._validate_parts(clean_parts)
         return cls(SEP.join(clean_parts))
 
@@ -72,8 +72,8 @@ class RedisKey:
         *,
         kind: str | None,
         identity: str | None,
-        suffix: str | None,
-        segments: tuple[str, ...] | list[str] | None,
+        suffix: str | int | None,
+        segments: tuple[str | int | None, ...] | list[str | int | None] | None,
     ) -> str:
         if kind is None:
             raise ValueError("RedisKey labelled construction requires kind")
@@ -84,9 +84,9 @@ class RedisKey:
             raise ValueError("RedisKey accepts suffix or segments, not both")
 
         if segments is None:
-            extra_parts: tuple[str, ...] = (suffix,) if suffix is not None else ()
+            extra_parts: tuple[str, ...] = (str(suffix),) if suffix is not None else ()
         else:
-            extra_parts = tuple(segments)
+            extra_parts = tuple(str(part) for part in segments if part is not None)
 
         return SEP.join((kind, identity, *extra_parts))
 

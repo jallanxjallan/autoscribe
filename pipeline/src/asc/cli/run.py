@@ -3,7 +3,7 @@
 The run surface manages the three long-lived runtime services:
 
     asc run start          # start or confirm orchestrator + worker + scrivener daemons
-    asc run start --debug  # start daemons with stdout/stderr attached to this terminal
+    asc run start --debug  # start daemons in the foreground with stdout/stderr attached
     asc run stop           # stop all daemons
     asc run status         # show daemon and queue status
 
@@ -19,6 +19,7 @@ import os
 import signal
 import subprocess
 import sys
+import time
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -82,24 +83,55 @@ def _pid_alive(pid: int) -> bool:
     return True
 
 
-def _start_daemon(daemon: ManagedDaemon, pids: dict[str, int], *, debug: bool = False) -> int:
+def _daemon_env() -> dict[str, str]:
+    env = os.environ.copy()
+    env["PYTHONUNBUFFERED"] = "1"
+    return env
+
+
+def _daemon_command(daemon: ManagedDaemon) -> list[str]:
+    return [
+        sys.executable,
+        "-c",
+        f"from {daemon.module} import run_forever; run_forever()",
+    ]
+
+
+def _start_daemon(daemon: ManagedDaemon, pids: dict[str, int]) -> int:
     existing = pids.get(daemon.name)
     if existing is not None and _pid_alive(existing):
         typer.echo(f"{daemon.name}=running pid={existing}")
         return existing
 
-    output_target = None if debug else subprocess.DEVNULL
-
     process = subprocess.Popen(
-        [sys.executable, "-m", daemon.module],
+        _daemon_command(daemon),
         stdin=subprocess.DEVNULL,
-        stdout=output_target,
-        stderr=output_target,
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
         start_new_session=True,
+        env=_daemon_env(),
     )
     pids[daemon.name] = int(process.pid)
     typer.echo(f"{daemon.name}=started pid={process.pid}")
     return int(process.pid)
+
+
+def _start_debug_daemon(daemon: ManagedDaemon, pids: dict[str, int]) -> subprocess.Popen[bytes]:
+    existing = pids.get(daemon.name)
+    if existing is not None and _pid_alive(existing):
+        raise RuntimeError(f"{daemon.name} already running pid={existing}; run `asc run stop` first")
+
+    process = subprocess.Popen(
+        _daemon_command(daemon),
+        stdin=subprocess.DEVNULL,
+        stdout=None,
+        stderr=None,
+        start_new_session=False,
+        env=_daemon_env(),
+    )
+    pids[daemon.name] = int(process.pid)
+    typer.echo(f"{daemon.name}=debug pid={process.pid}")
+    return process
 
 
 def _stop_daemon(name: str, pid: int, *, force: bool = False) -> bool:
@@ -113,20 +145,66 @@ def _stop_daemon(name: str, pid: int, *, force: bool = False) -> bool:
     return True
 
 
+def _stop_processes(processes: dict[str, subprocess.Popen[bytes]]) -> None:
+    for name, process in processes.items():
+        if process.poll() is None:
+            process.terminate()
+            typer.echo(f"{name}=terminating pid={process.pid}")
+
+    deadline = time.monotonic() + 5
+    for name, process in processes.items():
+        while process.poll() is None and time.monotonic() < deadline:
+            time.sleep(0.05)
+        if process.poll() is None:
+            process.kill()
+            typer.echo(f"{name}=killed pid={process.pid}")
+
+
 @app.command("start")
 def run_start(
     debug: bool = typer.Option(
         False,
         "--debug",
-        help="Attach daemon stdout/stderr to this terminal instead of suppressing output.",
+        help="Run daemons in the foreground with stdout/stderr attached to this terminal.",
     ),
 ) -> None:
     """Start or confirm all runtime daemons."""
 
     pids = _read_pids()
-    for daemon in DAEMONS:
-        _start_daemon(daemon, pids, debug=debug)
-    _write_pids(pids)
+
+    if not debug:
+        for daemon in DAEMONS:
+            _start_daemon(daemon, pids)
+        _write_pids(pids)
+        return
+
+    processes: dict[str, subprocess.Popen[bytes]] = {}
+    try:
+        for daemon in DAEMONS:
+            processes[daemon.name] = _start_debug_daemon(daemon, pids)
+        _write_pids(pids)
+        typer.echo("debug=attached; press Ctrl-C to stop daemons")
+
+        while True:
+            exited = [name for name, process in processes.items() if process.poll() is not None]
+            if exited:
+                for name in exited:
+                    process = processes[name]
+                    typer.echo(f"{name}=exited pid={process.pid} returncode={process.returncode}")
+                raise typer.Exit(code=1)
+            time.sleep(0.25)
+    except KeyboardInterrupt:
+        typer.echo("debug=stopping")
+    except RuntimeError as exc:
+        typer.echo(str(exc), err=True)
+        raise typer.Exit(code=1) from exc
+    finally:
+        _stop_processes(processes)
+        saved = _read_pids()
+        for name, process in processes.items():
+            if saved.get(name) == process.pid:
+                saved.pop(name)
+        _write_pids(saved)
 
 
 @app.command("stop")

@@ -21,8 +21,8 @@ class RedisMessage(RedisModel):
 
     ttl_seconds: int | None = None
 
-    def save(self, key: str | object | None = None) -> str:  # type: ignore[override]
-        raw_key = super().save(key)  # type: ignore[arg-type]
+    def save(self, key: str | object | None = None, **key_parts: object) -> str:  # type: ignore[override]
+        raw_key = super().save(key, **key_parts)  # type: ignore[arg-type]
         ttl = self.ttl_seconds
         if ttl is not None:
             if not isinstance(ttl, int) or ttl <= 0:

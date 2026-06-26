@@ -8,11 +8,12 @@ from asc.redis.primitives import hashes, keys
 
 
 T = TypeVar("T", bound="RedisModel")
+_UNSET = object()
 
 
 class RedisModel(BaseModel):
     kind: ClassVar[str]
-    suffix: ClassVar[str | None] = None
+    suffix: ClassVar[str | int | None] = None
     identity: str
 
     @classmethod
@@ -27,12 +28,12 @@ class RedisModel(BaseModel):
         identity: str,
         *,
         kind: str | None = None,
-        suffix: str | None = None,
+        suffix: str | int | None | object = _UNSET,
     ) -> RedisKey:
         return RedisKey.from_parts(
             cls.kind if kind is None else kind,
             identity,
-            cls.suffix if suffix is None else suffix,
+            cls.suffix if suffix is _UNSET else suffix,
         )
 
     @classmethod
@@ -85,9 +86,11 @@ class RedisModel(BaseModel):
         *,
         kind: str | None = None,
         identity: str | None = None,
-        suffix: str | None = None,
+        suffix: str | int | None | object = _UNSET,
     ) -> str:
-        if key is not None and any(value is not None for value in (kind, identity, suffix)):
+        if key is not None and (
+            kind is not None or identity is not None or suffix is not _UNSET
+        ):
             raise ValueError("save() accepts either a raw key or key parts, not both")
 
         redis_key = (
@@ -108,7 +111,7 @@ class RedisModel(BaseModel):
         *,
         kind: str | None = None,
         identity: str | None = None,
-        suffix: str | None = None,
+        suffix: str | int | None | object = _UNSET,
     ) -> str:
         return self.save(key, kind=kind, identity=identity, suffix=suffix)
 

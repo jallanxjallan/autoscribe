@@ -83,7 +83,7 @@ def run_forever(
     configure_logging()
     run_daemon(
         name="worker",
-        run_once=lambda **kwargs: run_once(wait=True, **kwargs),
+        run_once=run_once,
         timeout=timeout,
         empty_limit=empty_limit,
     )

@@ -1,6 +1,7 @@
 """Decisions after scrivener tasks complete."""
 
 from asc.models.process.task import Outcome, ScrivenerTask
+from asc.redis.key import RedisKey
 from asc.scrivener import inbox as scrivener_inbox
 from asc.scrivener.maps import CALLS_TABLE
 from asc.worker import inbox as worker_inbox
@@ -17,6 +18,7 @@ from . import call_index
 
 SUCCESS = "success"
 FAILURE = "failure"
+STEP_RESULT_KINDS = {"response", "transform", "retrieval", "failure"}
 
 
 def handle_done(*, task: ScrivenerTask, outcome: Outcome) -> None:
@@ -30,16 +32,33 @@ def handle_done(*, task: ScrivenerTask, outcome: Outcome) -> None:
             f"unknown scrivener outcome status {status!r}: {outcome.raw_key}"
         )
 
+    data_key = RedisKey(call_index.required_text(task.data_key, "task.data_key"))
+
     if task.action == SCRIVENER_WRITE_CALL:
+        if data_key.kind != "call":
+            raise OrchestratorContractError(
+                "scrivener write_call committed non-call data; refusing to "
+                f"restart worker chain: task={task.raw_key} data_key={data_key.raw_key}"
+            )
         _dispatch_first_worker_step(task)
         return
 
     if task.action == SCRIVENER_WRITE_STEP:
+        if data_key.kind not in STEP_RESULT_KINDS:
+            raise OrchestratorContractError(
+                "scrivener write_step committed non-step-result data: "
+                f"task={task.raw_key} data_key={data_key.raw_key}"
+            )
         # Worker completion drives step progression. A scrivener write_step
         # outcome is only a persistence acknowledgement.
         return
 
     if task.action in {SCRIVENER_CALL_COMPLETED, SCRIVENER_CALL_FAILED}:
+        if data_key.kind != "call":
+            raise OrchestratorContractError(
+                "scrivener call terminal action committed non-call data: "
+                f"task={task.raw_key} data_key={data_key.raw_key}"
+            )
         return
 
     raise OrchestratorContractError(

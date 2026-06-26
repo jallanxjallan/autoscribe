@@ -41,7 +41,7 @@ class Result(RedisModel):
             RedisKey(
                 kind=cls.kind,
                 identity=_identity(identity),
-                suffix=_suffix(suffix),
+                suffix=_step_suffix(suffix),
             )
         )
 
@@ -86,8 +86,9 @@ class Failure(RedisModel):
     external calls. Failures carry content so the chain can continue when the
     orchestrator policy allows it.
 
-    Like successful results, failures carry only failure payload. The executor
-    passes identity and suffix at save time.
+    Worker step failures pass a step suffix at save time. Daemon/task failures
+    may omit the suffix and are saved as two-segment failure:<task_identity>
+    records.
     """
 
     model_config = ConfigDict(extra="allow")
@@ -164,16 +165,16 @@ class Failure(RedisModel):
         )
 
     @classmethod
-    def output_key_for(cls, *, identity: object, suffix: object) -> str:
+    def output_key_for(cls, *, identity: object, suffix: object | None = None) -> str:
         return str(
             RedisKey(
                 kind=cls.kind,
                 identity=_identity(identity),
-                suffix=_suffix(suffix),
+                suffix=_optional_suffix(suffix),
             )
         )
 
-    def save(self, *, identity: object, suffix: object) -> str:  # type: ignore[override]
+    def save(self, *, identity: object, suffix: object | None = None) -> str:  # type: ignore[override]
         output_key = self.output_key_for(identity=identity, suffix=suffix)
         super().save(output_key)
         return output_key
@@ -280,7 +281,7 @@ def _identity(value: object) -> str:
     return redis_key_segment_text(value, "identity")
 
 
-def _suffix(value: object) -> str:
+def _step_suffix(value: object) -> str:
     text = "" if value is None else str(value).strip()
     if not text:
         raise ValueError("result suffix must not be empty")
@@ -290,6 +291,12 @@ def _suffix(value: object) -> str:
         raise ValueError(f"result suffix must be >= 1: {number}")
 
     return str(number)
+
+
+def _optional_suffix(value: object | None) -> str | None:
+    if value is None:
+        return None
+    return _step_suffix(value)
 
 
 __all__ = [
