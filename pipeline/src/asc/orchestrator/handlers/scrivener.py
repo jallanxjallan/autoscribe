@@ -3,7 +3,6 @@
 from asc.models.process.task import Outcome, ScrivenerTask
 from asc.redis.key import RedisKey
 from asc.scrivener import inbox as scrivener_inbox
-from asc.scrivener.maps import CALLS_TABLE
 from asc.worker import inbox as worker_inbox
 
 from ..contracts import (
@@ -13,7 +12,11 @@ from ..contracts import (
     SCRIVENER_WRITE_STEP,
 )
 from ..errors import OrchestratorContractError
-from ..tasks import make_scrivener_call_completed, make_worker_step
+from ..tasks import (
+    make_scrivener_call_completed,
+    make_scrivener_call_failed,
+    make_worker_step,
+)
 from . import call_index
 
 SUCCESS = "success"
@@ -49,14 +52,13 @@ def handle_done(*, task: ScrivenerTask, outcome: Outcome) -> None:
                 "scrivener write_step committed non-step-result data: "
                 f"task={task.raw_key} data_key={data_key.raw_key}"
             )
-        # Worker completion drives step progression. A scrivener write_step
-        # outcome is only a persistence acknowledgement.
+        _advance_after_step_write(str(data_key))
         return
 
     if task.action in {SCRIVENER_CALL_COMPLETED, SCRIVENER_CALL_FAILED}:
-        if data_key.kind != "call":
+        if data_key.kind not in STEP_RESULT_KINDS:
             raise OrchestratorContractError(
-                "scrivener call terminal action committed non-call data: "
+                "scrivener export terminal action committed non-result data: "
                 f"task={task.raw_key} data_key={data_key.raw_key}"
             )
         return
@@ -71,12 +73,33 @@ def _dispatch_first_worker_step(task: ScrivenerTask) -> None:
     step_key = call_index.first_step_key(index)
 
     if step_key is None:
-        _post_scrivener_call_completed(index)
-        return
+        raise OrchestratorContractError(
+            f"call index has no worker steps; cannot export final result: {index.redis_key}"
+        )
 
     _post_worker_step(
         step_key=step_key,
         data_key=call_index.call_key(index),
+    )
+
+
+def _advance_after_step_write(result_key: str) -> None:
+    index = call_index.for_data_key(result_key)
+    result = RedisKey(result_key)
+    step_number = call_index.slot_for_key(index, result_key)
+
+    if result.kind == "failure":
+        _post_scrivener_call_failed(result_key)
+        return
+
+    next_step = call_index.next_step_key_after(index, step_number)
+    if next_step is None:
+        _post_scrivener_call_completed(result_key)
+        return
+
+    _post_worker_step(
+        step_key=next_step,
+        data_key=call_index.latest_data_key(index),
     )
 
 
@@ -86,11 +109,14 @@ def _post_worker_step(*, step_key: str, data_key: str) -> None:
     worker_inbox.post(str(task.redis_key))
 
 
-def _post_scrivener_call_completed(index: object) -> None:
-    task = make_scrivener_call_completed(
-        table=CALLS_TABLE,
-        data_key=call_index.call_key(index),
-    )
+def _post_scrivener_call_completed(result_key: str) -> None:
+    task = make_scrivener_call_completed(data_key=result_key)
+    task.save()
+    scrivener_inbox.post(str(task.redis_key))
+
+
+def _post_scrivener_call_failed(result_key: str) -> None:
+    task = make_scrivener_call_failed(data_key=result_key)
     task.save()
     scrivener_inbox.post(str(task.redis_key))
 

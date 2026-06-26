@@ -1,22 +1,18 @@
 """Decisions after worker tasks complete."""
 
 from asc.models.process.task import Outcome, WorkerTask
+from asc.redis.key import RedisKey
 from asc.scrivener import inbox as scrivener_inbox
-from asc.scrivener.maps import CALLS_TABLE
-from asc.worker import inbox as worker_inbox
 
 from ..contracts import WORKER_EXECUTE_STEP
 from ..errors import OrchestratorContractError
-from ..tasks import (
-    make_scrivener_call_completed,
-    make_scrivener_call_failed,
-    make_scrivener_write_step,
-    make_worker_step,
-)
+from ..tasks import make_scrivener_write_step
 from . import call_index
 
 SUCCESS = "success"
 FAILURE = "failure"
+SUCCESS_RESULT_KINDS = {"response", "transform", "retrieval"}
+FAILURE_RESULT_KIND = "failure"
 
 
 def handle_done(*, task: WorkerTask, outcome: Outcome) -> None:
@@ -26,12 +22,8 @@ def handle_done(*, task: WorkerTask, outcome: Outcome) -> None:
         )
 
     status = call_index.required_text(outcome.status, "outcome.status")
-    if status == SUCCESS:
-        _handle_success(task=task, outcome=outcome)
-        return
-
-    if status == FAILURE:
-        _handle_failure(task=task, outcome=outcome)
+    if status in {SUCCESS, FAILURE}:
+        _record_worker_result(task=task, outcome=outcome, status=status)
         return
 
     raise OrchestratorContractError(
@@ -39,61 +31,32 @@ def handle_done(*, task: WorkerTask, outcome: Outcome) -> None:
     )
 
 
-def _handle_success(*, task: WorkerTask, outcome: Outcome) -> None:
+def _record_worker_result(*, task: WorkerTask, outcome: Outcome, status: str) -> None:
     index = call_index.for_data_key(task.data_key)
     step_number = call_index.slot_for_key(index, task.step_key)
     result_key = call_index.required_text(outcome.message, "outcome.message")
+    _validate_worker_result_key(status=status, result_key=result_key)
 
     call_index.set_result_slot(index, step_number=step_number, result_key=result_key)
     _post_scrivener_write_step(data_key=result_key)
 
-    next_step = call_index.next_step_key_after(index, step_number)
-    if next_step is None:
-        _post_scrivener_call_completed(index)
-        return
 
-    _post_worker_step(
-        step_key=next_step,
-        data_key=call_index.latest_data_key(index),
-    )
-
-
-def _handle_failure(*, task: WorkerTask, outcome: Outcome) -> None:
-    index = call_index.for_data_key(task.data_key)
-    step_number = call_index.slot_for_key(index, task.step_key)
-    result_key = call_index.required_text(outcome.message, "outcome.message")
-
-    call_index.set_result_slot(index, step_number=step_number, result_key=result_key)
-    _post_scrivener_write_step(data_key=result_key)
-    _post_scrivener_call_failed(index)
-
-
-def _post_worker_step(*, step_key: str, data_key: str) -> None:
-    task = make_worker_step(step_key=step_key, data_key=data_key)
-    task.save()
-    worker_inbox.post(str(task.redis_key))
+def _validate_worker_result_key(*, status: str, result_key: str) -> None:
+    result = RedisKey(result_key)
+    if status == SUCCESS and result.kind not in SUCCESS_RESULT_KINDS:
+        raise OrchestratorContractError(
+            "worker success outcome linked non-success result key: "
+            f"status={status!r} result_key={result.raw_key!r}"
+        )
+    if status == FAILURE and result.kind != FAILURE_RESULT_KIND:
+        raise OrchestratorContractError(
+            "worker failure outcome linked non-failure result key: "
+            f"status={status!r} result_key={result.raw_key!r}"
+        )
 
 
 def _post_scrivener_write_step(*, data_key: str) -> None:
     task = make_scrivener_write_step(data_key=data_key)
-    task.save()
-    scrivener_inbox.post(str(task.redis_key))
-
-
-def _post_scrivener_call_completed(index: object) -> None:
-    task = make_scrivener_call_completed(
-        table=CALLS_TABLE,
-        data_key=call_index.call_key(index),
-    )
-    task.save()
-    scrivener_inbox.post(str(task.redis_key))
-
-
-def _post_scrivener_call_failed(index: object) -> None:
-    task = make_scrivener_call_failed(
-        table=CALLS_TABLE,
-        data_key=call_index.call_key(index),
-    )
     task.save()
     scrivener_inbox.post(str(task.redis_key))
 

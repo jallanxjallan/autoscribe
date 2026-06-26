@@ -14,6 +14,7 @@ from asc.redis.key import RedisKey
 from asc.redis.primitives import hashes
 
 from .contracts import CALL, OUTCOME
+from .errors import OrchestratorContractError
 from .handlers import call as call_handler
 from .handlers import scrivener as scrivener_handler
 from .handlers import worker as worker_handler

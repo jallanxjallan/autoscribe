@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from asc.models.process.task import ScrivenerTask
-from asc.scrivener.maps import CALLS_TABLE, STEPS_TABLE
+from asc.scrivener.maps import CALLS_TABLE, STEPS_TABLE, EXPORTS_TABLE
 
 from ..contracts import (
     SCRIVENER_CALL_COMPLETED,
@@ -30,18 +30,18 @@ def make_scrivener_write_step(*, data_key: str) -> ScrivenerTask:
     )
 
 
-def make_scrivener_call_completed(*, table: str, data_key: str) -> ScrivenerTask:
+def make_scrivener_call_completed(*, data_key: str) -> ScrivenerTask:
     return _make_scrivener_task(
         action=SCRIVENER_CALL_COMPLETED,
-        table=table,
+        table=EXPORTS_TABLE,
         data_key=data_key,
     )
 
 
-def make_scrivener_call_failed(*, table: str, data_key: str) -> ScrivenerTask:
+def make_scrivener_call_failed(*, data_key: str) -> ScrivenerTask:
     return _make_scrivener_task(
         action=SCRIVENER_CALL_FAILED,
-        table=table,
+        table=EXPORTS_TABLE,
         data_key=data_key,
     )
 
