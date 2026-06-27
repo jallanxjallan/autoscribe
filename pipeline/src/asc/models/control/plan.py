@@ -34,9 +34,8 @@ class Plan(RedisModel):
 
     kind: ClassVar[str] = "plan"
 
-    model_config = ConfigDict(extra="forbid")
+    model_config = ConfigDict(extra="ignore")
 
-    type: Literal["plan"] = "plan"
     identity: RedisIdentity = Field(default_factory=generate_identity)
     slug: RecordIdentity
     content: OptionalRecordContent = ""
