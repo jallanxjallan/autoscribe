@@ -1,16 +1,12 @@
-"""Compatibility wrapper for Scrivener ledger writes.
+"""Compatibility wrapper for ledger writes used by Scrivener."""
 
-The write implementation lives in asc.scrivener.execute so the daemon and any
-legacy direct callers use the same table/action contract.
-"""
-
-from asc.scrivener.execute import write_task, write_task_with_connection
-from asc.scrivener.maps import (
+from asc.ledger.maps import (
     CALL_ACTION,
     CONFIRM_EXPORT_ACTION,
     EXPORT_ACTION,
     STEP_ACTION,
 )
+from asc.ledger.write import write_task, write_task_with_connection
 
 
 __all__ = [

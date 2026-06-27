@@ -73,19 +73,19 @@ MODEL_CONTRACTS: dict[str, ModelContractRef] = {
     "export:pending-export": ModelContractRef(
         group="export",
         name="pending-export",
-        import_paths=("asc.models.export.records.PendingExportRecord",),
+        import_paths=("asc.models.exporter.records.PendingExportRecord",),
         purpose="Typed rows emitted by pending export listing.",
     ),
     "export:extracted-result": ModelContractRef(
         group="export",
         name="extracted-result",
-        import_paths=("asc.models.export.records.ExtractedResultRecord",),
+        import_paths=("asc.models.exporter.records.ExtractedResultRecord",),
         purpose="Typed rows emitted by export result extraction.",
     ),
     "export:export-update": ModelContractRef(
         group="export",
         name="export-update",
-        import_paths=("asc.models.export.records.ExportUpdateRecord",),
+        import_paths=("asc.models.exporter.records.ExportUpdateRecord",),
         purpose="Typed records consumed when marking results exported.",
     ),
 }
