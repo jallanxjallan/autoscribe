@@ -20,86 +20,24 @@ function isPlainObject(value) {
   return value !== null && typeof value === "object" && !Array.isArray(value);
 }
 
-function parseJsonStringMaybe(value, fieldName) {
-  if (typeof value !== "string") return value;
-
-  const text = value.trim();
-  if (!text) return value;
-
-  if (
-    (text.startsWith("{") && text.endsWith("}")) ||
-    (text.startsWith("[") && text.endsWith("]"))
-  ) {
-    try {
-      return JSON.parse(text);
-    } catch (error) {
-      throw new Error(`${fieldName}: invalid JSON string: ${error.message}`);
-    }
-  }
-
-  return value;
-}
-
-function flattenFieldPairs(value, options = {}) {
-  const {
-    sourceName = "record",
-    parseJsonStrings = true,
-  } = options;
-
-  const flat = {};
-  const seen = new Map();
-
-  function addField(key, fieldValue, path) {
-    if (!key) return;
-
-    if (Object.prototype.hasOwnProperty.call(flat, key)) {
-      const firstPath = seen.get(key);
-      throw new Error(`${sourceName}: duplicate field name "${key}" at ${firstPath} and ${path}`);
-    }
-
-    flat[key] = fieldValue;
-    seen.set(key, path);
-  }
-
-  function walk(node, path) {
-    const parsed = parseJsonStrings ? parseJsonStringMaybe(node, path) : node;
-
-    if (Array.isArray(parsed)) {
-      parsed.forEach((item, index) => walk(item, `${path}[${index}]`));
-      return;
-    }
-
-    if (!isPlainObject(parsed)) return;
-
-    for (const [key, child] of Object.entries(parsed)) {
-      const childPath = path ? `${path}.${key}` : key;
-      const parsedChild = parseJsonStrings ? parseJsonStringMaybe(child, childPath) : child;
-
-      if (isPlainObject(parsedChild) || Array.isArray(parsedChild)) {
-        walk(parsedChild, childPath);
-      } else {
-        addField(key, parsedChild, childPath);
-      }
-    }
-  }
-
-  walk(value, sourceName);
-  return flat;
-}
-
-function flattenRecord(record) {
+function requireRecordObject(record, index, label) {
   if (!isPlainObject(record)) {
-    throw new Error("record must be a JSON object");
+    throw new Error(`${label} ${index + 1}: expected a JSON object`);
   }
-
-  return flattenFieldPairs(record, {
-    sourceName: "record",
-    parseJsonStrings: true,
-  });
 }
 
-function requireStringField(flat, key, label = key) {
-  const value = flat[key];
+function firstString(...values) {
+  for (const value of values) {
+    if (typeof value === "string" && value.trim()) {
+      return value.trim();
+    }
+  }
+
+  return "";
+}
+
+function requireStringField(record, key, label = key) {
+  const value = record[key];
 
   if (typeof value !== "string" || !value.trim()) {
     throw new Error(`missing ${label}`);
@@ -108,18 +46,64 @@ function requireStringField(flat, key, label = key) {
   return value.trim();
 }
 
-function normalizePendingRecord(record, index) {
-  const flat = flattenRecord(record);
+function normalizeWritebackRecord(record, index) {
+  requireRecordObject(record, index, "writeback record");
 
-  const promptSlug = requireStringField(flat, "prompt_slug", `prompt_slug in pending record ${index + 1}`);
-  const callIdentity = requireStringField(flat, "call_identity", `call_identity in pending record ${index + 1}`);
-  const resultIdentity = requireStringField(flat, "result_identity", `result_identity in pending record ${index + 1}`);
+  const promptSlug = requireStringField(
+    record,
+    "record_identity",
+    `record_identity in writeback record ${index + 1}`
+  );
+
+  const content = requireStringField(
+    record,
+    "record_content",
+    `record_content in writeback record ${index + 1}`
+  );
+
+  const slugRe = new RegExp(`^${slugRegexText()}$`);
+
+  if (!slugRe.test(promptSlug)) {
+    throw new Error(`writeback record ${index + 1}: invalid record_identity: ${promptSlug}`);
+  }
+
+  return {
+    promptSlug,
+    recordIdentity: promptSlug,
+    content,
+    resultIdentity: firstString(record.result_identity),
+    raw: record,
+  };
+}
+
+function parseWritebackRecords(text) {
+  return parseNdjson(text).map(normalizeWritebackRecord);
+}
+
+function normalizePendingRecord(record, index) {
+  requireRecordObject(record, index, "pending record");
+
+  const promptSlug = firstString(record.record_identity, record.prompt_slug);
+  const callIdentity = firstString(record.call_identity);
+  const resultIdentity = firstString(record.result_identity);
+
+  if (!promptSlug) {
+    throw new Error(`missing record_identity in pending record ${index + 1}`);
+  }
+
+  if (!callIdentity) {
+    throw new Error(`missing call_identity in pending record ${index + 1}`);
+  }
+
+  if (!resultIdentity) {
+    throw new Error(`missing result_identity in pending record ${index + 1}`);
+  }
 
   const slugRe = new RegExp(`^${slugRegexText()}$`);
   const identityRe = new RegExp(`^${identityRegexText()}$`);
 
   if (!slugRe.test(promptSlug)) {
-    throw new Error(`pending record ${index + 1}: invalid prompt_slug: ${promptSlug}`);
+    throw new Error(`pending record ${index + 1}: invalid record_identity: ${promptSlug}`);
   }
 
   if (!identityRe.test(callIdentity)) {
@@ -134,7 +118,6 @@ function normalizePendingRecord(record, index) {
     promptSlug,
     callIdentity,
     resultIdentity,
-    flat,
     raw: record,
   };
 }
@@ -144,28 +127,24 @@ function parsePendingRecords(text) {
 }
 
 function extractPayloadFromStdout(stdout) {
-  const records = parseNdjson(stdout);
+  const records = parseWritebackRecords(stdout);
 
   if (records.length !== 1) {
     throw new Error(`expected exactly one extracted result record, got ${records.length}`);
   }
 
   const record = records[0];
-  const flat = flattenRecord(record);
-  const content = requireStringField(flat, "content", "content in extracted result record");
 
   return {
-    content,
-    flat,
-    raw: record,
+    content: record.content,
+    raw: record.raw,
   };
 }
 
 module.exports = {
   identityRegexText,
   parseNdjson,
-  flattenFieldPairs,
-  flattenRecord,
   parsePendingRecords,
+  parseWritebackRecords,
   extractPayloadFromStdout,
 };
