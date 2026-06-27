@@ -1,10 +1,15 @@
 import sys
-from collections.abc import Iterable, Mapping
+from collections.abc import Iterable
 from typing import Any, TextIO
 
 import typer
 
-from asc.exporter.export_result import mark_result_exported, write_extracted_result_record
+from asc.exporter.export_result import (
+    mark_result_exported,
+    reset_result_exported,
+    write_extracted_result_record,
+    write_pending_result_records,
+)
 from asc.exporter.pending_exports import pending_export_records
 from asc.scrivener.connect import connect
 
@@ -26,8 +31,21 @@ def _write_pending_exports_table(
     rows: list[dict[str, object]],
     sink: TextIO,
 ) -> None:
-    headers = ("source_identity", "call_identity", "final_step", "result_key")
-    table_rows = [tuple(_text(row.get(header, "")) for header in headers) for row in rows]
+    headers = (
+        "slug",
+        "source_identity",
+        "call_identity",
+        "final_step",
+        "result_key",
+        "exported_at",
+    )
+    table_rows = [
+        tuple(
+            _text(row.get("exported_at_text") if header == "exported_at" else row.get(header, ""))
+            for header in headers
+        )
+        for row in rows
+    ]
 
     if not table_rows:
         print("No pending exports.", file=sink)
@@ -55,7 +73,7 @@ def list_pending_exports(
         ),
     ),
 ) -> None:
-    """List pending export/writeback rows."""
+    """List pending export/writeback rows by slug and identity."""
 
     if source_identity is not None:
         source_identity = source_identity.strip()
@@ -89,6 +107,16 @@ def extract_result(
         )
 
 
+@app.command("extract-pending-results")
+@app.command("extract-all-pending")
+@app.command("extract-pending")
+def extract_pending_results() -> None:
+    """Emit all pending extracted call/result rows as an NDJSON batch."""
+
+    with connect() as conn:
+        write_pending_result_records(conn=conn, sink=sys.stdout)
+
+
 @app.command("update-exports")
 def update_exports(
     result_identity: str = typer.Argument(
@@ -110,6 +138,35 @@ def update_exports(
             conn=conn,
             export_message=export_message,
         )
+
+
+@app.command("reset-exports")
+def reset_exports(
+    identities: list[str] = typer.Argument(
+        ...,
+        help="Call, result, result-key, or source identities to mark pending again.",
+    ),
+    export_message: str = typer.Option(
+        "reset",
+        "--export-message",
+        "--message",
+        help="Message to store in the exports row.",
+    ),
+) -> None:
+    """Reset exported_at to 0 for the supplied identities."""
+
+    cleaned = [identity.strip() for identity in identities if identity.strip()]
+    if not cleaned:
+        typer.echo("ERROR: at least one identity is required", err=True)
+        raise typer.Exit(code=1)
+
+    with connect() as conn:
+        count = reset_result_exported(
+            identities=cleaned,
+            conn=conn,
+            export_message=export_message,
+        )
+    typer.echo(f"Reset {count} export row(s).")
 
 
 def _write_table(

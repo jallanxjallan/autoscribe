@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import json
 from collections.abc import Mapping
+from datetime import datetime, timezone
 from typing import Any
 
 from asc.redis.key import RedisKey
@@ -23,6 +24,7 @@ from asc.scrivener.util import timestamp_now
 
 
 DEFAULT_EXPORT_MESSAGE = "writeback"
+PENDING_EXPORTED_AT = 0
 
 
 def pending_export_rows(
@@ -38,9 +40,8 @@ def pending_export_rows(
     """
 
     require_ledger_columns(conn)
-    _require_unique_pending_sources(conn)
 
-    where = "WHERE e.exported_at IS NULL"
+    where = "WHERE (e.exported_at IS NULL OR e.exported_at = 0)"
     values: tuple[Any, ...] = ()
     if source_identity is not None:
         where += " AND COALESCE(c.source_identity, e.source_identity) = ?"
@@ -51,10 +52,13 @@ def pending_export_rows(
         SELECT
             COALESCE(c.source_identity, e.source_identity) AS source_identity,
             COALESCE(c.source_identity, e.source_identity) AS record_identity,
+            c.source_json AS source_json,
             e.identity AS call_identity,
             e.final_step AS final_step,
             e.result_key AS result_key,
             e.result_key AS result_identity,
+            e.exported_at AS exported_at,
+            e.export_message AS export_message,
             e.created_at AS created_at
         FROM exports AS e
         LEFT JOIN calls AS c
@@ -64,7 +68,7 @@ def pending_export_rows(
         """,
         values,
     ).fetchall()
-    return [_row_dict(row) for row in rows]
+    return [_decorate_export_row(_row_dict(row)) for row in rows]
 
 
 def extracted_result_row(*, conn: LedgerConnection, call_identity: str) -> dict[str, Any] | None:
@@ -101,7 +105,7 @@ def extracted_result_row(*, conn: LedgerConnection, call_identity: str) -> dict[
     ).fetchone()
     if row is None:
         return None
-    data = _row_dict(row)
+    data = _decorate_export_row(_row_dict(row))
     data["source"] = _safe_json(data.get("source_json"))
     data["result"] = _safe_json(data.get("raw_json"))
     return data
@@ -129,14 +133,88 @@ def mark_exported(
             exported_at = ?,
             export_message = ?
         WHERE identity = ?
-          AND exported_at IS NULL
         """,
         (int(timestamp_now()), export_message, identity),
     )
     conn.commit()
     if cursor.rowcount == 0:
-        raise ValueError(f"no pending export row for result/call {result_identity}")
+        raise ValueError(f"no export row for result/call {result_identity}")
     return int(cursor.rowcount)
+
+
+def reset_exported(
+    *,
+    conn: LedgerConnection,
+    identities: list[str],
+    export_message: str = "reset",
+) -> int:
+    """Reset exported_at to zero for call/result/source identities."""
+
+    require_ledger_columns(conn)
+    if not identities:
+        raise ValueError("at least one identity is required")
+
+    count = 0
+    for value in identities:
+        text = str(value).strip()
+        if not text:
+            raise ValueError("identity must not be empty")
+        call_identity = _call_identity(text)
+        cursor = conn.execute(
+            """
+            UPDATE exports
+            SET
+                exported_at = 0,
+                export_message = ?
+            WHERE identity = ?
+               OR source_identity = ?
+               OR result_key = ?
+               OR result_key LIKE ?
+            """,
+            (export_message, call_identity, text, text, f"%:{call_identity}:%"),
+        )
+        count += int(cursor.rowcount)
+    conn.commit()
+    if count == 0:
+        joined = ", ".join(identities)
+        raise ValueError(f"no export rows matched: {joined}")
+    return count
+
+
+def render_exported_at(value: object) -> str:
+    """Render an export timestamp for CLI display.
+
+    Scrivener timestamps are stored as integer Unix timestamps, but the unit can
+    be seconds, milliseconds, microseconds, or nanoseconds depending on the
+    writer.  Normalize before handing the value to ``datetime``; otherwise a
+    nanosecond value such as ``1782535096879287212`` is treated as seconds and
+    overflows on some platforms.
+    """
+
+    if value is None or value == "":
+        return "pending"
+    try:
+        timestamp = int(value)
+    except (TypeError, ValueError):
+        return str(value)
+    if timestamp == 0:
+        return "pending"
+
+    seconds = _timestamp_seconds(timestamp)
+    return datetime.fromtimestamp(seconds, tz=timezone.utc).astimezone().strftime(
+        "%Y-%m-%d %H:%M:%S %Z"
+    )
+
+
+def _timestamp_seconds(timestamp: int) -> float:
+    absolute = abs(timestamp)
+    if absolute >= 10_000_000_000_000_000:
+        return timestamp / 1_000_000_000
+    if absolute >= 10_000_000_000_000:
+        return timestamp / 1_000_000
+    if absolute >= 10_000_000_000:
+        return timestamp / 1_000
+    return float(timestamp)
 
 
 def _require_unique_pending_sources(conn: LedgerConnection) -> None:
@@ -146,7 +224,7 @@ def _require_unique_pending_sources(conn: LedgerConnection) -> None:
         FROM exports AS e
         LEFT JOIN calls AS c
           ON c.identity = e.identity
-        WHERE e.exported_at IS NULL
+        WHERE e.exported_at IS NULL OR e.exported_at = 0
         GROUP BY COALESCE(c.source_identity, e.source_identity)
         HAVING COUNT(*) > 1
         ORDER BY COALESCE(c.source_identity, e.source_identity) ASC
@@ -156,6 +234,29 @@ def _require_unique_pending_sources(conn: LedgerConnection) -> None:
         return
     details = ", ".join(f"{row['source_identity']}={row['pending_count']}" for row in rows)
     raise ValueError(f"multiple pending exports for source_identity: {details}")
+
+
+def _decorate_export_row(row: dict[str, Any]) -> dict[str, Any]:
+    source = _safe_json(row.get("source_json"))
+    row["source"] = source
+    row["slug"] = _source_slug(source)
+    row["exported_at_text"] = render_exported_at(row.get("exported_at"))
+    return row
+
+
+def _source_slug(source: Any) -> str:
+    if not isinstance(source, Mapping):
+        return ""
+    for key in ("slug", "source_slug", "record_slug", "prompt_slug"):
+        value = source.get(key)
+        if value is not None and str(value).strip():
+            return str(value).strip()
+    metadata = source.get("metadata")
+    if isinstance(metadata, Mapping):
+        value = metadata.get("slug")
+        if value is not None and str(value).strip():
+            return str(value).strip()
+    return ""
 
 
 def _call_identity(value: object) -> str:
@@ -184,7 +285,10 @@ def _safe_json(value: Any) -> Any:
 
 __all__ = [
     "DEFAULT_EXPORT_MESSAGE",
+    "PENDING_EXPORTED_AT",
     "extracted_result_row",
     "mark_exported",
     "pending_export_rows",
+    "render_exported_at",
+    "reset_exported",
 ]
