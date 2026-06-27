@@ -46,6 +46,111 @@ function requireStringField(record, key, label = key) {
   return value.trim();
 }
 
+function parseJsonObjectString(value) {
+  if (typeof value !== "string") return null;
+
+  const trimmed = value.trim();
+  if (!trimmed.startsWith("{")) return null;
+
+  try {
+    const parsed = JSON.parse(trimmed);
+    return isPlainObject(parsed) ? parsed : null;
+  } catch (_error) {
+    return null;
+  }
+}
+
+function firstPresentContentValue(record) {
+  for (const key of ["record_content", "result_content", "content", "body", "text"]) {
+    const value = record[key];
+
+    if (isPlainObject(value)) {
+      return value;
+    }
+
+    if (typeof value === "string" && value.trim()) {
+      return value.trim();
+    }
+  }
+
+  return "";
+}
+
+function parseJsonObjectOrString(value) {
+  if (typeof value !== "string") return null;
+
+  const trimmed = value.trim();
+  if (!trimmed) return null;
+
+  if (!trimmed.startsWith("{") && !trimmed.startsWith('"')) return null;
+
+  try {
+    return JSON.parse(trimmed);
+  } catch (_error) {
+    return null;
+  }
+}
+
+function parseSingleNdjsonObject(value) {
+  if (typeof value !== "string") return null;
+
+  const lines = value
+    .split(/\r?\n/)
+    .map(line => line.trim())
+    .filter(Boolean);
+
+  if (lines.length !== 1) return null;
+
+  const parsed = parseJsonObjectString(lines[0]);
+  return isPlainObject(parsed) ? parsed : null;
+}
+
+function extractRecordContent(value, seen = new Set()) {
+  if (isPlainObject(value)) {
+    return extractRecordContent(firstPresentContentValue(value), seen);
+  }
+
+  if (typeof value !== "string" || !value.trim()) {
+    return "";
+  }
+
+  const trimmed = value.trim();
+
+  if (seen.has(trimmed)) {
+    return trimmed;
+  }
+  seen.add(trimmed);
+
+  const parsedSingleLine = parseSingleNdjsonObject(trimmed);
+  if (parsedSingleLine) {
+    const nestedContent = extractRecordContent(firstPresentContentValue(parsedSingleLine), seen);
+    if (nestedContent && nestedContent !== trimmed) return nestedContent;
+  }
+
+  const parsed = parseJsonObjectOrString(trimmed);
+  if (isPlainObject(parsed)) {
+    const nestedContent = extractRecordContent(firstPresentContentValue(parsed), seen);
+    if (nestedContent && nestedContent !== trimmed) return nestedContent;
+  }
+
+  if (typeof parsed === "string" && parsed.trim()) {
+    const nestedContent = extractRecordContent(parsed, seen);
+    if (nestedContent && nestedContent !== trimmed) return nestedContent;
+  }
+
+  return trimmed;
+}
+
+function requireRecordContent(record, index) {
+  const content = extractRecordContent(firstPresentContentValue(record));
+
+  if (!content) {
+    throw new Error(`missing record_content in writeback record ${index + 1}`);
+  }
+
+  return content;
+}
+
 function normalizeWritebackRecord(record, index) {
   requireRecordObject(record, index, "writeback record");
 
@@ -55,11 +160,7 @@ function normalizeWritebackRecord(record, index) {
     `record_identity in writeback record ${index + 1}`
   );
 
-  const content = requireStringField(
-    record,
-    "record_content",
-    `record_content in writeback record ${index + 1}`
-  );
+  const content = requireRecordContent(record, index);
 
   const slugRe = new RegExp(`^${slugRegexText()}$`);
 
@@ -147,4 +248,5 @@ module.exports = {
   parsePendingRecords,
   parseWritebackRecords,
   extractPayloadFromStdout,
+  extractRecordContent,
 };
