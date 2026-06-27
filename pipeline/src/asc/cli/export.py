@@ -1,25 +1,18 @@
 import sys
-from typing import TextIO
+from collections.abc import Iterable, Mapping
+from typing import Any, TextIO
 
 import typer
+
+from asc.exporter.export_result import mark_result_exported, write_extracted_result_record
+from asc.exporter.pending_exports import pending_export_records
+from asc.scrivener.connect import connect
 
 app = typer.Typer(
     add_completion=False,
     no_args_is_help=True,
     help="Export and write back completed ledger results.",
 )
-
-# DEBT(2026-06): export is intentionally offline during the queue/inbox/runtime
-# refactor. Replace this stub when the export-by-vault refactor resumes.
-
-'''
-
-from asc.export.export_result import mark_result_exported, write_extracted_result_record
-from asc.export.pending_exports import pending_export_records
-from asc.scrivener.connect import connect
-
-
-
 
 
 def _text(value: object) -> str:
@@ -33,80 +26,50 @@ def _write_pending_exports_table(
     rows: list[dict[str, object]],
     sink: TextIO,
 ) -> None:
-    headers = ("prompt_slug", "call_identity", "result_identity")
-    table_rows = [
-        (
-            _text(row["prompt_slug"]),
-            _text(row["call_identity"]),
-            _text(row["result_identity"]),
-        )
-        for row in rows
-    ]
+    headers = ("source_identity", "call_identity", "final_step", "result_key")
+    table_rows = [tuple(_text(row.get(header, "")) for header in headers) for row in rows]
 
     if not table_rows:
         print("No pending exports.", file=sink)
         return
 
-    widths = tuple(
-        max(len(header), *(len(row[index]) for row in table_rows))
-        for index, header in enumerate(headers)
-    )
-
-    print(
-        f"{headers[0]:<{widths[0]}}  {headers[1]:<{widths[1]}}  {headers[2]:<{widths[2]}}",
-        file=sink,
-    )
-    print(
-        f"{'-' * widths[0]}  {'-' * widths[1]}  {'-' * widths[2]}",
-        file=sink,
-    )
-
-    for prompt_slug, call_identity, result_identity in table_rows:
-        print(
-            f"{prompt_slug:<{widths[0]}}  {call_identity:<{widths[1]}}  {result_identity:<{widths[2]}}",
-            file=sink,
-        )
+    _write_table(headers, table_rows, sink=sink)
 
 
-def _write_prompt_slug_stream(
+def _write_source_identity_stream(
     *,
     rows: list[dict[str, object]],
     sink: TextIO,
 ) -> None:
     for row in rows:
-        print(_text(row["prompt_slug"]), file=sink)
+        print(_text(row.get("source_identity") or row.get("record_identity")), file=sink)
 
 
 @app.command("list-pending-exports")
 def list_pending_exports(
-    plan_slug: str | None = typer.Argument(
+    source_identity: str | None = typer.Argument(
         None,
         help=(
-            "Optional plan slug. With no argument, print a human-readable table. "
-            "With a plan slug, emit one pending prompt slug per line for writeback."
+            "Optional source/record identity. With no argument, print a table. "
+            "With an identity, emit matching pending source identities for writeback."
         ),
     ),
 ) -> None:
-    """List pending export/writeback rows.
+    """List pending export/writeback rows."""
 
-    Pending-export custody and duplicate-slug checks are owned by asc.ledger.
-    This command only chooses a display format and applies the optional plan
-    filter through the export helper.
-    """
-
-    if plan_slug is not None:
-        plan_slug = plan_slug.strip()
-        if not plan_slug:
-            typer.echo("ERROR: plan slug must not be empty", err=True)
+    if source_identity is not None:
+        source_identity = source_identity.strip()
+        if not source_identity:
+            typer.echo("ERROR: source identity must not be empty", err=True)
             raise typer.Exit(code=1)
 
     with connect() as conn:
-        rows = pending_export_records(conn=conn, plan_slug=plan_slug)
+        rows = pending_export_records(conn=conn, source_identity=source_identity)
 
-    if plan_slug is None:
+    if source_identity is None:
         _write_pending_exports_table(rows=rows, sink=sys.stdout)
     else:
-        _write_prompt_slug_stream(rows=rows, sink=sys.stdout)
+        _write_source_identity_stream(rows=rows, sink=sys.stdout)
 
 
 @app.command("extract-result")
@@ -130,7 +93,7 @@ def extract_result(
 def update_exports(
     result_identity: str = typer.Argument(
         ...,
-        help="Result identity that was successfully exported or written back.",
+        help="Result key, result identity, or call identity that was successfully exported.",
     ),
     export_message: str = typer.Option(
         "writeback",
@@ -148,8 +111,24 @@ def update_exports(
             export_message=export_message,
         )
 
-'''
+
+def _write_table(
+    headers: tuple[str, ...],
+    rows: Iterable[tuple[Any, ...]],
+    *,
+    sink: TextIO,
+) -> None:
+    materialized = [tuple(_text(cell) for cell in row) for row in rows]
+    widths = [len(header) for header in headers]
+    for row in materialized:
+        for index, cell in enumerate(row):
+            widths[index] = max(widths[index], len(cell))
+
+    print("  ".join(header.ljust(widths[index]) for index, header in enumerate(headers)), file=sink)
+    print("  ".join("─" * width for width in widths), file=sink)
+    for row in materialized:
+        print("  ".join(row[index].ljust(widths[index]) for index in range(len(headers))), file=sink)
+
+
 if __name__ == "__main__":
     app()
-	
-
