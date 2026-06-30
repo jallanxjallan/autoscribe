@@ -1,16 +1,9 @@
 from collections.abc import Iterable
 from typing import TextIO
 
-# from asc.enqueuer.call import promote_call_ttl
 from asc.enqueuer.reader import EnqueueRecord, iter_enqueue_records
 from asc.enqueuer.report import EnqueuedCall, EnqueueReport
-from asc.orchestrator.inbox import post as post_to_orchestrator
-
-
-# Future modification note:
-# This service should remain deliberately thin. Enqueue creates persisted calls,
-# posts call notices to the orchestrator inbox, and promotes successful call TTLs.
-# Runtime setup is now owned by orchestrator.handlers.call.
+from asc.enqueuer.runtime import activate_call, create_call_index
 
 
 def enqueue_from_stream(stream: TextIO) -> EnqueueReport:
@@ -23,16 +16,20 @@ def enqueue_records(records: Iterable[EnqueueRecord]) -> EnqueueReport:
 
 def enqueue_record(record: EnqueueRecord) -> EnqueuedCall:
     call = record.call
-    plan = record.plan.plan
-
-    post_to_orchestrator(str(call.redis_key))
-    # promote_call_ttl(call)
+    call_key = str(call.redis_key)
+    call_index_key = create_call_index(
+        call_identity=call.redis_key.identity,
+        call_key=call_key,
+        step_keys=record.plan.step_keys,
+    )
+    activate_call(call_key)
 
     return EnqueuedCall(
         call=call.redis_key.identity,
         source_identity=record.source_identity,
-        call_key=str(call.redis_key),
-        plan_key=str(plan.redis_key),
+        call_key=call_key,
+        call_index_key=call_index_key,
+        plan_key=record.plan.plan_key,
         step_count=record.plan.step_count,
     )
 

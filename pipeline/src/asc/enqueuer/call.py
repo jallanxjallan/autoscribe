@@ -4,16 +4,7 @@ from typing import Any
 from asc.models.process.call import CallRecord
 
 
-MANIFEST_FIELDS = frozenset({"record_type", "plan_slug"})
-PROBATIONARY_CALL_TTL_SECONDS = 5 * 60
-ENQUEUED_CALL_TTL_SECONDS = 60 * 60 * 24 * 30
-
-
-# Future modification note:
-# Keep this module focused on creating and TTL-managing the persisted CallRecord
-# at the enqueue boundary. Do not reintroduce cursor creation, call-index/results
-# initialization, step materialization, or task scheduling here; those now belong
-# to the orchestrator call handler.
+ENQUEUE_CONTROL_FIELDS = frozenset({"record_type", "record_plan", "plan_slug"})
 
 
 def create_call_from_manifest_record(
@@ -21,47 +12,23 @@ def create_call_from_manifest_record(
     *,
     plan_key: str,
 ) -> CallRecord:
-    """Create and persist the ephemeral Call carried by one run manifest row.
-
-    The enqueue stream row is a dispatch manifest, not a stored Call record.
-    Split off dispatch-only fields, build the Call from the document payload,
-    and save it with a short probationary TTL. If the full enqueue succeeds,
-    the service promotes the Call TTL. If enqueue fails midway, the orphaned
-    Call expires quickly.
-
-    The resolved plan key is stored on the Call so the orchestrator can open the
-    Call, open the Plan, and initialize runtime state without enqueue-time cursor
-    or results-index creation.
-    """
+    """Create and persist the CallRecord carried by one dispatch NDJSON row."""
 
     call = CallRecord(**_call_payload(record, plan_key=plan_key))
     call.save()
-    # expire_call(call, PROBATIONARY_CALL_TTL_SECONDS)
     return call
-
-
-# def promote_call_ttl(call: CallRecord) -> None:
-#     expire_call(call, ENQUEUED_CALL_TTL_SECONDS)
-
-
-# def expire_call(call: CallRecord, ttl_seconds: int) -> None:
-#     if ttl_seconds < 1:
-#         raise ValueError("ttl_seconds must be positive")
-#     call.redis_key.expire(ttl_seconds)
-
-
 
 
 def _call_payload(record: Mapping[str, Any], *, plan_key: str) -> dict[str, Any]:
     payload = dict(record)
-    for field in MANIFEST_FIELDS:
+    for field in ENQUEUE_CONTROL_FIELDS:
         payload.pop(field, None)
 
     try:
         source_identity = payload.pop("record_identity")
         content = payload.pop("record_content")
     except KeyError as exc:
-        raise ValueError(f"manifest record missing required field: {exc.args[0]}") from exc
+        raise ValueError(f"enqueue record missing required field: {exc.args[0]}") from exc
 
     return {
         "source_identity": source_identity,
@@ -71,10 +38,4 @@ def _call_payload(record: Mapping[str, Any], *, plan_key: str) -> dict[str, Any]
     }
 
 
-__all__ = [
-    "ENQUEUED_CALL_TTL_SECONDS",
-    "PROBATIONARY_CALL_TTL_SECONDS",
-    "create_call_from_manifest_record",
-    "expire_call",
-    "promote_call_ttl",
-]
+__all__ = ["create_call_from_manifest_record"]

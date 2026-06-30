@@ -4,9 +4,8 @@ const fs = require('node:fs');
 const path = require('node:path');
 
 const { fail, info } = require('./command');
-const { sha256 } = require('./records');
 const { readVaultFile, assertVaultRoot, vaultFileExists } = require('./selection');
-const { runPandocCapture } = require('./pandoc-upload');
+const { runPandocUpload } = require('./pandoc-upload');
 
 const { getGitRoot } = require('../../lib/git');
 const { getFrontmatterTextFromMarkdown } = require('../../lib/markdown');
@@ -20,9 +19,11 @@ function usage(script) {
   ${script} [--dry-run] [--manifest PATH]
 
 Behavior:
-  Reads the current local run dispatch manifest, resolves each content slug
-  against the active vault, renders the Markdown through Pandoc, and emits
-  enqueue NDJSON records suitable for: ${script} | asc enqueue
+  Reads the current local run dispatch manifest, resolves each prompt slug
+  against the active vault, and runs each Markdown prompt through Pandoc
+  with record_plan supplied as metadata.
+
+  Pandoc emits the final NDJSON record. Intended use: ${script} | asc enqueue
 
 Options:
   -n, --dry-run      Print resolved records to stderr; do not emit NDJSON.
@@ -200,55 +201,19 @@ function resolveCalls({ root, manifest, script }) {
   });
 }
 
-function buildDispatchRecord({ root, manifest, call, markdown, rendered, dispatchedAt }) {
-  return {
-    record_type: 'call',
-    record_identity: call.call_slug,
-    plan_slug: call.plan_slug,
-    record_content: rendered,
-    source: {
-      origin: 'obsidian.dispatch-run',
-      vault_root: root,
-      path: call.path,
-      filename_hint: call.filename || path.basename(call.path),
-      markdown_sha256: sha256(markdown),
-      rendered_sha256: sha256(rendered),
-      dispatched_at: dispatchedAt,
-      run_manifest: manifest.filepath || '',
-      run_slug: manifest.slug || '',
-      run_label: manifest.label || '',
-      call_index: call.index || null,
-    },
-  };
-}
-
-function renderDispatchRecord({ root, manifest, call, defaults, script }) {
-  const markdown = readVaultFile(root, call.path);
-  const dispatchedAt = new Date().toISOString();
-
-  let rendered = '';
+function dispatchPandocRecord({ root, call, defaults, script }) {
   try {
-    rendered = runPandocCapture({
+    runPandocUpload({
       cwd: root,
       input: call.path,
       defaults,
       metadata: {
-        record_identity: call.call_slug,
-        record_type: 'call',
+        record_plan: call.plan_slug,
       },
     });
   } catch (error) {
-    fail(script, `${call.path}: pandoc render failed: ${error.message || error}`);
+    fail(script, `${call.path}: pandoc dispatch failed: ${error.message || error}`);
   }
-
-  return buildDispatchRecord({
-    root,
-    manifest,
-    call,
-    markdown,
-    rendered,
-    dispatchedAt,
-  });
 }
 
 function logPlan({ script, root, manifest, calls }) {
@@ -286,8 +251,7 @@ function runDispatchRun(config = {}) {
   }
 
   for (const call of calls) {
-    const record = renderDispatchRecord({ root, manifest, call, defaults, script });
-    process.stdout.write(`${JSON.stringify(record)}\n`);
+    dispatchPandocRecord({ root, call, defaults, script });
   }
 
   info(script, `emitted enqueue records: ${calls.length}`);
@@ -298,7 +262,7 @@ module.exports = {
   runDispatchRun,
   normalizePromptPlanPairs,
   resolveCalls,
-  renderDispatchRecord,
+  dispatchPandocRecord,
 };
 
 if (require.main === module) {
