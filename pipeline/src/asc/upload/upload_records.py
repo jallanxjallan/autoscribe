@@ -1,3 +1,4 @@
+import json
 import sys
 from collections.abc import Iterable, Mapping
 from typing import Any, TextIO
@@ -6,6 +7,7 @@ from pydantic import ValidationError
 
 from asc.core.identity import generate_identity
 from asc.redis.key import RedisKey
+from asc.redis.primitives.keys import expire
 from asc.state.slugmap import SlugMap
 from asc.upload.common import SkippedUpload, UploadedItem, UploadReport
 from asc.upload.record_types import canonical_record_type, model_for_record_type
@@ -67,13 +69,17 @@ def upload_record(raw_record: object, *, expected_type: str) -> UploadedItem:
 
     record_type = canonical_record_type(record["record_type"])
     record_identity = required_string(record["record_identity"], "record_identity")
-    required_string(record["record_content"], "record_content")
 
     expected = canonical_record_type(expected_type)
     if record_type != expected:
         raise ValueError(
             f"record_type {record_type!r} does not match upload target {expected!r}"
         )
+
+    if record_type == "plan":
+        return upload_plan_record(record, record_identity=record_identity)
+
+    required_string(record["record_content"], "record_content")
 
     for field_name in SERVER_IDENTITY_FIELDS:
         record.pop(field_name, None)
@@ -93,9 +99,50 @@ def upload_record(raw_record: object, *, expected_type: str) -> UploadedItem:
 
     slugmap.set(record_identity, new_key)
     if old_key and old_key != new_key:
-        RedisKey(old_key).expire(PASTURE_TTL_SECONDS)
+        expire_key(old_key, PASTURE_TTL_SECONDS)
 
     return UploadedItem(target=record_type, slug=record_identity, key=new_key)
+
+
+def expire_key(key: str, ttl_seconds: int) -> None:
+    expire(RedisKey(key), int(ttl_seconds))
+
+
+def upload_plan_record(
+    record: Mapping[str, Any],
+    *,
+    record_identity: str,
+) -> UploadedItem:
+    content = plan_record_content(record["record_content"])
+    plan_identity = generate_identity()
+    plan_key = f"plan:{plan_identity}"
+
+    # Fan out first. Do not publish the slugmap pointer unless the executable
+    # step set exists. Import lazily so non-plan uploads do not depend on the
+    # Step model import path.
+    from asc.upload.plan_steps import fanout_plan_steps
+
+    fanout_plan_steps(plan_identity=plan_identity, content=content)
+
+    slugmap = SlugMap()
+    slugmap.set(record_identity, plan_key)
+
+    return UploadedItem(target="plan", slug=record_identity, key=plan_key)
+
+
+def plan_record_content(value: object) -> Mapping[str, Any]:
+    if isinstance(value, Mapping):
+        return dict(value)
+
+    if isinstance(value, str) and value.strip():
+        try:
+            parsed = json.loads(value)
+        except json.JSONDecodeError as exc:
+            raise ValueError(f"plan record_content must be a JSON object: {exc}") from exc
+        if isinstance(parsed, Mapping):
+            return dict(parsed)
+
+    raise ValueError("plan record_content must be a JSON object")
 
 
 def require_upload_fields(record: Mapping[str, Any]) -> None:
@@ -121,6 +168,8 @@ def record_identifier(record: object, *, fallback: str) -> str:
 __all__ = [
     "MANDATORY_FIELDS",
     "PASTURE_TTL_SECONDS",
+    "plan_record_content",
+    "upload_plan_record",
     "upload_record",
     "upload_records",
 ]
