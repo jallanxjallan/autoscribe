@@ -16,6 +16,7 @@ from ..tasks import (
     make_scrivener_call_completed,
     make_scrivener_call_failed,
     make_worker_step,
+    save_task,
 )
 from . import call_index
 
@@ -105,20 +106,20 @@ def _advance_after_step_write(result_key: str) -> None:
 
 def _post_worker_step(*, step_key: str, data_key: str) -> None:
     task = make_worker_step(step_key=step_key, data_key=data_key)
-    task.save()
-    worker_inbox.post(str(task.redis_key))
+    task_key = save_task(task)
+    worker_inbox.post(task_key)
 
 
 def _post_scrivener_call_completed(result_key: str) -> None:
     task = make_scrivener_call_completed(data_key=result_key)
-    task.save()
-    scrivener_inbox.post(str(task.redis_key))
+    task_key = save_task(task)
+    scrivener_inbox.post(task_key)
 
 
 def _post_scrivener_call_failed(result_key: str) -> None:
     task = make_scrivener_call_failed(data_key=result_key)
-    task.save()
-    scrivener_inbox.post(str(task.redis_key))
+    task_key = save_task(task)
+    scrivener_inbox.post(task_key)
 
 
 __all__ = ["handle_done"]

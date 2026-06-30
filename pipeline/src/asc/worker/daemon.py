@@ -14,7 +14,6 @@ runs the long-lived daemon loop.
 from dataclasses import dataclass
 
 from asc.models.process.task import WorkerTask
-from asc.orchestrator import inbox as orchestrator_inbox
 from asc.state.daemon import DEFAULT_CLAIM_TIMEOUT_SECONDS, configure_logging, run_daemon
 from asc.worker import inbox as worker_inbox
 from asc.worker.execute import WorkerExecutor
@@ -24,8 +23,8 @@ from asc.worker.execute import WorkerExecutor
 class WorkerRunReport:
     claimed: bool
     task_key: str | None = None
-    output_key: str | None = None
-    outcome_key: str | None = None
+    artifact_key: str | None = None
+    failure_key: str | None = None
     action: str | None = None
 
 
@@ -53,22 +52,17 @@ def run_once(
         raise ValueError("worker claimed an empty task key")
 
     # Print immediately after the atomic claim. If execution crashes before a
-    # result key is posted, this is the exact key to repost for retry testing.
+    # result key is produced, this is the exact key to repost for retry testing.
     print(f"worker claimed_task_key={task_key}", flush=True)
 
     task = WorkerTask.load(task_key)
     result = WorkerExecutor().execute(task, task_key)
 
-    # Worker persists the action-specific result/failure record, then posts the
-    # saved outcome key. The orchestrator opens the outcome and owns index
-    # insertion plus next-step routing.
-    orchestrator_inbox.post(result.outcome_key)
-
     return WorkerRunReport(
         claimed=True,
         task_key=task_key,
-        output_key=result.output_key,
-        outcome_key=result.outcome_key,
+        artifact_key=result.artifact_key,
+        failure_key=result.failure_key,
         action=task.action,
     )
 
@@ -97,7 +91,7 @@ def main() -> None:
     print(
         f"worker claimed={report.claimed} "
         f"task_key={report.task_key} action={report.action} "
-        f"output_key={report.output_key} outcome_key={report.outcome_key}"
+        f"artifact_key={report.artifact_key} failure_key={report.failure_key}"
     )
 
 

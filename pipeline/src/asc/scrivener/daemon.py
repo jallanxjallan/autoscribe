@@ -10,7 +10,6 @@ Run forever from imported code:
 
 from dataclasses import dataclass
 
-from asc.orchestrator import inbox as orchestrator_inbox
 from asc.scrivener import inbox as scrivener_inbox
 from asc.scrivener.execute import ScrivenerExecutor
 from asc.state.daemon import DEFAULT_CLAIM_TIMEOUT_SECONDS, configure_logging, run_daemon
@@ -21,7 +20,8 @@ class ScrivenerRunReport:
     claimed: bool
     task_key: str | None = None
     action: str | None = None
-    outcome_key: str | None = None
+    artifact_key: str | None = None
+    failure_key: str | None = None
 
 
 def run_once(
@@ -48,13 +48,13 @@ def run_once(
         raise ValueError("scrivener claimed an empty task key")
 
     result = ScrivenerExecutor().execute(task_key)
-    orchestrator_inbox.post(result.outcome_key)
 
     return ScrivenerRunReport(
         claimed=True,
         task_key=result.task_key,
         action=result.action,
-        outcome_key=result.outcome_key,
+        artifact_key=result.artifact_key,
+        failure_key=result.failure_key,
     )
 
 
@@ -82,7 +82,7 @@ def main() -> None:
     print(
         f"scrivener claimed={report.claimed} "
         f"task_key={report.task_key} action={report.action} "
-        f"outcome_key={report.outcome_key}"
+        f"artifact_key={report.artifact_key} failure_key={report.failure_key}"
     )
 
 

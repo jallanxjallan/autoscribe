@@ -1,4 +1,4 @@
-"""Orchestrator daemon entrypoint and runtime helpers.
+"""Orchestrator daemon entrypoint using the active-call zset.
 
 Run once from the command line:
     python -m asc.orchestrator.daemon
@@ -10,17 +10,27 @@ Run forever from imported code:
 
 from dataclasses import dataclass
 
-from asc.orchestrator import inbox as orchestrator_inbox
+from asc.orchestrator.active import bump_active_call, oldest_active_call, remove_active_call
 from asc.orchestrator.handle import handle
-from asc.orchestrator.post_key import key_kind
+from asc.redis.key import RedisKey
 from asc.state.daemon import DEFAULT_CLAIM_TIMEOUT_SECONDS, configure_logging, run_daemon
 
 
 @dataclass(frozen=True, slots=True)
 class OrchestratorRunReport:
     claimed: bool
-    post_key: str | None = None
-    kind: str | None = None
+    call_key: str | None = None
+    active: bool | None = None
+
+    @property
+    def post_key(self) -> str | None:
+        return self.call_key
+
+    @property
+    def kind(self) -> str | None:
+        if self.call_key is None:
+            return None
+        return RedisKey(self.call_key).kind
 
 
 def run_once(
@@ -29,31 +39,24 @@ def run_once(
     empty_limit: int | None = None,
     wait: bool = False,
 ) -> OrchestratorRunReport:
-    """Claim and handle one orchestrator inbox message."""
+    """Inspect and advance one active call.
 
-    if wait:
-        claimed = orchestrator_inbox.daemon_claim(
-            timeout=timeout or 0,
-            empty_limit=empty_limit,
-        )
-    else:
-        claimed = orchestrator_inbox.claim()
+    ``timeout``, ``empty_limit``, and ``wait`` are accepted for compatibility
+    with the shared daemon runner. Active calls are polled from the zset rather
+    than claimed from a blocking inbox.
+    """
 
-    if claimed is None:
+    call_key = oldest_active_call()
+    if call_key is None:
         return OrchestratorRunReport(claimed=False)
 
-    post_key = str(claimed).strip()
-    if not post_key:
-        raise ValueError("orchestrator claimed an empty post key")
+    active = handle(call_key)
+    if active:
+        bump_active_call(call_key)
+    else:
+        remove_active_call(call_key)
 
-    kind = key_kind(post_key)
-    handle(post_key)
-
-    return OrchestratorRunReport(
-        claimed=True,
-        post_key=post_key,
-        kind=kind,
-    )
+    return OrchestratorRunReport(claimed=True, call_key=call_key, active=active)
 
 
 def run_forever(
@@ -79,7 +82,7 @@ def main() -> None:
     report = run_once()
     print(
         f"orchestrator claimed={report.claimed} "
-        f"post_key={report.post_key} kind={report.kind}"
+        f"call_key={report.call_key} active={report.active} kind={report.kind}"
     )
 
 

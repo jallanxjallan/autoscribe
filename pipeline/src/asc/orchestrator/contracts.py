@@ -1,8 +1,7 @@
-"""Public contracts for orchestrator routing."""
+"""Public contracts for orchestrator task routing."""
 
 CALL = "call"
 OUTCOME = "outcome"
-
 ORCHESTRATOR_POST_KINDS = frozenset({CALL, OUTCOME})
 
 SCRIVENER_WRITE_CALL = "write_call"

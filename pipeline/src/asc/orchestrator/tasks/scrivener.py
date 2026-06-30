@@ -2,8 +2,10 @@
 
 from __future__ import annotations
 
+from asc.core.identity import generate_identity
 from asc.models.process.task import ScrivenerTask
-from asc.scrivener.maps import CALLS_TABLE, STEPS_TABLE, EXPORTS_TABLE
+from asc.redis.key import RedisKey
+from asc.scrivener.maps import CALLS_TABLE, EXPORTS_TABLE, STEPS_TABLE
 
 from ..contracts import (
     SCRIVENER_CALL_COMPLETED,
@@ -11,7 +13,6 @@ from ..contracts import (
     SCRIVENER_WRITE_CALL,
     SCRIVENER_WRITE_STEP,
 )
-
 
 
 def make_scrivener_write_call(*, data_key: str) -> ScrivenerTask:
@@ -47,10 +48,14 @@ def make_scrivener_call_failed(*, data_key: str) -> ScrivenerTask:
 
 
 def _make_scrivener_task(*, action: str, table: str, data_key: str) -> ScrivenerTask:
+    identity = generate_identity()
     return ScrivenerTask(
+        identity=identity,
         action=action,
         table=table,
         data_key=data_key,
+        expected_key=RedisKey(kind="committed", identity=identity).raw_key,
+        failure_key=RedisKey(kind="failure", identity=identity).raw_key,
     )
 
 

@@ -32,6 +32,8 @@ class Task(RedisMessage):
     identity: str = Field(default_factory=generate_identity)
     package: TaskPackage
     action: str
+    expected_key: str
+    failure_key: str = ""
 
     status: TaskStatus = "queued"
     created_at: int = Field(default_factory=timestamp)
@@ -46,6 +48,18 @@ class Task(RedisMessage):
     @classmethod
     def validate_action(cls, value: object) -> str:
         return redis_key_segment_text(value, "action")
+
+    @field_validator("expected_key", mode="before")
+    @classmethod
+    def validate_expected_key(cls, value: object) -> str:
+        return _required_text(value, "expected_key")
+
+    @field_validator("failure_key", mode="before")
+    @classmethod
+    def validate_failure_key(cls, value: object) -> str:
+        if value is None:
+            return ""
+        return str(value).strip()
 
     @field_validator("claimed_at", mode="before")
     @classmethod

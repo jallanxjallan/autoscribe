@@ -2,22 +2,23 @@
 
 from __future__ import annotations
 
+import json
 from dataclasses import dataclass
 
 from asc.ledger.connect import connect
 from asc.ledger.schema import ensure_ledger_schema
 from asc.ledger.write import table_for, write_task, write_task_with_connection
 from asc.models.process.result import Failure
-from asc.models.process.task import Outcome, ScrivenerTask
-
-
-SUCCESS = "success"
+from asc.models.process.task import ScrivenerTask
+from asc.redis.key import RedisKey
+from asc.redis.primitives import hashes
 
 
 @dataclass(frozen=True, slots=True)
 class _ExecutionReport:
     task_key: str
-    outcome_key: str
+    artifact_key: str
+    failure_key: str | None
     action: str
 
 
@@ -31,23 +32,53 @@ class ScrivenerExecutor:
                 ensure_ledger_schema(conn)
                 write_task_with_connection(conn=conn, task=task)
         except Exception as exc:
-            outcome_key = _save_failure_outcome(
+            failure_key = _save_failure_artifact(
                 task=task,
                 task_key=task_key,
                 exc=exc,
             )
-        else:
-            outcome = Outcome.success(task=task, message=SUCCESS)
-            outcome_key = outcome.save()
+            return _ExecutionReport(
+                task_key=task_key,
+                artifact_key=failure_key,
+                failure_key=failure_key,
+                action=task.action,
+            )
 
+        artifact_key = _save_committed_artifact(task=task, task_key=task_key)
         return _ExecutionReport(
             task_key=task_key,
-            outcome_key=outcome_key,
+            artifact_key=artifact_key,
+            failure_key=None,
             action=task.action,
         )
 
 
-def _save_failure_outcome(
+def _save_committed_artifact(*, task: ScrivenerTask, task_key: str) -> str:
+    expected_key = _required_task_text(task, "expected_key")
+    key = RedisKey(expected_key)
+    if key.kind != "committed":
+        raise ValueError(f"scrivener expected_key must be committed:<identity>: {expected_key!r}")
+
+    hashes.hset(
+        key,
+        mapping=_string_mapping(
+            {
+                "identity": key.identity,
+                "task_identity": task.identity,
+                "task_key": task_key,
+                "package": "scrivener",
+                "action": task.action,
+                "data_key": task.data_key,
+                "table": _task_table(task),
+                "result": "committed",
+                "status": "success",
+            }
+        ),
+    )
+    return key.raw_key
+
+
+def _save_failure_artifact(
     *,
     task: ScrivenerTask,
     task_key: str,
@@ -58,9 +89,22 @@ def _save_failure_outcome(
         task_key=task_key,
         exc=exc,
     )
-    failure_key = failure.save(identity=task.identity)
-    outcome = Outcome.failure(task=task, message=failure_key)
-    return outcome.save()
+    failure_key = _optional_task_text(task, "failure_key") or RedisKey(
+        kind="failure",
+        identity=task.identity,
+    ).raw_key
+    key = RedisKey(failure_key)
+    if key.kind != "failure":
+        raise ValueError(f"scrivener failure_key must be a failure key: {failure_key!r}")
+
+    saved_key = failure.save(identity=key.identity, suffix=key.suffix)
+    if str(saved_key) != key.raw_key:
+        raise ValueError(
+            "scrivener saved unexpected failure key: "
+            f"saved={saved_key!r} expected={key.raw_key!r}"
+        )
+
+    return str(saved_key)
 
 
 def _scrivener_failure(
@@ -70,16 +114,14 @@ def _scrivener_failure(
     exc: Exception,
 ) -> Failure:
     error = str(exc)
-    try:
-        table = table_for(task)
-    except Exception:
-        table = ""
 
     raw_json = {
         "task_key": task_key,
         "task_identity": task.identity,
         "data_key": task.data_key,
-        "table": table,
+        "expected_key": _optional_task_text(task, "expected_key") or "",
+        "failure_key": _optional_task_text(task, "failure_key") or "",
+        "table": _task_table(task),
         "action": task.action,
         "error": error,
         "error_type": type(exc).__name__,
@@ -98,6 +140,28 @@ def _scrivener_failure(
     )
 
 
+def _task_table(task: ScrivenerTask) -> str:
+    try:
+        return table_for(task)
+    except Exception:
+        value = getattr(task, "table", "")
+        return "" if value is None else str(value)
+
+
+def _string_mapping(raw: dict[str, object]) -> dict[str, str]:
+    out: dict[str, str] = {}
+    for key, value in raw.items():
+        if value is None:
+            out[key] = ""
+        elif isinstance(value, str):
+            out[key] = value
+        elif isinstance(value, (dict, list)):
+            out[key] = json.dumps(value, sort_keys=True, separators=(",", ":"))
+        else:
+            out[key] = str(value)
+    return out
+
+
 def _optional_text(value: object) -> str | None:
     if value is None:
         return None
@@ -110,6 +174,19 @@ def _required_text(value: object, field: str) -> str:
     if text is None:
         raise ValueError(f"{field} must be non-empty")
     return text
+
+
+def _required_task_text(task: ScrivenerTask, name: str) -> str:
+    value = _optional_task_text(task, name)
+    if value is None:
+        raise ValueError(f"scrivener task {name} must be non-empty: {task.raw_key}")
+    return value
+
+
+def _optional_task_text(task: ScrivenerTask, name: str) -> str | None:
+    value = getattr(task, name, None)
+    text = "" if value is None else str(value).strip()
+    return text or None
 
 
 __all__ = [

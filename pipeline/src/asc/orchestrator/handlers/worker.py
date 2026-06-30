@@ -6,7 +6,7 @@ from asc.scrivener import inbox as scrivener_inbox
 
 from ..contracts import WORKER_EXECUTE_STEP
 from ..errors import OrchestratorContractError
-from ..tasks import make_scrivener_write_step
+from ..tasks import make_scrivener_write_step, save_task
 from . import call_index
 
 SUCCESS = "success"
@@ -57,8 +57,8 @@ def _validate_worker_result_key(*, status: str, result_key: str) -> None:
 
 def _post_scrivener_write_step(*, data_key: str) -> None:
     task = make_scrivener_write_step(data_key=data_key)
-    task.save()
-    scrivener_inbox.post(str(task.redis_key))
+    task_key = save_task(task)
+    scrivener_inbox.post(task_key)
 
 
 __all__ = ["handle_done"]

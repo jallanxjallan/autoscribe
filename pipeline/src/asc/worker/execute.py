@@ -5,9 +5,10 @@ record. The executable runtime instruction is the Step stored at
 WorkerTask.step_key. The runtime input is the already-selected data record at
 WorkerTask.data_key.
 
-By the time the worker sees a Step, plan step definitions have already been
-flattened into top-level fields. Do not parse args_json or reload/unpack the
-Plan here.
+Workers no longer emit Outcome receipts. The task supplies the success artifact
+key in expected_key. On success, the worker writes that exact artifact. Runtime
+failures are still written as failure:<call_identity>:<step_number> so the
+orchestrator can observe failure artifacts directly.
 """
 
 from __future__ import annotations
@@ -17,7 +18,7 @@ from typing import Any
 
 from asc.models.process.result import Failure, Response, Result, Retrieval, Transform
 from asc.models.process.step import Step
-from asc.models.process.task import Outcome, WorkerTask
+from asc.models.process.task import WorkerTask
 from asc.redis.key import RedisKey
 from asc.worker.engines import load_engine_run, normalize_engine_kind
 from asc.worker.runtime_io import load_runtime_content
@@ -27,8 +28,8 @@ from asc.worker.runtime_io import load_runtime_content
 class WorkerResult:
     processed: int
     task_key: str
-    output_key: str
-    outcome_key: str
+    artifact_key: str
+    failure_key: str | None = None
 
 
 class WorkerExecutor:
@@ -37,34 +38,38 @@ class WorkerExecutor:
         input_content = load_runtime_content(task.data_key)
         engine_run = load_engine_run(step.engine, args=_step_args(step))
         result_class = _result_class_for_step(step)
-
-        identity = _result_identity(task)
-        suffix = _result_suffix(task=task, step=step)
+        expected_key = _required_task_text(task, "expected_key")
 
         try:
             output = engine_run(input_content)
         except Exception as exc:
-            result: Result | Failure = _runtime_failure(
+            failure_key = _save_runtime_failure(
                 task=task,
                 task_key=task_key,
                 step=step,
                 exc=exc,
             )
-        else:
-            result = _result_from_engine_output(
-                output=output,
-                result_class=result_class,
-                identity=identity,
+            return WorkerResult(
+                processed=1,
+                task_key=task_key,
+                artifact_key=failure_key,
+                failure_key=failure_key,
             )
 
-        output_key = result.save(identity=identity, suffix=suffix)
-        outcome_key = _save_outcome(task=task, output_key=output_key, result=result)
+        result = _result_from_engine_output(
+            output=output,
+            result_class=result_class,
+            identity=RedisKey(expected_key).identity,
+        )
+        artifact_key = _save_result_at_expected_key(
+            result=result,
+            expected_key=expected_key,
+        )
 
         return WorkerResult(
             processed=1,
             task_key=task_key,
-            output_key=output_key,
-            outcome_key=outcome_key,
+            artifact_key=artifact_key,
         )
 
 
@@ -127,6 +132,59 @@ def _payload_from_output(output: object) -> dict[str, object]:
     }
 
 
+def _save_result_at_expected_key(
+    *,
+    result: Result | Failure,
+    expected_key: str,
+) -> str:
+    expected = RedisKey(expected_key)
+    if expected.kind != _result_kind(result):
+        raise ValueError(
+            "worker result kind does not match task expected_key: "
+            f"result_kind={_result_kind(result)!r} expected_key={expected.raw_key!r}"
+        )
+
+    saved_key = result.save(identity=expected.identity, suffix=expected.suffix)
+    if str(saved_key) != expected.raw_key:
+        raise ValueError(
+            "worker saved unexpected artifact key: "
+            f"saved={saved_key!r} expected={expected.raw_key!r}"
+        )
+
+    return str(saved_key)
+
+
+def _save_runtime_failure(
+    *,
+    task: WorkerTask,
+    task_key: str,
+    step: Step,
+    exc: Exception,
+) -> str:
+    failure = _runtime_failure(
+        task=task,
+        task_key=task_key,
+        step=step,
+        exc=exc,
+    )
+    failure_key = _optional_task_text(task, "failure_key") or _default_failure_key(
+        task=task,
+        step=step,
+    )
+    expected = RedisKey(failure_key)
+    if expected.kind != "failure":
+        raise ValueError(f"worker failure_key must be a failure key: {failure_key!r}")
+
+    saved_key = failure.save(identity=expected.identity, suffix=expected.suffix)
+    if str(saved_key) != expected.raw_key:
+        raise ValueError(
+            "worker saved unexpected failure key: "
+            f"saved={saved_key!r} expected={expected.raw_key!r}"
+        )
+
+    return str(saved_key)
+
+
 def _runtime_failure(
     *,
     task: WorkerTask,
@@ -141,6 +199,8 @@ def _runtime_failure(
         "task_identity": task.identity,
         "data_key": task.data_key,
         "step_key": task.step_key,
+        "expected_key": _optional_task_text(task, "expected_key") or "",
+        "failure_key": _optional_task_text(task, "failure_key") or "",
         "step_number": step_number,
         "engine": step.engine,
         "error": str(exc),
@@ -150,7 +210,7 @@ def _runtime_failure(
 
     return Failure.model_validate(
         {
-            "identity": _result_identity(task),
+            "identity": RedisKey(task.data_key).identity,
             "failure_type": "runtime",
             "content": str(exc),
             "failure_reason": type(exc).__name__,
@@ -160,22 +220,16 @@ def _runtime_failure(
     )
 
 
-def _save_outcome(
-    *,
-    task: WorkerTask,
-    output_key: str,
-    result: Result | Failure,
-) -> str:
+def _result_kind(result: Result | Failure) -> str:
     if isinstance(result, Failure):
-        outcome = Outcome.failure(task=task, message=output_key)
-    else:
-        outcome = Outcome.success(task=task, message=output_key)
-
-    return outcome.save()
-
-
-def _result_identity(task: WorkerTask) -> str:
-    return RedisKey(task.data_key).identity
+        return "failure"
+    if isinstance(result, Response):
+        return "response"
+    if isinstance(result, Transform):
+        return "transform"
+    if isinstance(result, Retrieval):
+        return "retrieval"
+    raise TypeError(f"unsupported worker result type: {type(result).__name__}")
 
 
 def _result_suffix(*, task: WorkerTask, step: Step) -> str:
@@ -191,12 +245,33 @@ def _result_suffix(*, task: WorkerTask, step: Step) -> str:
     return str(suffix)
 
 
+def _default_failure_key(*, task: WorkerTask, step: Step) -> str:
+    return RedisKey(
+        kind="failure",
+        identity=RedisKey(task.data_key).identity,
+        suffix=_result_suffix(task=task, step=step),
+    ).raw_key
+
+
 def _step_args(step: Step) -> dict[str, Any]:
     return {
         name: value
         for name, value in step.model_dump(mode="python").items()
         if value not in (None, "")
     }
+
+
+def _required_task_text(task: WorkerTask, name: str) -> str:
+    value = _optional_task_text(task, name)
+    if value is None:
+        raise ValueError(f"worker task {name} must be non-empty: {task.raw_key}")
+    return value
+
+
+def _optional_task_text(task: WorkerTask, name: str) -> str | None:
+    value = getattr(task, name, None)
+    text = "" if value is None else str(value).strip()
+    return text or None
 
 
 __all__ = ["WorkerExecutor", "WorkerResult"]

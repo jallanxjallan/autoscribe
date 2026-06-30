@@ -1,81 +1,96 @@
-"""Call-index helpers used by orchestration decision handlers."""
+"""Call-index helpers used by the active-zset orchestrator."""
 
 from asc.redis.key import RedisKey
 from asc.state.calls import CallIndex
 
 from ..errors import OrchestratorContractError
 
+RESULT_KINDS = {"response", "transform", "retrieval", "failure"}
+DATA_KINDS = {"call", *RESULT_KINDS}
+TASK_KIND = "task"
+STEP_KIND = "step"
+COMMITTED_KIND = "committed"
 
-def for_data_key(data_key: str) -> CallIndex:
-    key = RedisKey(required_text(data_key, "task.data_key"))
-    if key.kind not in {"call", "response", "transform", "retrieval", "failure"}:
-        raise OrchestratorContractError(
-            f"task data_key must be call-derived; got {data_key!r}"
-        )
+
+def for_call_key(call_key: str | RedisKey) -> CallIndex:
+    key = RedisKey(str(call_key))
+    if key.kind != "call":
+        raise OrchestratorContractError(f"active member must be a call key: {call_key!r}")
     return CallIndex.from_identity(key.identity)
 
 
-def call_key(call_index: CallIndex) -> str:
-    value = call_index.slots().get(0) or call_index.slots().get("0")
-    return required_text(value, "call_index[0]")
+def slots(call_index: CallIndex) -> dict[int, str]:
+    return {
+        int(slot): str(value).strip()
+        for slot, value in call_index.slots().items()
+        if str(value).strip()
+    }
 
 
-def first_step_key(call_index: CallIndex) -> str | None:
-    return next_step_key_after(call_index, 0)
+def get_slot(call_index: CallIndex, slot: int) -> str:
+    value = call_index.slots().get(slot) or call_index.slots().get(str(slot))
+    return required_text(value, f"call_index[{slot}]")
 
 
-def next_step_key_after(call_index: CallIndex, current_slot: int) -> str | None:
-    for slot, key in sorted(call_index.slots().items(), key=lambda item: int(item[0])):
-        slot_number = int(slot)
-        if slot_number <= current_slot:
+def set_slot(call_index: CallIndex, slot: int, key: str | RedisKey) -> None:
+    call_index.set_slot(int(slot), str(key).strip())
+
+
+def first_process_slot(call_index: CallIndex) -> tuple[int, str] | None:
+    for slot, value in sorted(slots(call_index).items()):
+        if slot == 0:
             continue
-        text = str(key).strip()
-        if text and RedisKey(text).kind == "step":
-            return text
+        kind = RedisKey(value).kind
+        if kind in {STEP_KIND, TASK_KIND, *RESULT_KINDS}:
+            return slot, value
     return None
 
 
-def latest_data_key(call_index: CallIndex) -> str:
-    latest_slot = -1
-    latest_key = ""
-    for slot, key in call_index.slots().items():
-        text = str(key).strip()
-        if not text:
-            continue
-        if RedisKey(text).kind == "step":
-            continue
-        slot_number = int(slot)
-        if slot_number > latest_slot:
-            latest_slot = slot_number
-            latest_key = text
+def next_step_slot(call_index: CallIndex, current_slot: int) -> tuple[int, str] | None:
+    next_slot = current_slot + 1
+    value = call_index.slots().get(next_slot) or call_index.slots().get(str(next_slot))
+    if value is None or str(value).strip() == "":
+        return None
 
-    return required_text(latest_key, "call_index latest data key")
-
-
-def set_result_slot(call_index: CallIndex, *, step_number: int, result_key: str) -> None:
-    if step_number < 1:
+    text = str(value).strip()
+    if RedisKey(text).kind != STEP_KIND:
         raise OrchestratorContractError(
-            f"worker step slot must be positive; got {step_number!r}"
+            f"call_index[{next_slot}] must be a step key or absent; got {text!r}"
         )
 
-    result_key = required_text(result_key, "worker result key")
-    current = call_index.slots().get(step_number) or call_index.slots().get(str(step_number))
-    if current and RedisKey(str(current)).kind != "step":
+    validate_step_slot(step_key=text, slot=next_slot)
+    return next_slot, text
+
+
+def data_key_for_step(*, call_identity: str, call_index: CallIndex, slot: int) -> str:
+    if slot < 1:
+        raise OrchestratorContractError(f"step slot must be >= 1; got {slot}")
+
+    if slot == 1:
+        return RedisKey(kind="call", identity=call_identity, suffix="record").raw_key
+
+    previous_slot = slot - 1
+    previous_key = get_slot(call_index, previous_slot)
+    previous_kind = RedisKey(previous_key).kind
+    if previous_kind not in RESULT_KINDS:
         raise OrchestratorContractError(
-            f"call index slot {step_number} is already filled: {current!r}"
+            f"call_index[{previous_slot}] must be a result data key before step {slot}; "
+            f"got {previous_key!r}"
         )
 
-    call_index.set_slot(step_number, result_key)
+    return previous_key
 
 
-def slot_for_key(call_index: CallIndex, expected_key: str | RedisKey) -> int:
-    expected = str(expected_key).strip()
-    for slot, key in call_index.slots().items():
-        if str(key).strip() == expected:
-            return int(slot)
-    raise OrchestratorContractError(
-        f"call index does not contain key {expected!r}: {call_index.redis_key}"
-    )
+def validate_step_slot(*, step_key: str, slot: int) -> None:
+    key = RedisKey(step_key)
+    if key.kind != STEP_KIND:
+        raise OrchestratorContractError(f"call_index[{slot}] must be a step key; got {step_key!r}")
+
+    suffix = required_text(key.suffix, f"step key suffix for call_index[{slot}]")
+    if suffix != str(slot):
+        raise OrchestratorContractError(
+            f"step suffix must match call index slot: slot {slot}, key {step_key!r}"
+        )
 
 
 def required_text(value: object, field_name: str) -> str:
@@ -86,12 +101,18 @@ def required_text(value: object, field_name: str) -> str:
 
 
 __all__ = [
-    "call_key",
-    "first_step_key",
-    "for_data_key",
-    "latest_data_key",
-    "next_step_key_after",
+    "COMMITTED_KIND",
+    "DATA_KINDS",
+    "RESULT_KINDS",
+    "STEP_KIND",
+    "TASK_KIND",
+    "first_process_slot",
+    "for_call_key",
+    "get_slot",
+    "data_key_for_step",
+    "next_step_slot",
+    "validate_step_slot",
     "required_text",
-    "set_result_slot",
-    "slot_for_key",
+    "set_slot",
+    "slots",
 ]
