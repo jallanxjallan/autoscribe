@@ -1,7 +1,6 @@
 from typing import Callable, ClassVar, Literal, overload
 
 from asc.redis.key import RedisKey
-from asc.redis.primitives import hashes, keys
 
 
 class RedisIndex:
@@ -41,19 +40,19 @@ class RedisIndex:
         return self.raw_key
 
     def exists(self) -> bool:
-        return keys.exists(self.key)
+        return self.key.exists()
 
     def delete(self) -> int:
-        return keys.delete(self.key)
+        return self.key.delete()
 
     def type(self) -> str:
-        return keys.type(self.key)
+        return self.key.type()
 
     def ttl(self) -> int:
-        return keys.ttl(self.key)
+        return self.key.ttl()
 
     def expire(self, seconds: int) -> bool:
-        return keys.expire(self.key, seconds)
+        return self.key.expire(seconds)
 
 
 class FixedRedisIndex(RedisIndex):
@@ -63,25 +62,25 @@ class FixedRedisIndex(RedisIndex):
 class FixedRedisHashIndex(FixedRedisIndex):
     def hget(self, field: str) -> str | None:
         field = self._require_text(field, field_name="field")
-        return hashes.hget(self.key, field)
+        return self.key.hget(field)
 
     def hset(self, *, field: str, value: str) -> int:
         field = self._require_text(field, field_name="field")
         value = self._require_text(value, field_name="value")
-        return hashes.hset(self.key, field=field, value=value)
+        return self.key.hset(field, value)
 
     def hdel(self, field: str) -> int:
         field = self._require_text(field, field_name="field")
-        return hashes.hdel(self.key, field)
+        return self.key.hdel(field)
 
     def hgetall(self) -> dict[str, str]:
-        return hashes.hgetall(self.key)
+        return self.key.hgetall()
 
     def hkeys(self) -> list[str]:
-        return hashes.hkeys(self.key)
+        return self.key.hkeys()
 
     def hlen(self) -> int:
-        return hashes.hlen(self.key)
+        return self.key.hlen()
 
     @overload
     def resolve_pointer(

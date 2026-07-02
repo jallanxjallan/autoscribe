@@ -1,11 +1,183 @@
-from typing import ClassVar
+from typing import Any, ClassVar
 
 
 SEP = ":"
 MIN_PARTS = 2
 
 
-class RedisKey:
+class RedisKeyCommandsMixin:
+    def exists(self) -> bool:
+        from asc.redis.primitives import keys
+
+        return keys.exists(self)
+
+    def delete(self) -> int:
+        from asc.redis.primitives import keys
+
+        return keys.delete(self)
+
+    def type(self) -> str:
+        from asc.redis.primitives import keys
+
+        return keys.type(self)
+
+    def ttl(self) -> int:
+        from asc.redis.primitives import keys
+
+        return keys.ttl(self)
+
+    def expire(self, seconds: int) -> bool:
+        from asc.redis.primitives import keys
+
+        return keys.expire(self, seconds)
+
+
+class RedisStringCommandsMixin:
+    def get(self) -> str | None:
+        from asc.redis.primitives import strings
+
+        return strings.get(self)
+
+    def set(self, value: str) -> None:
+        from asc.redis.primitives import strings
+
+        strings.set(self, value)
+
+
+class RedisHashCommandsMixin:
+    def hget(self, field: str) -> str | None:
+        from asc.redis.primitives import hashes
+
+        return hashes.hget(self, field)
+
+    def hgetall(self) -> dict[str, str]:
+        from asc.redis.primitives import hashes
+
+        return hashes.hgetall(self)
+
+    def hkeys(self) -> list[str]:
+        from asc.redis.primitives import hashes
+
+        return hashes.hkeys(self)
+
+    def hlen(self) -> int:
+        from asc.redis.primitives import hashes
+
+        return hashes.hlen(self)
+
+    def hset(
+        self,
+        field: str | None = None,
+        value: str | None = None,
+        *,
+        mapping: dict[str, str] | None = None,
+    ) -> int:
+        from asc.redis.primitives import hashes
+
+        return hashes.hset(self, field=field, value=value, mapping=mapping)
+
+    def hdel(self, *fields: str) -> int:
+        from asc.redis.primitives import hashes
+
+        return hashes.hdel(self, *fields)
+
+
+class RedisListCommandsMixin:
+    def rpush(self, *values: str) -> int:
+        from asc.redis.primitives import lists
+
+        return lists.rpush(self, *values)
+
+    def lpush(self, *values: str) -> int:
+        from asc.redis.primitives import lists
+
+        return lists.lpush(self, *values)
+
+    def lpop(self) -> str | None:
+        from asc.redis.primitives import lists
+
+        return lists.lpop(self)
+
+    def blpop(self, *, timeout: int = 0) -> tuple[str, str] | None:
+        from asc.redis.primitives import lists
+
+        return lists.blpop(self, timeout=timeout)
+
+    def lindex(self, index: int) -> str | None:
+        from asc.redis.primitives import lists
+
+        return lists.lindex(self, index)
+
+    def llen(self) -> int:
+        from asc.redis.primitives import lists
+
+        return lists.llen(self)
+
+
+class RedisSortedSetCommandsMixin:
+    def zadd(self, mapping: dict[str, float]) -> int:
+        from asc.redis.primitives import zsets
+
+        return zsets.zadd(self, mapping)
+
+    def zcard(self) -> int:
+        from asc.redis.primitives import zsets
+
+        return zsets.zcard(self)
+
+    def zrange(self, start: int, stop: int) -> list[str]:
+        from asc.redis.primitives import zsets
+
+        return zsets.zrange(self, start, stop)
+
+    def zpopmin(self, count: int = 1) -> list[tuple[str, float]]:
+        from asc.redis.primitives import zsets
+
+        return zsets.zpopmin(self, count)
+
+    def zrangebyscore(
+        self,
+        min_score: float,
+        max_score: float,
+        **kwargs: Any,
+    ) -> list[Any]:
+        from asc.redis.primitives import zsets
+
+        return zsets.zrangebyscore(self, min_score, max_score, **kwargs)
+
+    def zscore(self, member: str) -> float | None:
+        from asc.redis.primitives import zsets
+
+        return zsets.zscore(self, member)
+
+    def zrem(self, *members: str) -> int:
+        from asc.redis.primitives import zsets
+
+        return zsets.zrem(self, *members)
+
+    def zrevrange(self, start: int, stop: int) -> list[str]:
+        from asc.redis.primitives import zsets
+
+        return zsets.zrevrange(self, start, stop)
+
+    def zrevrangebyscore(
+        self,
+        max_score: float,
+        min_score: float,
+        **kwargs: Any,
+    ) -> list[Any]:
+        from asc.redis.primitives import zsets
+
+        return zsets.zrevrangebyscore(self, max_score, min_score, **kwargs)
+
+
+class RedisKey(
+    RedisKeyCommandsMixin,
+    RedisStringCommandsMixin,
+    RedisHashCommandsMixin,
+    RedisListCommandsMixin,
+    RedisSortedSetCommandsMixin,
+):
     """Validated AutoScribe Redis key value object.
 
     Canonical shape:
@@ -149,4 +321,13 @@ class RedisKey:
         return hash(self.raw_key)
 
 
-__all__ = ["MIN_PARTS", "SEP", "RedisKey"]
+__all__ = [
+    "MIN_PARTS",
+    "SEP",
+    "RedisHashCommandsMixin",
+    "RedisKey",
+    "RedisKeyCommandsMixin",
+    "RedisListCommandsMixin",
+    "RedisSortedSetCommandsMixin",
+    "RedisStringCommandsMixin",
+]

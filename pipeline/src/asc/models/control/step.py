@@ -1,8 +1,8 @@
-"""Short-lived executable step records."""
+"""Reusable executable step control records."""
 
 from __future__ import annotations
 
-from typing import Any, ClassVar, Self
+from typing import Any, ClassVar
 
 from pydantic import ConfigDict, Field, field_serializer
 
@@ -14,9 +14,8 @@ from asc.redis.message_base import RedisMessage
 class Step(RedisMessage):
     """Materialized worker instruction for one plan step.
 
-    A Step is the compiled runtime form of one plan step. It is reusable across
-    calls. Workers receive the Step key plus whatever call/data key is carried
-    by the WorkerTask.
+    Step is a reusable control asset derived from a Plan. Workers receive the
+    Step key plus whatever call/data key is carried by the WorkerTask.
 
     Step keys use the Plan identity plus the numeric step suffix:
 
@@ -36,7 +35,6 @@ class Step(RedisMessage):
     step_number: int
     engine: str
     created_at: int = Field(default_factory=timestamp)
-
 
     def model_post_init(self, __context: Any) -> None:
         Step.suffix = str(self.step_number)

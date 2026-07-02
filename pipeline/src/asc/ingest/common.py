@@ -2,27 +2,27 @@ from dataclasses import dataclass, field
 
 
 @dataclass(frozen=True, slots=True)
-class UploadedItem:
-    target: str
+class IngestedItem:
+    record_type: str
     slug: str
     key: str
 
 
 @dataclass(frozen=True, slots=True)
-class SkippedUpload:
-    target: str
+class SkippedIngest:
+    record_type: str
     location: str
     identifier: str
     error: str
 
 
 @dataclass(frozen=True, slots=True)
-class UploadReport:
+class IngestReport:
     record_count: int = 0
     skipped_count: int = 0
     by_type: dict[str, int] = field(default_factory=dict)
-    records: tuple[UploadedItem, ...] = ()
-    skipped: tuple[SkippedUpload, ...] = ()
+    records: tuple[IngestedItem, ...] = ()
+    skipped: tuple[SkippedIngest, ...] = ()
 
 
-__all__ = ["SkippedUpload", "UploadedItem", "UploadReport"]
+__all__ = ["IngestReport", "IngestedItem", "SkippedIngest"]

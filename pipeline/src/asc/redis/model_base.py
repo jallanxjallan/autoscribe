@@ -4,7 +4,6 @@ from typing import Any, ClassVar, TypeVar
 from pydantic import BaseModel
 
 from asc.redis.key import RedisKey
-from asc.redis.primitives import hashes, keys
 
 
 T = TypeVar("T", bound="RedisModel")
@@ -39,7 +38,7 @@ class RedisModel(BaseModel):
     @classmethod
     def load(cls: type[T], key: str | RedisKey) -> T:
         redis_key = cls.redis_key_from_raw(key)
-        raw = hashes.hgetall(redis_key)
+        raw = redis_key.hgetall()
         if not raw:
             raise RuntimeError(f"Redis hash record missing: {redis_key.raw_key}")
         return cls.load_redis(raw)
@@ -87,11 +86,15 @@ class RedisModel(BaseModel):
         kind: str | None = None,
         identity: str | None = None,
         suffix: str | int | None | object = _UNSET,
+        ttl: int | None = None,
     ) -> str:
         if key is not None and (
             kind is not None or identity is not None or suffix is not _UNSET
         ):
             raise ValueError("save() accepts either a raw key or key parts, not both")
+
+        if ttl is not None and ttl < 1:
+            raise ValueError("save() ttl must be a positive integer")
 
         redis_key = (
             self.__class__.key_for_identity(
@@ -102,7 +105,9 @@ class RedisModel(BaseModel):
             if key is None
             else self.__class__.redis_key_from_raw(key)
         )
-        hashes.hset(redis_key, mapping=self.dump_json())
+        redis_key.hset(mapping=self.dump_json())
+        if ttl is not None:
+            redis_key.expire(ttl)
         return redis_key.raw_key
 
     def overwrite(
@@ -112,25 +117,26 @@ class RedisModel(BaseModel):
         kind: str | None = None,
         identity: str | None = None,
         suffix: str | int | None | object = _UNSET,
+        ttl: int | None = None,
     ) -> str:
-        return self.save(key, kind=kind, identity=identity, suffix=suffix)
+        return self.save(key, kind=kind, identity=identity, suffix=suffix, ttl=ttl)
 
     def exists(self) -> bool:
-        return keys.exists(self.redis_key)
+        return self.redis_key.exists()
 
     def delete(self) -> int:
-        return keys.delete(self.redis_key)
+        return self.redis_key.delete()
 
     def type(self) -> str:
-        return keys.type(self.redis_key)
+        return self.redis_key.type()
 
     def ttl(self) -> int:
-        return keys.ttl(self.redis_key)
+        return self.redis_key.ttl()
 
     def expire(self, seconds: int) -> bool:
         if seconds < 1:
             raise ValueError("expire() requires positive int seconds")
-        return keys.expire(self.redis_key, seconds)
+        return self.redis_key.expire(seconds)
 
 
 __all__ = ["RedisModel"]

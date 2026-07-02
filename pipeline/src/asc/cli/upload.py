@@ -7,7 +7,7 @@ import typer
 app = typer.Typer(
     no_args_is_help=True,
     add_completion=False,
-    help="Upload runtime, control, and future asset records from streamed NDJSON.",
+    help="Ingest runtime, control, and content records from streamed NDJSON.",
 )
 
 
@@ -18,30 +18,26 @@ def _report_value(report: Any, name: str) -> int:
     return int(value)
 
 
-def _upload_stream(target: str, source: Iterable[str], *, error_stream: TextIO = sys.stderr) -> Any:
-    """Load the consolidated uploader only when an upload command is invoked.
+def _ingest_stream(target: str, source: Iterable[str], *, error_stream: TextIO = sys.stderr) -> Any:
+    """Load the ingest package only when an ingest command is invoked."""
 
-    This keeps `asc --help` and unrelated commands resilient while the upload
-    package is being refactored independently.
-    """
+    from asc.ingest.stream import ingest_stream
 
-    from asc.upload.upload_streams import upload_stream
-
-    return upload_stream(source, target=target, error_stream=error_stream)
+    return ingest_stream(source, target=target, error_stream=error_stream)
 
 
-def _run_upload(target: str) -> None:
+def _run_ingest(target: str) -> None:
     try:
-        report = _upload_stream(target, sys.stdin)
+        report = _ingest_stream(target, sys.stdin)
     except NotImplementedError as exc:
-        typer.echo(f"[upload:{target}] not implemented: {exc}", err=True)
+        typer.echo(f"[ingest:{target}] not implemented: {exc}", err=True)
         raise typer.Exit(code=1) from exc
     except Exception as exc:
-        typer.echo(f"[upload:{target}] error: {exc}", err=True)
+        typer.echo(f"[ingest:{target}] error: {exc}", err=True)
         raise typer.Exit(code=1) from exc
 
     typer.echo(
-        f"[upload:{target}] uploaded: "
+        f"[ingest:{target}] ingested: "
         f"records={_report_value(report, 'record_count')} "
         f"skipped={_report_value(report, 'skipped_count')}",
         err=True,
@@ -49,31 +45,38 @@ def _run_upload(target: str) -> None:
 
 
 @app.command("instructions")
-def upload_instructions() -> None:
-    """Upload instruction records from streamed NDJSON."""
+def ingest_instructions() -> None:
+    """Ingest instruction records from streamed NDJSON."""
 
-    _run_upload("instructions")
+    _run_ingest("instructions")
+
+
+@app.command("content")
+def ingest_content() -> None:
+    """Ingest content records from streamed NDJSON."""
+
+    _run_ingest("content")
 
 
 @app.command("calls")
-def upload_calls() -> None:
-    """Upload call records from streamed NDJSON."""
+def ingest_calls() -> None:
+    """Compatibility alias for content records."""
 
-    _run_upload("calls")
+    _run_ingest("content")
 
 
 @app.command("plans")
-def upload_plans() -> None:
-    """Upload plan records from streamed NDJSON."""
+def ingest_plans() -> None:
+    """Ingest plan records from streamed NDJSON."""
 
-    _run_upload("plans")
+    _run_ingest("plans")
 
 
-@app.command("assets")
-def upload_assets() -> None:
-    """Reserved future upload target for asset records."""
+@app.command("records")
+def ingest_any_records() -> None:
+    """Ingest mixed NDJSON records and route each record by record_type."""
 
-    _run_upload("assets")
+    _run_ingest("all")
 
 
 if __name__ == "__main__":

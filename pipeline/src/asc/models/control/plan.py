@@ -1,13 +1,12 @@
-# plan.py
-
 import json
 from collections.abc import Mapping
-from typing import Any, ClassVar, Literal
+from typing import Any, ClassVar
 
 from pydantic import ConfigDict, Field, field_serializer, field_validator, model_validator
 
 from asc.core.identity import generate_identity
 from asc.models.helpers.upload import OptionalRecordContent, RecordIdentity, RedisIdentity
+from asc.redis.key import RedisKey
 from asc.redis.model_base import RedisModel
 
 
@@ -33,6 +32,7 @@ class Plan(RedisModel):
     """Uploaded reusable plan control asset."""
 
     kind: ClassVar[str] = "plan"
+    suffix: ClassVar[str] = "record"
 
     model_config = ConfigDict(extra="ignore")
 
@@ -56,37 +56,17 @@ class Plan(RedisModel):
 
         data = dict(value)
 
-        # Upload envelope:
-        # {
-        #   "record_type": "plan",
-        #   "record_identity": "plan.foo",
-        #   "record_content": "{...serialized plan json...}"
-        # }
         if "record_content" in data:
             raw_content = data.get("record_content")
-
-            if isinstance(raw_content, str) and raw_content.strip():
-                payload = json.loads(raw_content)
-            else:
-                payload = raw_content
-
+            payload = json.loads(raw_content) if isinstance(raw_content, str) and raw_content.strip() else raw_content
             if not isinstance(payload, Mapping):
                 raise ValueError("plan record_content must decode to an object")
 
             payload_data = dict(payload)
-
-            # Envelope identity is the public slug. Redis identity must remain fresh.
             if "record_identity" in data:
                 payload_data["slug"] = data["record_identity"]
-
-            # Preserve content as the raw serialized payload for audit/debug.
-            payload_data["content"] = (
-                raw_content if isinstance(raw_content, str) else _json_text(raw_content, default="{}")
-            )
-
-            # Never trust client-emitted Redis identity on upload.
+            payload_data["content"] = raw_content if isinstance(raw_content, str) else _json_text(raw_content, default="{}")
             payload_data.pop("identity", None)
-
             data = payload_data
 
         if "record_identity" in data and "slug" not in data:
@@ -114,7 +94,6 @@ class Plan(RedisModel):
             data["steps"] = data["steps_json"]
 
         metadata: dict[str, Any] = {}
-
         existing_metadata = data.get("metadata_json")
         if isinstance(existing_metadata, str) and existing_metadata.strip():
             try:
@@ -131,7 +110,6 @@ class Plan(RedisModel):
                 metadata[key] = data.pop(key)
 
         data["metadata_json"] = metadata
-
         return data
 
     @field_validator("instructions", mode="before")
@@ -153,13 +131,11 @@ class Plan(RedisModel):
     @classmethod
     def validate_steps(cls, value: object) -> list[dict[str, Any]]:
         raw_steps = _json_list(value, field_name="steps")
-
         steps: list[dict[str, Any]] = []
         for index, item in enumerate(raw_steps, start=1):
             if not isinstance(item, Mapping):
                 raise ValueError(f"plan steps[{index}] must be an object")
             steps.append(dict(item))
-
         return steps
 
     @field_validator("steps_json", mode="before")
@@ -177,6 +153,18 @@ class Plan(RedisModel):
         return value
 
     @property
+    def key(self) -> RedisKey:
+        return self.redis_key
+
+    @property
+    def record_key(self) -> str:
+        return f"plan:{self.identity}:record"
+
+    @property
+    def index_key(self) -> str:
+        return f"plan:{self.identity}:index"
+
+    @property
     def record_identity(self) -> str:
         return self.slug
 
@@ -191,41 +179,28 @@ class Plan(RedisModel):
     def step_definition(self, step_number: int) -> dict[str, Any]:
         if step_number < 1:
             raise IndexError(f"step_number must be >= 1, got {step_number}")
-
         try:
-            step = self.steps[step_number - 1]
+            return dict(self.steps[step_number - 1])
         except IndexError as exc:
-            raise IndexError(
-                f"plan {self.slug} has no step {step_number}; "
-                f"total_steps={self.total_steps}"
-            ) from exc
-
-        return dict(step)
+            raise IndexError(f"plan {self.slug} has no step {step_number}; total_steps={self.total_steps}") from exc
 
     def step_args(self, step_number: int) -> dict[str, Any]:
-        step = self.step_definition(step_number)
-        args = step.get("args", {})
+        args = self.step_definition(step_number).get("args", {})
         if args is None:
             return {}
         if not isinstance(args, Mapping):
             raise ValueError(f"plan step {step_number} args must be an object")
-
         return dict(args)
 
     def step_engine(self, step_number: int) -> str:
         step = self.step_definition(step_number)
         args = self.step_args(step_number)
 
-        engine = step.get("engine")
-        if engine is None:
-            engine = args.get("engine")
-
+        engine = step.get("engine", args.get("engine"))
         if isinstance(engine, Mapping):
             engine = engine.get("key") or engine.get("module")
-
         if not isinstance(engine, str) or not engine.strip():
             raise ValueError(f"plan step {step_number} must provide an engine")
-
         return engine.strip()
 
     def plan_dict(self) -> dict[str, Any]:
@@ -239,12 +214,11 @@ class Plan(RedisModel):
         metadata = json.loads(self.metadata_json or "{}")
         if isinstance(metadata, dict):
             data.update(metadata)
-
         return data
 
-    def dump_redis(self) -> dict[str, str]:
+    def dump_json(self) -> dict[str, str]:
         return {
-            "type": self.type,
+            "type": self.kind,
             "identity": self.identity,
             "slug": self.slug,
             "content": self.content,
@@ -254,4 +228,7 @@ class Plan(RedisModel):
         }
 
 
-__all__ = ["PlanRecord"]
+PlanRecord = Plan
+
+
+__all__ = ["Plan", "PlanRecord"]
