@@ -9,7 +9,6 @@ RESULT_KINDS = {"response", "transform", "retrieval", "failure"}
 DATA_KINDS = {"call", *RESULT_KINDS}
 TASK_KIND = "task"
 STEP_KIND = "step"
-COMMITTED_KIND = "committed"
 
 
 def for_call_key(call_key: str | RedisKey) -> CallIndex:
@@ -36,14 +35,63 @@ def set_slot(call_index: CallIndex, slot: int, key: str | RedisKey) -> None:
     call_index.set_slot(int(slot), str(key).strip())
 
 
-def first_process_slot(call_index: CallIndex) -> tuple[int, str] | None:
-    for slot, value in sorted(slots(call_index).items()):
+
+def has_started(call_index: CallIndex) -> bool:
+    for slot, value in slots(call_index).items():
         if slot == 0:
             continue
+        if RedisKey(value).kind != STEP_KIND:
+            return True
+    return False
+
+def first_process_slot(call_index: CallIndex) -> tuple[int, str] | None:
+    """Return the next slot that can advance the call.
+
+    Completed result slots stay in the index as data for later steps. Once a
+    later slot has been dispatched, those earlier result slots are no longer
+    actionable and must be skipped; otherwise the orchestrator re-reads step 1,
+    sees step 2 is already a task/result, and yells at a perfectly healthy
+    call.
+    """
+
+    current_slots = slots(call_index)
+
+    for slot, value in sorted(current_slots.items()):
+        if slot == 0:
+            continue
+
         kind = RedisKey(value).kind
-        if kind in {STEP_KIND, TASK_KIND, *RESULT_KINDS}:
+
+        if kind in {STEP_KIND, TASK_KIND}:
             return slot, value
+
+        if kind in RESULT_KINDS:
+            if _result_slot_can_advance(current_slots, slot):
+                return slot, value
+            continue
+
+        raise OrchestratorContractError(
+            f"unexpected call index value at slot {slot}: {value!r}"
+        )
+
     return None
+
+
+def _result_slot_can_advance(current_slots: dict[int, str], slot: int) -> bool:
+    next_value = current_slots.get(slot + 1)
+    if next_value is None:
+        return True
+
+    next_kind = RedisKey(next_value).kind
+    if next_kind == STEP_KIND:
+        return True
+
+    if next_kind in {TASK_KIND, *RESULT_KINDS}:
+        return False
+
+    raise OrchestratorContractError(
+        f"unexpected call index value after result slot {slot}: {next_value!r}"
+    )
 
 
 def next_step_slot(call_index: CallIndex, current_slot: int) -> tuple[int, str] | None:
@@ -101,7 +149,6 @@ def required_text(value: object, field_name: str) -> str:
 
 
 __all__ = [
-    "COMMITTED_KIND",
     "DATA_KINDS",
     "RESULT_KINDS",
     "STEP_KIND",
@@ -109,6 +156,7 @@ __all__ = [
     "first_process_slot",
     "for_call_key",
     "get_slot",
+    "has_started",
     "data_key_for_step",
     "next_step_slot",
     "validate_step_slot",

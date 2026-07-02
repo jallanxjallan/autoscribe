@@ -8,7 +8,7 @@ from typing import Any
 
 from asc.ledger.connect import LedgerConnection, connect
 from asc.ledger.schema import ensure_ledger_schema
-from asc.ledger.writers.common import (
+from asc.scrivener.writers.common import (
     insert_row,
     load_task_record,
     model_json,

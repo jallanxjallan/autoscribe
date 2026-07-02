@@ -1,9 +1,9 @@
 """Shared Scrivener writer plumbing.
 
-Scrivener receives task.source_key from the task model because that is the
-cross-package contract. Inside this package, the key names a runtime record:
-call, result, or failure. Keep domain names local and explicit so ledger fields
-are not confused with Redis task attributes.
+Scrivener receives task.data_key from the task model. The key names the
+runtime record to write: call, response, transform, retrieval, or failure. Keep
+domain names local and explicit so ledger fields are not confused with Redis
+task attributes.
 
 DEBT: the key-kind -> model mapping belongs in asc.registries when the runtime
 model/action/table contracts are consolidated.
@@ -20,8 +20,12 @@ from asc.ledger.util import execute_and_commit
 
 MODEL_PATH_BY_KEY_KIND = {
     "call": "asc.models.process.call.CallRecord",
-    "result": "asc.models.process.result.Result",
+    "response": "asc.models.process.result.Response",
+    "transform": "asc.models.process.result.Transform",
+    "retrieval": "asc.models.process.result.Retrieval",
     "failure": "asc.models.process.result.Failure",
+    # Transitional compatibility for older ledgers/results.
+    "result": "asc.models.process.result.Result",
 }
 
 
@@ -41,7 +45,7 @@ def task_action(task: Any) -> str:
 
 
 def task_record_key(task: Any) -> RedisKey:
-    return runtime_key(task.source_key, field="source_key")
+    return runtime_key(task.data_key, field="data_key")
 
 
 def task_record_key_text(task: Any) -> str:
@@ -65,7 +69,7 @@ def optional_domain_identity(obj: object, *names: str) -> str | None:
 
 
 def model_class_for_key(key: object) -> type[Any]:
-    runtime = runtime_key(key, field="source_key")
+    runtime = runtime_key(key, field="data_key")
     try:
         dotted = MODEL_PATH_BY_KEY_KIND[runtime.kind]
     except KeyError as exc:
@@ -80,9 +84,9 @@ def model_class_for_key(key: object) -> type[Any]:
 
 
 def load_record_key(key: object) -> Any:
-    """Load the runtime model named by a ScrivenerTask.source_key."""
+    """Load the runtime model named by a ScrivenerTask.data_key."""
 
-    key_text = require_text(key, "source_key")
+    key_text = require_text(key, "data_key")
     model_class = model_class_for_key(key_text)
     load = getattr(model_class, "load", None)
     if not callable(load):
@@ -91,7 +95,7 @@ def load_record_key(key: object) -> Any:
 
 
 def load_task_record(task: Any) -> Any:
-    return load_record_key(task.source_key)
+    return load_record_key(task.data_key)
 
 
 def model_json(record: Any) -> str:

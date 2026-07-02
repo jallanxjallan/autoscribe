@@ -20,8 +20,8 @@ class ScrivenerRunReport:
     claimed: bool
     task_key: str | None = None
     action: str | None = None
-    artifact_key: str | None = None
-    failure_key: str | None = None
+    table: str | None = None
+    data_key: str | None = None
 
 
 def run_once(
@@ -53,8 +53,8 @@ def run_once(
         claimed=True,
         task_key=result.task_key,
         action=result.action,
-        artifact_key=result.artifact_key,
-        failure_key=result.failure_key,
+        table=result.table,
+        data_key=result.data_key,
     )
 
 
@@ -82,7 +82,7 @@ def main() -> None:
     print(
         f"scrivener claimed={report.claimed} "
         f"task_key={report.task_key} action={report.action} "
-        f"artifact_key={report.artifact_key} failure_key={report.failure_key}"
+        f"table={report.table} data_key={report.data_key}"
     )
 
 

@@ -1,6 +1,6 @@
 ```dataviewjs
 const CONFIG = {
-  tocPath: "Table of Contents.md",
+  tocPath: "", // Optional override. Leave blank to auto-select a root Markdown file.
   tempRoot: "",
   debug: false,
 
@@ -74,7 +74,6 @@ function isExcludedPath(path) {
   });
 }
 
-
 function titleForPage(page, fallback = "") {
   return (
     asText(page?.title) ||
@@ -84,13 +83,76 @@ function titleForPage(page, fallback = "") {
   );
 }
 
-function getTocFile() {
-  const cleanTocPath = normalizePath(CONFIG.tocPath);
+function isVaultRootFile(file) {
+  const cleanPath = normalizePath(file?.path);
+  return cleanPath && !cleanPath.includes("/");
+}
 
-  return app.vault.getMarkdownFiles().find(file =>
-    normalizePath(file.path) === cleanTocPath ||
-    file.name === cleanTocPath
-  ) || null;
+function filenameTokens(file) {
+  return String(file?.basename || "")
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, " ")
+    .trim()
+    .split(/\s+/)
+    .filter(Boolean);
+}
+
+function tocPriorityScore(file) {
+  const basename = String(file?.basename || "").toLowerCase();
+  const tokens = filenameTokens(file);
+  const joined = tokens.join(" ");
+
+  let score = 0;
+
+  if (/^table\s+of\s+contents?$/.test(joined)) score += 100;
+  if (tokens.includes("toc")) score += 90;
+  if (tokens.includes("table")) score += 70;
+  if (tokens.includes("contents")) score += 60;
+  if (tokens.includes("content")) score += 50;
+
+  if (basename.includes("toc")) score += 30;
+  if (basename.includes("table")) score += 20;
+  if (basename.includes("contents")) score += 15;
+  if (basename.includes("content")) score += 10;
+
+  return score;
+}
+
+function getRootMarkdownCandidates() {
+  return app.vault.getMarkdownFiles()
+    .filter(file => isVaultRootFile(file))
+    .filter(file => !isExcludedPath(file.path))
+    .sort((a, b) => {
+      const scoreDiff = tocPriorityScore(b) - tocPriorityScore(a);
+      if (scoreDiff !== 0) return scoreDiff;
+
+      return String(a.name).localeCompare(String(b.name));
+    });
+}
+
+function getTocFile() {
+  const configuredPath = asText(CONFIG.tocPath).trim();
+
+  if (configuredPath) {
+    const cleanTocPath = normalizePath(configuredPath);
+
+    const configuredFile = app.vault.getMarkdownFiles().find(file =>
+      normalizePath(file.path) === cleanTocPath ||
+      file.name === cleanTocPath
+    );
+
+    if (configuredFile) return configuredFile;
+
+    throw new Error(`Configured table/content file not found: ${CONFIG.tocPath}`);
+  }
+
+  const candidates = getRootMarkdownCandidates();
+
+  if (!candidates.length) {
+    throw new Error("No Markdown files found at the vault root.");
+  }
+
+  return candidates[0];
 }
 
 function extractWikiLinks(line) {
@@ -180,7 +242,7 @@ async function buildRowsFromToc() {
   const tocFile = getTocFile();
 
   if (!tocFile) {
-    throw new Error(`Table of Contents file not found: ${CONFIG.tocPath}`);
+    throw new Error("No table/content source file could be selected.");
   }
 
   const tocText = await app.vault.read(tocFile);
@@ -281,6 +343,7 @@ async function buildRowsFromToc() {
   return {
     rows,
     headings,
+    tocFile,
   };
 }
 
@@ -304,7 +367,7 @@ function serializeIndexRow(row) {
 function savedSelectionExtras({ rows }) {
   return {
     ordering: "table-of-contents",
-    toc_path: CONFIG.tocPath,
+    toc_path: SELECTED_TOC_FILE.path,
     displayed_count: rows.length,
   };
 }
@@ -387,7 +450,7 @@ function renderRowsTable(parent, rows, api) {
   const thead = table.createEl("thead");
   const headRow = thead.createEl("tr");
 
-    [
+  [
     "",
     "Title",
     "Class",
@@ -467,6 +530,17 @@ function renderIndexResults(parent, displayedRows, api) {
   }
 }
 
+function renderSelectedTocLink(parent, api) {
+  const sourceWrap = parent.createDiv();
+  sourceWrap.style.display = "flex";
+  sourceWrap.style.alignItems = "center";
+  sourceWrap.style.gap = "0.4em";
+  sourceWrap.style.marginBottom = "0.8em";
+
+  sourceWrap.createEl("span", { text: "Source:" });
+  api.createInternalLink(sourceWrap, SELECTED_TOC_FILE.path, SELECTED_TOC_FILE.basename);
+}
+
 async function saveSelectionManifest(api) {
   await api.saveDataviewSelection({
     operation: "content-index",
@@ -477,7 +551,7 @@ async function saveSelectionManifest(api) {
     selectionKey: "selection_key",
     serializeRow: serializeIndexRow,
     options: {
-      toc_path: CONFIG.tocPath,
+      toc_path: SELECTED_TOC_FILE.path,
       ordering: "table-of-contents",
       filters: ["class", "status", "stage"],
     },
@@ -487,12 +561,13 @@ async function saveSelectionManifest(api) {
   });
 }
 
-const { rows, headings } = await buildRowsFromToc();
+const { rows, headings, tocFile } = await buildRowsFromToc();
 const TOC_HEADINGS = headings;
+const SELECTED_TOC_FILE = tocFile;
 
 if (!rows.length) {
   dv.container.innerHTML = "";
-  dv.paragraph(`No Markdown files linked from ${CONFIG.tocPath} were found.`);
+  dv.paragraph(`No Markdown files linked from ${SELECTED_TOC_FILE.path} were found.`);
   return;
 }
 
@@ -513,7 +588,7 @@ await renderSelectionQuery({
   rows,
   columns: [],
 
-    filterFields: [
+  filterFields: [
     { key: "class", title: "Class" },
     { key: "status", title: "Status" },
     { key: "stage", title: "Stage" },
@@ -532,14 +607,16 @@ await renderSelectionQuery({
     return savedSelectionExtras({ rows });
   },
 
-  emptyMessage: `No Markdown files linked from ${CONFIG.tocPath} were found.`,
+  emptyMessage: `No Markdown files linked from ${SELECTED_TOC_FILE.path} were found.`,
   noMatchesMessage: "No matching TOC-linked files.",
 
   summaryText({ displayedRows, selectedRows }) {
-    return `${displayedRows.length} TOC-linked file(s) displayed · ${selectedRows.length} checked`;
+    return `${displayedRows.length} file(s) linked from ${SELECTED_TOC_FILE.name} · ${selectedRows.length} checked`;
   },
 
   renderActions(parent, api) {
+    renderSelectedTocLink(parent, api);
+
     const saveButton = parent.createEl("button", { text: "Save selection manifest" });
     saveButton.onclick = async () => {
       await saveSelectionManifest(api);

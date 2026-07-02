@@ -7,7 +7,7 @@ asc.scrivener.contracts or asc.registries once the string contracts are gathered
 from typing import Any
 
 from asc.ledger.connect import LedgerConnection
-from asc.ledger.writers.common import (
+from asc.scrivener.writers.common import (
     insert_row,
     load_task_record,
     model_json,
@@ -18,6 +18,9 @@ from asc.ledger.writers.common import (
 
 STEPS_TABLE = "steps"
 STEP_STATUS_BY_MODEL_NAME = {
+    "Response": "completed",
+    "Transform": "completed",
+    "Retrieval": "completed",
     "Result": "completed",
     "StepResult": "completed",
     "Failure": "failed",
@@ -35,9 +38,7 @@ def step_values(task: Any, record: object | None = None) -> dict[str, Any]:
     if record is None:
         record = load_task_record(task)
 
-    step_number = int(task.task_number)
-    if step_number <= 0:
-        raise ValueError(f"ledger step_number must be > 0: {step_number}")
+    step_number = step_number_from_task(task)
 
     return {
         "identity": task_call_identity(task),
@@ -63,7 +64,16 @@ def step_status(record: object) -> str:
 def failure_message(record: object) -> str | None:
     if type(record).__name__ not in STEP_FAILURE_NAMES:
         return None
-    return record.fail_message
+    return getattr(record, "fail_message", None) or getattr(record, "failure_reason", None)
+
+
+def step_number_from_task(task: Any) -> int:
+    key_text = task_record_key_text(task)
+    suffix = key_text.rsplit(":", 1)[-1]
+    step_number = int(suffix)
+    if step_number <= 0:
+        raise ValueError(f"ledger step_number must be > 0: {step_number}")
+    return step_number
 
 
 __all__ = [
@@ -72,6 +82,7 @@ __all__ = [
     "STEP_STATUS_BY_MODEL_NAME",
     "failure_message",
     "insert_step",
+    "step_number_from_task",
     "step_status",
     "step_values",
 ]

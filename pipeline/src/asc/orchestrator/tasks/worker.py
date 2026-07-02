@@ -1,8 +1,8 @@
-"""Worker task factories used by orchestrator handlers."""
+"""Worker task factories used by the orchestrator."""
 
 from __future__ import annotations
 
-from asc.models.process.step import Step
+from asc.models.control.step import Step
 from asc.models.process.task import WorkerTask
 from asc.redis.key import RedisKey
 from asc.worker.engines import normalize_engine_kind
@@ -27,11 +27,12 @@ def make_worker_step(
     expected_key = _expected_worker_result_key(step_key=step_key, data_key=data_key)
     failure_key = _worker_failure_key(step_key=step_key, data_key=data_key)
     return WorkerTask(
+        package="worker",
         action=WORKER_EXECUTE_STEP,
-        step_key=step_key,
-        data_key=data_key,
         expected_key=expected_key,
         failure_key=failure_key,
+        step_key=step_key,
+        data_key=data_key,
     )
 
 

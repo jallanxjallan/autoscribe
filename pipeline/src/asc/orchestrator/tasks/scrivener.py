@@ -1,10 +1,8 @@
-"""Scrivener task factories used by orchestrator handlers."""
+"""Scrivener task factories used by the orchestrator."""
 
 from __future__ import annotations
 
-from asc.core.identity import generate_identity
 from asc.models.process.task import ScrivenerTask
-from asc.redis.key import RedisKey
 from asc.scrivener.maps import CALLS_TABLE, EXPORTS_TABLE, STEPS_TABLE
 
 from ..contracts import (
@@ -48,14 +46,12 @@ def make_scrivener_call_failed(*, data_key: str) -> ScrivenerTask:
 
 
 def _make_scrivener_task(*, action: str, table: str, data_key: str) -> ScrivenerTask:
-    identity = generate_identity()
     return ScrivenerTask(
-        identity=identity,
+        package="scrivener",
         action=action,
+        expected_key=data_key,
         table=table,
         data_key=data_key,
-        expected_key=RedisKey(kind="committed", identity=identity).raw_key,
-        failure_key=RedisKey(kind="failure", identity=identity).raw_key,
     )
 
 

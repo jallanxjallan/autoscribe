@@ -17,7 +17,7 @@ from dataclasses import dataclass
 from typing import Any
 
 from asc.models.process.result import Failure, Response, Result, Retrieval, Transform
-from asc.models.process.step import Step
+from asc.models.control.step import Step
 from asc.models.process.task import WorkerTask
 from asc.redis.key import RedisKey
 from asc.worker.engines import load_engine_run, normalize_engine_kind

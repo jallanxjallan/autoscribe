@@ -18,10 +18,6 @@ from asc.scrivener import inbox as scrivener_inbox
 from asc.worker import inbox as worker_inbox
 
 from .contracts import (
-    SCRIVENER_CALL_COMPLETED,
-    SCRIVENER_CALL_FAILED,
-    SCRIVENER_WRITE_CALL,
-    SCRIVENER_WRITE_STEP,
     WORKER_EXECUTE_STEP,
 )
 from .errors import OrchestratorContractError
@@ -38,7 +34,6 @@ from .tasks import (
 SCRIVENER_PACKAGE = "scrivener"
 WORKER_PACKAGE = "worker"
 TASK_KIND = "task"
-COMMITTED_KIND = "committed"
 FAILURE_KIND = "failure"
 
 
@@ -75,31 +70,16 @@ def handle(call_key: str | RedisKey) -> bool:
     slot0_kind = RedisKey(slot0).kind
 
     if slot0_kind == "call":
-        _dispatch_scrivener_write_call(index=index, call_key=slot0)
-        return True
-
-    if slot0_kind == TASK_KIND:
-        state = _load_task(slot0)
-        result = _apply_task_state(
-            call_identity=RedisKey(call_record_key).identity,
-            index=index,
-            slot=0,
-            state=state,
-        )
-        if result is not None:
-            return result
-        return True
+        if not call_index.has_started(index):
+            _post_scrivener_write_call(call_key=slot0)
+        return _advance_steps(index, call_identity=RedisKey(call_record_key).identity)
 
     if slot0_kind == FAILURE_KIND:
         return False
 
-    if slot0_kind not in {COMMITTED_KIND}:
-        raise OrchestratorContractError(
-            f"call index slot 0 must be call/task/committed/failure; got {slot0!r}"
-        )
-
-    return _advance_steps(index, call_identity=RedisKey(call_record_key).identity)
-
+    raise OrchestratorContractError(
+        f"call index slot 0 must be call/failure; got {slot0!r}"
+    )
 
 def _advance_steps(index, *, call_identity: str) -> bool:
     process_slot = call_index.first_process_slot(index)
@@ -158,62 +138,32 @@ def _apply_task_state(
         return None
 
     if state.package == SCRIVENER_PACKAGE:
-        return _apply_scrivener_success(
-            index=index,
-            slot=slot,
-            state=state,
-            call_identity=call_identity,
+        raise OrchestratorContractError(
+            f"scrivener task must not occupy call index slot {slot}: {state.key}"
         )
 
     if state.package == WORKER_PACKAGE:
-        return _apply_worker_success(index=index, slot=slot, state=state)
+        return _apply_worker_success(index=index, slot=slot, state=state, call_identity=call_identity)
 
     raise OrchestratorContractError(
         f"unknown task package {state.package!r}: {state.key}"
     )
 
 
-def _apply_scrivener_success(
-    *,
-    index,
-    slot: int,
-    state: TaskState,
-    call_identity: str,
-) -> bool:
-    if state.action == SCRIVENER_WRITE_CALL:
-        call_index.set_slot(index, slot, state.expected_key)
-        return _advance_steps(index, call_identity=call_identity)
-
-    if state.action == SCRIVENER_WRITE_STEP:
-        # The committed artifact proves the ledger write happened. Keep the
-        # result/failure artifact in the step slot so the next worker step can
-        # use it as data.
-        call_index.set_slot(index, slot, state.data_key)
-        return _advance_from_persisted_result(
-            index=index,
-            slot=slot,
-            result_key=state.data_key,
-            call_identity=call_identity,
-        )
-
-    if state.action in {SCRIVENER_CALL_COMPLETED, SCRIVENER_CALL_FAILED}:
-        call_index.set_slot(index, slot, state.expected_key)
-        return False
-
-    raise OrchestratorContractError(
-        f"unknown scrivener task action {state.action!r}: {state.key}"
-    )
-
-
-def _apply_worker_success(*, index, slot: int, state: TaskState) -> bool:
+def _apply_worker_success(*, index, slot: int, state: TaskState, call_identity: str) -> bool:
     if state.action != WORKER_EXECUTE_STEP:
         raise OrchestratorContractError(
             f"unknown worker task action {state.action!r}: {state.key}"
         )
 
-    _dispatch_scrivener_write_step(index=index, slot=slot, result_key=state.expected_key)
-    return True
-
+    call_index.set_slot(index, slot, state.expected_key)
+    _post_scrivener_write_step(result_key=state.expected_key)
+    return _advance_from_persisted_result(
+        index=index,
+        slot=slot,
+        result_key=state.expected_key,
+        call_identity=call_identity,
+    )
 
 def _handle_failure_artifact(*, index, slot: int, failure_key: str) -> bool:
     key = RedisKey(failure_key)
@@ -221,12 +171,11 @@ def _handle_failure_artifact(*, index, slot: int, failure_key: str) -> bool:
         raise OrchestratorContractError(f"failure artifact must be failure:*; got {failure_key!r}")
 
     if slot == 0:
-        # Ledger failure while writing the call itself has no safe continuation.
         return False
 
-    _dispatch_scrivener_write_step(index=index, slot=slot, result_key=failure_key)
-    return True
-
+    _post_scrivener_write_step(result_key=failure_key)
+    _post_terminal_failure(result_key=failure_key)
+    return False
 
 def _advance_from_persisted_result(
     *,
@@ -238,8 +187,8 @@ def _advance_from_persisted_result(
     result = RedisKey(result_key)
 
     if result.kind == FAILURE_KIND:
-        _dispatch_terminal_failure(index=index, slot=slot, result_key=result_key)
-        return True
+        _post_terminal_failure(result_key=result_key)
+        return False
 
     if result.kind not in {"response", "transform", "retrieval"}:
         raise OrchestratorContractError(
@@ -257,16 +206,14 @@ def _advance_from_persisted_result(
         )
         return True
 
-    _dispatch_terminal_success(index=index, slot=slot, result_key=result_key)
-    return True
+    _post_terminal_success(result_key=result_key)
+    return False
 
 
-def _dispatch_scrivener_write_call(*, index, call_key: str) -> None:
+def _post_scrivener_write_call(*, call_key: str) -> None:
     task = make_scrivener_write_call(data_key=call_key)
     task_key = save_task(task)
-    call_index.set_slot(index, 0, task_key)
     scrivener_inbox.post(task_key)
-
 
 def _dispatch_worker_step(
     *,
@@ -287,26 +234,22 @@ def _dispatch_worker_step(
     worker_inbox.post(task_key)
 
 
-def _dispatch_scrivener_write_step(*, index, slot: int, result_key: str) -> None:
+def _post_scrivener_write_step(*, result_key: str) -> None:
     task = make_scrivener_write_step(data_key=result_key)
     task_key = save_task(task)
-    call_index.set_slot(index, slot, task_key)
     scrivener_inbox.post(task_key)
 
 
-def _dispatch_terminal_success(*, index, slot: int, result_key: str) -> None:
+def _post_terminal_success(*, result_key: str) -> None:
     task = make_scrivener_call_completed(data_key=result_key)
     task_key = save_task(task)
-    call_index.set_slot(index, slot, task_key)
     scrivener_inbox.post(task_key)
 
 
-def _dispatch_terminal_failure(*, index, slot: int, result_key: str) -> None:
+def _post_terminal_failure(*, result_key: str) -> None:
     task = make_scrivener_call_failed(data_key=result_key)
     task_key = save_task(task)
-    call_index.set_slot(index, slot, task_key)
     scrivener_inbox.post(task_key)
-
 
 def _load_task(task_key: str) -> TaskState:
     key = RedisKey(task_key)
