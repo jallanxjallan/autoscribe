@@ -36,7 +36,8 @@ def ingest_plan(record: Mapping[str, Any]) -> IngestedItem:
 def fanout_steps(plan: Plan) -> tuple[str, ...]:
     """Save a Plan and materialize its executable Step records."""
 
-    if not plan.steps:
+    step_entries = plan_step_entries(plan.steps)
+    if not step_entries:
         raise ValueError("plan steps must not be empty")
 
     plan.save(ttl=PLAN_TTL_SECONDS)
@@ -44,13 +45,20 @@ def fanout_steps(plan: Plan) -> tuple[str, ...]:
     saved: list[str] = []
     index_entries: dict[int, str] = {}
 
-    for fallback_number, raw_step in enumerate(plan.steps, start=1):
+    for fallback_number, raw_step in step_entries:
         number = _step_number(raw_step, fallback=fallback_number)
         if number in index_entries:
             raise ValueError(f"duplicate plan step number: {number}")
 
         instruction_keys = _instruction_keys(raw_step, number=number)
-        step = Step(**_step_payload(plan=plan, number=number, raw_step=raw_step, instruction_keys=instruction_keys))
+        step = Step(
+            **_step_payload(
+                plan=plan,
+                number=number,
+                raw_step=raw_step,
+                instruction_keys=instruction_keys,
+            )
+        )
         step_key = step.save(ttl=STEP_TTL_SECONDS)
 
         saved.append(step_key)
@@ -58,6 +66,34 @@ def fanout_steps(plan: Plan) -> tuple[str, ...]:
 
     save_step_index(plan, index_entries)
     return tuple(saved)
+
+
+def plan_step_entries(raw_steps: object) -> tuple[tuple[int, Mapping[str, Any]], ...]:
+    """Return plan steps as sorted 1-based ``(fallback_number, step)`` pairs.
+
+    Plan uploads used to carry ``steps`` as a list. The current client stores
+    steps as a 1-based object keyed by display/index number. Ingest accepts
+    both shapes, but enqueue never materializes upload records.
+    """
+
+    if isinstance(raw_steps, Mapping):
+        entries: list[tuple[int, Mapping[str, Any]]] = []
+        for raw_number, raw_step in raw_steps.items():
+            number = _positive_int(raw_number, field="plan step key")
+            if not isinstance(raw_step, Mapping):
+                raise ValueError(f"plan step {number} must be an object")
+            entries.append((number, raw_step))
+        return tuple(sorted(entries, key=lambda item: item[0]))
+
+    if isinstance(raw_steps, Sequence) and not isinstance(raw_steps, (str, bytes, bytearray)):
+        entries = []
+        for number, raw_step in enumerate(raw_steps, start=1):
+            if not isinstance(raw_step, Mapping):
+                raise ValueError(f"plan step {number} must be an object")
+            entries.append((number, raw_step))
+        return tuple(entries)
+
+    return ()
 
 
 def save_step_index(plan: Plan, entries: Mapping[int | str, str]) -> str:
@@ -93,7 +129,10 @@ def _step_payload(
 
 
 def _instruction_keys(raw_step: Mapping[str, Any], *, number: int) -> list[str]:
-    slugs = _string_list(raw_step.get("instruction_slugs", []), field=f"step {number} instruction_slugs")
+    slugs = _string_list(
+        raw_step.get("instruction_slugs", []),
+        field=f"step {number} instruction_slugs",
+    )
     resolver = SlugKeyResolver()
     keys = [str(resolver.resolve(slug, expected_kind="instruction")) for slug in slugs]
     for key in keys:
@@ -103,14 +142,18 @@ def _instruction_keys(raw_step: Mapping[str, Any], *, number: int) -> list[str]:
 
 def _step_number(raw_step: Mapping[str, Any], *, fallback: int) -> int:
     value = raw_step.get("number", raw_step.get("index", fallback))
+    return _positive_int(value, field="step number")
+
+
+def _positive_int(value: object, *, field: str) -> int:
     if isinstance(value, bool):
-        raise ValueError(f"step number must be an integer: {value!r}")
+        raise ValueError(f"{field} must be an integer: {value!r}")
     try:
         number = int(value)
     except (TypeError, ValueError) as exc:
-        raise ValueError(f"step number must be an integer: {value!r}") from exc
+        raise ValueError(f"{field} must be an integer: {value!r}") from exc
     if number < 1:
-        raise ValueError(f"step number must be positive: {number}")
+        raise ValueError(f"{field} must be positive: {number}")
     return number
 
 
@@ -134,5 +177,6 @@ __all__ = [
     "STEP_TTL_SECONDS",
     "fanout_steps",
     "ingest_plan",
+    "plan_step_entries",
     "save_step_index",
 ]

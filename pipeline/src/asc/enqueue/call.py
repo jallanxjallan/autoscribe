@@ -1,22 +1,25 @@
 from collections.abc import Mapping
 from typing import Any
 
-from asc.enqueue.plan import LoadedPlan
 from asc.models.process.call import CallRecord
 
 
 ENQUEUE_CONTROL_FIELDS = frozenset({"record_type", "record_plan", "plan_slug"})
 
 
-def create_call(record: Mapping[str, Any], *, plan: LoadedPlan) -> CallRecord:
-    """Create and save the runtime call for one dispatch record."""
+def create_call_from_manifest_record(
+    record: Mapping[str, Any],
+    *,
+    plan_key: str,
+) -> CallRecord:
+    """Create and persist the CallRecord carried by one dispatch NDJSON row."""
 
-    call = CallRecord(**_call_payload(record, plan=plan))
+    call = CallRecord(**_call_payload(record, plan_key=plan_key))
     call.save()
     return call
 
 
-def _call_payload(record: Mapping[str, Any], *, plan: LoadedPlan) -> dict[str, Any]:
+def _call_payload(record: Mapping[str, Any], *, plan_key: str) -> dict[str, Any]:
     payload = dict(record)
     for field in ENQUEUE_CONTROL_FIELDS:
         payload.pop(field, None)
@@ -30,9 +33,9 @@ def _call_payload(record: Mapping[str, Any], *, plan: LoadedPlan) -> dict[str, A
     return {
         "source_identity": source_identity,
         "content": content,
-        "plan_key": plan.raw_key,
+        "plan_key": str(plan_key),
         **payload,
     }
 
 
-__all__ = ["create_call"]
+__all__ = ["create_call_from_manifest_record"]
