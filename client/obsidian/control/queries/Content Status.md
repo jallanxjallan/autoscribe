@@ -1,16 +1,18 @@
 ```dataviewjs
 const CONFIG = {
-  contentsPrefix: "",
-  tocPath: "Table of Contents.md",
-  defaultComponent: "narrative",
-  ungroupedHeading: "Ungrouped",
-  alphabeticalHeading: "Alphabetical",
-
-  slugPrefixes: ["cnt", "img"],
-  excludePaths: [],
-
   tempRoot: "",
-  debug: false
+  debug: false,
+
+  defaultClass: "—",
+  defaultStatus: "—",
+  defaultStage: "—",
+  defaultSlugPrefix: "—",
+
+  excludePaths: [
+    ".obsidian",
+    ".trash",
+    ".autoscribe",
+  ],
 };
 
 const nodeRequire =
@@ -37,7 +39,7 @@ const runtimePath = pathMod.join(
 );
 
 const { createQueryRuntime } = nodeRequire(runtimePath);
-const runtime = createQueryRuntime({ app, queryTitle: "Slug Status query" });
+const runtime = createQueryRuntime({ app, queryTitle: "Content Status query" });
 const { loader, queryPath, vaultName } = runtime;
 
 const { renderSelectionQuery } = loader.requireControl("scripts/lib/selection-query.js");
@@ -56,122 +58,237 @@ function normalizePath(path) {
 
 function isExcludedPath(path) {
   const clean = normalizePath(path);
-  return CONFIG.excludePaths.some(prefix =>
-    clean === normalizePath(prefix) ||
-    clean.startsWith(`${normalizePath(prefix).replace(/\/+$/, "")}/`)
-  );
+
+  if (isUnderscoreFolder(clean)) return true;
+
+  return CONFIG.excludePaths.some(prefix => {
+    const cleanPrefix = normalizePath(prefix).replace(/\/+$/, "");
+    return clean === cleanPrefix || clean.startsWith(`${cleanPrefix}/`);
+  });
 }
 
-function slugAllowed(slug) {
+function slugPrefix(slug) {
   const clean = asText(slug);
-  if (!clean) return false;
+  if (!clean) return CONFIG.defaultSlugPrefix;
 
-  return CONFIG.slugPrefixes.some(prefix =>
-    clean === prefix || clean.startsWith(`${prefix}.`) || clean.startsWith(`${prefix}-`)
+  const dotPrefix = clean.split(".")[0]?.trim();
+  const dashPrefix = clean.split("-")[0]?.trim();
+
+  if (dotPrefix && dotPrefix !== clean) return dotPrefix;
+  if (dashPrefix && dashPrefix !== clean) return dashPrefix;
+
+  return clean;
+}
+
+function titleForPage(page) {
+  return (
+    asText(page.title) ||
+    asText(page.file?.name) ||
+    asText(page.file?.path)
   );
 }
 
-function pathAllowed(path) {
+function sluggedPageForPath(path) {
   const clean = normalizePath(path);
-  return !isExcludedPath(clean);
-}
-
-function publicSluggedPageForPath(path) {
-  const clean = normalizePath(path);
-  if (!pathAllowed(clean)) return null;
+  if (isExcludedPath(clean)) return null;
 
   const page = dv.page(clean);
-  if (!page || !slugAllowed(page.slug)) return null;
+  if (!page) return null;
+
+  const slug = asText(page.slug);
+  if (!slug) return null;
 
   return page;
 }
 
-function rowNameFor(page, fallback) {
-  return asText(page?.title) || asText(fallback) || asText(page?.file?.name);
-}
-
-function statusRowFromPage(page, { heading, order }) {
-  const path = normalizePath(page.file.path);
-  const name = rowNameFor(page, page.file.name);
-
-  return {
-    id: asText(page.slug),
-    selection_key: asText(page.slug),
-
-    heading,
-    order,
-
-    path,
-    name,
-    title: name,
-    slug: asText(page.slug),
-    type: asText(page.type),
-    status: asText(page.status),
-    stage: asText(page.stage),
-    process: asText(page.process),
-    component: asText(page.component, CONFIG.defaultComponent)
-  };
-}
-
-function allPublicSluggedPages() {
+function allSluggedPages() {
   return app.vault.getMarkdownFiles()
-    .map(file => publicSluggedPageForPath(file.path))
+    .map(file => sluggedPageForPath(file.path))
     .filter(Boolean);
 }
 
+function isUnderscoreFolder(path) {
+  return normalizePath(path)
+    .split("/")
+    .some(part => part.startsWith("_"));
+}
+
+function statusRowFromPage(page) {
+  const path = normalizePath(page.file.path);
+  const slug = asText(page.slug);
+  const title = titleForPage(page);
+  const modifiedMillis = page.file?.mtime?.toMillis?.() ?? page.file?.mtime ?? 0;
+
+  return {
+    id: slug,
+    selection_key: slug,
+
+    path,
+    name: title,
+    title,
+    slug,
+
+    slug_prefix: slugPrefix(slug),
+
+    class: asText(page.class, CONFIG.defaultClass),
+    status: asText(page.status, CONFIG.defaultStatus),
+    stage: asText(page.stage, CONFIG.defaultStage),
+    process: asText(page.process),
+
+    modified: modifiedMillis,
+    modified_display: modifiedMillis
+      ? window.moment(modifiedMillis).format("YYYY-MM-DD HH:mm")
+      : "",
+  };
+}
+
 function alphaCompare(a, b) {
-  return String(a.name || a.title || a.path).localeCompare(
-    String(b.name || b.title || b.path),
+  return String(a.title || a.name || a.path).localeCompare(
+    String(b.title || b.name || b.path),
     undefined,
     { sensitivity: "base" }
   );
 }
 
-function buildAlphabeticalRows({ heading = CONFIG.alphabeticalHeading } = {}) {
-  return allPublicSluggedPages()
-    .map((page, index) => statusRowFromPage(page, { heading, order: index }))
-    .sort(alphaCompare)
-    .map((row, index) => ({ ...row, order: index }));
+function buildRows() {
+  return allSluggedPages().map(statusRowFromPage);
 }
 
 function serializeStatusRow(row) {
   return {
     selection_key: row.slug,
     slug: row.slug,
-    title: row.title || row.name,
+    slug_prefix: row.slug_prefix,
+    title: row.title,
     path: row.path,
-    heading: row.heading,
-    type: row.type,
+    class: row.class,
     status: row.status,
     stage: row.stage,
     process: row.process,
-    component: row.component
+    modified: row.modified_display,
   };
 }
 
 function savedSelectionExtras({ rows }) {
   return {
-    ordering: "alphabetical",
-    slug_prefixes: CONFIG.slugPrefixes,
-    exclude_paths: CONFIG.excludePaths,
-    default_component: CONFIG.defaultComponent,
-    displayed_count: rows.length
+    ordering: "content-status",
+    displayed_count: rows.length,
+    filters: ["class", "status", "stage", "slug_prefix"],
+    sort_modes: ["title", "modified"],
   };
+}
+
+function sortRows(rows, mode) {
+  const copy = [...rows];
+
+  if (mode === "title-desc") {
+    return copy.sort((a, b) => alphaCompare(b, a));
+  }
+
+  if (mode === "modified-desc") {
+    return copy.sort((a, b) => Number(b.modified || 0) - Number(a.modified || 0));
+  }
+
+  if (mode === "modified-asc") {
+    return copy.sort((a, b) => Number(a.modified || 0) - Number(b.modified || 0));
+  }
+
+  return copy.sort(alphaCompare);
+}
+
+function renderGroupedResults(parent, displayedRows, api) {
+  const sortedRows = sortRows(displayedRows, api.model.sortMode || "title-asc");
+
+  const section = parent.createDiv();
+  section.style.marginBottom = "1.5em";
+
+  const headingRow = section.createDiv();
+  headingRow.style.display = "flex";
+  headingRow.style.alignItems = "center";
+  headingRow.style.gap = "0.6em";
+  headingRow.style.marginBottom = "0.5em";
+
+  const checkedCount = sortedRows.filter(row => api.model.selectedKeys.has(row.slug)).length;
+
+  const groupBox = headingRow.createEl("input", { type: "checkbox" });
+  setTriState(groupBox, checkedCount, sortedRows.length);
+  groupBox.onchange = async () => {
+    for (const row of sortedRows) {
+      if (groupBox.checked) api.model.selectedKeys.add(row.slug);
+      else api.model.selectedKeys.delete(row.slug);
+    }
+
+    await api.saveCurrentState({ quiet: true, action: "selection" });
+    api.render();
+  };
+
+  headingRow.createEl("strong", { text: "Content Status" });
+
+  const countText = headingRow.createEl("span");
+  countText.style.opacity = "0.75";
+  countText.setText(`(${checkedCount}/${sortedRows.length})`);
+
+  const tableWrap = section.createDiv();
+  tableWrap.style.overflowX = "auto";
+
+  const table = tableWrap.createEl("table");
+  table.classList.add("dataview", "table-view-table");
+  table.style.width = "100%";
+
+  const thead = table.createEl("thead");
+  const headRow = thead.createEl("tr");
+
+  [
+    "",
+    "Title",
+    "Slug",
+    "Prefix",
+    "Class",
+    "Status",
+    "Stage",
+    "Modified",
+  ].forEach(text => headRow.createEl("th", { text }));
+
+  const tbody = table.createEl("tbody");
+
+  for (const row of sortedRows) {
+    const tr = tbody.createEl("tr");
+
+    const selectCell = tr.createEl("td");
+    const itemBox = selectCell.createEl("input", { type: "checkbox" });
+    itemBox.checked = api.model.selectedKeys.has(row.slug);
+    itemBox.onchange = async () => {
+      if (itemBox.checked) api.model.selectedKeys.add(row.slug);
+      else api.model.selectedKeys.delete(row.slug);
+
+      await api.saveCurrentState({ quiet: true, action: "selection" });
+      api.render();
+    };
+
+    const noteCell = tr.createEl("td");
+    api.createInternalLink(noteCell, row.path, row.title);
+
+    tr.createEl("td", { text: row.slug });
+    tr.createEl("td", { text: row.slug_prefix });
+    tr.createEl("td", { text: row.class });
+    tr.createEl("td", { text: row.status });
+    tr.createEl("td", { text: row.stage });
+    tr.createEl("td", { text: row.modified_display });
+  }
 }
 
 async function saveSelectionManifest(api) {
   await api.saveDataviewSelection({
-    operation: "slug-status",
-    queryName: "Slug Status",
-    namespace: "slug-status",
-    selectionSource: "slug-status",
+    operation: "content-status",
+    queryName: "Content Status",
+    namespace: "content-status",
+    selectionSource: "content-status",
     selectionKind: "slug",
     selectionKey: "slug",
     serializeRow: serializeStatusRow,
     options: {
-      slug_prefixes: CONFIG.slugPrefixes,
-      exclude_paths: CONFIG.excludePaths,
-      default_component: CONFIG.defaultComponent
+      filters: ["class", "status", "stage", "slug_prefix"],
+      sort_modes: ["title", "modified"],
     },
     savedSelectionExtras({ rows }) {
       return savedSelectionExtras({ rows });
@@ -179,89 +296,11 @@ async function saveSelectionManifest(api) {
   });
 }
 
-function renderGroupedResults(parent, displayedRows, api) {
-  const grouped = new Map();
-
-  for (const row of displayedRows) {
-    const heading = asText(row.heading, CONFIG.alphabeticalHeading);
-    if (!grouped.has(heading)) grouped.set(heading, []);
-    grouped.get(heading).push(row);
-  }
-
-  for (const [heading, groupRows] of grouped.entries()) {
-    const section = parent.createDiv();
-    section.style.marginBottom = "1.5em";
-
-    const headingRow = section.createDiv();
-    headingRow.style.display = "flex";
-    headingRow.style.alignItems = "center";
-    headingRow.style.gap = "0.6em";
-    headingRow.style.marginBottom = "0.5em";
-
-    const checkedCount = groupRows.filter(row => api.model.selectedKeys.has(row.slug)).length;
-
-    const groupBox = headingRow.createEl("input", { type: "checkbox" });
-    setTriState(groupBox, checkedCount, groupRows.length);
-    groupBox.onchange = async () => {
-      for (const row of groupRows) {
-        if (groupBox.checked) api.model.selectedKeys.add(row.slug);
-        else api.model.selectedKeys.delete(row.slug);
-      }
-
-      await api.saveCurrentState({ quiet: true, action: "selection" });
-      api.render();
-    };
-
-    headingRow.createEl("strong", { text: heading });
-
-    const countText = headingRow.createEl("span");
-    countText.style.opacity = "0.75";
-    countText.setText(`(${checkedCount}/${groupRows.length})`);
-
-    const tableWrap = section.createDiv();
-    tableWrap.style.overflowX = "auto";
-
-    const table = tableWrap.createEl("table");
-    table.classList.add("dataview", "table-view-table");
-    table.style.width = "100%";
-
-    const thead = table.createEl("thead");
-    const headRow = thead.createEl("tr");
-    ["", "Title", "Slug", "Status", "Stage"].forEach(text =>
-      headRow.createEl("th", { text })
-    );
-
-    const tbody = table.createEl("tbody");
-
-    for (const row of groupRows) {
-      const tr = tbody.createEl("tr");
-
-      const selectCell = tr.createEl("td");
-      const itemBox = selectCell.createEl("input", { type: "checkbox" });
-      itemBox.checked = api.model.selectedKeys.has(row.slug);
-      itemBox.onchange = async () => {
-        if (itemBox.checked) api.model.selectedKeys.add(row.slug);
-        else api.model.selectedKeys.delete(row.slug);
-
-        await api.saveCurrentState({ quiet: true, action: "selection" });
-        api.render();
-      };
-
-      const noteCell = tr.createEl("td");
-      api.createInternalLink(noteCell, row.path, row.name);
-
-      tr.createEl("td", { text: row.slug });
-      tr.createEl("td", { text: row.status });
-      tr.createEl("td", { text: row.stage });
-    }
-  }
-}
-
-const rows = buildAlphabeticalRows();
+const rows = buildRows();
 
 if (!rows.length) {
   dv.container.innerHTML = "";
-  dv.paragraph("No Markdown files with frontmatter `slug` beginning `cnt` or `ins` were found.");
+  dv.paragraph("No Markdown files with frontmatter `slug` were found.");
   return;
 }
 
@@ -270,9 +309,9 @@ await renderSelectionQuery({
   dv,
   nodeRequire: runtime.nodeRequire,
 
-  title: "Slug Status",
-  namespace: "slug-status",
-  bridgeName: "__slugStatusSelection",
+  title: "Content Status",
+  namespace: "content-status",
+  bridgeName: "__contentStatusSelection",
 
   vaultName,
   queryPath,
@@ -281,12 +320,22 @@ await renderSelectionQuery({
 
   rows,
   columns: [],
+
   filterFields: [
+    { key: "class", title: "Class" },
     { key: "status", title: "Status" },
     { key: "stage", title: "Stage" },
+    { key: "slug_prefix", title: "Slug Prefix" },
   ],
-  sortModes: [],
-  defaultSortMode: "alphabetical",
+
+  sortModes: [
+    ["title-asc", "Title A–Z"],
+    ["title-desc", "Title Z–A"],
+    ["modified-desc", "Modified newest"],
+    ["modified-asc", "Modified oldest"],
+  ],
+
+  defaultSortMode: "title-asc",
 
   selectionKind: "slug",
   selectionKey: "slug",
@@ -295,11 +344,11 @@ await renderSelectionQuery({
     return savedSelectionExtras({ rows });
   },
 
-  emptyMessage: "No Markdown files with frontmatter `slug` beginning `cnt` or `ins` were found.",
+  emptyMessage: "No Markdown files with frontmatter `slug` were found.",
   noMatchesMessage: "No matching slugged files.",
 
   summaryText({ displayedRows, selectedRows }) {
-    return `${displayedRows.length} slugged file(s) displayed alphabetically · ${selectedRows.length} checked`;
+    return `${displayedRows.length} slugged file(s) displayed · ${selectedRows.length} checked`;
   },
 
   renderActions(parent, api) {
@@ -314,3 +363,4 @@ await renderSelectionQuery({
   debug: CONFIG.debug
 });
 ```
+
