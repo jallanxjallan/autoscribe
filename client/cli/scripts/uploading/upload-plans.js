@@ -116,6 +116,28 @@ function normalizeInstructionSlugs(value) {
     .filter(Boolean);
 }
 
+function controlRef(value) {
+  if (!value) return '';
+  if (typeof value === 'string') return value.trim();
+  if (typeof value === 'object') {
+    return String(value.key || value.slug || value.record_identity || '').trim();
+  }
+  return String(value).trim();
+}
+
+function stepEntries(steps) {
+  if (Array.isArray(steps)) {
+    return steps.map((step, index) => [index + 1, step]);
+  }
+
+  if (!steps || typeof steps !== 'object') return [];
+
+  return Object.entries(steps)
+    .map(([key, step]) => [Number(key), step])
+    .filter(([number, step]) => Number.isInteger(number) && number > 0 && step)
+    .sort(([a], [b]) => a - b);
+}
+
 function normalizeStep(rawStep, index) {
   const source = rawStep && typeof rawStep === 'object' ? rawStep : {};
   const number = Number(source.index || source.number || index);
@@ -127,18 +149,21 @@ function normalizeStep(rawStep, index) {
     index: Number.isInteger(number) && number > 0 ? number : index,
     kind: String(source.kind || ''),
     label: String(source.label || `Step ${index}`),
-    engine: String(source.engine || ''),
-    script: String(source.script || ''),
-    rag_profile: String(source.rag_profile || source.ragProfile || ''),
+    engine: controlRef(source.engine),
+    script: controlRef(source.script),
+    rag_profile: controlRef(source.rag_profile || source.ragProfile),
     instruction_slugs: normalizeInstructionSlugs(source.instruction_slugs || source.instructionSlugs),
     args,
   };
 }
 
 function cleanPlanContent(record, item) {
-  const steps = Array.isArray(record.steps)
-    ? record.steps.map((step, index) => normalizeStep(step, index + 1))
-    : [];
+  const steps = stepEntries(record.steps)
+    .map(([number, step]) => normalizeStep(step, number));
+
+  if (!steps.length) {
+    throw new Error(`plan has no executable steps: ${item.slug}`);
+  }
 
   return {
     version: Number(record.version || 1),
@@ -288,24 +313,24 @@ function runUploadPlans(config = {}) {
   }
 
   const uploadedAt = new Date().toISOString();
-  let emitted = 0;
+  const emittedItems = [];
 
   for (const item of items) {
     try {
       process.stdout.write(`${JSON.stringify(planUploadRecord({ item, uploadedAt }))}\n`);
-      emitted += 1;
+      emittedItems.push(item);
     } catch (error) {
       info(script, `ERROR: ${item.path}: ${error.message || error}`);
     }
   }
 
-  if (emitted === 0) {
+  if (emittedItems.length === 0) {
     info(script, 'no valid plans to upload after skipping errors');
     process.exitCode = 1;
     return;
   }
 
-  for (const item of items) {
+  for (const item of emittedItems) {
     try {
       markPlanUploaded(item, uploadedAt);
     } catch (error) {
@@ -313,7 +338,7 @@ function runUploadPlans(config = {}) {
     }
   }
 
-  info(script, `emitted ${emitted} plan record(s); reset pending_upload on local plan JSON`);
+  info(script, `emitted ${emittedItems.length} plan record(s); reset pending_upload on local plan JSON`);
 }
 
 module.exports = {
@@ -322,6 +347,7 @@ module.exports = {
   planUploadRecord,
   cleanPlanContent,
   normalizeStep,
+  stepEntries,
 };
 
 if (require.main === module) {

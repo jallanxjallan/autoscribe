@@ -36,9 +36,30 @@ function selectionOptionText(sel, tag = '') {
   return `${tag}${sel.name} (${sel.count}) — ${sel.vaultKey}${warn}`;
 }
 
+function planStepEntries(plan) {
+  const steps = plan?.steps;
+
+  if (Array.isArray(steps)) {
+    return steps.map((step, index) => [index + 1, step]).filter(([, step]) => step);
+  }
+
+  if (!steps || typeof steps !== 'object') return [];
+
+  return Object.entries(steps)
+    .map(([key, step]) => [Number(key), step])
+    .filter(([number, step]) => Number.isInteger(number) && number > 0 && step)
+    .sort(([a], [b]) => a - b);
+}
+
+function planStepCount(plan) {
+  const explicit = Number(plan?.step_count);
+  if (Number.isInteger(explicit) && explicit >= 0) return explicit;
+  return planStepEntries(plan).length;
+}
+
 function planOptionText(planFile) {
   const plan = planFile.record;
-  const count = Array.isArray(plan.steps) ? plan.steps.length : 0;
+  const count = planStepCount(plan);
   return `${plan.label || plan.slug} — ${plan.slug} (${count} step${count === 1 ? '' : 's'})`;
 }
 
@@ -65,31 +86,47 @@ function renderPromptTable(container, items) {
   container.appendChild(table);
 }
 
+function refLabel(value) {
+  if (!value) return '';
+  if (typeof value === 'string') return value;
+  return value.label || value.key || value.slug || '';
+}
+
 function stepTargetText(step) {
-  const script = step.script?.label || step.script?.key || step.script?.slug;
-  const rag = step.rag_profile?.label || step.rag_profile?.key || step.rag_profile?.slug;
-  const engine = step.engine?.label || step.engine?.key || step.engine?.slug;
+  const script = refLabel(step.script);
+  const rag = refLabel(step.rag_profile);
+  const engine = refLabel(step.engine);
   if (script) return `script: ${script}`;
   if (rag) return `rag: ${rag}`;
   if (engine) return `engine: ${engine}`;
   return '—';
 }
 
+function stepInstructionText(step) {
+  if (Array.isArray(step.instructions)) {
+    return step.instructions.map(refLabel).filter(Boolean).join(', ');
+  }
+  if (Array.isArray(step.instruction_slugs)) {
+    return step.instruction_slugs.filter(Boolean).join(', ');
+  }
+  return '';
+}
+
 function renderPlanTable(container, plan) {
-  const steps = Array.isArray(plan?.steps) ? plan.steps : [];
-  if (!steps.length) {
+  const entries = planStepEntries(plan);
+  if (!entries.length) {
     container.appendChild(el('p', { text: 'Selected plan has no steps.' }));
     return;
   }
   const table = el('table');
   table.style.width = '100%';
   table.appendChild(el('tr', {}, ['#', 'Step', 'Target', 'Instructions'].map((h) => el('th', { text: h }))));
-  steps.forEach((step, idx) => {
+  entries.forEach(([number, step]) => {
     table.appendChild(el('tr', {}, [
-      el('td', { text: step.index || idx + 1 }),
-      el('td', { text: step.label || `Step ${idx + 1}` }),
+      el('td', { text: step.index || number }),
+      el('td', { text: step.label || `Step ${number}` }),
       el('td', { text: stepTargetText(step) }),
-      el('td', { text: (step.instructions || []).map((ins) => ins.label || ins.slug).join(', ') || '—' }),
+      el('td', { text: stepInstructionText(step) || '—' }),
     ]));
   });
   container.appendChild(table);

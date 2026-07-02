@@ -172,6 +172,7 @@ function listPlanFolder(root, source) {
         const data = JSON.parse(fs.readFileSync(file, 'utf8'));
         label = data.label || data.title || label;
         if (Array.isArray(data.steps)) step_count = data.steps.length;
+        else if (data.steps && typeof data.steps === 'object') step_count = Object.keys(data.steps).length;
       } catch (err) {
         read_error = err.message;
       }
@@ -410,6 +411,7 @@ function emptyStep(kind, index, { engines }) {
   const ragEngine = findRagEngine(engines);
   const defaultLlmEngine = llmEngines(engines)[0] || engines[0] || null;
   const step = {
+    index,
     kind,
     label: `Step ${index}`,
     engine: null,
@@ -454,12 +456,26 @@ function ensurePlanUploadContract(record) {
   return plan;
 }
 
+function planStepEntries(steps) {
+  if (Array.isArray(steps)) {
+    return steps.map((step, index) => [index + 1, step]);
+  }
+
+  if (!steps || typeof steps !== 'object') return [];
+
+  return Object.entries(steps)
+    .map(([key, step]) => [Number(key), step])
+    .filter(([number, step]) => Number.isInteger(number) && number > 0 && step)
+    .sort(([a], [b]) => a - b);
+}
+
 function planToScreenSteps(plan, { engines, instructions, scripts, ragProfiles }) {
-  return (plan.steps || []).map((step, index) => {
+  return planStepEntries(plan.steps).map(([stepNumber, step]) => {
     const kind = inferStepKind(step);
     const screenStep = {
+      index: Number(step.index || stepNumber),
       kind,
-      label: step.label || `Step ${index + 1}`,
+      label: step.label || `Step ${stepNumber}`,
       engine: hydrateControl(step.engine, engines, 'key'),
       script: hydrateControl(step.script, scripts, 'key'),
       rag_profile: hydrateControl(step.rag_profile, ragProfiles, 'key'),

@@ -97,6 +97,19 @@ function planSlug(record) {
   return record?.record_identity || record?.slug || '';
 }
 
+function stepEntries(steps) {
+  if (Array.isArray(steps)) {
+    return steps.map((step, index) => [index + 1, step]);
+  }
+
+  if (!steps || typeof steps !== 'object') return [];
+
+  return Object.entries(steps)
+    .map(([key, step]) => [Number(key), step])
+    .filter(([number, step]) => Number.isInteger(number) && number > 0 && step)
+    .sort(([a], [b]) => a - b);
+}
+
 function buildPlanRecord({
   app,
   label,
@@ -109,7 +122,7 @@ function buildPlanRecord({
 }) {
   if (!label || !label.trim()) throw new Error('Plan label is required.');
 
-  const cleanSteps = (steps || []).filter(hasExecutableTarget);
+  const cleanSteps = stepEntries(steps).filter(([, step]) => hasExecutableTarget(step));
   if (!cleanSteps.length) throw new Error('At least one executable step is required.');
 
   const root = vaultRoot(app);
@@ -117,8 +130,10 @@ function buildPlanRecord({
   const now = new Date().toISOString();
   const selectedControls = [];
 
-  const planSteps = cleanSteps.map((step, index) => {
-    const stepNumber = index + 1;
+  const planSteps = {};
+
+  cleanSteps.forEach(([screenIndex, step]) => {
+    const stepNumber = screenIndex;
     const kind = normalizeStepKind(step);
     const engine = compactRegistryRecord(step.engine);
     const script = compactRegistryRecord(step.script);
@@ -164,7 +179,7 @@ function buildPlanRecord({
       out.rag_profile = rag_profile.key;
     }
 
-    return out;
+    planSteps[String(stepNumber)] = out;
   });
 
   const warnings = controlWarnings(selectedControls);
@@ -193,7 +208,7 @@ function buildPlanRecord({
     },
     registry_snapshot,
     control_snapshot,
-    step_count: planSteps.length,
+    step_count: Object.keys(planSteps).length,
     preflight: {
       clean: warnings.length === 0,
       warnings,

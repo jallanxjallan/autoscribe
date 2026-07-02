@@ -1,12 +1,12 @@
 ```dataviewjs
 const CONFIG = {
-  contentsPrefix: "contents/",
+  contentsPrefix: "",
   tocPath: "Table of Contents.md",
   defaultComponent: "narrative",
   ungroupedHeading: "Ungrouped",
   alphabeticalHeading: "Alphabetical",
 
-  slugPrefixes: [],
+  slugPrefixes: ["cnt", "img"],
   excludePaths: [],
 
   tempRoot: "",
@@ -37,20 +37,11 @@ const runtimePath = pathMod.join(
 );
 
 const { createQueryRuntime } = nodeRequire(runtimePath);
-const runtime = createQueryRuntime({ app, queryTitle: "Content Status query" });
+const runtime = createQueryRuntime({ app, queryTitle: "Slug Status query" });
 const { loader, queryPath, vaultName } = runtime;
 
 const { renderSelectionQuery } = loader.requireControl("scripts/lib/selection-query.js");
 const { setTriState } = loader.requireControl("scripts/lib/dom.js");
-
-const {
-  buildTocGroups,
-  findUnlinkedContentFiles
-} = loader.requireControl("scripts/lib/toc-index.js");
-
-const {
-  renderTocAuditSections
-} = loader.requireControl("scripts/lib/toc-audit-ui.js");
 
 function asText(value, fallback = "") {
   if (value == null) return fallback;
@@ -74,16 +65,15 @@ function isExcludedPath(path) {
 function slugAllowed(slug) {
   const clean = asText(slug);
   if (!clean) return false;
-  if (!CONFIG.slugPrefixes.length) return true;
-  return CONFIG.slugPrefixes.some(prefix => clean.startsWith(prefix));
+
+  return CONFIG.slugPrefixes.some(prefix =>
+    clean === prefix || clean.startsWith(`${prefix}.`) || clean.startsWith(`${prefix}-`)
+  );
 }
 
 function pathAllowed(path) {
   const clean = normalizePath(path);
-  if (isExcludedPath(clean)) return false;
-  if (!CONFIG.contentsPrefix) return true;
-  const prefix = normalizePath(CONFIG.contentsPrefix).replace(/\/+$/, "");
-  return clean === prefix || clean.startsWith(`${prefix}/`);
+  return !isExcludedPath(clean);
 }
 
 function publicSluggedPageForPath(path) {
@@ -94,12 +84,6 @@ function publicSluggedPageForPath(path) {
   if (!page || !slugAllowed(page.slug)) return null;
 
   return page;
-}
-
-function folderFromPath(path) {
-  const parts = normalizePath(path).split("/");
-  parts.pop();
-  return parts.join("/") || "/";
 }
 
 function rowNameFor(page, fallback) {
@@ -129,22 +113,6 @@ function statusRowFromPage(page, { heading, order }) {
   };
 }
 
-function statusRowFromTocRow(tocRow, order) {
-  const page = publicSluggedPageForPath(tocRow.path);
-  if (!page) return null;
-
-  return {
-    ...statusRowFromPage(page, {
-      heading: asText(tocRow.heading, CONFIG.ungroupedHeading),
-      order
-    }),
-
-    toc_id: tocRow.id,
-    toc_component: tocRow.component,
-    component: asText(page.component, asText(tocRow.component, CONFIG.defaultComponent))
-  };
-}
-
 function allPublicSluggedPages() {
   return app.vault.getMarkdownFiles()
     .map(file => publicSluggedPageForPath(file.path))
@@ -159,9 +127,8 @@ function alphaCompare(a, b) {
   );
 }
 
-function buildAlphabeticalRows({ excludePaths = new Set(), heading = CONFIG.alphabeticalHeading } = {}) {
+function buildAlphabeticalRows({ heading = CONFIG.alphabeticalHeading } = {}) {
   return allPublicSluggedPages()
-    .filter(page => !excludePaths.has(normalizePath(page.file.path)))
     .map((page, index) => statusRowFromPage(page, { heading, order: index }))
     .sort(alphaCompare)
     .map((row, index) => ({ ...row, order: index }));
@@ -182,41 +149,32 @@ function serializeStatusRow(row) {
   };
 }
 
-function savedSelectionExtras({ rows, tocFile, badTocLinks, unlinkedContentFiles, ordering }) {
+function savedSelectionExtras({ rows }) {
   return {
-    ordering,
-    toc_path: CONFIG.tocPath,
-    toc_exists: Boolean(tocFile),
-    toc_link_issue_count: badTocLinks.length,
-    unlinked_public_slugged_content_count: unlinkedContentFiles.length,
-    options: {
-      contents_prefix: CONFIG.contentsPrefix,
-      slug_prefixes: CONFIG.slugPrefixes,
-      exclude_paths: CONFIG.excludePaths,
-      default_component: CONFIG.defaultComponent
-    },
+    ordering: "alphabetical",
+    slug_prefixes: CONFIG.slugPrefixes,
+    exclude_paths: CONFIG.excludePaths,
+    default_component: CONFIG.defaultComponent,
     displayed_count: rows.length
   };
 }
 
-async function saveSelectionManifest(api, context) {
+async function saveSelectionManifest(api) {
   await api.saveDataviewSelection({
-    operation: "content-status",
-    queryName: "Content Status",
-    namespace: "content-status",
-    selectionSource: "content-status",
+    operation: "slug-status",
+    queryName: "Slug Status",
+    namespace: "slug-status",
+    selectionSource: "slug-status",
     selectionKind: "slug",
     selectionKey: "slug",
     serializeRow: serializeStatusRow,
     options: {
-      contents_prefix: CONFIG.contentsPrefix,
-      toc_path: CONFIG.tocPath,
       slug_prefixes: CONFIG.slugPrefixes,
       exclude_paths: CONFIG.excludePaths,
       default_component: CONFIG.defaultComponent
     },
     savedSelectionExtras({ rows }) {
-      return savedSelectionExtras({ rows, ...context });
+      return savedSelectionExtras({ rows });
     }
   });
 }
@@ -225,7 +183,7 @@ function renderGroupedResults(parent, displayedRows, api) {
   const grouped = new Map();
 
   for (const row of displayedRows) {
-    const heading = asText(row.heading, CONFIG.ungroupedHeading);
+    const heading = asText(row.heading, CONFIG.alphabeticalHeading);
     if (!grouped.has(heading)) grouped.set(heading, []);
     grouped.get(heading).push(row);
   }
@@ -269,7 +227,7 @@ function renderGroupedResults(parent, displayedRows, api) {
 
     const thead = table.createEl("thead");
     const headRow = thead.createEl("tr");
-    ["", "Title", "Status", "Stage"].forEach(text =>
+    ["", "Title", "Slug", "Status", "Stage"].forEach(text =>
       headRow.createEl("th", { text })
     );
 
@@ -292,73 +250,18 @@ function renderGroupedResults(parent, displayedRows, api) {
       const noteCell = tr.createEl("td");
       api.createInternalLink(noteCell, row.path, row.name);
 
-      
-
+      tr.createEl("td", { text: row.slug });
       tr.createEl("td", { text: row.status });
       tr.createEl("td", { text: row.stage });
-
-
     }
   }
 }
 
-let tocFile = null;
-let badTocLinks = [];
-let unlinkedContentFiles = [];
-let rows = [];
-let ordering = "alphabetical";
-
-const tocResult = await buildTocGroups({
-  app,
-  tocPath: CONFIG.tocPath,
-  contentsPrefix: CONFIG.contentsPrefix,
-  defaultComponent: CONFIG.defaultComponent,
-  ungroupedHeading: CONFIG.ungroupedHeading
-});
-
-tocFile = tocResult.tocFile;
-badTocLinks = tocResult.badTocLinks || [];
-
-if (tocFile) {
-  const linkedContentPaths = new Set(
-    [...(tocResult.linkedContentPaths || [])].map(path => normalizePath(path))
-  );
-
-  unlinkedContentFiles = findUnlinkedContentFiles({
-    app,
-    linkedContentPaths,
-    contentsPrefix: CONFIG.contentsPrefix
-  }).filter(file => publicSluggedPageForPath(file.path));
-
-  const tocRows = [];
-  let order = 0;
-
-  for (const group of tocResult.groups || []) {
-    for (const item of group.items || []) {
-      const row = statusRowFromTocRow(item, order++);
-      if (row) tocRows.push(row);
-    }
-  }
-
-  const unlinkedRows = unlinkedContentFiles
-    .map(file => publicSluggedPageForPath(file.path))
-    .filter(Boolean)
-    .map((page, index) => statusRowFromPage(page, {
-      heading: CONFIG.ungroupedHeading,
-      order: tocRows.length + index
-    }))
-    .sort(alphaCompare)
-    .map((row, index) => ({ ...row, order: tocRows.length + index }));
-
-  rows = [...tocRows, ...unlinkedRows];
-  ordering = "toc";
-} else {
-  rows = buildAlphabeticalRows();
-}
+const rows = buildAlphabeticalRows();
 
 if (!rows.length) {
   dv.container.innerHTML = "";
-  dv.paragraph("No public Markdown files with frontmatter `slug` were found.");
+  dv.paragraph("No Markdown files with frontmatter `slug` beginning `cnt` or `ins` were found.");
   return;
 }
 
@@ -367,13 +270,13 @@ await renderSelectionQuery({
   dv,
   nodeRequire: runtime.nodeRequire,
 
-  title: "Content Status",
-  namespace: "content-status",
-  bridgeName: "__contentStatusSelection",
+  title: "Slug Status",
+  namespace: "slug-status",
+  bridgeName: "__slugStatusSelection",
 
   vaultName,
   queryPath,
-  stateVersion: 4,
+  stateVersion: 1,
   tempRoot: CONFIG.tempRoot,
 
   rows,
@@ -383,54 +286,26 @@ await renderSelectionQuery({
     { key: "stage", title: "Stage" },
   ],
   sortModes: [],
-  defaultSortMode: ordering,
+  defaultSortMode: "alphabetical",
 
   selectionKind: "slug",
   selectionKey: "slug",
   serializeRow: serializeStatusRow,
   savedSelectionExtras({ rows }) {
-    return savedSelectionExtras({
-      rows,
-      tocFile,
-      badTocLinks,
-      unlinkedContentFiles,
-      ordering
-    });
+    return savedSelectionExtras({ rows });
   },
 
-  emptyMessage: "No public Markdown files with frontmatter `slug` were found.",
-  noMatchesMessage: "No matching public slugged files.",
+  emptyMessage: "No Markdown files with frontmatter `slug` beginning `cnt` or `ins` were found.",
+  noMatchesMessage: "No matching slugged files.",
 
   summaryText({ displayedRows, selectedRows }) {
-    const visibleHeadingCount = new Set(displayedRows.map(row => row.heading)).size;
-    const orderText = ordering === "toc" ? "TOC order" : "alphabetical order";
-    return `${visibleHeadingCount} heading group(s) · ${displayedRows.length} public slugged file(s) displayed in ${orderText} · ${selectedRows.length} checked · ${badTocLinks.length} TOC link issue(s) · ${unlinkedContentFiles.length} unlinked public slugged content file(s)`;
-  },
-
-  renderSummaryExtras(parent, { api }) {
-    if (!tocFile) {
-      const note = parent.createEl("p");
-      note.style.opacity = "0.75";
-      note.setText(`No ${CONFIG.tocPath} found. Displaying public slugged content alphabetically.`);
-      return;
-    }
-
-    renderTocAuditSections(parent, {
-      tocFile,
-      badTocLinks,
-      unlinkedContentFiles
-    }, api.createInternalLink);
+    return `${displayedRows.length} slugged file(s) displayed alphabetically · ${selectedRows.length} checked`;
   },
 
   renderActions(parent, api) {
     const saveButton = parent.createEl("button", { text: "Save selection manifest" });
     saveButton.onclick = async () => {
-      await saveSelectionManifest(api, {
-        tocFile,
-        badTocLinks,
-        unlinkedContentFiles,
-        ordering
-      });
+      await saveSelectionManifest(api);
     };
   },
 
