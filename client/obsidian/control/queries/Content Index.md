@@ -4,6 +4,20 @@ const CONFIG = {
   tempRoot: "",
   debug: false,
 
+  // Files whose slug starts with one of these prefixes are considered
+  // indexable. TOC-linked files are still displayed in TOC order;
+  // matching files not linked in the TOC are listed separately.
+  slugPrefixes: ["cnt", "ins"],
+
+  unicodeReference: [
+    { symbol: "❦", code: "U+2766", meaning: "Motif or chapter emblem" },
+    { symbol: "▣", code: "U+25A3", meaning: "Boxout" },
+    { symbol: "◈", code: "U+25C8", meaning: "Case, deal, or feature note" },
+    { symbol: "¶", code: "U+00B6", meaning: "Narrative paragraph" },
+    { symbol: "▯", code: "U+25AF", meaning: "Single page" },
+    { symbol: "▭", code: "U+25AD", meaning: "Double page" },
+  ],
+
   defaultClass: "—",
   defaultStatus: "—",
   defaultStage: "—",
@@ -192,6 +206,40 @@ function pageForFile(file) {
   return dv.page(file.path) || null;
 }
 
+function normalizeSlug(value) {
+  return asText(value).toLowerCase().trim();
+}
+
+function slugPrefixForSlug(slug) {
+  const cleanSlug = normalizeSlug(slug);
+  if (!cleanSlug) return "—";
+
+  const explicitPrefix = CONFIG.slugPrefixes.find(prefix => {
+    const cleanPrefix = String(prefix || "").toLowerCase().trim();
+    return cleanPrefix && cleanSlug.startsWith(cleanPrefix);
+  });
+
+  if (explicitPrefix) return String(explicitPrefix).toLowerCase().trim();
+
+  return cleanSlug.split(/[.\-_/]/)[0] || "—";
+}
+
+function slugMatchesCriteria(slug) {
+  const cleanSlug = normalizeSlug(slug);
+  if (!cleanSlug) return false;
+
+  return CONFIG.slugPrefixes.some(prefix => {
+    const cleanPrefix = String(prefix || "").toLowerCase().trim();
+    return cleanPrefix && cleanSlug.startsWith(cleanPrefix);
+  });
+}
+
+function candidateMarkdownFiles() {
+  return app.vault.getMarkdownFiles()
+    .filter(file => !isExcludedPath(file.path))
+    .sort((a, b) => String(a.path).localeCompare(String(b.path)));
+}
+
 function headingKey(parts) {
   return parts
     .filter(Boolean)
@@ -221,6 +269,8 @@ function rowFromPage(page, file, context) {
     title,
     slug,
 
+    slug_prefix: slugPrefixForSlug(slug),
+
     class: asText(page?.class, CONFIG.defaultClass),
     status: asText(page?.status, CONFIG.defaultStatus),
     stage: asText(page?.stage, CONFIG.defaultStage),
@@ -235,6 +285,7 @@ function rowFromPage(page, file, context) {
     heading_path: context.heading_path,
     heading_level: context.heading_level,
     order: context.order,
+    placement: context.placement || "toc",
   };
 }
 
@@ -334,6 +385,7 @@ async function buildRowsFromToc() {
         heading_path: parts.length ? [...parts] : ["Contents"],
         heading_level: Math.max(parts.length, 1),
         order,
+        placement: "toc",
       }));
 
       order += 1;
@@ -344,7 +396,41 @@ async function buildRowsFromToc() {
     rows,
     headings,
     tocFile,
+    tocPaths: seenPaths,
   };
+}
+
+function buildUnplacedRows(tocPaths, tocFile) {
+  const unplacedRows = [];
+  const tocPath = normalizePath(tocFile?.path);
+  const queryPathClean = normalizePath(queryPath);
+
+  for (const file of candidateMarkdownFiles()) {
+    const cleanPath = normalizePath(file.path);
+
+    if (!cleanPath) continue;
+    if (cleanPath === tocPath) continue;
+    if (cleanPath === queryPathClean) continue;
+    if (tocPaths.has(cleanPath)) continue;
+
+    const page = pageForFile(file);
+    if (!page) continue;
+
+    const slug = asText(page?.slug);
+    if (!slugMatchesCriteria(slug)) continue;
+
+    unplacedRows.push(rowFromPage(page, file, {
+      heading_key: "Not in table of contents",
+      heading_path: ["Not in table of contents"],
+      heading_level: 1,
+      order: 1000000 + unplacedRows.length,
+      placement: "unplaced",
+    }));
+  }
+
+  return unplacedRows.sort((a, b) =>
+    String(a.slug || a.title || a.path).localeCompare(String(b.slug || b.title || b.path))
+  );
 }
 
 function serializeIndexRow(row) {
@@ -355,6 +441,8 @@ function serializeIndexRow(row) {
     path: row.path,
     heading: row.heading_key,
     heading_path: row.heading_path,
+    placement: row.placement,
+    slug_prefix: row.slug_prefix,
     class: row.class,
     status: row.status,
     stage: row.stage,
@@ -368,7 +456,10 @@ function savedSelectionExtras({ rows }) {
   return {
     ordering: "table-of-contents",
     toc_path: SELECTED_TOC_FILE.path,
+    slug_prefixes: CONFIG.slugPrefixes,
     displayed_count: rows.length,
+    toc_count: rows.filter(row => row.placement === "toc").length,
+    unplaced_count: rows.filter(row => row.placement === "unplaced").length,
   };
 }
 
@@ -386,7 +477,16 @@ function rowsForHeading(displayedRows, heading) {
 }
 
 function sortRowsByTocOrder(rows) {
-  return [...rows].sort((a, b) => Number(a.order || 0) - Number(b.order || 0));
+  return [...rows].sort((a, b) => {
+    const placementDiff = String(a.placement || "toc").localeCompare(String(b.placement || "toc"));
+    if (placementDiff !== 0) return placementDiff;
+
+    if (a.placement === "unplaced" || b.placement === "unplaced") {
+      return String(a.slug || a.title || a.path).localeCompare(String(b.slug || b.title || b.path));
+    }
+
+    return Number(a.order || 0) - Number(b.order || 0);
+  });
 }
 
 function renderHeadingBlock(parent, heading, headingRows, api) {
@@ -485,6 +585,9 @@ function renderRowsTable(parent, rows, api) {
 }
 
 function renderIndexResults(parent, displayedRows, api) {
+  const tocRows = displayedRows.filter(row => row.placement !== "unplaced");
+  const unplacedRows = displayedRows.filter(row => row.placement === "unplaced");
+
   const orderedHeadings = [...TOC_HEADINGS].sort((a, b) =>
     Number(a.order || 0) - Number(b.order || 0)
   );
@@ -493,10 +596,10 @@ function renderIndexResults(parent, displayedRows, api) {
 
   for (const heading of orderedHeadings) {
     const directRows = sortRowsByTocOrder(
-      displayedRows.filter(row => row.heading_key === heading.key)
+      tocRows.filter(row => row.heading_key === heading.key)
     );
 
-    const subtreeRows = rowsForHeading(displayedRows, heading);
+    const subtreeRows = rowsForHeading(tocRows, heading);
 
     if (!directRows.length && !subtreeRows.length) continue;
 
@@ -514,7 +617,7 @@ function renderIndexResults(parent, displayedRows, api) {
     }
   }
 
-  const orphanRows = displayedRows.filter(row => !renderedRowKeys.has(row.selection_key));
+  const orphanRows = tocRows.filter(row => !renderedRowKeys.has(row.selection_key));
 
   if (orphanRows.length) {
     const heading = {
@@ -527,6 +630,19 @@ function renderIndexResults(parent, displayedRows, api) {
 
     renderHeadingBlock(parent, heading, orphanRows, api);
     renderRowsTable(parent, orphanRows, api);
+  }
+
+  if (unplacedRows.length) {
+    const heading = {
+      key: "Not in table of contents",
+      title: "Not in table of contents",
+      level: 1,
+      path: ["Not in table of contents"],
+      order: 1000000,
+    };
+
+    renderHeadingBlock(parent, heading, unplacedRows, api);
+    renderRowsTable(parent, unplacedRows, api);
   }
 }
 
@@ -541,6 +657,29 @@ function renderSelectedTocLink(parent, api) {
   api.createInternalLink(sourceWrap, SELECTED_TOC_FILE.path, SELECTED_TOC_FILE.basename);
 }
 
+function renderUnicodeReference(parent) {
+  const details = parent.createEl("details");
+  details.style.margin = "0.8em 0";
+
+  details.createEl("summary", { text: "Unicode symbol reference" });
+
+  const table = details.createEl("table");
+  table.classList.add("dataview", "table-view-table");
+  table.style.marginTop = "0.5em";
+
+  const thead = table.createEl("thead");
+  const headRow = thead.createEl("tr");
+  ["Symbol", "Code", "Meaning"].forEach(text => headRow.createEl("th", { text }));
+
+  const tbody = table.createEl("tbody");
+  for (const item of CONFIG.unicodeReference) {
+    const tr = tbody.createEl("tr");
+    tr.createEl("td", { text: item.symbol });
+    tr.createEl("td", { text: item.code });
+    tr.createEl("td", { text: item.meaning });
+  }
+}
+
 async function saveSelectionManifest(api) {
   await api.saveDataviewSelection({
     operation: "content-index",
@@ -553,7 +692,8 @@ async function saveSelectionManifest(api) {
     options: {
       toc_path: SELECTED_TOC_FILE.path,
       ordering: "table-of-contents",
-      filters: ["class", "status", "stage"],
+      slug_prefixes: CONFIG.slugPrefixes,
+      filters: ["slug_prefix", "class", "status", "stage"],
     },
     savedSelectionExtras({ rows }) {
       return savedSelectionExtras({ rows });
@@ -561,13 +701,15 @@ async function saveSelectionManifest(api) {
   });
 }
 
-const { rows, headings, tocFile } = await buildRowsFromToc();
-const TOC_HEADINGS = headings;
-const SELECTED_TOC_FILE = tocFile;
+const tocBuild = await buildRowsFromToc();
+const unplacedRows = buildUnplacedRows(tocBuild.tocPaths, tocBuild.tocFile);
+const rows = [...tocBuild.rows, ...unplacedRows];
+const TOC_HEADINGS = tocBuild.headings;
+const SELECTED_TOC_FILE = tocBuild.tocFile;
 
 if (!rows.length) {
   dv.container.innerHTML = "";
-  dv.paragraph(`No Markdown files linked from ${SELECTED_TOC_FILE.path} were found.`);
+  dv.paragraph(`No Markdown files linked from ${SELECTED_TOC_FILE.path}, and no files matched slug prefixes ${CONFIG.slugPrefixes.join(", ")}.`);
   return;
 }
 
@@ -589,6 +731,7 @@ await renderSelectionQuery({
   columns: [],
 
   filterFields: [
+    { key: "slug_prefix", title: "Slug prefix" },
     { key: "class", title: "Class" },
     { key: "status", title: "Status" },
     { key: "stage", title: "Stage" },
@@ -608,14 +751,17 @@ await renderSelectionQuery({
   },
 
   emptyMessage: `No Markdown files linked from ${SELECTED_TOC_FILE.path} were found.`,
-  noMatchesMessage: "No matching TOC-linked files.",
+  noMatchesMessage: "No matching files.",
 
   summaryText({ displayedRows, selectedRows }) {
-    return `${displayedRows.length} file(s) linked from ${SELECTED_TOC_FILE.name} · ${selectedRows.length} checked`;
+    const tocCount = displayedRows.filter(row => row.placement === "toc").length;
+    const unplacedCount = displayedRows.filter(row => row.placement === "unplaced").length;
+    return `${tocCount} TOC file(s) · ${unplacedCount} not in TOC · ${selectedRows.length} checked`;
   },
 
   renderActions(parent, api) {
     renderSelectedTocLink(parent, api);
+    renderUnicodeReference(parent);
 
     const saveButton = parent.createEl("button", { text: "Save selection manifest" });
     saveButton.onclick = async () => {
