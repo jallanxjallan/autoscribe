@@ -18,9 +18,8 @@ from asc.redis.primitives.zsets import zadd, zrange, zrem, zscore
 ACTIVE_CALLS_KEY = RedisKey("state:active:index")
 ACTIVE_WINDOW_LIMIT = 16
 WAITING_CALL_DELAY_SECONDS = 3.0
-IDLE_SLEEP_SECONDS = 5.0
-MAX_IDLE_SLEEP_SECONDS = 5.0
-COMPLETED_CALL_DELAY_SECONDS = 365 * 24 * 60 * 60
+ORCHESTRATOR_IDLE_SLEEP_SECONDS = 5.0
+
 
 
 @dataclass(frozen=True, slots=True)
@@ -66,14 +65,14 @@ def seconds_until_next_visible(
     limit: int = ACTIVE_WINDOW_LIMIT,
     calls: list[ActiveCall] | None = None,
 ) -> float | None:
-    window = active_call_window(limit=limit) if calls is None else calls
-    if not window:
+    current_calls = active_call_window(limit=limit) if calls is None else calls
+    if not current_calls:
         return None
 
-    delay = window[0].score - time.time()
+    delay = current_calls[0].score - time.time()
     if delay <= 0:
         return 0.0
-    return min(delay, MAX_IDLE_SLEEP_SECONDS)
+    return min(delay, ORCHESTRATOR_IDLE_SLEEP_SECONDS)
 
 
 def bump_active_call(call_key: str) -> None:
@@ -88,21 +87,6 @@ def defer_active_call(
     zadd(ACTIVE_CALLS_KEY, {str(call_key): float(time.time()) + delay_seconds})
 
 
-def complete_active_call(
-    call_key: str,
-    *,
-    delay_seconds: float = COMPLETED_CALL_DELAY_SECONDS,
-) -> None:
-    """Park a finished call in the active index with a far-future score.
-
-    Completed calls stay visible to inspection/status tooling instead of being
-    removed from the active zset. The future score keeps the forever-loop from
-    reprocessing them during normal runtime polling.
-    """
-
-    zadd(ACTIVE_CALLS_KEY, {str(call_key): float(time.time()) + delay_seconds})
-
-
 def remove_active_call(call_key: str) -> None:
     zrem(ACTIVE_CALLS_KEY, str(call_key))
 
@@ -110,13 +94,11 @@ def remove_active_call(call_key: str) -> None:
 __all__ = [
     "ACTIVE_CALLS_KEY",
     "ACTIVE_WINDOW_LIMIT",
-    "COMPLETED_CALL_DELAY_SECONDS",
-    "IDLE_SLEEP_SECONDS",
+    "ORCHESTRATOR_IDLE_SLEEP_SECONDS",
     "WAITING_CALL_DELAY_SECONDS",
     "ActiveCall",
     "active_call_window",
     "bump_active_call",
-    "complete_active_call",
     "defer_active_call",
     "oldest_active_call",
     "remove_active_call",

@@ -38,7 +38,7 @@ def export_values(task: Any) -> dict[str, Any]:
         "source_identity": source_identity,
         "final_step": final_step_number(task),
         "result_key": task_record_key_text(task),
-        "exported_at": int(timestamp_now()),
+        "exported_at": 0,
         "export_message": export_message(task),
         "created_at": int(task.created_at),
     }

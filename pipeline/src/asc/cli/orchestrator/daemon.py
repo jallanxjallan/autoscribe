@@ -12,13 +12,12 @@ from dataclasses import dataclass
 import time
 
 from asc.orchestrator.active import (
-    IDLE_SLEEP_SECONDS,
     active_call_window,
     bump_active_call,
-    complete_active_call,
     defer_active_call,
     remove_active_call,
     seconds_until_next_visible,
+    ORCHESTRATOR_IDLE_SLEEP_SECONDS,
 )
 from asc.orchestrator.handle import handle
 from asc.redis.key import RedisKey
@@ -61,9 +60,9 @@ def run_once(
     visible = [call for call in window if call.score <= now]
 
     if not visible:
-        delay = seconds_until_next_visible(calls=window)
         if wait:
-            time.sleep(delay if delay is not None else IDLE_SLEEP_SECONDS)
+            delay = seconds_until_next_visible(calls=window)
+            time.sleep(delay if delay is not None else ORCHESTRATOR_IDLE_SLEEP_SECONDS)
         return OrchestratorRunReport(claimed=False)
 
     waiting = False
@@ -72,7 +71,7 @@ def run_once(
         result = handle(call.key)
 
         if not result.active:
-            complete_active_call(call.key)
+            remove_active_call(call.key)
             return OrchestratorRunReport(
                 claimed=True,
                 call_key=call.key,
@@ -94,7 +93,7 @@ def run_once(
         )
 
     if wait and waiting:
-        time.sleep(IDLE_SLEEP_SECONDS)
+        time.sleep(ORCHESTRATOR_IDLE_SLEEP_SECONDS)
 
     return OrchestratorRunReport(claimed=False, waiting=waiting)
 
@@ -103,19 +102,21 @@ def run_forever(
     *,
     timeout: int = DEFAULT_CLAIM_TIMEOUT_SECONDS,
     empty_limit: int | None = None,
-    target_keys: set[str] | None = None,
 ) -> None:
-    """Run the orchestrator daemon forever.
+    """Run the orchestrator loop forever.
 
-    The orchestrator polls the active-call zset. Worker and scrivener daemons
-    remain blocking Redis consumers; the orchestrator simply backs off for five
-    seconds when its visibility window has no immediately actionable work.
-    ``timeout``, ``empty_limit``, and ``target_keys`` are retained only for API compatibility.
+    The orchestrator polls the active-call zset rather than blocking on a Redis
+    inbox.  It must therefore not use the shared idle-shutdown daemon runner:
+    a temporarily waiting worker/scrivener task is normal pipeline state, not a
+    reason for the orchestrator process to exit.
+
+    ``timeout`` and ``empty_limit`` are accepted for API compatibility with the
+    managed run surface. They are intentionally ignored here.
     """
 
     configure_logging()
     while True:
-        run_once(timeout=timeout, empty_limit=empty_limit, wait=True)
+        run_once(wait=True)
 
 
 def main() -> None:
