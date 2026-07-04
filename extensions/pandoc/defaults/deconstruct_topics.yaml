@@ -1,0 +1,21 @@
+from: markdown+yaml_metadata_block+wikilinks_title_after_pipe+bracketed_spans+fenced_divs
+to: markdown
+wrap: none
+
+# Keep this here so the outer Pandoc run and the inner Lua-triggered Pandoc
+# render use the same configured data-dir. The finding template should live at:
+#   /home/jeremy/.local/share/pandoc/templates/finding-note.md
+# data-dir: /home/jeremy/.local/share/pandoc
+
+filters:
+  - import/deconstruct-topics.lua
+
+metadata:
+  deconstruct-from: markdown+yaml_metadata_block+wikilinks_title_after_pipe+bracketed_spans+fenced_divs
+  deconstruct-to: markdown+yaml_metadata_block+wikilinks_title_after_pipe+bracketed_spans+fenced_divs
+  deconstruct-wrap: none
+  deconstruct-template: finding-note
+  deconstruct-finding-prefix: fnd__
+  deconstruct-topic-prefix: tpc__
+  deconstruct-overwrite: false
+  deconstruct-include-preamble: false
