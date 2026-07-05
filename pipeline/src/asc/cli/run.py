@@ -385,17 +385,17 @@ def _run_until_complete(target_keys: tuple[str, ...], processes: dict[str, subpr
     quiet_ticks = 0
 
     while True:
-        _raise_if_child_exited(processes)
-        active = _active_key_set()
-        target_active = bool(active & targets)
+        active = _active_calls()
+        target_visible = any(call.key in targets and call.visible for call in active)
         inbox_count = _runtime_inbox_count()
 
-        if not target_active and inbox_count == 0:
+        if not target_visible and inbox_count == 0:
             quiet_ticks += 1
             if quiet_ticks >= QUIET_DRAIN_TICKS:
                 return
         else:
             quiet_ticks = 0
+            _raise_if_child_exited(processes)
 
         time.sleep(MONITOR_SLEEP_SECONDS)
 
