@@ -19,7 +19,6 @@ ACTIVE_CALLS_KEY = RedisKey("state:active:index")
 ACTIVE_WINDOW_LIMIT = 16
 WAITING_CALL_DELAY_SECONDS = 3.0
 IDLE_SLEEP_SECONDS = 5.0
-MAX_IDLE_SLEEP_SECONDS = 5.0
 COMPLETED_CALL_DELAY_SECONDS = 365 * 24 * 60 * 60
 
 
@@ -40,7 +39,15 @@ def oldest_active_call() -> str | None:
     return calls[0].key
 
 
-def active_call_window(*, limit: int = ACTIVE_WINDOW_LIMIT) -> list[ActiveCall]:
+def active_call_window(
+    *,
+    limit: int = ACTIVE_WINDOW_LIMIT,
+    target_keys: set[str] | None = None,
+) -> list[ActiveCall]:
+    if target_keys is not None:
+        calls = _target_active_calls(target_keys=target_keys)
+        return calls[: max(0, limit)]
+
     members = zrange(ACTIVE_CALLS_KEY, 0, max(0, limit - 1))
     calls: list[ActiveCall] = []
 
@@ -56,24 +63,52 @@ def active_call_window(*, limit: int = ACTIVE_WINDOW_LIMIT) -> list[ActiveCall]:
     return calls
 
 
-def visible_active_calls(*, limit: int = ACTIVE_WINDOW_LIMIT) -> list[ActiveCall]:
+def _target_active_calls(*, target_keys: set[str]) -> list[ActiveCall]:
+    calls: list[ActiveCall] = []
+
+    for raw in target_keys:
+        key = str(raw).strip()
+        if not key:
+            continue
+        score = zscore(ACTIVE_CALLS_KEY, key)
+        if score is None:
+            continue
+        calls.append(ActiveCall(key=key, score=float(score)))
+
+    return sorted(calls, key=lambda call: call.score)
+
+
+def visible_active_calls(
+    *,
+    limit: int = ACTIVE_WINDOW_LIMIT,
+    target_keys: set[str] | None = None,
+) -> list[ActiveCall]:
     now = time.time()
-    return [call for call in active_call_window(limit=limit) if call.score <= now]
+    return [
+        call
+        for call in active_call_window(limit=limit, target_keys=target_keys)
+        if call.score <= now
+    ]
 
 
 def seconds_until_next_visible(
     *,
     limit: int = ACTIVE_WINDOW_LIMIT,
     calls: list[ActiveCall] | None = None,
+    target_keys: set[str] | None = None,
 ) -> float | None:
-    window = active_call_window(limit=limit) if calls is None else calls
+    window = (
+        active_call_window(limit=limit, target_keys=target_keys)
+        if calls is None
+        else calls
+    )
     if not window:
         return None
 
     delay = window[0].score - time.time()
     if delay <= 0:
         return 0.0
-    return min(delay, MAX_IDLE_SLEEP_SECONDS)
+    return min(delay, IDLE_SLEEP_SECONDS)
 
 
 def bump_active_call(call_key: str) -> None:

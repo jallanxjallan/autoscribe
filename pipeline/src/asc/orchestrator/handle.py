@@ -160,6 +160,12 @@ def _apply_task_state(
 
 
 def _apply_worker_success(*, index, slot: int, state: TaskState, call_identity: str) -> HandleResult:
+    if not state.step_key:
+        raise OrchestratorContractError(
+            f"worker task missing step_key: {state.key}"
+        )
+    call_index.validate_step_slot(step_key=state.step_key, slot=slot)
+
     if state.action != WORKER_EXECUTE_STEP:
         raise OrchestratorContractError(
             f"unknown worker task action {state.action!r}: {state.key}"

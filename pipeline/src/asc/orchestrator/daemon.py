@@ -17,7 +17,6 @@ from asc.orchestrator.active import (
     bump_active_call,
     complete_active_call,
     defer_active_call,
-    remove_active_call,
     seconds_until_next_visible,
 )
 from asc.orchestrator.handle import handle
@@ -48,16 +47,18 @@ def run_once(
     timeout: int | None = None,
     empty_limit: int | None = None,
     wait: bool = False,
+    target_keys: set[str] | None = None,
 ) -> OrchestratorRunReport:
     """Inspect and advance one active call.
 
     ``timeout``, ``empty_limit``, and ``wait`` are accepted for compatibility
     with the shared daemon runner. Active calls are polled from the zset rather
-    than claimed from a blocking inbox.
+    than claimed from a blocking inbox. When provided, ``target_keys`` restricts
+    polling to that exact active-call snapshot.
     """
 
     now = time.time()
-    window = active_call_window()
+    window = active_call_window(target_keys=target_keys)
     visible = [call for call in window if call.score <= now]
 
     if not visible:
@@ -110,12 +111,19 @@ def run_forever(
     The orchestrator polls the active-call zset. Worker and scrivener daemons
     remain blocking Redis consumers; the orchestrator simply backs off for five
     seconds when its visibility window has no immediately actionable work.
-    ``timeout``, ``empty_limit``, and ``target_keys`` are retained only for API compatibility.
+    ``timeout`` and ``empty_limit`` are retained for API compatibility.
+    ``target_keys`` constrains this loop to the active-call snapshot supplied by
+    controlled run modes such as ``single`` and ``drain``.
     """
 
     configure_logging()
     while True:
-        run_once(timeout=timeout, empty_limit=empty_limit, wait=True)
+        run_once(
+            timeout=timeout,
+            empty_limit=empty_limit,
+            wait=True,
+            target_keys=target_keys,
+        )
 
 
 def main() -> None:
