@@ -1,5 +1,6 @@
 from collections.abc import Iterator, Mapping
 from dataclasses import dataclass
+import sys
 from typing import Any, TextIO
 
 from asc.enqueue.call import create_call_from_manifest_record
@@ -35,37 +36,48 @@ def iter_enqueue_records(stream: TextIO) -> Iterator[EnqueueRecord]:
         seen = True
         raw = parsed.record
         if not isinstance(raw, Mapping):
-            raise ValueError(
-                f"enqueue stream row {parsed.line_number} must be a JSON object"
-            )
+            _skip_enqueue_row(parsed.line_number, "row must be a JSON object")
+            continue
 
         try:
             record_type = str(raw["record_type"])
-        except KeyError as exc:
-            raise ValueError(
-                f"enqueue stream row {parsed.line_number} missing required field: record_type"
-            ) from exc
+        except KeyError:
+            _skip_enqueue_row(parsed.line_number, "missing required field: record_type")
+            continue
 
         try:
             call_kind = ENQUEUE_RECORD_TYPES[record_type]
-        except KeyError as exc:
+        except KeyError:
             allowed = ", ".join(sorted(ENQUEUE_RECORD_TYPES))
-            raise ValueError(
-                f"enqueue stream row {parsed.line_number} record_type must be one of: {allowed}"
-            ) from exc
+            _skip_enqueue_row(
+                parsed.line_number,
+                f"record_type must be one of: {allowed}; got {record_type!r}",
+            )
+            continue
 
         plan = load_plan_from_manifest_record(raw)
+
+        try:
+            call = create_call_from_manifest_record(raw, plan_key=plan.raw_key)
+        except Exception as exc:
+            _skip_enqueue_row(parsed.line_number, str(exc))
+            continue
 
         yield EnqueueRecord(
             record_type=record_type,
             call_kind=call_kind,
             plan=plan,
-            call=create_call_from_manifest_record(raw, plan_key=plan.raw_key),
+            call=call,
             raw_record=raw,
         )
 
     if not seen:
-        raise ValueError("no enqueue records found")
+        print("asc enqueue: no records uploaded", file=sys.stderr)
+        return
+
+
+def _skip_enqueue_row(line_number: int, reason: str) -> None:
+    print(f"asc enqueue: skipping row {line_number}: {reason}", file=sys.stderr)
 
 
 def load_enqueue_records(stream: TextIO) -> list[EnqueueRecord]:
