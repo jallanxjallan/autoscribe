@@ -1,11 +1,17 @@
 'use strict';
 
-const fs = require('node:fs');
 const path = require('node:path');
 
 const { fail, info } = require('./command');
 const { readVaultFile, assertVaultRoot, vaultFileExists } = require('./selection');
 const { runPandocUpload } = require('./pandoc-upload');
+const {
+  loadRunManifest,
+  markCallUploaded,
+  markCallUploadError,
+  pendingRunCalls,
+  writeRunManifest,
+} = require('./run-manifest');
 
 const { getGitRoot } = require('../../lib/git');
 const { getFrontmatterTextFromMarkdown } = require('../../lib/markdown');
@@ -65,28 +71,8 @@ function defaultManifestPath(root) {
   return path.join(workflowDir(root), 'runs', 'current-run.json');
 }
 
-function readJsonFile(filepath, script) {
-  try {
-    return JSON.parse(fs.readFileSync(filepath, 'utf8'));
-  } catch (error) {
-    fail(script, `${filepath}: could not read JSON: ${error.message || error}`);
-  }
-}
-
 function loadDispatchManifest({ options, root, script }) {
-  const filepath = path.resolve(root, options.manifestPath || defaultManifestPath(root));
-  const manifest = readJsonFile(filepath, script);
-  const payload = Array.isArray(manifest) ? { slug_pairs: manifest } : { ...manifest };
-  payload.filepath = payload.filepath || filepath;
-
-  const manifestType = 'run_dispatch_manifest' 
-  // payload.type || payload.manifest_type || payload.record_type;
-
-  if (manifestType && manifestType !== 'run_dispatch_manifest') {
-    fail(script, `manifest type is ${manifestType}, expected run_dispatch_manifest`);
-  }
-
-  return payload;
+  return loadRunManifest({ options, root, script });
 }
 
 function firstArray(...values) {
@@ -96,8 +82,12 @@ function firstArray(...values) {
   return [];
 }
 
-function normalizePromptPlanPairs(manifest) {
-  const rows = firstArray(
+function manifestRows(manifest) {
+  if (manifest.type === 'run_manifest' || manifest.type === 'run_dispatch_manifest') {
+    return pendingRunCalls(manifest);
+  }
+
+  return firstArray(
     manifest.prompt_plan_pairs,
     manifest.promptPlanPairs,
     manifest.slug_pairs,
@@ -106,7 +96,11 @@ function normalizePromptPlanPairs(manifest) {
     manifest.items,
     manifest.records,
     manifest.dispatch
-  );
+  ).filter((row) => String(row.upload_status || 'pending') === 'pending');
+}
+
+function normalizePromptPlanPairs(manifest) {
+  const rows = manifestRows(manifest);
 
   return rows.map((row, index) => {
     const promptSlug =
@@ -201,19 +195,15 @@ function resolveCalls({ root, manifest, script }) {
   });
 }
 
-function dispatchPandocRecord({ root, call, defaults, script }) {
-  try {
-    runPandocUpload({
-      cwd: root,
-      input: call.path,
-      defaults,
-      metadata: {
-        record_plan: call.plan_slug,
-      },
-    });
-  } catch (error) {
-    fail(script, `${call.path}: pandoc dispatch failed: ${error.message || error}`);
-  }
+function dispatchPandocRecord({ root, call, defaults }) {
+  runPandocUpload({
+    cwd: root,
+    input: call.path,
+    defaults,
+    metadata: {
+      record_plan: call.plan_slug,
+    },
+  });
 }
 
 function logPlan({ script, root, manifest, calls }) {
@@ -239,7 +229,7 @@ function runDispatchRun(config = {}) {
   const calls = resolveCalls({ root, manifest, script });
 
   if (calls.length === 0) {
-    info(script, 'no enqueue records in dispatch manifest');
+    info(script, 'no pending enqueue records in dispatch manifest');
     return;
   }
 
@@ -250,11 +240,23 @@ function runDispatchRun(config = {}) {
     return;
   }
 
+  const uploadedAt = new Date().toISOString();
+  let emitted = 0;
+
   for (const call of calls) {
-    dispatchPandocRecord({ root, call, defaults, script });
+    try {
+      dispatchPandocRecord({ root, call, defaults });
+      markCallUploaded({ manifest, call, uploadedAt });
+      emitted += 1;
+    } catch (error) {
+      markCallUploadError({ manifest, call, error });
+      writeRunManifest(manifest.filepath, manifest, script);
+      fail(script, `${call.path}: dispatch failed: ${error.message || error}`);
+    }
   }
 
-  info(script, `emitted enqueue records: ${calls.length}`);
+  writeRunManifest(manifest.filepath, manifest, script);
+  info(script, `emitted enqueue records: ${emitted}`);
 }
 
 module.exports = {

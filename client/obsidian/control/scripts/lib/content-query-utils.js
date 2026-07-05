@@ -125,28 +125,48 @@ function normalizeSlug(value) {
   return asText(value).toLowerCase().trim();
 }
 
+function normalizeSlugPrefix(value) {
+  return String(value || "")
+    .toLowerCase()
+    .trim()
+    .replace(/[.\-_/]+$/g, "");
+}
+
+function slugPrefixToken(slug) {
+  return normalizeSlug(slug).split(/[.\-_/]/)[0] || "";
+}
+
+function slugMatchesPrefix(slug, prefix) {
+  const cleanSlug = normalizeSlug(slug);
+  const cleanPrefix = normalizeSlugPrefix(prefix);
+
+  if (!cleanSlug || !cleanPrefix) return false;
+  if (cleanSlug === cleanPrefix) return true;
+
+  return cleanSlug.startsWith(`${cleanPrefix}.`)
+    || cleanSlug.startsWith(`${cleanPrefix}-`)
+    || cleanSlug.startsWith(`${cleanPrefix}_`)
+    || cleanSlug.startsWith(`${cleanPrefix}/`);
+}
+
 function slugPrefixForSlug(slug, slugPrefixes = [], fallback = "—") {
   const cleanSlug = normalizeSlug(slug);
   if (!cleanSlug) return fallback;
 
-  const explicitPrefix = slugPrefixes.find(prefix => {
-    const cleanPrefix = String(prefix || "").toLowerCase().trim();
-    return cleanPrefix && cleanSlug.startsWith(cleanPrefix);
-  });
+  const explicitPrefix = slugPrefixes
+    .map(normalizeSlugPrefix)
+    .find(prefix => slugMatchesPrefix(cleanSlug, prefix));
 
-  if (explicitPrefix) return String(explicitPrefix).toLowerCase().trim();
+  if (explicitPrefix) return explicitPrefix;
 
-  return cleanSlug.split(/[.\-_/]/)[0] || fallback;
+  return slugPrefixToken(cleanSlug) || fallback;
 }
 
 function slugMatchesPrefixes(slug, slugPrefixes = []) {
   const cleanSlug = normalizeSlug(slug);
   if (!cleanSlug) return false;
 
-  return slugPrefixes.some(prefix => {
-    const cleanPrefix = String(prefix || "").toLowerCase().trim();
-    return cleanPrefix && cleanSlug.startsWith(cleanPrefix);
-  });
+  return slugPrefixes.some(prefix => slugMatchesPrefix(cleanSlug, prefix));
 }
 
 function extractWikiLinks(line) {
@@ -215,7 +235,22 @@ function makeContentQueryUtils({ app, dv, config = {} } = {}) {
 
   function pageForFile(file) {
     if (!file || isExcluded(file.path)) return null;
-    return dv?.page(file.path) || null;
+
+    const dataviewPage = dv?.page(file.path);
+    if (dataviewPage) return dataviewPage;
+
+    const frontmatter = app?.metadataCache?.getFileCache(file)?.frontmatter || {};
+    if (!Object.keys(frontmatter).length) return null;
+
+    return {
+      ...frontmatter,
+      file: {
+        name: file.name,
+        basename: file.basename,
+        path: file.path,
+        mtime: file.stat?.mtime || 0,
+      },
+    };
   }
 
   function candidateMarkdownFiles() {
@@ -297,6 +332,9 @@ module.exports = {
   filenameTokens,
   tocPriorityScore,
   normalizeSlug,
+  normalizeSlugPrefix,
+  slugPrefixToken,
+  slugMatchesPrefix,
   slugPrefixForSlug,
   slugMatchesPrefixes,
   extractWikiLinks,

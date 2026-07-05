@@ -52,8 +52,13 @@ function manifestVaultRoot(manifest) {
 }
 
 function assertRunManifest({ manifest, root, script }) {
-  if (manifest.type !== 'run_manifest') {
-    fail(script, `manifest type is ${manifest.type || 'missing'}, expected run_manifest`);
+  const allowedTypes = new Set(['run_manifest', 'run_dispatch_manifest']);
+
+  if (!allowedTypes.has(manifest.type)) {
+    fail(
+      script,
+      `manifest type is ${manifest.type || 'missing'}, expected run_manifest or run_dispatch_manifest`
+    );
   }
 
   const manifestRoot = manifestVaultRoot(manifest);
@@ -68,9 +73,21 @@ function assertRunManifest({ manifest, root, script }) {
     );
   }
 
-  if (!Array.isArray(manifest.calls)) {
-    fail(script, 'run manifest must contain a calls array');
+  if (!Array.isArray(runManifestRows(manifest))) {
+    fail(script, 'run manifest must contain a calls or prompt_plan_pairs array');
   }
+}
+
+function runManifestRows(manifest) {
+  if (Array.isArray(manifest.calls)) return manifest.calls;
+  if (Array.isArray(manifest.prompt_plan_pairs)) return manifest.prompt_plan_pairs;
+  if (Array.isArray(manifest.promptPlanPairs)) return manifest.promptPlanPairs;
+  if (Array.isArray(manifest.slug_pairs)) return manifest.slug_pairs;
+  if (Array.isArray(manifest.pairs)) return manifest.pairs;
+  if (Array.isArray(manifest.items)) return manifest.items;
+  if (Array.isArray(manifest.records)) return manifest.records;
+  if (Array.isArray(manifest.dispatch)) return manifest.dispatch;
+  return null;
 }
 
 function loadRunManifest({ options, root, script }) {
@@ -86,7 +103,7 @@ function loadRunManifest({ options, root, script }) {
 }
 
 function pendingRunCalls(manifest) {
-  return manifest.calls
+  return runManifestRows(manifest)
     .filter((call) => String(call.upload_status || 'pending') === 'pending')
     .map((call) => ({
       ...call,
@@ -94,37 +111,50 @@ function pendingRunCalls(manifest) {
     }));
 }
 
-function markCallUploaded({ manifest, call, uploadedAt }) {
-  const index = manifest.calls.findIndex((item) => {
+function findManifestCallIndex({ manifest, call }) {
+  return runManifestRows(manifest).findIndex((item, index) => {
     if (call.index !== undefined && item.index === call.index) return true;
+    if (call.index !== undefined && item.index === undefined && Number(call.index) === index + 1) return true;
     if (call.call_slug && item.call_slug === call.call_slug) return true;
+    if (call.call_slug && item.callSlug === call.call_slug) return true;
+    if (call.prompt_slug && item.prompt_slug === call.prompt_slug) return true;
+    if (call.prompt_slug && item.promptSlug === call.prompt_slug) return true;
+    if (call.prompt_slug && item.slug === call.prompt_slug) return true;
     return false;
   });
+}
 
+function updateManifestCall({ manifest, call, fields }) {
+  const rows = runManifestRows(manifest);
+  const index = findManifestCallIndex({ manifest, call });
   if (index < 0) return;
-
-  manifest.calls[index] = {
-    ...manifest.calls[index],
-    upload_status: 'uploaded',
-    uploaded_at: uploadedAt,
-    upload_error: null,
+  rows[index] = {
+    ...rows[index],
+    ...fields,
   };
 }
 
-function markCallUploadError({ manifest, call, error }) {
-  const index = manifest.calls.findIndex((item) => {
-    if (call.index !== undefined && item.index === call.index) return true;
-    if (call.call_slug && item.call_slug === call.call_slug) return true;
-    return false;
+function markCallUploaded({ manifest, call, uploadedAt }) {
+  updateManifestCall({
+    manifest,
+    call,
+    fields: {
+      upload_status: 'uploaded',
+      uploaded_at: uploadedAt,
+      upload_error: null,
+    },
   });
+}
 
-  if (index < 0) return;
-
-  manifest.calls[index] = {
-    ...manifest.calls[index],
-    upload_status: 'error',
-    upload_error: error.message || String(error),
-  };
+function markCallUploadError({ manifest, call, error }) {
+  updateManifestCall({
+    manifest,
+    call,
+    fields: {
+      upload_status: 'error',
+      upload_error: error.message || String(error),
+    },
+  });
 }
 
 module.exports = {
@@ -135,5 +165,6 @@ module.exports = {
   markCallUploaded,
   markCallUploadError,
   pendingRunCalls,
+  runManifestRows,
   writeRunManifest,
 };
