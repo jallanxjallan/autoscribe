@@ -4,7 +4,9 @@ const CONFIG = {
   tempRoot: "",
   debug: false,
 
+  // Keep these as the content filter, but do not expose them as a selector.
   slugPrefixes: ["cnt_", "img_"],
+  selectorChoiceLimit: 10,
 
   unicodeReference: [
     { symbol: "❦", code: "U+2766", label: "motif", meaning: "Motif" },
@@ -52,6 +54,61 @@ const { loader, queryPath, vaultName } = runtime;
 const { renderSelectionQuery } = loader.requireControl("scripts/lib/selection-query.js");
 const { makeContentIndexView } = loader.requireControl("scripts/lib/content-index-view.js");
 
+function compactChoiceLists(root, limit) {
+  if (!Number.isFinite(limit) || limit < 1) return;
+
+  const blocks = [...root.querySelectorAll("div, fieldset")]
+    .map(block => ({
+      block,
+      choices: [...block.children].filter(child =>
+        child.tagName === "LABEL" &&
+        child.querySelector('input[type="checkbox"], input[type="radio"]')
+      ),
+    }))
+    .filter(item => item.choices.length > limit)
+    .filter((item, _index, items) =>
+      !items.some(other => other !== item && other.block.contains(item.block))
+    );
+
+  for (const { block, choices } of blocks) {
+    const hidden = choices.slice(limit);
+    if (!hidden.length) continue;
+
+    for (const choice of hidden) choice.style.display = "none";
+
+    const toggle = block.createEl("a", {
+      href: "#",
+      text: `more (${hidden.length})`,
+    });
+
+    toggle.style.display = "inline-block";
+    toggle.style.marginTop = "0.25em";
+
+    toggle.onclick = event => {
+      event.preventDefault();
+
+      const expanded = toggle.dataset.expanded === "true";
+      for (const choice of hidden) choice.style.display = expanded ? "none" : "";
+
+      toggle.dataset.expanded = expanded ? "false" : "true";
+      toggle.setText(expanded ? `more (${hidden.length})` : "less");
+    };
+  }
+}
+
+async function renderTidySelectionQuery(options) {
+  const nextOptions = {
+    ...options,
+
+    filterFields: (options.filterFields || [])
+      .filter(field => field.key !== "slug_prefix"),
+  };
+
+  const result = await renderSelectionQuery(nextOptions);
+  compactChoiceLists(dv.container, CONFIG.selectorChoiceLimit);
+  return result;
+}
+
 await makeContentIndexView({
   app,
   dv,
@@ -59,6 +116,6 @@ await makeContentIndexView({
   queryPath,
   vaultName,
   config: CONFIG,
-  renderSelectionQuery,
+  renderSelectionQuery: renderTidySelectionQuery,
 }).render();
 ```

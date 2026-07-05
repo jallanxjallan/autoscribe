@@ -5,8 +5,11 @@ const CONFIG = {
 
   defaultStatus: "—",
   defaultStage: "—",
-  defaultProcess: "—",
+  defaultRepoState: "—",
   defaultSlugPrefix: "—",
+
+  // Slug prefixes only. Filenames are irrelevant.
+  slugPrefixes: ["cnt", "img"],
 
   excludePaths: [
     ".obsidian",

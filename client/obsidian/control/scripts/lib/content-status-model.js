@@ -14,6 +14,7 @@ function makeContentStatusModel({ app, dv, config }) {
     candidateMarkdownFiles,
     pageForFile,
     slugPrefixForSlug,
+    slugMatchesCriteria,
   } = utils;
 
   function processForPage(page) {
@@ -27,6 +28,7 @@ function makeContentStatusModel({ app, dv, config }) {
 
     const slug = asText(page.slug);
     if (!slug) return null;
+    if (!slugMatchesCriteria(slug)) return null;
 
     return { file, page, slug };
   }
@@ -78,6 +80,7 @@ function makeContentStatusModel({ app, dv, config }) {
       displayed_count: rows.length,
       filters: ["status", "stage", "process"],
       sort_modes: ["title", "modified"],
+      slug_prefixes: config.slugPrefixes || [],
     };
   }
 
