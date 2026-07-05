@@ -1,4 +1,6 @@
 import sys
+
+import click
 from collections.abc import Iterable
 from typing import Any, TextIO
 
@@ -9,6 +11,7 @@ from asc.exporter.export_result import (
     reset_result_exported,
     write_extracted_result_record,
     write_pending_result_records,
+    write_result_record_by_slug,
 )
 from asc.exporter.pending_exports import pending_export_records
 from asc.scrivener.connect import connect
@@ -63,8 +66,8 @@ def _write_source_identity_stream(
         print(_text(row.get("source_identity") or row.get("record_identity")), file=sink)
 
 
-@app.command("list-pending-exports")
-def list_pending_exports(
+@app.command("list-pending")
+def list_pending(
     source_identity: str | None = typer.Argument(
         None,
         help=(
@@ -107,14 +110,61 @@ def extract_result(
         )
 
 
-@app.command("extract-pending-results")
-@app.command("extract-all-pending")
 @app.command("extract-pending")
 def extract_pending_results() -> None:
     """Emit all pending extracted call/result rows as an NDJSON batch."""
 
     with connect() as conn:
         write_pending_result_records(conn=conn, sink=sys.stdout)
+
+
+@app.command("re-export")
+def re_export(
+    slug: str = typer.Argument(
+        ...,
+        help="Source slug to emit again as NDJSON.",
+    ),
+    yes: bool = typer.Option(
+        False,
+        "--yes",
+        "-y",
+        help="Skip confirmation before emitting overwrite-oriented NDJSON.",
+    ),
+    export_message: str = typer.Option(
+        "re-export",
+        "--export-message",
+        "--message",
+        help="Message to store in the exports row.",
+    ),
+) -> None:
+    """Emit one slug's latest result as NDJSON and refresh exported_at."""
+
+    cleaned = slug.strip()
+    if not cleaned:
+        typer.echo("ERROR: slug must not be empty", err=True)
+        raise typer.Exit(code=1)
+
+    if not yes:
+        confirmed = click.confirm(
+            f"Re-export {cleaned!r}? This is intended to overwrite a dirty writeback file.",
+            default=False,
+            err=True,
+        )
+        if not confirmed:
+            typer.echo("re-export=cancelled", err=True)
+            raise typer.Exit(code=1)
+
+    try:
+        with connect() as conn:
+            write_result_record_by_slug(
+                slug=cleaned,
+                conn=conn,
+                sink=sys.stdout,
+                export_message=export_message,
+            )
+    except ValueError as exc:
+        typer.echo(f"ERROR: {exc}", err=True)
+        raise typer.Exit(code=1) from exc
 
 
 @app.command("update-exports")

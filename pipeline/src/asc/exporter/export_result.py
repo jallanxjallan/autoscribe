@@ -5,6 +5,7 @@ from asc.scrivener.connect import LedgerConnection
 from asc.exporter._ledger import (
     DEFAULT_EXPORT_MESSAGE,
     extracted_result_row,
+    extracted_result_row_by_slug,
     mark_exported,
     pending_export_rows,
     reset_exported,
@@ -66,6 +67,33 @@ def write_pending_result_records(
 
     return count
 
+
+
+def write_result_record_by_slug(
+    slug: str,
+    *,
+    conn: LedgerConnection,
+    sink: TextIO = sys.stdout,
+    export_message: str = DEFAULT_EXPORT_MESSAGE,
+) -> int:
+    """Write the most recent result row for a source slug as NDJSON and mark it exported."""
+
+    row = extracted_result_row_by_slug(conn=conn, slug=slug)
+    if row is None:
+        raise ValueError(f"no extractable result row for slug {slug}")
+
+    call_identity = str(row.get("call_identity") or "").strip()
+    if not call_identity:
+        raise ValueError(f"extractable result row for slug {slug} is missing call identity")
+
+    write_ndjson_record(_export_record(row=row, call_identity=call_identity), sink)
+    _flush(sink)
+    mark_exported(
+        conn=conn,
+        result_identity=call_identity,
+        export_message=export_message,
+    )
+    return 1
 
 def mark_result_exported(
     result_identity: str,
@@ -136,4 +164,5 @@ __all__ = [
     "reset_result_exported",
     "write_extracted_result_record",
     "write_pending_result_records",
+    "write_result_record_by_slug",
 ]

@@ -110,6 +110,51 @@ def extracted_result_row(*, conn: LedgerConnection, call_identity: str) -> dict[
     data["result"] = _safe_json(data.get("raw_json"))
     return data
 
+def extracted_result_row_by_slug(*, conn: LedgerConnection, slug: str) -> dict[str, Any] | None:
+    """Return the most recent exportable terminal result row for a source slug."""
+
+    require_ledger_columns(conn)
+    cleaned = str(slug).strip()
+    if not cleaned:
+        raise ValueError("slug must not be empty")
+
+    rows = conn.execute(
+        """
+        SELECT
+            c.source_identity AS source_identity,
+            c.source_identity AS record_identity,
+            c.identity AS call_identity,
+            e.final_step AS final_step,
+            e.result_key AS result_key,
+            e.result_key AS result_identity,
+            s.content AS content,
+            s.raw_json AS raw_json,
+            c.source_json AS source_json,
+            c.created_at AS call_created_at,
+            s.created_at AS step_created_at,
+            e.created_at AS export_created_at,
+            e.exported_at AS exported_at,
+            e.export_message AS export_message
+        FROM calls AS c
+        JOIN exports AS e
+          ON e.identity = c.identity
+        JOIN steps AS s
+          ON s.identity = e.identity
+         AND s.step_number = e.final_step
+        ORDER BY e.created_at DESC, s.created_at DESC, c.created_at DESC, c.identity DESC
+        """
+    ).fetchall()
+
+    for row in rows:
+        data = _decorate_export_row(_row_dict(row))
+        if data.get("slug") != cleaned:
+            continue
+        data["source"] = _safe_json(data.get("source_json"))
+        data["result"] = _safe_json(data.get("raw_json"))
+        return data
+
+    return None
+
 
 def mark_exported(
     *,
@@ -287,6 +332,7 @@ __all__ = [
     "DEFAULT_EXPORT_MESSAGE",
     "PENDING_EXPORTED_AT",
     "extracted_result_row",
+    "extracted_result_row_by_slug",
     "mark_exported",
     "pending_export_rows",
     "render_exported_at",
