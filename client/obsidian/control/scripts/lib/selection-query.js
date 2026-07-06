@@ -159,6 +159,7 @@ async function renderSelectionQuery(rawOptions) {
     savedSelectionExtras: null,
     sortRows: null,
     serializeRow: defaultSerializeRow,
+    maxFilterChoices: null,
     debug: false,
     ...rawOptions
   };
@@ -204,6 +205,13 @@ async function renderSelectionQuery(rawOptions) {
   function debugLog(...args) {
     if (!options.debug) return;
     console.log(`[${options.namespace}]`, ...args);
+  }
+
+  const expandedFilterGroups = new Set();
+
+  function filterChoiceLimit() {
+    const limit = Number(options.maxFilterChoices ?? 0);
+    return Number.isFinite(limit) && limit > 0 ? Math.floor(limit) : null;
   }
 
   function getApi() {
@@ -594,8 +602,14 @@ async function renderSelectionQuery(rawOptions) {
     countText.setText(`(${group.selected.size}/${group.values.length})`);
 
     const list = wrap.createDiv();
+    const limit = filterChoiceLimit();
+    const expanded = expandedFilterGroups.has(group.key);
+    const valuesToRender =
+      limit && !expanded
+        ? group.values.slice(0, limit)
+        : group.values;
 
-    for (const value of group.values) {
+    for (const value of valuesToRender) {
       const label = list.createEl("label");
       label.style.display = "flex";
       label.style.alignItems = "center";
@@ -616,6 +630,27 @@ async function renderSelectionQuery(rawOptions) {
       label.createEl("span", {
         text: `${value} (${model.valueCounts[group.key].get(value) ?? 0})`
       });
+    }
+
+    if (limit && group.values.length > limit) {
+      const moreRow = list.createDiv();
+      moreRow.style.marginTop = "0.35em";
+
+      const moreLink = moreRow.createEl("a", {
+        href: "#",
+        text: expanded
+          ? "less"
+          : `more... (${group.values.length - limit} more)`
+      });
+
+      moreLink.onclick = event => {
+        event.preventDefault();
+
+        if (expanded) expandedFilterGroups.delete(group.key);
+        else expandedFilterGroups.add(group.key);
+
+        render();
+      };
     }
   }
 
