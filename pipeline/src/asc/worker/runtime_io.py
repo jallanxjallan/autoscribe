@@ -1,5 +1,8 @@
+from __future__ import annotations
+
 import json
-from typing import Any
+from dataclasses import dataclass
+from typing import Any, Mapping
 
 from asc.redis.key import RedisKey
 from asc.redis.primitives.hashes import hgetall
@@ -13,20 +16,45 @@ CONTENT_FIELDS = (
 )
 
 
-def load_runtime_content(key: str) -> str:
-    """Load text content from a runtime Redis hash.
+@dataclass(frozen=True, slots=True)
+class RuntimeInput:
+    """Concrete runtime input loaded from Redis for an engine call."""
 
-    Workers receive concrete input keys from their jobs. They should not know
-    whether the input points at the original call record or a previous step
-    result; both records only need to expose a content-like field.
-    """
+    key: str
+    content: str
+    fields: Mapping[str, Any]
+
+
+def load_runtime_input(key: str) -> RuntimeInput:
+    """Load the worker input record without interpreting engine semantics."""
     if not isinstance(key, str) or not key.strip():
         raise ValueError("runtime input key must be non-empty")
 
-    data = hgetall(RedisKey(key.strip()))
+    clean_key = key.strip()
+    data = hgetall(RedisKey(clean_key))
     if not data:
-        raise ValueError(f"runtime input key is missing or empty: {key}")
+        raise ValueError(f"runtime input key is missing or empty: {clean_key}")
 
+    content = _content_from_fields(data)
+    if content is None:
+        raise ValueError(
+            f"runtime input key has no content field: {clean_key} "
+            f"available={sorted(str(name) for name in data)}"
+        )
+
+    return RuntimeInput(
+        key=clean_key,
+        content=content,
+        fields=data,
+    )
+
+
+def load_runtime_content(key: str) -> str:
+    """Backward-compatible helper for callers that only need the text body."""
+    return load_runtime_input(key).content
+
+
+def _content_from_fields(data: Mapping[str, Any]) -> str | None:
     for field in CONTENT_FIELDS:
         value = data.get(field)
         if value is not None:
@@ -34,14 +62,9 @@ def load_runtime_content(key: str) -> str:
 
     raw_json = data.get("raw_json") or data.get("record_content_json") or data.get("raw_record_json")
     if raw_json:
-        extracted = _content_from_json(raw_json)
-        if extracted is not None:
-            return extracted
+        return _content_from_json(raw_json)
 
-    raise ValueError(
-        f"runtime input key has no content field: {key} "
-        f"available={sorted(str(name) for name in data)}"
-    )
+    return None
 
 
 def _content_from_json(raw_json: Any) -> str | None:
@@ -58,4 +81,4 @@ def _content_from_json(raw_json: Any) -> str | None:
     return None
 
 
-__all__ = ["load_runtime_content"]
+__all__ = ["RuntimeInput", "load_runtime_content", "load_runtime_input"]

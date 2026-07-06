@@ -20,8 +20,8 @@ from asc.models.process.result import Failure, Response, Result, Retrieval, Tran
 from asc.models.control.step import Step
 from asc.models.process.task import WorkerTask
 from asc.redis.key import RedisKey
-from asc.worker.engines import load_engine_run, normalize_engine_kind
-from asc.worker.runtime_io import load_runtime_content
+from asc.worker.engines import load_engine_call
+from asc.worker.runtime_io import load_runtime_input
 
 
 @dataclass(frozen=True, slots=True)
@@ -35,13 +35,12 @@ class WorkerResult:
 class WorkerExecutor:
     def execute(self, task: WorkerTask, task_key: str) -> WorkerResult:
         step = Step.load(task.step_key)
-        input_content = load_runtime_content(task.data_key)
-        engine_run = load_engine_run(step.engine, args=_step_args(step))
-        result_class = _result_class_for_step(step)
-        expected_key = _required_task_text(task, "expected_key")
+        runtime_input = load_runtime_input(task.data_key)
+        engine_call = load_engine_call(step.engine)
+        expected_key = task.expected_key
 
         try:
-            output = engine_run(input_content)
+            output = engine_call(step=step, content=runtime_input, task=task)
         except Exception as exc:
             failure_key = _save_runtime_failure(
                 task=task,
@@ -58,7 +57,7 @@ class WorkerExecutor:
 
         result = _result_from_engine_output(
             output=output,
-            result_class=result_class,
+            expected_key=expected_key,
             identity=RedisKey(expected_key).identity,
         )
         artifact_key = _save_result_at_expected_key(
@@ -76,7 +75,7 @@ class WorkerExecutor:
 def _result_from_engine_output(
     *,
     output: object,
-    result_class: type[Result],
+    expected_key: str,
     identity: str,
 ) -> Result | Failure:
     if isinstance(output, (Result, Failure)):
@@ -84,26 +83,26 @@ def _result_from_engine_output(
 
     payload = _payload_from_output(output)
 
-    return result_class(
+    return _result_class_for_expected_key(expected_key)(
         identity=identity,
         content=payload["content"],
         raw_json=payload["raw_json"],
     )
 
 
-def _result_class_for_step(step: Step) -> type[Result]:
-    engine = normalize_engine_kind(step.engine)
+def _result_class_for_expected_key(expected_key: str) -> type[Result]:
+    kind = RedisKey(expected_key).kind
 
-    if engine == "llm":
+    if kind == "response":
         return Response
 
-    if engine == "script":
+    if kind == "transform":
         return Transform
 
-    if engine == "rag":
+    if kind == "retrieval":
         return Retrieval
 
-    raise ValueError(f"unsupported worker step engine: {step.engine!r}")
+    raise ValueError(f"unsupported worker expected_key kind: {expected_key!r}")
 
 
 def _payload_from_output(output: object) -> dict[str, object]:
@@ -251,27 +250,6 @@ def _default_failure_key(*, task: WorkerTask, step: Step) -> str:
         identity=RedisKey(task.data_key).identity,
         suffix=_result_suffix(task=task, step=step),
     ).raw_key
-
-
-def _step_args(step: Step) -> dict[str, Any]:
-    return {
-        name: value
-        for name, value in step.model_dump(mode="python").items()
-        if value not in (None, "")
-    }
-
-
-def _required_task_text(task: WorkerTask, name: str) -> str:
-    value = _optional_task_text(task, name)
-    if value is None:
-        raise ValueError(f"worker task {name} must be non-empty: {task.raw_key}")
-    return value
-
-
-def _optional_task_text(task: WorkerTask, name: str) -> str | None:
-    value = getattr(task, name, None)
-    text = "" if value is None else str(value).strip()
-    return text or None
 
 
 __all__ = ["WorkerExecutor", "WorkerResult"]

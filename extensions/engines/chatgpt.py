@@ -1,97 +1,80 @@
+from __future__ import annotations
+
+from collections.abc import Iterable, Mapping
 from typing import Any
+
+from openai import OpenAI
 
 
 ENGINE = "chatgpt"
 
 ENGINE_COMPONENT = {
-    "label": "ChatGPT Stub",
+    "label": "ChatGPT",
     "kind": "llm",
     "step_fields": [
         "model",
         "instructions",
         "temperature",
-        "max_tokens",
+        "max_output_tokens",
     ],
 }
 
-DEFAULT_MODEL = "chatgpt-stub"
 
+def make_call(*, step: Any, content: Any, task: Any) -> dict[str, Any]:
+    request: dict[str, Any] = {
+        "model": step.model,
+        "input": _content_text(content),
+    }
 
-def _instruction_text(instructions: Any) -> str:
-    if not instructions:
-        return ""
+    instructions = _instruction_text(step.instructions)
+    if instructions:
+        request["instructions"] = instructions
 
-    if isinstance(instructions, str):
-        return instructions.strip()
+    for name in ("temperature", "max_output_tokens"):
+        value = getattr(step, name, None)
+        if value is not None:
+            request[name] = value
 
-    if isinstance(instructions, list):
-        parts: list[str] = []
-        for item in instructions:
-            if isinstance(item, str):
-                parts.append(item.strip())
-            elif isinstance(item, dict):
-                label = item.get("label") or item.get("slug") or item.get("key") or "instruction"
-                content = item.get("content") or item.get("text") or item.get("body") or ""
-                if content:
-                    parts.append(f"# {label}\n\n{content}".strip())
-                else:
-                    parts.append(str(item))
-            else:
-                parts.append(str(item))
-        return "\n\n---\n\n".join(part for part in parts if part)
-
-    return str(instructions).strip()
-
-
-def make_call(
-    *,
-    prompt: str,
-    instructions: list[Any] | None = None,
-    step_args: dict[str, Any] | None = None,
-) -> dict[str, Any]:
-    args = dict(step_args or {})
-    model = args.get("model") or DEFAULT_MODEL
-    instruction_block = _instruction_text(instructions or args.get("instructions") or [])
-
-    content = (
-        f"Model: {model}\n\n"
-        f"Instructions:\n"
-        f"{instruction_block or '(none)'}\n\n"
-        f"Content:\n"
-        f"```text\n"
-        f"{prompt}\n"
-        f"```"
-    )
+    response = OpenAI().responses.create(**request)
 
     return {
-        "content": content,
-        "model": model,
+        "content": response.output_text,
         "engine": ENGINE,
+        "model": step.model,
+        "raw_json": response.model_dump(mode="json"),
     }
 
 
-def make_run(*, args: dict[str, Any]):
-    frozen_args = dict(args or {})
-
-    def run(content: str) -> str:
-        result = make_call(
-            prompt=content,
-            instructions=frozen_args.get("instructions") or [],
-            step_args=frozen_args,
-        )
-        return result["content"]
-
-    return run
+def _content_text(content: Any) -> str:
+    value = getattr(content, "content", content)
+    return "" if value is None else str(value)
 
 
-def should_retry(exc: BaseException) -> bool:
-    return False
+def _instruction_text(value: Any) -> str:
+    if value in (None, ""):
+        return ""
+
+    if isinstance(value, str):
+        return value.strip()
+
+    if isinstance(value, Mapping):
+        return _mapping_instruction_text(value)
+
+    if isinstance(value, Iterable):
+        parts = [_instruction_text(item) for item in value]
+        return "\n\n---\n\n".join(part for part in parts if part)
+
+    return str(value).strip()
 
 
-__all__ = [
-    "ENGINE",
-    "ENGINE_COMPONENT",
-    "make_call",
-    "make_run",
-    "should_retry",
-]
+def _mapping_instruction_text(value: Mapping[Any, Any]) -> str:
+    label = value.get("label") or value.get("slug") or value.get("key")
+    for field in ("content", "text", "body", "prompt"):
+        text = value.get(field)
+        if text:
+            body = str(text).strip()
+            return f"# {label}\n\n{body}" if label else body
+    return "\n".join(f"{key}: {item}" for key, item in value.items()).strip()
+
+
+__all__ = ["ENGINE", "ENGINE_COMPONENT", "make_call"]

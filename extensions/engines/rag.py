@@ -1,10 +1,12 @@
-from typing import Any
+from __future__ import annotations
+
+from typing import Any, Mapping
 
 
 ENGINE = "rag"
 
 ENGINE_COMPONENT = {
-    "label": "RAG Stub",
+    "label": "RAG",
     "kind": "rag",
     "step_fields": [
         "rag_profile",
@@ -13,35 +15,30 @@ ENGINE_COMPONENT = {
 }
 
 
-def make_call(
-    *,
-    prompt: str,
-    instructions: list[Any] | None = None,
-    step_args: dict[str, Any] | None = None,
-) -> dict[str, Any]:
-    args = dict(step_args or {})
+def make_call(*, step: Any, content: Any, task: Any) -> dict[str, Any]:
+    args = _step_args(step)
+    profile = args.get("rag_profile") or getattr(step, "rag_profile", "") or ""
+
     return {
-        "content": prompt,
+        "content": _content_text(content),
         "engine": ENGINE,
-        "profile": args.get("rag_profile") or "",
+        "profile": profile,
+        "raw_json": {
+            "engine": ENGINE,
+            "profile": profile,
+            "args": dict(args),
+        },
     }
 
 
-def make_run(*, args: dict[str, Any]):
-    def run(content: str) -> str:
-        return content
-
-    return run
+def _step_args(step: Any) -> Mapping[str, Any]:
+    value = getattr(step, "args", None)
+    return value if isinstance(value, Mapping) else {}
 
 
-def should_retry(exc: BaseException) -> bool:
-    return False
+def _content_text(content: Any) -> str:
+    value = getattr(content, "content", content)
+    return "" if value is None else str(value)
 
 
-__all__ = [
-    "ENGINE",
-    "ENGINE_COMPONENT",
-    "make_call",
-    "make_run",
-    "should_retry",
-]
+__all__ = ["ENGINE", "ENGINE_COMPONENT", "make_call"]
