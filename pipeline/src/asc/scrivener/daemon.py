@@ -1,18 +1,20 @@
-"""Scrivener daemon entrypoint and runtime helpers.
+"""Scrivener daemon entrypoint.
 
-Run once from the command line:
-    python -m asc.scrivener.daemon
-
-Run forever from imported code:
-    from asc.scrivener.daemon import run_forever
-    run_forever()
+``python -m asc.scrivener.daemon`` runs the production scrivener loop until
+stopped by ``asc run stop``.
 """
 
+from __future__ import annotations
+
 from dataclasses import dataclass
+import logging
 
 from asc.scrivener import inbox as scrivener_inbox
 from asc.scrivener.execute import ScrivenerExecutor
 from asc.state.daemon import DEFAULT_CLAIM_TIMEOUT_SECONDS, configure_logging, run_daemon
+
+
+LOG = logging.getLogger(__name__)
 
 
 @dataclass(frozen=True, slots=True)
@@ -28,17 +30,11 @@ def run_once(
     *,
     timeout: int | None = None,
     empty_limit: int | None = None,
-    wait: bool = False,
+    wait: bool = True,
 ) -> ScrivenerRunReport:
     """Claim and execute one scrivener task."""
 
-    if wait:
-        claimed = scrivener_inbox.daemon_claim(
-            timeout=timeout or 0,
-            empty_limit=empty_limit,
-        )
-    else:
-        claimed = scrivener_inbox.claim()
+    claimed = scrivener_inbox.daemon_claim(timeout=timeout or 0, empty_limit=None) if wait else scrivener_inbox.claim()
 
     if claimed is None:
         return ScrivenerRunReport(claimed=False)
@@ -47,43 +43,38 @@ def run_once(
     if not task_key:
         raise ValueError("scrivener claimed an empty task key")
 
+    LOG.info("scrivener operation=claimed task_key=%s", task_key)
+
     result = ScrivenerExecutor().execute(task_key)
 
-    return ScrivenerRunReport(
+    report = ScrivenerRunReport(
         claimed=True,
         task_key=result.task_key,
         action=result.action,
         table=result.table,
         data_key=result.data_key,
     )
+    LOG.info(
+        "scrivener operation=executed task_key=%s action=%s table=%s data_key=%s",
+        report.task_key,
+        report.action,
+        report.table,
+        report.data_key,
+    )
+    return report
 
 
-def run_forever(
-    *,
-    timeout: int = DEFAULT_CLAIM_TIMEOUT_SECONDS,
-    empty_limit: int | None = None,
-) -> None:
-    """Run the scrivener daemon loop until idle shutdown or interruption."""
+def run_forever(*, timeout: int = DEFAULT_CLAIM_TIMEOUT_SECONDS, empty_limit: int | None = None) -> None:
+    """Run the scrivener daemon loop until process termination."""
 
     configure_logging()
-    run_daemon(
-        name="scrivener",
-        run_once=run_once,
-        timeout=timeout,
-        empty_limit=empty_limit,
-    )
+    run_daemon(name="scrivener", run_once=run_once, timeout=timeout, empty_limit=empty_limit)
 
 
 def main() -> None:
-    """Run one scrivener cycle from the command line."""
+    """Run the production scrivener loop."""
 
-    configure_logging()
-    report = run_once()
-    print(
-        f"scrivener claimed={report.claimed} "
-        f"task_key={report.task_key} action={report.action} "
-        f"table={report.table} data_key={report.data_key}"
-    )
+    run_forever()
 
 
 if __name__ == "__main__":

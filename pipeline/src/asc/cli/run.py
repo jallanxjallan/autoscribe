@@ -1,17 +1,14 @@
 """User-facing run commands.
 
-The run surface manages the three runtime services:
+The run surface manages the three production runtime daemons:
 
-    asc run single  # process one score-0 call, then stop daemons
-    asc run drain   # process all current score-0 calls, then stop daemons
     asc run loop    # start or confirm orchestrator + worker + scrivener daemons
     asc run stop    # stop all daemons, confirming if runtime work is present
     asc run status  # show daemons, active calls, and inbox contents/counts
+    asc run log     # show the shared daemon operation log
 
 The orchestrator owns active-call progression. The worker owns engine execution.
-The scrivener owns ledger writes. `single` and `drain` snapshot score-0 calls
-at launch and keep the daemons alive until those calls are no longer active and
-runtime inboxes have drained.
+The scrivener owns ledger writes. Daemons run until stopped with ``asc run stop``.
 """
 
 from __future__ import annotations
@@ -25,7 +22,6 @@ import sys
 import time
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Iterable
 
 import typer
 
@@ -35,10 +31,10 @@ app = typer.Typer(
     help="Run and inspect AutoScribe runtime daemons.",
 )
 
-PID_DIR = Path(os.environ.get("AUTOSCRIBE_RUN_DIR", "/tmp/autoscribe"))
-PID_FILE = PID_DIR / "runtime-daemons.json"
-QUIET_DRAIN_TICKS = 3
-MONITOR_SLEEP_SECONDS = 0.25
+RUN_DIR = Path(os.environ.get("AUTOSCRIBE_RUN_DIR", "/tmp/autoscribe"))
+PID_FILE = RUN_DIR / "runtime-daemons.json"
+LOG_DIR = Path(os.environ.get("AUTOSCRIBE_LOG_DIR", str(RUN_DIR / "logs")))
+LOG_FILE = Path(os.environ.get("AUTOSCRIBE_DAEMON_LOG", str(LOG_DIR / "runtime.log")))
 
 
 @dataclass(frozen=True, slots=True)
@@ -96,6 +92,7 @@ def _read_pids() -> dict[str, int]:
         return {}
     if not isinstance(raw, dict):
         return {}
+
     out: dict[str, int] = {}
     for name, pid in raw.items():
         try:
@@ -106,7 +103,7 @@ def _read_pids() -> dict[str, int]:
 
 
 def _write_pids(pids: dict[str, int]) -> None:
-    PID_DIR.mkdir(parents=True, exist_ok=True)
+    RUN_DIR.mkdir(parents=True, exist_ok=True)
     PID_FILE.write_text(json.dumps(pids, indent=2, sort_keys=True), encoding="utf-8")
 
 
@@ -122,73 +119,44 @@ def _pid_alive(pid: int) -> bool:
     return True
 
 
-def _daemon_env(*, target_keys: tuple[str, ...] | None = None) -> dict[str, str]:
+def _daemon_env() -> dict[str, str]:
     env = os.environ.copy()
     env["PYTHONUNBUFFERED"] = "1"
-    if target_keys is not None:
-        env["AUTOSCRIBE_TARGET_CALLS"] = json.dumps(list(target_keys))
+    env["AUTOSCRIBE_DAEMON_LOG"] = str(LOG_FILE)
     return env
 
 
-def _daemon_command(daemon: ManagedDaemon, *, target_keys: tuple[str, ...] | None = None) -> list[str]:
-    if daemon.name == "orchestrator" and target_keys is not None:
-        return [
-            sys.executable,
-            "-c",
-            (
-                "import json, os; "
-                "from asc.orchestrator.daemon import run_forever; "
-                "run_forever(target_keys=set(json.loads(os.environ['AUTOSCRIBE_TARGET_CALLS'])))"
-            ),
-        ]
-
-    return [
-        sys.executable,
-        "-c",
-        f"from {daemon.module} import run_forever; run_forever()",
-    ]
+def _daemon_command(daemon: ManagedDaemon) -> list[str]:
+    return [sys.executable, "-m", daemon.module]
 
 
-def _start_daemon(
-    daemon: ManagedDaemon,
-    pids: dict[str, int],
-    *,
-    target_keys: tuple[str, ...] | None = None,
-) -> int:
+def _open_daemon_log():
+    LOG_DIR.mkdir(parents=True, exist_ok=True)
+    return LOG_FILE.open("ab", buffering=0)
+
+
+def _start_daemon(daemon: ManagedDaemon, pids: dict[str, int]) -> int:
     existing = pids.get(daemon.name)
     if existing is not None and _pid_alive(existing):
         typer.echo(f"{daemon.name}=running pid={existing}")
         return existing
 
-    process = subprocess.Popen(
-        _daemon_command(daemon, target_keys=target_keys),
-        stdin=subprocess.DEVNULL,
-        stdout=subprocess.DEVNULL,
-        stderr=subprocess.DEVNULL,
-        start_new_session=True,
-        env=_daemon_env(target_keys=target_keys),
-    )
+    log_handle = _open_daemon_log()
+    try:
+        process = subprocess.Popen(
+            _daemon_command(daemon),
+            stdin=subprocess.DEVNULL,
+            stdout=log_handle,
+            stderr=subprocess.STDOUT,
+            start_new_session=True,
+            env=_daemon_env(),
+        )
+    finally:
+        log_handle.close()
+
     pids[daemon.name] = int(process.pid)
     typer.echo(f"{daemon.name}=started pid={process.pid}")
     return int(process.pid)
-
-
-def _start_debug_daemon(daemon: ManagedDaemon, pids: dict[str, int]) -> subprocess.Popen[bytes]:
-    existing = pids.get(daemon.name)
-    if existing is not None and _pid_alive(existing):
-        raise RuntimeError(f"{daemon.name} already running pid={existing}; run `asc run stop` first")
-
-    process = subprocess.Popen(
-        _daemon_command(daemon),
-        stdin=subprocess.DEVNULL,
-        stdout=None,
-        stderr=None,
-        start_new_session=False,
-        env=_daemon_env(),
-    )
-    pids[daemon.name] = int(process.pid)
-    typer.echo(f"{daemon.name}=debug pid={process.pid}")
-    return process
 
 
 def _stop_daemon(name: str, pid: int, *, force: bool = False) -> bool:
@@ -215,29 +183,6 @@ def _stop_recorded_daemons(*, force: bool = False) -> None:
     _write_pids(remaining)
 
 
-def _stop_processes(processes: dict[str, subprocess.Popen[bytes]]) -> None:
-    for name, process in processes.items():
-        if process.poll() is None:
-            process.terminate()
-            typer.echo(f"{name}=terminating pid={process.pid}")
-
-    deadline = time.monotonic() + 5
-    for name, process in processes.items():
-        while process.poll() is None and time.monotonic() < deadline:
-            time.sleep(0.05)
-        if process.poll() is None:
-            process.kill()
-            typer.echo(f"{name}=killed pid={process.pid}")
-
-
-def _remove_managed_pids(processes: dict[str, subprocess.Popen[bytes]]) -> None:
-    saved = _read_pids()
-    for name, process in processes.items():
-        if saved.get(name) == process.pid:
-            saved.pop(name)
-    _write_pids(saved)
-
-
 # ---------------------------------------------------------------------------
 # runtime inspection helpers
 
@@ -261,14 +206,6 @@ def _active_calls(*, limit: int = 1000) -> list[ActiveCallView]:
             continue
         calls.append(ActiveCallView(key=text, score=float(score)))
     return calls
-
-
-def _score_zero_calls() -> tuple[str, ...]:
-    return tuple(call.key for call in _active_calls() if call.score == 0)
-
-
-def _active_key_set() -> set[str]:
-    return {call.key for call in _active_calls()}
 
 
 def _inboxes() -> tuple[InboxView, ...]:
@@ -343,142 +280,52 @@ def _runtime_has_work() -> bool:
 
 
 # ---------------------------------------------------------------------------
-# controlled run modes
+# log helpers
 
 
-def _start_all(*, target_keys: tuple[str, ...] | None = None) -> dict[str, subprocess.Popen[bytes]]:
-    pids = _read_pids()
-    already = {daemon.name: pid for daemon in DAEMONS if (pid := pids.get(daemon.name)) and _pid_alive(pid)}
-    if already:
-        names = ", ".join(f"{name}={pid}" for name, pid in sorted(already.items()))
-        raise RuntimeError(f"runtime already running: {names}; run `asc run stop` first")
-
-    processes: dict[str, subprocess.Popen[bytes]] = {}
-    for daemon in DAEMONS:
-        process = subprocess.Popen(
-            _daemon_command(daemon, target_keys=target_keys),
-            stdin=subprocess.DEVNULL,
-            stdout=subprocess.DEVNULL,
-            stderr=subprocess.DEVNULL,
-            start_new_session=True,
-            env=_daemon_env(target_keys=target_keys),
-        )
-        processes[daemon.name] = process
-        pids[daemon.name] = int(process.pid)
-        typer.echo(f"{daemon.name}=started pid={process.pid}")
-    _write_pids(pids)
-    return processes
+def _tail_lines(path: Path, n: int) -> list[str]:
+    if n <= 0:
+        return []
+    if not path.exists():
+        return []
+    with path.open("r", encoding="utf-8", errors="replace") as fh:
+        lines = fh.readlines()
+    return lines[-n:]
 
 
-def _raise_if_child_exited(processes: dict[str, subprocess.Popen[bytes]]) -> None:
-    exited = [name for name, process in processes.items() if process.poll() is not None]
-    if not exited:
-        return
-    details = ", ".join(
-        f"{name}={processes[name].returncode}" for name in exited
-    )
-    raise RuntimeError(f"daemon exited before run completed: {details}")
+def _follow_log(path: Path) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.touch(exist_ok=True)
+    with path.open("r", encoding="utf-8", errors="replace") as fh:
+        fh.seek(0, os.SEEK_END)
+        while True:
+            line = fh.readline()
+            if line:
+                typer.echo(line, nl=False)
+                continue
+            time.sleep(0.25)
 
 
-def _run_until_complete(target_keys: tuple[str, ...], processes: dict[str, subprocess.Popen[bytes]]) -> None:
-    targets = set(target_keys)
-    quiet_ticks = 0
-
-    while True:
-        active = _active_calls()
-        target_visible = any(call.key in targets and call.visible for call in active)
-        inbox_count = _runtime_inbox_count()
-
-        if not target_visible and inbox_count == 0:
-            quiet_ticks += 1
-            if quiet_ticks >= QUIET_DRAIN_TICKS:
-                return
-        else:
-            quiet_ticks = 0
-            _raise_if_child_exited(processes)
-
-        time.sleep(MONITOR_SLEEP_SECONDS)
-
-
-def _controlled_run(target_keys: tuple[str, ...], *, label: str) -> None:
-    if not target_keys:
-        typer.echo(f"{label}=no-score-0-calls")
-        return
-
-    typer.echo(f"{label}=starting calls={len(target_keys)}")
-    processes: dict[str, subprocess.Popen[bytes]] = {}
-    try:
-        processes = _start_all(target_keys=target_keys)
-        _run_until_complete(target_keys, processes)
-        typer.echo(f"{label}=complete")
-    except RuntimeError as exc:
-        typer.echo(str(exc), err=True)
-        raise typer.Exit(code=1) from exc
-    finally:
-        _stop_processes(processes)
-        _remove_managed_pids(processes)
-
-
-@app.command("single")
-def run_single() -> None:
-    """Process one score-0 call, then stop all daemons."""
-
-    calls = _score_zero_calls()
-    _controlled_run(calls[:1], label="single")
-
-
-@app.command("drain")
-def run_drain() -> None:
-    """Process all currently score-0 calls, then stop all daemons."""
-
-    _controlled_run(_score_zero_calls(), label="drain")
+# ---------------------------------------------------------------------------
+# commands
 
 
 @app.command("loop")
-def run_loop(
-    debug: bool = typer.Option(
-        False,
-        "--debug",
-        help="Run daemons in the foreground with stdout/stderr attached to this terminal.",
-    ),
-) -> None:
+def run_loop() -> None:
     """Start or confirm all runtime daemons and keep them running."""
 
     pids = _read_pids()
-
-    if not debug:
-        for daemon in DAEMONS:
-            _start_daemon(daemon, pids)
-        _write_pids(pids)
-        return
-
-    processes: dict[str, subprocess.Popen[bytes]] = {}
-    try:
-        for daemon in DAEMONS:
-            processes[daemon.name] = _start_debug_daemon(daemon, pids)
-        _write_pids(pids)
-        typer.echo("debug=attached; press Ctrl-C to stop daemons")
-
-        while True:
-            _raise_if_child_exited(processes)
-            time.sleep(0.25)
-    except KeyboardInterrupt:
-        typer.echo("debug=stopping")
-    except RuntimeError as exc:
-        typer.echo(str(exc), err=True)
-        raise typer.Exit(code=1) from exc
-    finally:
-        _stop_processes(processes)
-        _remove_managed_pids(processes)
+    for daemon in DAEMONS:
+        _start_daemon(daemon, pids)
+    _write_pids(pids)
+    typer.echo(f"log={LOG_FILE}")
 
 
 @app.command("start", hidden=True)
-def run_start_alias(
-    debug: bool = typer.Option(False, "--debug"),
-) -> None:
+def run_start_alias() -> None:
     """Deprecated alias for `asc run loop`."""
 
-    run_loop(debug=debug)
+    run_loop()
 
 
 @app.command("stop")
@@ -525,6 +372,26 @@ def run_status() -> None:
         typer.echo(f"  {inbox.name} count={count}")
         for item in inbox.items:
             typer.echo(f"    {item}")
+
+    typer.echo(f"log={LOG_FILE}")
+
+
+@app.command("log")
+def run_log(
+    lines: int = typer.Option(200, "--lines", "-n", help="Number of log lines to show."),
+    follow: bool = typer.Option(False, "--follow", "-f", help="Follow the daemon log."),
+) -> None:
+    """Show the shared daemon operation log."""
+
+    if not LOG_FILE.exists():
+        typer.echo(f"log=missing path={LOG_FILE}")
+        return
+
+    for line in _tail_lines(LOG_FILE, lines):
+        typer.echo(line, nl=False)
+
+    if follow:
+        _follow_log(LOG_FILE)
 
 
 if __name__ == "__main__":
