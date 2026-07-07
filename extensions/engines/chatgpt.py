@@ -5,6 +5,8 @@ from typing import Any
 
 from openai import OpenAI
 
+from asc.core.config import config
+
 
 ENGINE = "chatgpt"
 
@@ -35,7 +37,7 @@ def make_call(*, step: Any, content: Any, task: Any) -> dict[str, Any]:
         if value is not None:
             request[name] = value
 
-    response = OpenAI().responses.create(**request)
+    response = OpenAI(api_key=config.open_ai_key).responses.create(**request)
 
     return {
         "content": response.output_text,
