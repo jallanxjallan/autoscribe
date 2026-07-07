@@ -11,21 +11,12 @@ from asc.models.process.result import ExternalFailure, Response
 ENGINE = "chatgpt"
 
 MODEL_LABELS: dict[str, str] = {
-    # Best / flagship
     "best": "gpt-5.5",
     "frontier": "gpt-5.5",
-
-    # Highest-quality / expensive
     "pro": "gpt-5.5-pro",
-
-    # Strong general production model
     "standard": "gpt-5.4",
-
-    # Cheaper / faster production model
     "cheap": "gpt-5.4-mini",
     "mini": "gpt-5.4-mini",
-
-    # Cheapest / fastest high-volume model
     "nano": "gpt-5.4-nano",
 }
 
@@ -47,7 +38,7 @@ def make_call(*, content: Any, step: Any, call: Any) -> Response | ExternalFailu
 
     The worker/registry has already validated the content, step, and call
     models. This engine owns only the provider request shape and maps the
-    provider object into instantiated runtime result models.
+    provider object into self-addressed runtime result models.
     """
 
     model = MODEL_LABELS[step.model]
