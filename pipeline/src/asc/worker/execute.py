@@ -20,7 +20,7 @@ from asc.models.process.result import Failure, Response, Result, Retrieval, Tran
 from asc.models.control.step import Step
 from asc.models.process.task import WorkerTask
 from asc.redis.key import RedisKey
-from asc.worker.engines import load_engine_call
+from asc.worker.loader import load_engine_call
 from asc.worker.runtime_io import load_runtime_input
 
 

@@ -1,18 +1,86 @@
+from __future__ import annotations
+
+import os
 import sys
 from dataclasses import dataclass
 from pathlib import Path
 
 
-REDIS_URL = "redis://127.0.0.1:6379/0"
-SQL_LEDGER_PATH = Path("/home/jeremy/.local/share/autoscribe/db/ledger.sql")
+REDIS_URL = os.environ.get("REDIS_URL", "redis://127.0.0.1:6379/0")
+SQL_LEDGER_PATH = Path(
+    os.environ.get("SQL_LEDGER_PATH", "~/.local/share/autoscribe/db/ledger.sql")
+).expanduser()
 
 # External runtime components live outside the AutoScribe source tree.
 # This root must be the parent of engines/ and scripts/.
-AUTOSCRIBE_EXTENSIONS_ROOT = Path("/home/jeremy/AutoScribe/extensions").resolve()
-
-# Current live extension package names.
+AUTOSCRIBE_EXTENSIONS_ROOT = Path(
+    os.environ.get("AUTOSCRIBE_EXTENSIONS_ROOT", "~/AutoScribe/extensions")
+).expanduser().resolve()
 AUTOSCRIBE_ENGINE_PACKAGES = ("engines",)
 AUTOSCRIBE_SCRIPT_PACKAGES = ("scripts",)
+
+_SECRET_FILES = (
+    Path(".env"),
+    Path("~/.secrets.env").expanduser(),
+)
+_SECRETS_LOADED = False
+
+
+class ConfigError(RuntimeError):
+    pass
+
+
+def _strip_quotes(value: str) -> str:
+    if len(value) >= 2 and value[0] == value[-1] and value[0] in {"'", '"'}:
+        return value[1:-1]
+    return value
+
+
+def _load_env_file(path: Path) -> None:
+    if not path.exists():
+        return
+
+    for line in path.read_text(encoding="utf-8").splitlines():
+        stripped = line.strip()
+        if not stripped or stripped.startswith("#"):
+            continue
+        if stripped.startswith("export "):
+            stripped = stripped[7:].lstrip()
+        if "=" not in stripped:
+            raise ConfigError(f"Invalid env line in {path}: {line.rstrip()}")
+
+        key, value = stripped.split("=", 1)
+        key = key.strip()
+        value = _strip_quotes(value.strip())
+        if not key:
+            raise ConfigError(f"Empty env key in {path}: {line.rstrip()}")
+        os.environ.setdefault(key, value)
+
+
+def load_secrets() -> None:
+    global _SECRETS_LOADED
+    if _SECRETS_LOADED:
+        return
+    for path in _SECRET_FILES:
+        _load_env_file(path.expanduser())
+    _SECRETS_LOADED = True
+
+
+def secret(*names: str, default: str | None = None) -> str | None:
+    load_secrets()
+    for name in names:
+        value = os.environ.get(name)
+        if value not in {None, ""}:
+            return value
+    return default
+
+
+def require_secret(*names: str) -> str:
+    value = secret(*names)
+    if value not in {None, ""}:
+        return value
+    joined = " or ".join(names)
+    raise ConfigError(f"Missing required secret: set {joined} in the environment, .env, or ~/.secrets.env")
 
 
 def ensure_runtime_paths() -> None:
@@ -32,6 +100,15 @@ def ensure_runtime_paths() -> None:
 class Config:
     redis_url: str = REDIS_URL
     sql_ledger_path: Path = SQL_LEDGER_PATH
+    extensions_root: Path = AUTOSCRIBE_EXTENSIONS_ROOT
+
+    @property
+    def open_ai_key(self) -> str:
+        return require_secret("OPENAI_API_KEY", "OPEN_AI_KEY")
+
+    @property
+    def anthropic_key(self) -> str:
+        return require_secret("ANTHROPIC_API_KEY")
 
 
 config = Config()
@@ -42,8 +119,12 @@ __all__ = [
     "AUTOSCRIBE_EXTENSIONS_ROOT",
     "AUTOSCRIBE_SCRIPT_PACKAGES",
     "Config",
+    "ConfigError",
     "REDIS_URL",
     "SQL_LEDGER_PATH",
     "config",
     "ensure_runtime_paths",
+    "load_secrets",
+    "require_secret",
+    "secret",
 ]
