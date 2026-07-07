@@ -10,21 +10,16 @@ from asc.redis.key import RedisKey
 from asc.redis.model_base import RedisModel
 
 
+_UNSET = object()
+
+
 class Result(RedisModel):
     """Base class for successful worker output.
 
-    Engines instantiate concrete result objects with only the payload produced
-    by that engine. The worker executor owns runtime custody metadata and passes
-    the Redis address at save time:
-
-    - identity: source call identity
-    - suffix: producing step number
-
-    Successful worker results have three concrete Redis key kinds:
-
-    - response: successful LLM completion
-    - transform: successful script transform
-    - retrieval: successful RAG/retrieval operation
+    Result artifacts are self-addressed once instantiated. Engines set the
+    artifact identity from the source call identity and set ``suffix`` from the
+    producing step number. The worker may validate those coordinates, then save
+    the artifact without passing custody information again.
     """
 
     model_config = ConfigDict(extra="allow")
@@ -34,6 +29,14 @@ class Result(RedisModel):
     content: str
     raw_json: Any = Field(default_factory=dict)
     created_at: int = Field(default_factory=timestamp)
+
+    @property
+    def artifact_suffix(self) -> str:
+        return _step_suffix(_extra_value(self, "suffix"))
+
+    @property
+    def raw_key(self) -> str:
+        return self.output_key_for(identity=self.identity, suffix=self.artifact_suffix)
 
     @classmethod
     def output_key_for(cls, *, identity: object, suffix: object) -> str:
@@ -45,9 +48,24 @@ class Result(RedisModel):
             )
         )
 
-    def save(self, *, identity: object, suffix: object) -> str:  # type: ignore[override]
-        output_key = self.output_key_for(identity=identity, suffix=suffix)
-        super().save(output_key)
+    def save(  # type: ignore[override]
+        self,
+        key: str | RedisKey | None = None,
+        *,
+        identity: object | None = None,
+        suffix: object = _UNSET,
+        ttl: int | None = None,
+    ) -> str:
+        if key is not None:
+            if identity is not None or suffix is not _UNSET:
+                raise ValueError("save() accepts either a raw key or key parts, not both")
+            return super().save(key, ttl=ttl)
+
+        output_key = self.output_key_for(
+            identity=self.identity if identity is None else identity,
+            suffix=self.artifact_suffix if suffix is _UNSET else suffix,
+        )
+        super().save(output_key, ttl=ttl)
         return output_key
 
     @field_validator("content", mode="before")
@@ -81,14 +99,9 @@ class Retrieval(Result):
 class Failure(RedisModel):
     """Base class for failed daemon/worker output.
 
-    Failure records all use the Redis key kind ``failure``. The
-    ``failure_type`` field distinguishes internal boundary errors from failed
-    external calls. Failures carry content so the chain can continue when the
-    orchestrator policy allows it.
-
-    Worker step failures pass a step suffix at save time. Daemon/task failures
-    may omit the suffix and are saved as two-segment failure:<task_identity>
-    records.
+    Worker step failures are self-addressed when instantiated with the source
+    call identity and producing step suffix. Daemon/task failures may omit a
+    suffix and materialize as two-segment failure:<identity> records.
     """
 
     model_config = ConfigDict(extra="allow")
@@ -101,6 +114,17 @@ class Failure(RedisModel):
     raw_json: Any = Field(default_factory=dict)
     boundary: str | None = None
     created_at: int = Field(default_factory=timestamp)
+
+    @property
+    def artifact_suffix(self) -> str | None:
+        value = _extra_value(self, "suffix")
+        if value in (None, ""):
+            return None
+        return _step_suffix(value)
+
+    @property
+    def raw_key(self) -> str:
+        return self.output_key_for(identity=self.identity, suffix=self.artifact_suffix)
 
     @classmethod
     def internal(
@@ -132,6 +156,8 @@ class Failure(RedisModel):
         raw_json: Any,
     ) -> ExternalFailure:
         return ExternalFailure(
+            identity=_task_call_identity(task),
+            suffix=getattr(step, "step_number", None),
             content=content,
             failure_reason=failure_reason,
             raw_json={
@@ -174,9 +200,24 @@ class Failure(RedisModel):
             )
         )
 
-    def save(self, *, identity: object, suffix: object | None = None) -> str:  # type: ignore[override]
-        output_key = self.output_key_for(identity=identity, suffix=suffix)
-        super().save(output_key)
+    def save(  # type: ignore[override]
+        self,
+        key: str | RedisKey | None = None,
+        *,
+        identity: object | None = None,
+        suffix: object = _UNSET,
+        ttl: int | None = None,
+    ) -> str:
+        if key is not None:
+            if identity is not None or suffix is not _UNSET:
+                raise ValueError("save() accepts either a raw key or key parts, not both")
+            return super().save(key, ttl=ttl)
+
+        output_key = self.output_key_for(
+            identity=self.identity if identity is None else identity,
+            suffix=self.artifact_suffix if suffix is _UNSET else suffix,
+        )
+        super().save(output_key, ttl=ttl)
         return output_key
 
     @field_validator("failure_type", "content", "failure_reason", "boundary", mode="before")
@@ -219,6 +260,8 @@ class InternalFailure(Failure):
         raw_json.update({key: value for key, value in context.items() if key not in raw_json})
 
         return cls(
+            identity=_failure_identity(task=task, context=context),
+            suffix=context.get("suffix"),
             content=str(exc),
             failure_reason=type(exc).__name__,
             raw_json=raw_json,
@@ -297,6 +340,29 @@ def _optional_suffix(value: object | None) -> str | None:
     if value is None:
         return None
     return _step_suffix(value)
+
+
+def _extra_value(model: Any, name: str) -> Any:
+    return (getattr(model, "__pydantic_extra__", None) or {}).get(name)
+
+
+def _task_call_identity(task: Any) -> str:
+    data_key = getattr(task, "data_key", None)
+    if data_key:
+        return RedisKey(str(data_key)).identity
+    return _identity(getattr(task, "identity", ""))
+
+
+def _failure_identity(*, task: Any | None, context: dict[str, Any]) -> str:
+    if context.get("identity"):
+        return _identity(context["identity"])
+    if context.get("data_key"):
+        return RedisKey(str(context["data_key"])).identity
+    if task is not None and getattr(task, "data_key", None):
+        return RedisKey(str(task.data_key)).identity
+    if task is not None and getattr(task, "identity", None):
+        return _identity(task.identity)
+    raise ValueError("failure identity could not be resolved")
 
 
 __all__ = [

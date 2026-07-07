@@ -1,29 +1,30 @@
 """Worker execution boundary.
 
 The worker queue carries a WorkerTask key. The task is the custody/envelope
-record. The executable runtime instruction is the Step stored at
-WorkerTask.step_key. The runtime input is the already-selected data record at
-WorkerTask.data_key.
+record and stays on the worker side. The engine receives only the runtime input
+content, the Step, and the source CallRecord.
 
-The worker does not interpret engine semantics. It loads the registered engine,
-passes the task/step/content models through, and persists the engine output at
-the task's expected artifact key. Registered engines must return the agreed
-runtime artifact payload shape; bad outputs fail loudly and are recorded as
-runtime failures.
+The worker does not post worker results to the orchestrator. It materializes the
+result/failure artifact in Redis. The orchestrator discovers that deterministic
+artifact key when it next inspects the active call index.
 """
 
 from __future__ import annotations
 
 from dataclasses import dataclass
-from collections.abc import Mapping
 from typing import Any
 
 from asc.models.control.step import Step
+from asc.models.process.call import CallRecord
 from asc.models.process.result import Failure, Response, Result, Retrieval, Transform
 from asc.models.process.task import WorkerTask
 from asc.redis.key import RedisKey
 from asc.worker.loader import load_engine_call
 from asc.worker.runtime_io import load_runtime_input
+
+
+RESULT_TYPES = (Response, Transform, Retrieval, Failure)
+SUCCESS_TYPES = (Response, Transform, Retrieval)
 
 
 @dataclass(frozen=True, slots=True)
@@ -37,22 +38,21 @@ class WorkerResult:
 class WorkerExecutor:
     def execute(self, task: WorkerTask, task_key: str) -> WorkerResult:
         step = Step.load(task.step_key)
-        runtime_input = load_runtime_input(task.data_key)
+        call = _load_call_for_task(task)
+        content = load_runtime_input(task.data_key)
         engine_call = load_engine_call(step.engine)
 
         try:
-            output = engine_call(step=step, content=runtime_input, task=task)
-            result = _result_from_engine_output(
-                output=output,
-                expected_key=task.expected_key,
-                identity=RedisKey(task.expected_key).identity,
+            artifact = engine_call(content=content, step=step, call=call)
+            _validate_engine_artifact(
+                artifact=artifact,
+                task=task,
+                step=step,
+                call=call,
             )
-            artifact_key = _save_result_at_expected_key(
-                result=result,
-                expected_key=task.expected_key,
-            )
+            artifact_key = _save_engine_artifact(artifact=artifact, task=task, step=step)
         except Exception as exc:
-            failure_key = _save_runtime_failure(
+            artifact_key = _save_runtime_failure(
                 task=task,
                 task_key=task_key,
                 step=step,
@@ -61,80 +61,85 @@ class WorkerExecutor:
             return WorkerResult(
                 processed=1,
                 task_key=task_key,
-                artifact_key=failure_key,
-                failure_key=failure_key,
+                artifact_key=artifact_key,
+                failure_key=artifact_key,
             )
 
         return WorkerResult(
             processed=1,
             task_key=task_key,
             artifact_key=artifact_key,
+            failure_key=artifact_key if isinstance(artifact, Failure) else None,
         )
 
 
-def _result_from_engine_output(
+def _load_call_for_task(task: WorkerTask) -> CallRecord:
+    call_identity = RedisKey(task.data_key).identity
+    call_key = RedisKey(kind="call", identity=call_identity, suffix="record")
+    return CallRecord.load(call_key.raw_key)
+
+
+def _validate_engine_artifact(
     *,
-    output: object,
-    expected_key: str,
-    identity: str,
-) -> Result:
-    payload = _engine_payload(output)
-    return _result_class_for_expected_key(expected_key)(
-        identity=identity,
-        content=str(payload["content"]),
-        raw_json=payload["raw_json"],
-    )
-
-
-def _engine_payload(output: object) -> Mapping[str, Any]:
-    if not isinstance(output, Mapping):
+    artifact: object,
+    task: WorkerTask,
+    step: Step,
+    call: CallRecord,
+) -> None:
+    if not isinstance(artifact, RESULT_TYPES):
         raise TypeError(
-            "engine output must be a mapping with content and raw_json fields: "
-            f"got {type(output).__name__}"
+            f"engine {step.engine!r} returned {type(artifact).__name__}; "
+            "expected instantiated Response, Transform, Retrieval, or Failure"
         )
 
-    missing = [name for name in ("content", "raw_json") if name not in output]
-    if missing:
-        raise ValueError(f"engine output missing required fields: {', '.join(missing)}")
-
-    return output
-
-
-def _result_class_for_expected_key(expected_key: str) -> type[Result]:
-    kind = RedisKey(expected_key).kind
-
-    if kind == "response":
-        return Response
-
-    if kind == "transform":
-        return Transform
-
-    if kind == "retrieval":
-        return Retrieval
-
-    raise ValueError(f"unsupported worker expected_key kind: {expected_key!r}")
-
-
-def _save_result_at_expected_key(
-    *,
-    result: Result,
-    expected_key: str,
-) -> str:
-    expected = RedisKey(expected_key)
-    if expected.kind != _result_kind(result):
+    if artifact.identity != call.identity:
         raise ValueError(
-            "worker result kind does not match task expected_key: "
-            f"result_kind={_result_kind(result)!r} expected_key={expected.raw_key!r}"
+            "engine artifact identity does not match call identity: "
+            f"artifact={artifact.identity!r} call={call.identity!r}"
         )
 
-    saved_key = result.save(identity=expected.identity, suffix=expected.suffix)
-    if str(saved_key) != expected.raw_key:
+    if _artifact_suffix(artifact) != str(step.step_number):
+        raise ValueError(
+            "engine artifact suffix does not match step number: "
+            f"artifact={_artifact_suffix(artifact)!r} step={step.step_number!r}"
+        )
+
+    expected_key = _expected_key_for_artifact(artifact=artifact, task=task, step=step)
+    expected = RedisKey(expected_key)
+    if expected.identity != artifact.identity:
+        raise ValueError(
+            "engine artifact identity does not match expected key identity: "
+            f"artifact={artifact.identity!r} expected={expected.raw_key!r}"
+        )
+    if expected.suffix != _artifact_suffix(artifact):
+        raise ValueError(
+            "engine artifact suffix does not match expected key suffix: "
+            f"artifact={_artifact_suffix(artifact)!r} expected={expected.raw_key!r}"
+        )
+    if expected.kind != _artifact_kind(artifact):
+        raise ValueError(
+            "engine artifact kind does not match expected key kind: "
+            f"artifact={_artifact_kind(artifact)!r} expected={expected.raw_key!r}"
+        )
+
+
+def _save_engine_artifact(*, artifact: Result | Failure, task: WorkerTask, step: Step) -> str:
+    expected_key = _expected_key_for_artifact(artifact=artifact, task=task, step=step)
+    saved_key = artifact.save()
+    if saved_key != expected_key:
         raise ValueError(
             "worker saved unexpected artifact key: "
-            f"saved={saved_key!r} expected={expected.raw_key!r}"
+            f"saved={saved_key!r} expected={expected_key!r}"
         )
+    return saved_key
 
-    return str(saved_key)
+
+def _expected_key_for_artifact(*, artifact: Result | Failure, task: WorkerTask, step: Step) -> str:
+    if isinstance(artifact, Failure):
+        return _failure_key_for_task(task=task, step=step)
+    if isinstance(artifact, SUCCESS_TYPES):
+        return task.expected_key
+    raise TypeError(f"unsupported worker artifact type: {type(artifact).__name__}")
 
 
 def _save_runtime_failure(
@@ -150,22 +155,14 @@ def _save_runtime_failure(
         step=step,
         exc=exc,
     )
-    failure_key = _optional_task_text(task, "failure_key") or _default_failure_key(
-        task=task,
-        step=step,
-    )
-    expected = RedisKey(failure_key)
-    if expected.kind != "failure":
-        raise ValueError(f"worker failure_key must be a failure key: {failure_key!r}")
-
-    saved_key = failure.save(identity=expected.identity, suffix=expected.suffix)
-    if str(saved_key) != expected.raw_key:
+    failure_key = _failure_key_for_task(task=task, step=step)
+    saved_key = failure.save()
+    if saved_key != failure_key:
         raise ValueError(
             "worker saved unexpected failure key: "
-            f"saved={saved_key!r} expected={expected.raw_key!r}"
+            f"saved={saved_key!r} expected={failure_key!r}"
         )
-
-    return str(saved_key)
+    return saved_key
 
 
 def _runtime_failure(
@@ -175,15 +172,15 @@ def _runtime_failure(
     step: Step,
     exc: Exception,
 ) -> Failure:
-    step_number = _result_suffix(task=task, step=step)
+    step_number = str(step.step_number)
 
     raw_json = {
         "task_key": task_key,
         "task_identity": task.identity,
         "data_key": task.data_key,
         "step_key": task.step_key,
-        "expected_key": _optional_task_text(task, "expected_key") or "",
-        "failure_key": _optional_task_text(task, "failure_key") or "",
+        "expected_key": task.expected_key,
+        "failure_key": _failure_key_for_task(task=task, step=step),
         "step_number": step_number,
         "engine": step.engine,
         "error": str(exc),
@@ -194,6 +191,7 @@ def _runtime_failure(
     return Failure.model_validate(
         {
             "identity": RedisKey(task.data_key).identity,
+            "suffix": step_number,
             "failure_type": "runtime",
             "content": str(exc),
             "failure_reason": type(exc).__name__,
@@ -203,42 +201,37 @@ def _runtime_failure(
     )
 
 
-def _result_kind(result: Result) -> str:
-    if isinstance(result, Response):
-        return "response"
-    if isinstance(result, Transform):
-        return "transform"
-    if isinstance(result, Retrieval):
-        return "retrieval"
-    raise TypeError(f"unsupported worker result type: {type(result).__name__}")
+def _failure_key_for_task(*, task: WorkerTask, step: Step) -> str:
+    if task.failure_key:
+        expected = RedisKey(task.failure_key)
+        if expected.kind != "failure":
+            raise ValueError(f"worker failure_key must be a failure key: {task.failure_key!r}")
+        return expected.raw_key
 
-
-def _result_suffix(*, task: WorkerTask, step: Step) -> str:
-    for name in ("step_number", "number"):
-        value = getattr(step, name, None)
-        if value not in (None, ""):
-            return str(value)
-
-    suffix = RedisKey(task.step_key).suffix
-    if not suffix:
-        raise ValueError(f"worker task step_key has no step suffix: {task.step_key!r}")
-
-    return str(suffix)
-
-
-def _default_failure_key(*, task: WorkerTask, step: Step) -> str:
     return RedisKey(
         kind="failure",
         identity=RedisKey(task.data_key).identity,
-        suffix=_result_suffix(task=task, step=step),
+        suffix=step.step_number,
     ).raw_key
 
 
-def _optional_task_text(task: WorkerTask, name: str) -> str | None:
-    value = getattr(task, name, None)
-    if value in (None, ""):
-        return None
-    return str(value)
+def _artifact_kind(artifact: Result | Failure) -> str:
+    if isinstance(artifact, Response):
+        return "response"
+    if isinstance(artifact, Transform):
+        return "transform"
+    if isinstance(artifact, Retrieval):
+        return "retrieval"
+    if isinstance(artifact, Failure):
+        return "failure"
+    raise TypeError(f"unsupported worker artifact type: {type(artifact).__name__}")
+
+
+def _artifact_suffix(artifact: Result | Failure) -> str:
+    suffix = getattr(artifact, "artifact_suffix", None)
+    if suffix in (None, ""):
+        raise ValueError(f"artifact missing suffix: {type(artifact).__name__}")
+    return str(suffix)
 
 
 __all__ = ["WorkerExecutor", "WorkerResult"]

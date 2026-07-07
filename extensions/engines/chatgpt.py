@@ -1,14 +1,33 @@
 from __future__ import annotations
 
-from collections.abc import Iterable, Mapping
 from typing import Any
 
 from openai import OpenAI
 
 from asc.core.config import config
+from asc.models.process.result import ExternalFailure, Response
 
 
 ENGINE = "chatgpt"
+
+MODEL_LABELS: dict[str, str] = {
+    # Best / flagship
+    "best": "gpt-5.5",
+    "frontier": "gpt-5.5",
+
+    # Highest-quality / expensive
+    "pro": "gpt-5.5-pro",
+
+    # Strong general production model
+    "standard": "gpt-5.4",
+
+    # Cheaper / faster production model
+    "cheap": "gpt-5.4-mini",
+    "mini": "gpt-5.4-mini",
+
+    # Cheapest / fastest high-volume model
+    "nano": "gpt-5.4-nano",
+}
 
 ENGINE_COMPONENT = {
     "label": "ChatGPT",
@@ -19,64 +38,70 @@ ENGINE_COMPONENT = {
         "temperature",
         "max_output_tokens",
     ],
+    "models": MODEL_LABELS,
 }
 
 
-def make_call(*, step: Any, content: Any, task: Any) -> dict[str, Any]:
+def make_call(*, content: Any, step: Any, call: Any) -> Response | ExternalFailure:
+    """Run one ChatGPT Responses API call.
+
+    The worker/registry has already validated the content, step, and call
+    models. This engine owns only the provider request shape and maps the
+    provider object into instantiated runtime result models.
+    """
+
+    model = MODEL_LABELS[step.model]
     request: dict[str, Any] = {
-        "model": step.model,
-        "input": _content_text(content),
+        "model": model,
+        "input": content.content,
     }
 
-    instructions = _instruction_text(step.instructions)
+    instructions = _instructions_text(step.instructions)
     if instructions:
         request["instructions"] = instructions
 
-    for name in ("temperature", "max_output_tokens"):
-        value = getattr(step, name, None)
-        if value is not None:
-            request[name] = value
+    temperature = getattr(step, "temperature", None)
+    if temperature is not None:
+        request["temperature"] = temperature
 
-    response = OpenAI(api_key=config.open_ai_key).responses.create(**request)
+    max_output_tokens = getattr(step, "max_output_tokens", None)
+    if max_output_tokens is not None:
+        request["max_output_tokens"] = max_output_tokens
 
-    return {
-        "content": response.output_text,
-        "engine": ENGINE,
-        "model": step.model,
-        "raw_json": response.model_dump(mode="json"),
-    }
+    try:
+        result = OpenAI(api_key=config.open_ai_key).responses.create(**request)
+    except Exception as exc:
+        return ExternalFailure(
+            identity=call.identity,
+            suffix=step.step_number,
+            content=str(exc),
+            failure_reason=type(exc).__name__,
+            raw_json={
+                "engine": ENGINE,
+                "model_label": step.model,
+                "model": model,
+                "error": str(exc),
+                "error_type": type(exc).__name__,
+            },
+            boundary=ENGINE,
+        )
 
-
-def _content_text(content: Any) -> str:
-    value = getattr(content, "content", content)
-    return "" if value is None else str(value)
-
-
-def _instruction_text(value: Any) -> str:
-    if value in (None, ""):
-        return ""
-
-    if isinstance(value, str):
-        return value.strip()
-
-    if isinstance(value, Mapping):
-        return _mapping_instruction_text(value)
-
-    if isinstance(value, Iterable):
-        parts = [_instruction_text(item) for item in value]
-        return "\n\n---\n\n".join(part for part in parts if part)
-
-    return str(value).strip()
-
-
-def _mapping_instruction_text(value: Mapping[Any, Any]) -> str:
-    label = value.get("label") or value.get("slug") or value.get("key")
-    for field in ("content", "text", "body", "prompt"):
-        text = value.get(field)
-        if text:
-            body = str(text).strip()
-            return f"# {label}\n\n{body}" if label else body
-    return "\n".join(f"{key}: {item}" for key, item in value.items()).strip()
+    raw_json = result.model_dump(mode="json")
+    return Response(
+        identity=call.identity,
+        suffix=step.step_number,
+        content=result.output_text,
+        raw_json={
+            "engine": ENGINE,
+            "model_label": step.model,
+            "model": model,
+            "provider": raw_json,
+        },
+    )
 
 
-__all__ = ["ENGINE", "ENGINE_COMPONENT", "make_call"]
+def _instructions_text(instructions: list[str]) -> str:
+    return "\n\n".join(instructions).strip()
+
+
+__all__ = ["ENGINE", "ENGINE_COMPONENT", "MODEL_LABELS", "make_call"]
