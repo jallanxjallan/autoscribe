@@ -17,11 +17,6 @@ function makeContentStatusModel({ app, dv, config }) {
     slugMatchesCriteria,
   } = utils;
 
-  function processForPage(page) {
-    // Git-derived process state goes here later. Frontmatter is the production stub.
-    return asText(page?.process, config.defaultProcess);
-  }
-
   function sluggedPageForFile(file) {
     const page = pageForFile(file);
     if (!page) return null;
@@ -47,7 +42,7 @@ function makeContentStatusModel({ app, dv, config }) {
       slug_prefix: slugPrefixForSlug(slug),
       status: asText(page.status, config.defaultStatus),
       stage: asText(page.stage, config.defaultStage),
-      process: processForPage(page),
+      origin: asText(page.origin, config.defaultOrigin),
       modified: modifiedMillis,
       modified_display: modifiedDisplayForMillis(modifiedMillis),
     };
@@ -69,7 +64,7 @@ function makeContentStatusModel({ app, dv, config }) {
       path: row.path,
       status: row.status,
       stage: row.stage,
-      process: row.process,
+      origin: row.origin,
       modified: row.modified_display,
     };
   }
@@ -78,7 +73,7 @@ function makeContentStatusModel({ app, dv, config }) {
     return {
       ordering: "content-status",
       displayed_count: rows.length,
-      filters: ["status", "stage", "process"],
+      filters: ["status", "stage", "origin"],
       sort_modes: ["title", "modified"],
       slug_prefixes: config.slugPrefixes || [],
     };

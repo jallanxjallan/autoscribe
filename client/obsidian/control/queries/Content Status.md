@@ -5,7 +5,7 @@ const CONFIG = {
 
   defaultStatus: "—",
   defaultStage: "—",
-  defaultRepoState: "—",
+  defaultOrigin: "—",
   defaultSlugPrefix: "—",
 
   // Slug prefixes only. Filenames are irrelevant.

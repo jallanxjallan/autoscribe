@@ -11,10 +11,9 @@ function makeContentStatusView({
     tempRoot: "",
     debug: false,
 
-    defaultClass: "—",
     defaultStatus: "—",
     defaultStage: "—",
-    defaultRepoState: "—",
+    defaultOrigin: "—",
     defaultSlugPrefix: "—",
 
     slugPrefixes: ["cnt", "img"],
@@ -27,14 +26,6 @@ function makeContentStatusView({
 
     ...(config || {}),
   };
-
-  const fs = nodeRequire("fs");
-  const pathMod = nodeRequire("path");
-  const childProcess = nodeRequire("child_process");
-
-  const vaultBasePath =
-    app.vault.adapter.getBasePath?.() ||
-    app.vault.adapter.basePath;
 
   function asText(value, fallback = "") {
     if (value == null) return fallback;
@@ -122,174 +113,6 @@ function makeContentStatusView({
       .filter(Boolean);
   }
 
-  function runGit(argv, { cwd = vaultBasePath, check = false } = {}) {
-    const proc = childProcess.spawnSync(
-      "git",
-      argv,
-      {
-        cwd,
-        encoding: "utf8",
-      }
-    );
-
-    if (check && proc.status !== 0) {
-      const detail = String(proc.stderr || proc.stdout || "git failed").trim();
-      throw new Error(`git ${argv.join(" ")} failed: ${detail}`);
-    }
-
-    return proc;
-  }
-
-  function gitRepoRoot() {
-    const proc = runGit(["rev-parse", "--show-toplevel"]);
-    if (proc.status !== 0) return "";
-    return String(proc.stdout || "").trim();
-  }
-
-  const REPO_ROOT = gitRepoRoot();
-
-  function pathRelativeToVaultFromRepoStatusPath(statusPath) {
-    if (!REPO_ROOT) return normalizePath(statusPath);
-
-    const absolute = pathMod.resolve(REPO_ROOT, statusPath);
-    const relativeToVault = pathMod.relative(vaultBasePath, absolute);
-
-    if (!relativeToVault || relativeToVault.startsWith("..")) {
-      return "";
-    }
-
-    return normalizePath(relativeToVault);
-  }
-
-  function gitStatusMap() {
-    const proc = runGit(["status", "--porcelain=v1", "--untracked-files=all"]);
-    if (proc.status !== 0) return new Map();
-
-    const map = new Map();
-
-    for (const raw of String(proc.stdout || "").split(/\r?\n/)) {
-      if (!raw.trim()) continue;
-      if (raw.length < 4) continue;
-
-      const indexStatus = raw[0];
-      const worktreeStatus = raw[1];
-      const payload = raw.slice(3);
-      const rawPath = payload.includes(" -> ")
-        ? payload.split(" -> ").pop()
-        : payload;
-
-      const cleanPath = pathRelativeToVaultFromRepoStatusPath(rawPath);
-      if (!cleanPath) continue;
-
-      if (indexStatus === "?" && worktreeStatus === "?") {
-        map.set(cleanPath, "new");
-      } else {
-        map.set(cleanPath, "editing");
-      }
-    }
-
-    return map;
-  }
-
-  const GIT_STATUS = gitStatusMap();
-  const LATEST_COMMIT_CACHE = new Map();
-  const TAGS_AT_COMMIT_CACHE = new Map();
-  const LATEST_SUBJECT_CACHE = new Map();
-
-  function markerNameForPath(path) {
-    return normalizePath(path).replace(/[\\/]/g, "__");
-  }
-
-  function markerExists(kind, path) {
-    const markerPath = pathMod.join(
-      vaultBasePath,
-      ".autoscribe",
-      "workflow",
-      kind,
-      `${markerNameForPath(path)}.json`
-    );
-    return fs.existsSync(markerPath);
-  }
-
-  function latestCommitForPath(path) {
-    const clean = normalizePath(path);
-    if (LATEST_COMMIT_CACHE.has(clean)) return LATEST_COMMIT_CACHE.get(clean);
-
-    const proc = runGit(["log", "-1", "--pretty=%H", "--", clean]);
-    const commit = proc.status === 0 ? String(proc.stdout || "").trim() : "";
-
-    LATEST_COMMIT_CACHE.set(clean, commit);
-    return commit;
-  }
-
-  function latestSubjectForPath(path) {
-    const clean = normalizePath(path);
-    if (LATEST_SUBJECT_CACHE.has(clean)) return LATEST_SUBJECT_CACHE.get(clean);
-
-    const proc = runGit(["log", "-1", "--pretty=%s", "--", clean]);
-    const subject = proc.status === 0 ? String(proc.stdout || "").trim() : "";
-
-    LATEST_SUBJECT_CACHE.set(clean, subject);
-    return subject;
-  }
-
-  function tagsAtCommit(commit) {
-    if (!commit) return [];
-    if (TAGS_AT_COMMIT_CACHE.has(commit)) return TAGS_AT_COMMIT_CACHE.get(commit);
-
-    const proc = runGit(["tag", "--points-at", commit]);
-    const tags = proc.status === 0
-      ? String(proc.stdout || "")
-          .split(/\r?\n/)
-          .map(line => line.trim())
-          .filter(Boolean)
-      : [];
-
-    TAGS_AT_COMMIT_CACHE.set(commit, tags);
-    return tags;
-  }
-
-  function isPipelineTag(tag) {
-    const clean = String(tag || "").trim().toLowerCase();
-    return (
-      /^autoscribe[\/._-]in-flight\b/.test(clean) ||
-      /^in-flight[\/._-]/.test(clean) ||
-      /^pipeline[\/._-]/.test(clean)
-    );
-  }
-
-  function hasPipelineTag(path) {
-    const commit = latestCommitForPath(path);
-    return tagsAtCommit(commit).some(isPipelineTag);
-  }
-
-  function hasPipelineMarker(path) {
-    return markerExists("in-flight", path);
-  }
-
-  function hasConflictMarker(path) {
-    return markerExists("conflicts", path);
-  }
-
-  function latestCommitMarksWritten(path) {
-    return /^autoscribe: writeback\b/.test(latestSubjectForPath(path));
-  }
-
-  function repoStateForPath(path) {
-    const clean = normalizePath(path);
-
-    if (hasConflictMarker(clean)) return "conflicted";
-
-    const gitState = GIT_STATUS.get(clean);
-    if (gitState === "new") return "new";
-    if (gitState === "editing") return "editing";
-
-    if (hasPipelineMarker(clean) || hasPipelineTag(clean)) return "in-flight";
-    if (latestCommitMarksWritten(clean)) return "written";
-
-    return "committed";
-  }
-
   function statusRowFromPage(page) {
     const path = normalizePath(page.file.path);
     const slug = asText(page.slug);
@@ -306,10 +129,9 @@ function makeContentStatusView({
 
       slug_prefix: slugPrefix(slug),
 
-      class: asText(page.class, CONFIG.defaultClass),
       status: asText(page.status, CONFIG.defaultStatus),
       stage: asText(page.stage, CONFIG.defaultStage),
-      repo_state: repoStateForPath(path),
+      origin: asText(page.origin, CONFIG.defaultOrigin),
     };
   }
 
@@ -332,10 +154,9 @@ function makeContentStatusView({
       slug_prefix: row.slug_prefix,
       title: row.title,
       path: row.path,
-      class: row.class,
       status: row.status,
       stage: row.stage,
-      repo_state: row.repo_state,
+      origin: row.origin,
     };
   }
 
@@ -343,7 +164,7 @@ function makeContentStatusView({
     return {
       ordering: "content-status",
       displayed_count: rows.length,
-      filters: ["class", "status", "stage", "repo_state"],
+      filters: ["status", "stage", "origin"],
       sort_modes: ["title"],
       slug_prefixes: CONFIG.slugPrefixes,
     };
@@ -409,10 +230,9 @@ function makeContentStatusView({
     [
       "",
       "Title",
-      "Class",
       "Status",
       "Stage",
-      "Repo",
+      "Origin",
     ].forEach(text => headRow.createEl("th", { text }));
 
     const tbody = table.createEl("tbody");
@@ -434,10 +254,9 @@ function makeContentStatusView({
       const noteCell = tr.createEl("td");
       api.createInternalLink(noteCell, row.path, row.title);
 
-      tr.createEl("td", { text: row.class });
       tr.createEl("td", { text: row.status });
       tr.createEl("td", { text: row.stage });
-      tr.createEl("td", { text: row.repo_state });
+      tr.createEl("td", { text: row.origin });
     }
   }
 
@@ -451,7 +270,7 @@ function makeContentStatusView({
       selectionKey: "slug",
       serializeRow: serializeStatusRow,
       options: {
-        filters: ["class", "status", "stage", "repo_state"],
+        filters: ["status", "stage", "origin"],
         sort_modes: ["title"],
         slug_prefixes: CONFIG.slugPrefixes,
       },
@@ -488,10 +307,9 @@ function makeContentStatusView({
       columns: [],
 
       filterFields: [
-        { key: "class", title: "Class" },
         { key: "status", title: "Status" },
         { key: "stage", title: "Stage" },
-        { key: "repo_state", title: "Repo" },
+        { key: "origin", title: "Origin" },
       ],
 
       sortModes: [
