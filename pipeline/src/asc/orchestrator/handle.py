@@ -13,7 +13,7 @@ from typing import Mapping
 
 from asc.redis.key import RedisKey
 from asc.redis.primitives import hashes
-from asc.redis.primitives.keys import exists
+from asc.redis.primitives.keys import delete, exists
 from asc.scrivener import inbox as scrivener_inbox
 from asc.worker import inbox as worker_inbox
 
@@ -41,6 +41,7 @@ FAILURE_KIND = "failure"
 class HandleResult:
     active: bool
     waiting: bool = False
+    retry: bool = False
 
     def __bool__(self) -> bool:
         return self.active
@@ -140,8 +141,19 @@ def _apply_task_state(
     call_identity: str,
 ) -> HandleResult | None:
     if state.failure_exists:
-        call_index.set_slot(index, slot, state.failure_key or "")
-        return _handle_failure_artifact(index=index, slot=slot, failure_key=state.failure_key or "")
+        failure_key = state.failure_key or ""
+        if _failure_is_nonfatal(failure_key):
+            if not state.step_key:
+                raise OrchestratorContractError(
+                    f"non-fatal worker failure cannot retry without step_key: {state.key}"
+                )
+            call_index.validate_step_slot(step_key=state.step_key, slot=slot)
+            delete(RedisKey(failure_key))
+            call_index.set_slot(index, slot, state.step_key)
+            return HandleResult(active=True, retry=True)
+
+        call_index.set_slot(index, slot, failure_key)
+        return _handle_failure_artifact(index=index, slot=slot, failure_key=failure_key)
 
     if not state.expected_exists:
         return None
@@ -185,6 +197,9 @@ def _handle_failure_artifact(*, index, slot: int, failure_key: str) -> HandleRes
     if key.kind != FAILURE_KIND:
         raise OrchestratorContractError(f"failure artifact must be failure:*; got {failure_key!r}")
 
+    if _failure_is_nonfatal(failure_key):
+        return HandleResult(active=True, retry=True)
+
     if slot == 0:
         return HandleResult(active=False)
 
@@ -202,8 +217,7 @@ def _advance_from_persisted_result(
     result = RedisKey(result_key)
 
     if result.kind == FAILURE_KIND:
-        _post_terminal_failure(result_key=result_key)
-        return HandleResult(active=False)
+        return _handle_failure_artifact(index=index, slot=slot, failure_key=result_key)
 
     if result.kind not in {"response", "transform", "retrieval"}:
         raise OrchestratorContractError(
@@ -265,6 +279,32 @@ def _post_terminal_failure(*, result_key: str) -> None:
     task = make_scrivener_call_failed(data_key=result_key)
     task_key = save_task(task)
     scrivener_inbox.post(task_key)
+
+
+def _failure_is_nonfatal(failure_key: str) -> bool:
+    key = RedisKey(failure_key)
+    if key.kind != FAILURE_KIND:
+        raise OrchestratorContractError(f"failure artifact must be failure:*; got {failure_key!r}")
+
+    raw = hashes.hgetall(key)
+    if not raw:
+        raise OrchestratorContractError(f"missing failure hash: {failure_key}")
+
+    return (
+        _truthy(raw.get("retryable"))
+        or _truthy(raw.get("nonfatal"))
+        or _truthy(raw.get("non_fatal"))
+        or _falsey(raw.get("fatal"))
+    )
+
+
+def _truthy(value: object) -> bool:
+    return str(value or "").strip().lower() in {"1", "true", "yes", "y", "on"}
+
+
+def _falsey(value: object) -> bool:
+    text = str(value or "").strip().lower()
+    return text in {"0", "false", "no", "n", "off"}
 
 def _load_task(task_key: str) -> TaskState:
     key = RedisKey(task_key)

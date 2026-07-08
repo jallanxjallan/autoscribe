@@ -9,7 +9,7 @@ from __future__ import annotations
 
 from typing import Any
 
-from asc.models.process.step import Step
+from asc.models.control.step import Step
 
 
 def materialize_plan_steps(

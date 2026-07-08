@@ -1,9 +1,10 @@
 from asc.redis.key import RedisKey
 from asc.redis.primitives.hashes import hset
 from asc.redis.primitives.zsets import zadd
+import time
 
 ACTIVE_CALLS_KEY = RedisKey("state:active:index")
-INITIAL_ACTIVE_SCORE = 0.0
+PARKED_CALL_SCORE = 0.0
 
 
 def create_call_index(
@@ -33,12 +34,12 @@ def create_call_index(
 def activate_call(call_key: str) -> None:
     """Put the call record in the active-call zset for orchestration."""
 
-    zadd(ACTIVE_CALLS_KEY, {call_key: INITIAL_ACTIVE_SCORE})
+    zadd(ACTIVE_CALLS_KEY, {call_key: float(time.time())})
 
 
 __all__ = [
     "ACTIVE_CALLS_KEY",
-    "INITIAL_ACTIVE_SCORE",
+    "PARKED_CALL_SCORE",
     "activate_call",
     "create_call_index",
 ]

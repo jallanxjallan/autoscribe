@@ -22,7 +22,7 @@ from dataclasses import dataclass
 
 from asc.models.process.call import CallRecord
 from asc.models.process.result import Failure, Response, Result, Retrieval, Transform
-from asc.models.process.step import Step
+from asc.models.control.step import Step
 from asc.models.process.task import WorkerTask
 from asc.redis.key import RedisKey
 from asc.worker.loader import load_engine_call
@@ -112,7 +112,7 @@ def _validate_engine_artifact(
         )
 
     expected_suffix = _step_number(step)
-    actual_suffix = str(getattr(artifact, "suffix", "")).strip()
+    actual_suffix = str(getattr(artifact, "result_suffix", getattr(artifact, "suffix", ""))).strip()
     if actual_suffix != expected_suffix:
         raise ValueError(
             "engine artifact suffix does not match step number: "
@@ -135,7 +135,7 @@ def _validate_success_kind_matches_task(*, artifact: Result, task: WorkerTask) -
             f"artifact_kind={artifact.kind!r} expected_key={expected.raw_key!r}"
         )
 
-    if expected.identity != artifact.identity or str(expected.suffix) != str(artifact.suffix):
+    if expected.identity != artifact.identity or str(expected.suffix) != str(getattr(artifact, "result_suffix", "")):
         raise ValueError(
             "engine artifact key does not match task expected_key: "
             f"artifact_key={artifact.raw_key!r} expected_key={expected.raw_key!r}"

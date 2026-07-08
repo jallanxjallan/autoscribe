@@ -11,23 +11,14 @@ from asc.redis.model_base import RedisModel
 
 
 class Result(RedisModel):
-    """Base class for successful worker output.
+    """Base class for self-addressed successful worker output."""
 
-    Engines return instantiated, self-addressed result models. The worker may
-    validate custody coordinates, then materializes the artifact by calling
-    ``save()``. Redis keys are deterministic:
-
-        response:<call_identity>:<step_number>
-        transform:<call_identity>:<step_number>
-        retrieval:<call_identity>:<step_number>
-    """
-
-    model_config = ConfigDict(extra="allow")
+    model_config = ConfigDict(extra="allow", populate_by_name=True)
 
     kind: ClassVar[str] = "result"
 
     identity: str
-    suffix: str
+    result_suffix: str = Field(alias="suffix")
     content: str
     raw_json: Any = Field(default_factory=dict)
     created_at: int = Field(default_factory=timestamp)
@@ -45,7 +36,7 @@ class Result(RedisModel):
         return RedisKey(
             kind=self.kind,
             identity=_identity(self.identity),
-            suffix=_step_suffix(self.suffix),
+            suffix=_step_suffix(self.result_suffix),
         )
 
     @property
@@ -60,9 +51,9 @@ class Result(RedisModel):
     def validate_identity(cls, value: object) -> str:
         return _identity(value)
 
-    @field_validator("suffix", mode="before")
+    @field_validator("result_suffix", mode="before")
     @classmethod
-    def validate_suffix(cls, value: object) -> str:
+    def validate_result_suffix(cls, value: object) -> str:
         return _step_suffix(value)
 
     @field_validator("content", mode="before")
@@ -76,42 +67,26 @@ class Result(RedisModel):
 
 
 class Response(Result):
-    """Successful LLM call completion."""
-
     kind: ClassVar[str] = "response"
 
 
 class Transform(Result):
-    """Successful script transform."""
-
     kind: ClassVar[str] = "transform"
 
 
 class Retrieval(Result):
-    """Successful RAG/retrieval operation."""
-
     kind: ClassVar[str] = "retrieval"
 
 
 class Failure(RedisModel):
-    """Failed daemon, worker, or external call output.
+    """Base class for self-addressed failed daemon/worker output."""
 
-    Worker-step failures are self-addressed with the source call identity and
-    producing step suffix:
-
-        failure:<call_identity>:<step_number>
-
-    Daemon/task failures may omit suffix and are addressed as:
-
-        failure:<task_identity>
-    """
-
-    model_config = ConfigDict(extra="allow")
+    model_config = ConfigDict(extra="allow", populate_by_name=True)
 
     kind: ClassVar[str] = "failure"
 
     identity: str
-    suffix: str | None = None
+    result_suffix: str | None = Field(default=None, alias="suffix")
     failure_type: str
     content: str
     failure_reason: str
@@ -196,7 +171,7 @@ class Failure(RedisModel):
         return RedisKey(
             kind=self.kind,
             identity=_identity(self.identity),
-            suffix=_optional_suffix(self.suffix),
+            suffix=_optional_suffix(self.result_suffix),
         )
 
     @property
@@ -211,7 +186,7 @@ class Failure(RedisModel):
     def validate_identity(cls, value: object) -> str:
         return _identity(value)
 
-    @field_validator("suffix", mode="before")
+    @field_validator("result_suffix", mode="before")
     @classmethod
     def validate_failure_suffix(cls, value: object | None) -> str | None:
         return _optional_suffix(value)
@@ -229,8 +204,6 @@ class Failure(RedisModel):
 
 
 class InternalFailure(Failure):
-    """Internal daemon or executor boundary failure."""
-
     failure_type: str = "internal"
 
     @classmethod
@@ -259,11 +232,9 @@ class InternalFailure(Failure):
         if not identity:
             identity = RedisKey(task_key).identity
 
-        suffix = context.get("suffix")
-
         return cls(
             identity=identity,
-            suffix=suffix,
+            suffix=context.get("suffix"),
             content=str(exc),
             failure_reason=type(exc).__name__,
             raw_json=raw_json,
@@ -272,14 +243,10 @@ class InternalFailure(Failure):
 
 
 class ExternalFailure(Failure):
-    """Failed external call, such as an LLM or retrieval provider rejection."""
-
     failure_type: str = "external"
 
 
 class Committed(RedisModel):
-    """Successful daemon task result."""
-
     model_config = ConfigDict(extra="allow")
 
     kind: ClassVar[str] = "committed"

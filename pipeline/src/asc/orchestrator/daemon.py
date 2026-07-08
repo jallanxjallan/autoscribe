@@ -7,8 +7,12 @@ until stopped by ``asc run stop``.
 from __future__ import annotations
 
 from dataclasses import dataclass
+import atexit
 import importlib
 import logging
+import os
+import subprocess
+import sys
 import time
 
 from asc.orchestrator.active import (
@@ -17,6 +21,7 @@ from asc.orchestrator.active import (
     bump_active_call,
     complete_active_call,
     defer_active_call,
+    retry_active_call,
     seconds_until_next_visible,
 )
 from asc.orchestrator.handle import handle
@@ -26,6 +31,52 @@ from asc.state.daemon import DEFAULT_CLAIM_TIMEOUT_SECONDS, configure_logging
 
 LOG = logging.getLogger(__name__)
 DOWNSTREAM_INBOXES: tuple[str, ...] = ("asc.worker.inbox", "asc.scrivener.inbox")
+DOWNSTREAM_DAEMONS: tuple[str, ...] = ("asc.worker.daemon", "asc.scrivener.daemon")
+MANAGE_DOWNSTREAM = os.environ.get("ASC_ORCHESTRATOR_MANAGE_DOWNSTREAM", "1") != "0"
+
+
+class _ManagedDownstream:
+    def __init__(self, modules: tuple[str, ...]) -> None:
+        self.modules = modules
+        self.processes: dict[str, subprocess.Popen] = {}
+
+    def start(self) -> None:
+        if not MANAGE_DOWNSTREAM:
+            return
+
+        for module in self.modules:
+            process = self.processes.get(module)
+            if process is not None and process.poll() is None:
+                continue
+
+            LOG.info("orchestrator operation=downstream_start module=%s", module)
+            self.processes[module] = subprocess.Popen(
+                [sys.executable, "-m", module],
+                start_new_session=True,
+            )
+
+    def stop(self) -> None:
+        if not MANAGE_DOWNSTREAM:
+            return
+
+        for module, process in list(self.processes.items()):
+            if process.poll() is not None:
+                self.processes.pop(module, None)
+                continue
+
+            LOG.info("orchestrator operation=downstream_stop module=%s pid=%s", module, process.pid)
+            process.terminate()
+            try:
+                process.wait(timeout=5)
+            except subprocess.TimeoutExpired:
+                LOG.warning("orchestrator operation=downstream_kill module=%s pid=%s", module, process.pid)
+                process.kill()
+                process.wait(timeout=5)
+            self.processes.pop(module, None)
+
+
+DOWNSTREAM = _ManagedDownstream(DOWNSTREAM_DAEMONS)
+atexit.register(DOWNSTREAM.stop)
 
 
 @dataclass(frozen=True, slots=True)
@@ -34,6 +85,7 @@ class OrchestratorRunReport:
     call_key: str | None = None
     active: bool | None = None
     waiting: bool | None = None
+    retry: bool | None = None
     action: str | None = None
 
     @property
@@ -128,9 +180,12 @@ def run_once(*, timeout: int | None = None, empty_limit: int | None = None, wait
 
     visible = [call for call in window if call.score <= now]
     if not visible:
+        DOWNSTREAM.stop()
         if wait:
             _sleep_until_next(window)
         return OrchestratorRunReport(claimed=False, action="sleep")
+
+    DOWNSTREAM.start()
 
     for call in visible:
         LOG.info("orchestrator operation=handle call_key=%s score=%s", call.key, call.score)
@@ -139,12 +194,27 @@ def run_once(*, timeout: int | None = None, empty_limit: int | None = None, wait
         if not result.active:
             complete_active_call(call.key)
             LOG.info("orchestrator operation=complete call_key=%s", call.key)
+            if not active_call_window():
+                DOWNSTREAM.stop()
             return OrchestratorRunReport(
                 claimed=True,
                 call_key=call.key,
                 active=False,
                 waiting=False,
+                retry=False,
                 action="complete",
+            )
+
+        if result.retry:
+            retry_active_call(call.key)
+            LOG.info("orchestrator operation=retry_later call_key=%s", call.key)
+            return OrchestratorRunReport(
+                claimed=True,
+                call_key=call.key,
+                active=True,
+                waiting=False,
+                retry=True,
+                action="retry_later",
             )
 
         if result.waiting:
@@ -156,6 +226,7 @@ def run_once(*, timeout: int | None = None, empty_limit: int | None = None, wait
                     call_key=call.key,
                     active=True,
                     waiting=True,
+                    retry=False,
                     action="bump_waiting",
                 )
 
@@ -176,9 +247,11 @@ def run_once(*, timeout: int | None = None, empty_limit: int | None = None, wait
             call_key=call.key,
             active=True,
             waiting=False,
+            retry=False,
             action="bump_active",
         )
 
+    DOWNSTREAM.stop()
     if wait:
         _sleep_until_next(window)
     return OrchestratorRunReport(claimed=False, action="sleep")
