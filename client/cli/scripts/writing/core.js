@@ -16,14 +16,12 @@ function info(script, message) {
 function usage(config) {
   if (config.mode === "writeback") {
     console.error(`Usage:
-  writeback [--dry-run] [--limit N] [--asc-bin BIN]
+  asc export extract-result CALL_ID | writeback [--dry-run] [--limit N]
 
 Behavior:
-  Finds pending exports whose prompt_slug already exists in the active vault,
-  extracts each result with asc export extract-result <call_identity>, replaces
-  only the target Markdown body, preserves target frontmatter, marks the result
-  exported with asc export update-exports <result_identity>, and saves a
-  writeback manifest.
+  Reads piped NDJSON records from asc export extract-result/export-result,
+  matches record_identity to an existing vault slug, replaces only the target
+  Markdown body, preserves target frontmatter, and saves a writeback manifest.
 
 Safety:
   - aborts on duplicate vault slugs
@@ -138,12 +136,16 @@ function runWritingCommand(config) {
   const vaultSlugs = gatherVaultSlugs({ root, script: config.script });
   info(config.script, `vault slugs: ${vaultSlugs.size}`);
 
-  const pendingExports = listPendingExports({
-    root,
-    ascBin: options.ascBin,
-    script: config.script,
-  });
-  info(config.script, `pending exports: ${pendingExports.length}`);
+  const pendingExports = config.loadInputRecords
+    ? config.loadInputRecords({ root, options, script: config.script })
+    : listPendingExports({
+      root,
+      ascBin: options.ascBin,
+      script: config.script,
+    });
+
+  const inputLabel = config.inputLabel || "pending exports";
+  info(config.script, `${inputLabel}: ${pendingExports.length}`);
 
   if (pendingExports.length === 0) {
     console.log(`${config.script}: no pending exports`);
@@ -225,7 +227,8 @@ function runWritingCommand(config) {
   const unchanged = written.length - changed;
 
   if (config.mode === "writeback") {
-    console.log(`writeback: wrote ${changed} file(s); ${unchanged} unchanged; marked ${written.length} export(s); review dirty files before committing`);
+    const markNote = config.marksExports === false ? "exports not marked" : `marked ${written.length} export(s)`;
+    console.log(`writeback: wrote ${changed} file(s); ${unchanged} unchanged; ${markNote}; review dirty files before committing`);
   } else {
     console.log(`writenew: wrote ${written.length} new file(s); marked ${written.length} export(s)`);
   }

@@ -4,6 +4,10 @@ const fs = require('node:fs');
 const os = require('node:os');
 const path = require('node:path');
 const { spawnSync } = require('node:child_process');
+const {
+  findManagedVaultRoot: findManagedVaultRootStrict,
+} = require('../../lib/vault-utils');
+
 
 class CliError extends Error {
   constructor(message, code = 1) {
@@ -11,6 +15,7 @@ class CliError extends Error {
     this.exitCode = code;
   }
 }
+
 
 function fail(message, code = 1) {
   throw new CliError(message, code);
@@ -97,23 +102,13 @@ function commandExists(bin) {
   return result.status === 0;
 }
 
-function findManagedVaultRoot(startDir) {
-  let current = absPath(startDir);
+function findManagedVaultRoot(startDir = '.') {
+  const start =
+    startDir === '.' && process.env.OBSIDIAN_VAULT_ROOT
+      ? process.env.OBSIDIAN_VAULT_ROOT
+      : startDir;
 
-  while (true) {
-    const obsidianDir = path.join(current, '.obsidian');
-    const controlPath = path.join(current, '_control');
-
-    if (isDirectory(obsidianDir) && exists(controlPath)) {
-      return current;
-    }
-
-    const parent = path.dirname(current);
-    if (parent === current) break;
-    current = parent;
-  }
-
-  fail(`current directory is not inside a managed Obsidian vault: ${startDir}`);
+  return findManagedVaultRootStrict(start);
 }
 
 function titleCaseStem(stem) {

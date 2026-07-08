@@ -1,14 +1,20 @@
-from __future__ import annotations
-
 import sys
-from typing import TextIO
+
+import click
+from collections.abc import Iterable
+from typing import Any, TextIO
 
 import typer
 
-from asc.export.export_result import mark_result_exported, write_extracted_result_record
-from asc.export.pending_exports import pending_export_records
-from asc.ledger.connect import connect
-
+from asc.exporter.export_result import (
+    mark_result_exported,
+    reset_result_exported,
+    write_extracted_result_record,
+    write_pending_result_records,
+    write_result_record_by_slug,
+)
+from asc.exporter.pending_exports import pending_export_records
+from asc.scrivener.connect import connect
 
 app = typer.Typer(
     add_completion=False,
@@ -28,12 +34,18 @@ def _write_pending_exports_table(
     rows: list[dict[str, object]],
     sink: TextIO,
 ) -> None:
-    headers = ("prompt_slug", "call_identity", "result_identity")
+    headers = (
+        "slug",
+        "source_identity",
+        "call_identity",
+        "final_step",
+        "result_key",
+        "exported_at",
+    )
     table_rows = [
-        (
-            _text(row["prompt_slug"]),
-            _text(row["call_identity"]),
-            _text(row["result_identity"]),
+        tuple(
+            _text(row.get("exported_at_text") if header == "exported_at" else row.get(header, ""))
+            for header in headers
         )
         for row in rows
     ]
@@ -42,66 +54,43 @@ def _write_pending_exports_table(
         print("No pending exports.", file=sink)
         return
 
-    widths = tuple(
-        max(len(header), *(len(row[index]) for row in table_rows))
-        for index, header in enumerate(headers)
-    )
-
-    print(
-        f"{headers[0]:<{widths[0]}}  {headers[1]:<{widths[1]}}  {headers[2]:<{widths[2]}}",
-        file=sink,
-    )
-    print(
-        f"{'-' * widths[0]}  {'-' * widths[1]}  {'-' * widths[2]}",
-        file=sink,
-    )
-
-    for prompt_slug, call_identity, result_identity in table_rows:
-        print(
-            f"{prompt_slug:<{widths[0]}}  {call_identity:<{widths[1]}}  {result_identity:<{widths[2]}}",
-            file=sink,
-        )
+    _write_table(headers, table_rows, sink=sink)
 
 
-def _write_prompt_slug_stream(
+def _write_source_identity_stream(
     *,
     rows: list[dict[str, object]],
     sink: TextIO,
 ) -> None:
     for row in rows:
-        print(_text(row["prompt_slug"]), file=sink)
+        print(_text(row.get("source_identity") or row.get("record_identity")), file=sink)
 
 
-@app.command("list-pending-exports")
-def list_pending_exports(
-    plan_slug: str | None = typer.Argument(
+@app.command("list-pending")
+def list_pending(
+    source_identity: str | None = typer.Argument(
         None,
         help=(
-            "Optional plan slug. With no argument, print a human-readable table. "
-            "With a plan slug, emit one pending prompt slug per line for writeback."
+            "Optional source/record identity. With no argument, print a table. "
+            "With an identity, emit matching pending source identities for writeback."
         ),
     ),
 ) -> None:
-    """List pending export/writeback rows.
+    """List pending export/writeback rows by slug and identity."""
 
-    Pending-export custody and duplicate-slug checks are owned by asc.ledger.
-    This command only chooses a display format and applies the optional plan
-    filter through the export helper.
-    """
-
-    if plan_slug is not None:
-        plan_slug = plan_slug.strip()
-        if not plan_slug:
-            typer.echo("ERROR: plan slug must not be empty", err=True)
+    if source_identity is not None:
+        source_identity = source_identity.strip()
+        if not source_identity:
+            typer.echo("ERROR: source identity must not be empty", err=True)
             raise typer.Exit(code=1)
 
     with connect() as conn:
-        rows = pending_export_records(conn=conn, plan_slug=plan_slug)
+        rows = pending_export_records(conn=conn, source_identity=source_identity)
 
-    if plan_slug is None:
+    if source_identity is None:
         _write_pending_exports_table(rows=rows, sink=sys.stdout)
     else:
-        _write_prompt_slug_stream(rows=rows, sink=sys.stdout)
+        _write_source_identity_stream(rows=rows, sink=sys.stdout)
 
 
 @app.command("extract-result")
@@ -121,11 +110,68 @@ def extract_result(
         )
 
 
+@app.command("extract-pending")
+def extract_pending_results() -> None:
+    """Emit all pending extracted call/result rows as an NDJSON batch."""
+
+    with connect() as conn:
+        write_pending_result_records(conn=conn, sink=sys.stdout)
+
+
+@app.command("re-export")
+def re_export(
+    slug: str = typer.Argument(
+        ...,
+        help="Source slug to emit again as NDJSON.",
+    ),
+    yes: bool = typer.Option(
+        False,
+        "--yes",
+        "-y",
+        help="Skip confirmation before emitting overwrite-oriented NDJSON.",
+    ),
+    export_message: str = typer.Option(
+        "re-export",
+        "--export-message",
+        "--message",
+        help="Message to store in the exports row.",
+    ),
+) -> None:
+    """Emit one slug's latest result as NDJSON and refresh exported_at."""
+
+    cleaned = slug.strip()
+    if not cleaned:
+        typer.echo("ERROR: slug must not be empty", err=True)
+        raise typer.Exit(code=1)
+
+    if not yes:
+        confirmed = click.confirm(
+            f"Re-export {cleaned!r}? This is intended to overwrite a dirty writeback file.",
+            default=False,
+            err=True,
+        )
+        if not confirmed:
+            typer.echo("re-export=cancelled", err=True)
+            raise typer.Exit(code=1)
+
+    try:
+        with connect() as conn:
+            write_result_record_by_slug(
+                slug=cleaned,
+                conn=conn,
+                sink=sys.stdout,
+                export_message=export_message,
+            )
+    except ValueError as exc:
+        typer.echo(f"ERROR: {exc}", err=True)
+        raise typer.Exit(code=1) from exc
+
+
 @app.command("update-exports")
 def update_exports(
     result_identity: str = typer.Argument(
         ...,
-        help="Result identity that was successfully exported or written back.",
+        help="Result key, result identity, or call identity that was successfully exported.",
     ),
     export_message: str = typer.Option(
         "writeback",
@@ -142,6 +188,53 @@ def update_exports(
             conn=conn,
             export_message=export_message,
         )
+
+
+@app.command("reset-exports")
+def reset_exports(
+    identities: list[str] = typer.Argument(
+        ...,
+        help="Call, result, result-key, or source identities to mark pending again.",
+    ),
+    export_message: str = typer.Option(
+        "reset",
+        "--export-message",
+        "--message",
+        help="Message to store in the exports row.",
+    ),
+) -> None:
+    """Reset exported_at to 0 for the supplied identities."""
+
+    cleaned = [identity.strip() for identity in identities if identity.strip()]
+    if not cleaned:
+        typer.echo("ERROR: at least one identity is required", err=True)
+        raise typer.Exit(code=1)
+
+    with connect() as conn:
+        count = reset_result_exported(
+            identities=cleaned,
+            conn=conn,
+            export_message=export_message,
+        )
+    typer.echo(f"Reset {count} export row(s).")
+
+
+def _write_table(
+    headers: tuple[str, ...],
+    rows: Iterable[tuple[Any, ...]],
+    *,
+    sink: TextIO,
+) -> None:
+    materialized = [tuple(_text(cell) for cell in row) for row in rows]
+    widths = [len(header) for header in headers]
+    for row in materialized:
+        for index, cell in enumerate(row):
+            widths[index] = max(widths[index], len(cell))
+
+    print("  ".join(header.ljust(widths[index]) for index, header in enumerate(headers)), file=sink)
+    print("  ".join("─" * width for width in widths), file=sink)
+    for row in materialized:
+        print("  ".join(row[index].ljust(widths[index]) for index in range(len(headers))), file=sink)
 
 
 if __name__ == "__main__":

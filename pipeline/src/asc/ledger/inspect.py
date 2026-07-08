@@ -1,5 +1,3 @@
-from __future__ import annotations
-
 from dataclasses import dataclass
 import json
 from typing import Any
@@ -7,7 +5,7 @@ from typing import Any
 from asc.ledger.connect import connect
 
 
-TABLE_NAMES = ("calls", "steps", "results", "exports")
+TABLE_NAMES = ("calls", "steps", "exports")
 
 
 @dataclass(frozen=True, slots=True)
@@ -18,10 +16,7 @@ class TableCount:
 
 def table_counts() -> tuple[TableCount, ...]:
     with connect() as conn:
-        return tuple(
-            TableCount(table=name, rows=_count(conn, name))
-            for name in TABLE_NAMES
-        )
+        return tuple(TableCount(table=name, rows=_count(conn, name)) for name in TABLE_NAMES)
 
 
 def recent_calls(*, limit: int = 20) -> list[dict[str, Any]]:
@@ -29,20 +24,20 @@ def recent_calls(*, limit: int = 20) -> list[dict[str, Any]]:
         rows = conn.execute(
             """
             SELECT
-                c.call,
-                c.plan,
-                c.record_identity AS source_identifier,
-                c.record_identity AS source_slug,
+                c.identity,
+                c.source_identity,
                 c.created_at,
-                COUNT(s.step_id) AS steps,
-                SUM(CASE WHEN s.status = 'pending' THEN 1 ELSE 0 END) AS pending,
-                SUM(CASE WHEN s.status = 'running' THEN 1 ELSE 0 END) AS running,
+                COUNT(s.step_number) AS steps,
                 SUM(CASE WHEN s.status = 'completed' THEN 1 ELSE 0 END) AS completed,
-                SUM(CASE WHEN s.status = 'failed' THEN 1 ELSE 0 END) AS failed
+                SUM(CASE WHEN s.status = 'failed' THEN 1 ELSE 0 END) AS failed,
+                CASE WHEN e.identity IS NULL THEN 0 ELSE 1 END AS export_ready,
+                e.exported_at
             FROM calls AS c
             LEFT JOIN steps AS s
-                ON s.call = c.call
-            GROUP BY c.call
+                ON s.identity = c.identity
+            LEFT JOIN exports AS e
+                ON e.identity = c.identity
+            GROUP BY c.identity
             ORDER BY c.created_at DESC
             LIMIT ?
             """,
@@ -55,53 +50,20 @@ def recent_steps(*, limit: int = 50, statuses: tuple[str, ...] = ()) -> list[dic
     where = ""
     params: list[Any] = []
     if statuses:
-        where = f"WHERE s.status IN ({', '.join('?' for _ in statuses)})"
+        where = f"WHERE status IN ({', '.join('?' for _ in statuses)})"
         params.extend(statuses)
-
     params.append(limit)
+
     with connect() as conn:
         rows = conn.execute(
             f"""
-            SELECT
-                s.call,
-                s.step_number,
-                s.status,
-                s.handler,
-                s.engine,
-                s.input_key,
-                s.output_key,
-                s.created_at,
-                s.started_at,
-                s.completed_at,
-                s.fail_message
-            FROM steps AS s
+            SELECT *
+            FROM steps
             {where}
-            ORDER BY s.created_at DESC, s.call ASC, s.step_number ASC
+            ORDER BY created_at DESC, identity ASC, step_number ASC
             LIMIT ?
             """,
             tuple(params),
-        ).fetchall()
-        return [_row_dict(row) for row in rows]
-
-
-def recent_results(*, limit: int = 30) -> list[dict[str, Any]]:
-    with connect() as conn:
-        rows = conn.execute(
-            """
-            SELECT
-                r.result,
-                r.call,
-                r.terminal_step_id,
-                r.created_at,
-                CASE WHEN e.result IS NULL THEN 0 ELSE 1 END AS exported,
-                e.created_at AS exported_at
-            FROM results AS r
-            LEFT JOIN exports AS e
-                ON e.result = r.result
-            ORDER BY r.created_at DESC
-            LIMIT ?
-            """,
-            (limit,),
         ).fetchall()
         return [_row_dict(row) for row in rows]
 
@@ -111,13 +73,14 @@ def recent_exports(*, limit: int = 30) -> list[dict[str, Any]]:
         rows = conn.execute(
             """
             SELECT
-                e.result,
-                r.call,
-                e.export_message,
-                e.created_at
+                e.identity,
+                e.source_identity,
+                e.final_step,
+                e.result_key,
+                e.created_at,
+                e.exported_at,
+                e.export_message
             FROM exports AS e
-            LEFT JOIN results AS r
-                ON r.result = e.result
             ORDER BY e.created_at DESC
             LIMIT ?
             """,
@@ -126,61 +89,106 @@ def recent_exports(*, limit: int = 30) -> list[dict[str, Any]]:
         return [_row_dict(row) for row in rows]
 
 
-def pending_work(*, limit: int = 50) -> list[dict[str, Any]]:
-    return recent_steps(limit=limit, statuses=("pending", "running", "failed"))
-
-
-def show_call(call: str) -> dict[str, Any]:
+def pending_exports(*, limit: int = 50) -> list[dict[str, Any]]:
     with connect() as conn:
-        call_row = conn.execute(
-            "SELECT * FROM calls WHERE call = ?",
-            (call,),
-        ).fetchone()
-        if call_row is None:
-            raise KeyError(f"call not found: {call}")
+        rows = conn.execute(
+            """
+            SELECT
+                e.identity,
+                e.source_identity,
+                e.final_step,
+                e.result_key,
+                e.created_at
+            FROM exports AS e
+            WHERE e.exported_at IS NULL
+            ORDER BY e.created_at ASC
+            LIMIT ?
+            """,
+            (limit,),
+        ).fetchall()
+        return [_row_dict(row) for row in rows]
 
-        step_rows = conn.execute(
+
+def pending_export_for_source(source_identity: str) -> dict[str, Any] | None:
+    """Return one unfinished export row for a source document, if any.
+
+    Enqueue code can use this as the guard against starting a new run while
+    an earlier completed run is still waiting to be written back.
+    """
+
+    with connect() as conn:
+        row = conn.execute(
             """
             SELECT *
-            FROM steps
-            WHERE call = ?
-            ORDER BY step_number ASC
+            FROM exports
+            WHERE source_identity = ?
+              AND exported_at IS NULL
+            ORDER BY created_at ASC, identity ASC
+            LIMIT 1
             """,
-            (call,),
-        ).fetchall()
-        result_row = conn.execute(
-            "SELECT * FROM results WHERE call = ?",
-            (call,),
+            (source_identity,),
         ).fetchone()
-        export_row = None
-        if result_row is not None:
-            export_row = conn.execute(
-                "SELECT * FROM exports WHERE result = ?",
-                (result_row["result"],),
-            ).fetchone()
+    return _row_dict(row) if row is not None else None
 
-    raw = _safe_json(call_row["raw_json"])
+
+def pending_work(*, limit: int = 50) -> list[dict[str, Any]]:
+    """Legacy CLI name.
+
+    Scrivener no longer tracks pending/running workflow state.  The nearest
+    useful inspection surface is failed ledgered steps plus pending exports.
+    """
+
+    failed = recent_steps(limit=limit, statuses=("failed",))
+    if len(failed) >= limit:
+        return failed[:limit]
+    exports = pending_exports(limit=limit - len(failed))
+    for row in exports:
+        row.setdefault("status", "pending_export")
+    return failed + exports
+
+
+def recent_results(*, limit: int = 30) -> list[dict[str, Any]]:
+    """Legacy CLI name.
+
+    The results table was intentionally removed.  Exports now point directly at
+    the terminal step result, so recent exports are the result inspection view.
+    """
+
+    return recent_exports(limit=limit)
+
+
+def show_call(identity: str) -> dict[str, Any]:
+    with connect() as conn:
+        call_row = conn.execute("SELECT * FROM calls WHERE identity = ?", (identity,)).fetchone()
+        if call_row is None:
+            raise KeyError(f"call not found: {identity}")
+        step_rows = conn.execute(
+            "SELECT * FROM steps WHERE identity = ? ORDER BY step_number ASC",
+            (identity,),
+        ).fetchall()
+        export_row = conn.execute("SELECT * FROM exports WHERE identity = ?", (identity,)).fetchone()
+
     return {
         "call": _row_dict(call_row),
-        "raw": raw,
+        "source": _safe_json(call_row["source_json"]),
         "steps": [_row_dict(row) for row in step_rows],
-        "result": _row_dict(result_row) if result_row is not None else None,
         "export": _row_dict(export_row) if export_row is not None else None,
     }
 
 
-def show_step(call: str, step_number: int) -> dict[str, Any]:
+def show_step(identity: str, step_number: int) -> dict[str, Any]:
     with connect() as conn:
         row = conn.execute(
             """
             SELECT *
             FROM steps
-            WHERE call = ? AND step_number = ?
+            WHERE identity = ?
+              AND step_number = ?
             """,
-            (call, step_number),
+            (identity, step_number),
         ).fetchone()
         if row is None:
-            raise KeyError(f"step not found: {call} step {step_number}")
+            raise KeyError(f"step not found: {identity} step {step_number}")
     data = _row_dict(row)
     data["raw"] = _safe_json(data.get("raw_json"))
     return data
@@ -208,6 +216,8 @@ def _safe_json(value: Any) -> Any:
 
 __all__ = [
     "TableCount",
+    "pending_export_for_source",
+    "pending_exports",
     "pending_work",
     "recent_calls",
     "recent_exports",

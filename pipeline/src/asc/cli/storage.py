@@ -1,109 +1,329 @@
-from __future__ import annotations
-
-from datetime import datetime
-from pathlib import Path
-from typing import Annotated
-from zoneinfo import ZoneInfo
+import json
+from collections.abc import Iterable, Mapping
+from typing import Any
 
 import typer
 
-from asc.ledger.connect import configured_ledger_path
-from asc.ledger.load import init_database
-
-
-DEFAULT_ARCHIVE_DIRNAME = "archive"
-
+from asc.scrivener.inspect import (
+    pending_export_for_source,
+    pending_work,
+    recent_calls,
+    recent_exports,
+    recent_results,
+    recent_steps,
+    show_call,
+    show_step,
+    table_counts,
+)
+from asc.scrivener.lifecycle import (
+    active_ledger_path,
+    ensure_active_ledger,
+    reset_ledger,
+    rotate_ledger,
+)
+from asc.scrivener.schema_dump import schema_columns, schema_sql
 
 app = typer.Typer(
     no_args_is_help=True,
     add_completion=False,
-    help="Manage AutoScribe storage, ledger rotation, and result persistence.",
+    help="Inspect and maintain the Scrivener ledger.",
 )
 
 
-def timestamp_label() -> str:
-    now = datetime.now(ZoneInfo("Asia/Jakarta"))
-    return now.strftime("%Y%m%dT%H%M%S%z")
+@app.command("path")
+def path_command() -> None:
+    """Print the active Scrivener ledger path."""
+
+    typer.echo(str(active_ledger_path()))
 
 
-def archive_path_for(ledger_path: Path, archive_dir: Path) -> Path:
-    suffix = ledger_path.suffix or ".sql"
-    stem = ledger_path.stem
-    return archive_dir / f"{stem}.{timestamp_label()}{suffix}"
+@app.command("init")
+def init_command() -> None:
+    """Create or update the active Scrivener ledger schema."""
+
+    path = ensure_active_ledger()
+    typer.echo(f"initialized: {path}")
 
 
-def rotate_ledger(
-    *,
-    archive_dir: Path | None = None,
-) -> tuple[Path | None, Path]:
-    ledger_path = configured_ledger_path().expanduser().resolve()
+@app.command("reset")
+def reset_command(
+    yes: bool = typer.Option(False, "--yes", help="Actually reset the ledger."),
+) -> None:
+    """Drop and recreate all Scrivener ledger objects.
 
-    if archive_dir is None:
-        archive_dir = ledger_path.parent / DEFAULT_ARCHIVE_DIRNAME
-    else:
-        archive_dir = archive_dir.expanduser().resolve()
+    Without --yes this is a dry run, so accidental resets are noisy and safe.
+    """
 
-    archived_to: Path | None = None
+    report = reset_ledger(apply=yes)
+    if not report.applied:
+        typer.echo(f"ledger reset would clear all rows from: {report.ledger_path}")
+        typer.echo("run again with --yes to apply")
+        return
+    typer.echo(f"reset: {report.ledger_path}")
 
-    if ledger_path.exists():
-        archive_dir.mkdir(parents=True, exist_ok=True)
-        archived_to = archive_path_for(ledger_path, archive_dir)
 
-        if archived_to.exists():
-            raise FileExistsError(f"archive target already exists: {archived_to}")
+@app.command("rotate")
+def rotate_command() -> None:
+    """Archive the current ledger and create a fresh active ledger.
 
-        ledger_path.rename(archived_to)
+    Pending export custody rows are carried forward so completed-but-unexported
+    work remains visible after rotation.
+    """
 
-    init_database(force=False)
-    initialized = configured_ledger_path().expanduser().resolve()
-
-    return archived_to, initialized
+    report = rotate_ledger()
+    typer.echo(f"active:  {report.active_path}")
+    if report.archive_path is not None:
+        typer.echo(f"archive: {report.archive_path}")
+    typer.echo(
+        "carried: "
+        f"calls={report.carried_calls} "
+        f"steps={report.carried_steps} "
+        f"exports={report.carried_exports}"
+    )
+    typer.echo(
+        "removed from archive: "
+        f"calls={report.old_deleted_calls} "
+        f"steps={report.old_deleted_steps} "
+        f"exports={report.old_deleted_exports}"
+    )
 
 
 @app.command("rotate-db")
-def rotate_db_command(
-    archive_dir: Annotated[
-        Path | None,
-        typer.Option(
-            "--archive-dir",
-            "-a",
-            help="Directory where archived ledgers should be stored.",
-        ),
-    ] = None,
+def rotate_db_command() -> None:
+    """Compatibility alias for ``rotate``.
+
+    The old storage command renamed the SQLite file and initialized a blank
+    database.  Ledger rotation now belongs to ``asc.scrivener.lifecycle`` so
+    pending export custody can be carried into the fresh active ledger.
+    """
+
+    rotate_command()
+
+
+@app.command("schema")
+def schema_command(
+    columns: bool = typer.Option(False, "--columns", help="Print PRAGMA table_info rows instead of CREATE SQL."),
 ) -> None:
+    """Print the actual active SQLite ledger schema."""
+
+    if columns:
+        rows = [
+            (
+                item.table,
+                item.cid,
+                item.name,
+                item.column_type,
+                item.not_null,
+                item.default_value or "",
+                item.primary_key,
+            )
+            for item in schema_columns()
+        ]
+        _print_table(("table", "cid", "name", "type", "not_null", "default", "pk"), rows)
+        return
+
+    for ddl in schema_sql():
+        typer.echo(f"-- {ddl.name}")
+        typer.echo(ddl.sql)
+        typer.echo("")
+
+
+@app.command("blocked")
+def blocked_command(source_identity: str) -> None:
+    """Check whether a source document has an unfinished export row."""
+
+    row = pending_export_for_source(source_identity)
+    if row is None:
+        typer.echo(f"not blocked: {source_identity}")
+        return
+    _print_dict_rows([row], ("identity", "source_identity", "final_step", "result_key", "created_at", "exported_at"))
+
+
+@app.command("counts")
+def counts_command() -> None:
+    """Print row counts for ledger tables."""
+
+    rows = [(item.table, item.rows) for item in table_counts()]
+    _print_table(("table", "rows"), rows)
+
+
+@app.command("calls")
+def calls_command(
+    limit: int = typer.Option(20, "--limit", "-n", min=1, help="Maximum rows to print."),
+) -> None:
+    """Print recent call rows.
+
+    The ledger no longer owns workflow state.  It records calls, completed or
+    failed steps, and export custody.  Therefore this view deliberately reports
+    ledger facts only: source identity, step counts, terminal export readiness,
+    and timestamps.
     """
-    Rename the configured ledger as a timestamped archive and initialize a new ledger.
+
+    rows = recent_calls(limit=limit)
+    _print_dict_rows(
+        rows,
+        (
+            "identity",
+            "source_identity",
+            "created_at",
+            "steps",
+            "completed",
+            "failed",
+            "export_ready",
+            "exported_at",
+        ),
+    )
+
+
+@app.command("steps")
+def steps_command(
+    limit: int = typer.Option(50, "--limit", "-n", min=1, help="Maximum rows to print."),
+    status: list[str] | None = typer.Option(None, "--status", "-s", help="Filter by completed or failed."),
+) -> None:
+    """Print recent ledgered step rows."""
+
+    statuses = tuple(status or ())
+    rows = recent_steps(limit=limit, statuses=statuses)
+    _print_step_rows(rows)
+
+
+@app.command("exports")
+def exports_command(
+    limit: int = typer.Option(30, "--limit", "-n", min=1, help="Maximum rows to print."),
+) -> None:
+    """Print recent export custody rows."""
+
+    rows = recent_exports(limit=limit)
+    _print_dict_rows(
+        rows,
+        (
+            "identity",
+            "source_identity",
+            "final_step",
+            "result_key",
+            "created_at",
+            "exported_at",
+            "export_message",
+        ),
+    )
+
+
+@app.command("results")
+def results_command(
+    limit: int = typer.Option(30, "--limit", "-n", min=1, help="Maximum rows to print."),
+) -> None:
+    """Legacy alias: print recent export-backed terminal results."""
+
+    rows = recent_results(limit=limit)
+    _print_dict_rows(
+        rows,
+        (
+            "identity",
+            "source_identity",
+            "final_step",
+            "result_key",
+            "created_at",
+            "exported_at",
+            "export_message",
+        ),
+    )
+
+
+@app.command("pending")
+def pending_command(
+    limit: int = typer.Option(50, "--limit", "-n", min=1, help="Maximum rows to print."),
+) -> None:
+    """Print failed steps plus pending exports.
+
+    Scrivener no longer tracks pending/running workflow state.  This command is
+    retained as a convenience inspection surface for work that still needs human
+    or export attention.
     """
 
-    archived_to, initialized = rotate_ledger(archive_dir=archive_dir)
-
-    if archived_to is None:
-        typer.echo("storage rotate-db: no existing ledger found")
-    else:
-        typer.echo(f"storage rotate-db: archived ledger: {archived_to}")
-
-    typer.echo(f"storage rotate-db: initialized ledger: {initialized}")
-
-
-@app.command("start")
-def start_command() -> None:
-    """Start the storage persistence process when lifecycle wiring is available."""
-
-    typer.echo("storage start not wired yet")
-
-
-@app.command("stop")
-def stop_command() -> None:
-    """Stop the storage persistence process when lifecycle wiring is available."""
-
-    typer.echo("storage stop not wired yet")
+    rows = pending_work(limit=limit)
+    _print_dict_rows(
+        rows,
+        (
+            "identity",
+            "source_identity",
+            "step_number",
+            "final_step",
+            "status",
+            "result_key",
+            "fail_message",
+            "created_at",
+        ),
+    )
 
 
-@app.command("status")
-def status_command() -> None:
-    """Show storage persistence status when lifecycle wiring is available."""
+@app.command("show")
+def show_command(identity: str) -> None:
+    """Print one call with its steps and export row as JSON."""
 
-    typer.echo("storage status not wired yet")
+    try:
+        data = show_call(identity)
+    except KeyError as exc:
+        typer.echo(f"ERROR: {exc}", err=True)
+        raise typer.Exit(1) from exc
+
+    call_row = data.get("call", {})
+    typer.echo(f"identity: {call_row.get('identity', '')}")
+    typer.echo(f"source:   {call_row.get('source_identity', '')}")
+    typer.echo(f"created:  {call_row.get('created_at', '')}")
+    typer.echo("")
+    typer.echo(json.dumps(data, ensure_ascii=False, indent=2, sort_keys=True))
+
+
+@app.command("step")
+def step_command(identity: str, step_number: int) -> None:
+    """Print one ledgered step as JSON."""
+
+    try:
+        data = show_step(identity, step_number)
+    except KeyError as exc:
+        typer.echo(f"ERROR: {exc}", err=True)
+        raise typer.Exit(1) from exc
+    typer.echo(json.dumps(data, ensure_ascii=False, indent=2, sort_keys=True))
+
+
+def _print_step_rows(rows: list[dict[str, Any]]) -> None:
+    _print_dict_rows(
+        rows,
+        (
+            "identity",
+            "step_number",
+            "status",
+            "result_key",
+            "fail_message",
+            "created_at",
+        ),
+    )
+
+
+def _print_dict_rows(rows: Iterable[Mapping[str, Any]], columns: tuple[str, ...]) -> None:
+    materialized = [tuple(_cell(row.get(column, "")) for column in columns) for row in rows]
+    _print_table(columns, materialized)
+
+
+def _print_table(headers: tuple[str, ...], rows: Iterable[tuple[Any, ...]]) -> None:
+    materialized = [tuple(_cell(cell) for cell in row) for row in rows]
+    widths = [len(header) for header in headers]
+    for row in materialized:
+        for index, cell in enumerate(row):
+            widths[index] = max(widths[index], len(cell))
+
+    typer.echo("  ".join(header.ljust(widths[index]) for index, header in enumerate(headers)))
+    typer.echo("  ".join("─" * width for width in widths))
+    for row in materialized:
+        typer.echo("  ".join(row[index].ljust(widths[index]) for index in range(len(headers))))
+
+
+def _cell(value: Any) -> str:
+    if value is None:
+        return ""
+    if isinstance(value, bool):
+        return "1" if value else "0"
+    return str(value)
 
 
 if __name__ == "__main__":

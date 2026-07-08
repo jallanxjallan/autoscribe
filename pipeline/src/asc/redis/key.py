@@ -1,54 +1,289 @@
-from __future__ import annotations
-
 from typing import Any, ClassVar
 
-from attr import define, field, validators
 
-from asc.redis.client import get_client
-from asc.redis.key_builder import MIN_PARTS, SEP, build_key
+SEP = ":"
+MIN_PARTS = 2
 
 
-@define(frozen=True)
-class RedisKey:
-    key: str = field(
-        validator=[
-            validators.instance_of(str),
-            validators.min_len(3),
-        ]
-    )
+class RedisKeyCommandsMixin:
+    def exists(self) -> bool:
+        from asc.redis.primitives import keys
+
+        return keys.exists(self)
+
+    def delete(self) -> int:
+        from asc.redis.primitives import keys
+
+        return keys.delete(self)
+
+    def type(self) -> str:
+        from asc.redis.primitives import keys
+
+        return keys.type(self)
+
+    def ttl(self) -> int:
+        from asc.redis.primitives import keys
+
+        return keys.ttl(self)
+
+    def expire(self, seconds: int) -> bool:
+        from asc.redis.primitives import keys
+
+        return keys.expire(self, seconds)
+
+
+class RedisStringCommandsMixin:
+    def get(self) -> str | None:
+        from asc.redis.primitives import strings
+
+        return strings.get(self)
+
+    def set(self, value: str) -> None:
+        from asc.redis.primitives import strings
+
+        strings.set(self, value)
+
+
+class RedisHashCommandsMixin:
+    def hget(self, field: str) -> str | None:
+        from asc.redis.primitives import hashes
+
+        return hashes.hget(self, field)
+
+    def hgetall(self) -> dict[str, str]:
+        from asc.redis.primitives import hashes
+
+        return hashes.hgetall(self)
+
+    def hkeys(self) -> list[str]:
+        from asc.redis.primitives import hashes
+
+        return hashes.hkeys(self)
+
+    def hlen(self) -> int:
+        from asc.redis.primitives import hashes
+
+        return hashes.hlen(self)
+
+    def hset(
+        self,
+        field: str | None = None,
+        value: str | None = None,
+        *,
+        mapping: dict[str, str] | None = None,
+    ) -> int:
+        from asc.redis.primitives import hashes
+
+        return hashes.hset(self, field=field, value=value, mapping=mapping)
+
+    def hdel(self, *fields: str) -> int:
+        from asc.redis.primitives import hashes
+
+        return hashes.hdel(self, *fields)
+
+
+class RedisListCommandsMixin:
+    def rpush(self, *values: str) -> int:
+        from asc.redis.primitives import lists
+
+        return lists.rpush(self, *values)
+
+    def lpush(self, *values: str) -> int:
+        from asc.redis.primitives import lists
+
+        return lists.lpush(self, *values)
+
+    def lpop(self) -> str | None:
+        from asc.redis.primitives import lists
+
+        return lists.lpop(self)
+
+    def blpop(self, *, timeout: int = 0) -> tuple[str, str] | None:
+        from asc.redis.primitives import lists
+
+        return lists.blpop(self, timeout=timeout)
+
+    def lindex(self, index: int) -> str | None:
+        from asc.redis.primitives import lists
+
+        return lists.lindex(self, index)
+
+    def llen(self) -> int:
+        from asc.redis.primitives import lists
+
+        return lists.llen(self)
+
+
+class RedisSortedSetCommandsMixin:
+    def zadd(self, mapping: dict[str, float]) -> int:
+        from asc.redis.primitives import zsets
+
+        return zsets.zadd(self, mapping)
+
+    def zcard(self) -> int:
+        from asc.redis.primitives import zsets
+
+        return zsets.zcard(self)
+
+    def zrange(self, start: int, stop: int) -> list[str]:
+        from asc.redis.primitives import zsets
+
+        return zsets.zrange(self, start, stop)
+
+    def zpopmin(self, count: int = 1) -> list[tuple[str, float]]:
+        from asc.redis.primitives import zsets
+
+        return zsets.zpopmin(self, count)
+
+    def zrangebyscore(
+        self,
+        min_score: float,
+        max_score: float,
+        **kwargs: Any,
+    ) -> list[Any]:
+        from asc.redis.primitives import zsets
+
+        return zsets.zrangebyscore(self, min_score, max_score, **kwargs)
+
+    def zscore(self, member: str) -> float | None:
+        from asc.redis.primitives import zsets
+
+        return zsets.zscore(self, member)
+
+    def zrem(self, *members: str) -> int:
+        from asc.redis.primitives import zsets
+
+        return zsets.zrem(self, *members)
+
+    def zrevrange(self, start: int, stop: int) -> list[str]:
+        from asc.redis.primitives import zsets
+
+        return zsets.zrevrange(self, start, stop)
+
+    def zrevrangebyscore(
+        self,
+        max_score: float,
+        min_score: float,
+        **kwargs: Any,
+    ) -> list[Any]:
+        from asc.redis.primitives import zsets
+
+        return zsets.zrevrangebyscore(self, max_score, min_score, **kwargs)
+
+
+class RedisKey(
+    RedisKeyCommandsMixin,
+    RedisStringCommandsMixin,
+    RedisHashCommandsMixin,
+    RedisListCommandsMixin,
+    RedisSortedSetCommandsMixin,
+):
+    """Validated AutoScribe Redis key value object.
+
+    Canonical shape:
+
+        kind:identity[:suffix...]
+
+    Construction supports either a complete raw key string:
+
+        RedisKey("call:01ABC:record")
+
+    or labelled key parts:
+
+        RedisKey(kind="call", identity="01ABC")
+        RedisKey(kind="call", identity="01ABC", suffix="record")
+        RedisKey(kind="call", identity="01ABC", segments=("record",))
+
+    The suffix/segments are optional. Two-segment keys are first-class keys,
+    not a special case.
+    """
 
     SEP: ClassVar[str] = SEP
     MIN_PARTS: ClassVar[int] = MIN_PARTS
 
-    def __attrs_post_init__(self) -> None:
-        parts = self.parts
-        if len(parts) < self.MIN_PARTS:
-            raise ValueError(
-                f"Invalid Redis key '{self.key}'; expected at least "
-                f"namespace and identity segments separated by '{self.SEP}'"
+    def __init__(
+        self,
+        raw_key: str | None = None,
+        *,
+        kind: str | None = None,
+        identity: str | None = None,
+        suffix: str | int | None = None,
+        segments: tuple[str | int | None, ...] | list[str | int | None] | None = None,
+    ) -> None:
+        if raw_key is not None and (kind is not None or identity is not None):
+            raise ValueError("RedisKey accepts either raw_key or labelled parts, not both")
+
+        if raw_key is None:
+            raw_key = self._raw_from_labelled_parts(
+                kind=kind,
+                identity=identity,
+                suffix=suffix,
+                segments=segments,
             )
+
+        if not isinstance(raw_key, str):
+            raise TypeError("RedisKey requires a string")
+
+        raw_key = raw_key.strip()
+        parts = tuple(raw_key.split(self.SEP))
+
+        self._validate_parts(parts)
+
+        self.raw_key = raw_key
+        self.parts = parts
+
+    @classmethod
+    def from_parts(cls, *parts: str | int | None) -> "RedisKey":
+        clean_parts = tuple(str(part) for part in parts if part is not None)
+        cls._validate_parts(clean_parts)
+        return cls(SEP.join(clean_parts))
+
+    @classmethod
+    def _raw_from_labelled_parts(
+        cls,
+        *,
+        kind: str | None,
+        identity: str | None,
+        suffix: str | int | None,
+        segments: tuple[str | int | None, ...] | list[str | int | None] | None,
+    ) -> str:
+        if kind is None:
+            raise ValueError("RedisKey labelled construction requires kind")
+        if identity is None:
+            raise ValueError("RedisKey labelled construction requires identity")
+
+        if suffix is not None and segments is not None:
+            raise ValueError("RedisKey accepts suffix or segments, not both")
+
+        if segments is None:
+            extra_parts: tuple[str, ...] = (str(suffix),) if suffix is not None else ()
+        else:
+            extra_parts = tuple(str(part) for part in segments if part is not None)
+
+        return SEP.join((kind, identity, *extra_parts))
+
+    @classmethod
+    def _validate_parts(cls, parts: tuple[str, ...]) -> None:
+        if len(parts) < cls.MIN_PARTS:
+            raise ValueError("Redis keys must have at least kind and identity segments")
+
         for index, part in enumerate(parts, start=1):
+            if not isinstance(part, str):
+                raise TypeError(f"Redis key segment {index} must be a string")
             if not part:
-                raise ValueError(
-                    f"Invalid Redis key '{self.key}'; segment {index} is empty"
-                )
+                raise ValueError(f"Redis key segment {index} must be non-empty")
             if part != part.strip():
                 raise ValueError(
-                    f"Invalid Redis key '{self.key}'; segment {index} has surrounding whitespace"
+                    f"Redis key segment {index} has surrounding whitespace"
+                )
+            if cls.SEP in part:
+                raise ValueError(
+                    f"Redis key segment {index} must not contain {cls.SEP!r}"
                 )
 
     @property
-    def parts(self) -> tuple[str, ...]:
-        return tuple(self.key.split(self.SEP))
-
-    @property
-    def namespace(self) -> str:
+    def kind(self) -> str:
         return self.parts[0]
-
-    @property
-    def domain(self) -> str:
-        """Backward-compatible alias for namespace."""
-        return self.namespace
 
     @property
     def identity(self) -> str:
@@ -59,138 +294,40 @@ class RedisKey:
         return self.parts[2:]
 
     @property
-    def classifier(self) -> str | None:
-        """Backward-compatible alias for the first extra segment."""
-        return self.segments[0] if self.segments else None
+    def suffix(self) -> str | None:
+        if not self.segments:
+            return None
+        return self.SEP.join(self.segments)
 
-    @classmethod
-    def from_parts(cls, *parts: str) -> "RedisKey":
-        return cls(build_key(*parts))
+    def _r(self):
+        from asc.redis.client import get_client
 
-    def __str__(self) -> str:
-        return self.key
-
-    def _r(self) -> Any:
         return get_client()
 
-    def exists(self) -> bool:
-        return bool(self._r().exists(self.key))
+    def __str__(self) -> str:
+        return self.raw_key
 
-    def delete(self) -> int:
-        return int(self._r().delete(self.key))
+    def __repr__(self) -> str:
+        return f"RedisKey({self.raw_key!r})"
 
-    def type(self) -> str:
-        return str(self._r().type(self.key))
+    def __eq__(self, other: object) -> bool:
+        if isinstance(other, RedisKey):
+            return self.raw_key == other.raw_key
+        if isinstance(other, str):
+            return self.raw_key == other
+        return False
 
-    def ttl(self) -> int:
-        return int(self._r().ttl(self.key))
-
-    def expire(self, seconds: int) -> bool:
-        if not isinstance(seconds, int) or seconds < 0:
-            raise ValueError("expire() requires non-negative int seconds")
-        return bool(self._r().expire(self.key, seconds))
-
-    # Raw string helpers are intentionally minimal. Runtime records should use hashes.
-
-    def get(self) -> str | None:
-        return self._r().get(self.key)
-
-    def set(self, value: str) -> None:
-        if not isinstance(value, str):
-            raise TypeError("set() requires a string value")
-        self._r().set(self.key, value)
-
-    def hget(self, field: str) -> str | None:
-        return self._r().hget(self.key, field)
-
-    def hgetall(self) -> dict[str, str]:
-        return dict(self._r().hgetall(self.key))
-
-    def hkeys(self) -> list[str]:
-        return [str(item) for item in self._r().hkeys(self.key)]
-
-    def hlen(self) -> int:
-        return int(self._r().hlen(self.key))
-
-    def hset(
-        self,
-        *,
-        field: str | None = None,
-        value: str | None = None,
-        mapping: dict[str, str] | None = None,
-    ) -> int:
-        if mapping is not None:
-            return int(self._r().hset(self.key, mapping=mapping))
-        if field is None or value is None:
-            raise TypeError("hset() requires either field+value or mapping")
-        return int(self._r().hset(self.key, field, value))
-
-    def hdel(self, *fields: str) -> int:
-        return int(self._r().hdel(self.key, *fields))
+    def __hash__(self) -> int:
+        return hash(self.raw_key)
 
 
-    # Redis LIST helpers. Live handoff queues use RPUSH + LPOP/BLPOP.
-
-    def rpush(self, *values: str) -> int:
-        if not values:
-            raise ValueError("rpush() requires at least one value")
-        for value in values:
-            if not isinstance(value, str):
-                raise TypeError("rpush() values must be strings")
-        return int(self._r().rpush(self.key, *values))
-
-    def lpush(self, *values: str) -> int:
-        if not values:
-            raise ValueError("lpush() requires at least one value")
-        for value in values:
-            if not isinstance(value, str):
-                raise TypeError("lpush() values must be strings")
-        return int(self._r().lpush(self.key, *values))
-
-    def lpop(self) -> str | None:
-        value = self._r().lpop(self.key)
-        return None if value is None else str(value)
-
-    def blpop(self, *, timeout: int = 0) -> tuple[str, str] | None:
-        if not isinstance(timeout, int) or timeout < 0:
-            raise ValueError("blpop() timeout must be a non-negative int")
-        item = self._r().blpop(self.key, timeout=timeout)
-        if item is None:
-            return None
-        key, value = item
-        return str(key), str(value)
-
-    def lindex(self, index: int) -> str | None:
-        value = self._r().lindex(self.key, index)
-        return None if value is None else str(value)
-
-    def llen(self) -> int:
-        return int(self._r().llen(self.key))
-
-    def zadd(self, mapping: dict[str, float]) -> int:
-        return int(self._r().zadd(self.key, mapping))
-
-    def zcard(self) -> int:
-        return int(self._r().zcard(self.key))
-
-    def zrange(self, start: int, stop: int) -> list[str]:
-        return [str(item) for item in self._r().zrange(self.key, start, stop)]
-
-    def zpopmin(self, count: int = 1) -> list[tuple[str, float]]:
-        return [(str(member), float(score)) for member, score in self._r().zpopmin(self.key, count)]
-
-    def zrangebyscore(self, min_score: float, max_score: float, **kwargs: Any) -> list[Any]:
-        return list(self._r().zrangebyscore(self.key, min_score, max_score, **kwargs))
-
-    def zscore(self, member: str) -> float | None:
-        value = self._r().zscore(self.key, member)
-        return None if value is None else float(value)
-
-    def zrem(self, *members: str) -> int:
-        return int(self._r().zrem(self.key, *members))
-
-    def zrevrange(self, start: int, stop: int) -> list[str]:
-        return [str(item) for item in self._r().zrevrange(self.key, start, stop)]
-
-    def zrevrangebyscore(self, max_score: float, min_score: float, **kwargs: Any) -> list[Any]:
-        return list(self._r().zrevrangebyscore(self.key, max_score, min_score, **kwargs))
+__all__ = [
+    "MIN_PARTS",
+    "SEP",
+    "RedisHashCommandsMixin",
+    "RedisKey",
+    "RedisKeyCommandsMixin",
+    "RedisListCommandsMixin",
+    "RedisSortedSetCommandsMixin",
+    "RedisStringCommandsMixin",
+]

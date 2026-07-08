@@ -1,5 +1,3 @@
-from __future__ import annotations
-
 from asc.state.slugmap import SlugMap
 
 

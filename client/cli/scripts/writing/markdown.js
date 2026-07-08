@@ -1,4 +1,5 @@
 const { splitMarkdownFrontmatter } = require("../../lib/markdown");
+const { extractRecordContent } = require("./pending");
 
 function fail(script, message) {
   console.error(`${script}: ERROR: ${message}`);
@@ -16,6 +17,18 @@ function ensureFinalNewline(text) {
   return source.endsWith("\n") ? source : `${source}\n`;
 }
 
+function setFrontmatterField(frontmatter, key, value) {
+  const source = String(frontmatter || "").replace(/\r\n/g, "\n");
+  const lineRe = new RegExp(`^${key}\\s*:\\s*.*$`, "m");
+  const line = `${key}: ${value}`;
+
+  if (lineRe.test(source)) {
+    return source.replace(lineRe, line);
+  }
+
+  return source.trimEnd() ? `${source.trimEnd()}\n${line}` : line;
+}
+
 function composeMarkdownFromExistingFrontmatter({
   targetMarkdown,
   resultContent,
@@ -29,17 +42,21 @@ function composeMarkdownFromExistingFrontmatter({
     fail(script, `${relPath}: target file has no frontmatter to preserve`);
   }
 
-  const body = stripLeadingResultFrontmatter(resultContent).replace(/^\n+/, "");
+  const unwrappedContent = extractRecordContent(resultContent);
+  const body = stripLeadingResultFrontmatter(unwrappedContent).replace(/^\n+/, "");
 
   if (!body.trim()) {
     fail(script, `${relPath}: exported result content is empty after frontmatter stripping`);
   }
 
-  return `---\n${split.frontmatter}\n---\n${ensureFinalNewline(body)}`;
+  const frontmatter = setFrontmatterField(split.frontmatter, "status", "ai-generated");
+
+  return `---\n${frontmatter}\n---\n${ensureFinalNewline(body)}`;
 }
 
 module.exports = {
   stripLeadingResultFrontmatter,
   ensureFinalNewline,
+  setFrontmatterField,
   composeMarkdownFromExistingFrontmatter,
 };

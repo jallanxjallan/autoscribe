@@ -1,5 +1,3 @@
-from __future__ import annotations
-
 import json
 from collections.abc import Iterable, Sequence
 from typing import Any
@@ -129,6 +127,12 @@ def result_timestamp(result: object) -> int:
     return timestamp()
 
 
+def timestamp_now() -> int:
+    from asc.core.timestamp import timestamp
+
+    return int(timestamp())
+
+
 __all__ = [
     "SqlParams",
     "execute_and_commit",
@@ -143,4 +147,5 @@ __all__ = [
     "result_timestamp",
     "row_dict",
     "rows_dict",
+    "timestamp_now",
 ]

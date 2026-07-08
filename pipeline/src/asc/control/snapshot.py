@@ -1,12 +1,11 @@
-from __future__ import annotations
-
 from typing import Any
 
 from asc.redis.key import RedisKey
+from asc.redis.primitives import keys
 from asc.state.slugmap import SlugMap
 
+
 CONTROL_KIND_TO_REGISTRY = {
-    "driver": "drivers",
     "instruction": "instructions",
     "plan": "plans",
 }
@@ -28,12 +27,13 @@ def build_control_snapshot() -> dict[str, Any]:
 
     for slug, full_key in slugmap.list().items():
         key = RedisKey(full_key)
-        if not key.exists():
+
+        if not keys.exists(key):
             slugmap.delete(slug)
             stale[slug] = full_key
             continue
 
-        kind = key.segments[-1] if key.segments else ""
+        kind = key.kind
         registry_name = CONTROL_KIND_TO_REGISTRY.get(kind)
         if registry_name is None:
             continue
@@ -63,23 +63,11 @@ def _snapshot_record(*, slug: str, key: RedisKey, kind: str) -> dict[str, Any]:
     if identity:
         record["identity"] = identity
 
-    # stored = key.hgetall()
-    # if isinstance(stored, dict):
-    #     label = _first_text(stored, "label", "title", "name")
-    #     description = _first_text(stored, "description")
-    #     if label:
-    #         record["label"] = label
-    #     if description:
-    #         record["description"] = description
-
     return record
 
 
 def _identity_from_key(key: RedisKey) -> str:
-    # Expected shape is control:<ULID>:<kind>.
-    if len(key.segments) >= 2:
-        return key.segments[-2]
-    return ""
+    return key.identity
 
 
 def _first_text(source: dict[str, Any], *fields: str) -> str:

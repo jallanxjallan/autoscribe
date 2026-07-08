@@ -1,16 +1,24 @@
 ```dataviewjs
 const CONFIG = {
-  slugPrefixes: [],
-  excludePaths: [],
   tempRoot: "",
-  debug: false
+  debug: false,
+
+  defaultStatus: "—",
+  defaultStage: "—",
+  defaultOrigin: "—",
+  defaultSlugPrefix: "—",
+
+  // Slug prefixes only. Filenames are irrelevant.
+  slugPrefixes: ["cnt", "img"],
+
+  excludePaths: [
+    ".obsidian",
+    ".trash",
+    ".autoscribe",
+  ],
 };
 
-const nodeRequire =
-  typeof require === "function"
-    ? require
-    : window.require;
-
+const nodeRequire = typeof require === "function" ? require : window.require;
 const pathMod = nodeRequire("path");
 const vaultBasePath = app.vault.adapter.getBasePath?.() || app.vault.adapter.basePath;
 const queryPathForBootstrap = app.workspace.getActiveFile().path;
@@ -31,26 +39,18 @@ const runtimePath = pathMod.join(
 
 const { createQueryRuntime } = nodeRequire(runtimePath);
 const runtime = createQueryRuntime({ app, queryTitle: "Content Status query" });
-const { loader } = runtime;
+const { loader, queryPath, vaultName } = runtime;
 
-const { renderStatusQuery } = loader.requireControl(
-  "scripts/status-query-runner.js"
-);
+const { renderSelectionQuery } = loader.requireControl("scripts/lib/selection-query.js");
+const { makeContentStatusView } = loader.requireControl("scripts/lib/content-status-view.js");
 
-await renderStatusQuery({
+await makeContentStatusView({
   app,
   dv,
-  runtime,
+  nodeRequire: runtime.nodeRequire,
+  queryPath,
+  vaultName,
   config: CONFIG,
-
-  scope: "public",
-  title: "Content Status",
-  namespace: "content-status",
-  bridgeName: "__contentStatusSelection",
-  operation: "content-status",
-  queryName: "Content Status",
-
-  emptyMessage: "No public Markdown files with frontmatter `slug` were found.",
-  noMatchesMessage: "No matching public slugged files."
-});
+  renderSelectionQuery,
+}).render();
 ```

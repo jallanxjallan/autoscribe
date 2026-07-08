@@ -68,6 +68,16 @@ function readManifest(app, operation) {
   }
 }
 
+function writeJsonFile(file, data) {
+  if (!file || typeof file !== "string") {
+    throw new Error("writeJsonFile requires a file path string.");
+  }
+
+  fs.mkdirSync(path.dirname(file), { recursive: true });
+  fs.writeFileSync(file, `${JSON.stringify(data, null, 2)}\n`, "utf8");
+  return file;
+}
+
 function normalizeWriteArgs(args) {
   if (args.length === 1 && args[0] && typeof args[0] === "object") {
     return args[0];
@@ -153,8 +163,7 @@ function writeManifest(...args) {
   const manifestPath = getManifestPath(app, operation);
   const manifest = buildManifest(params);
 
-  fs.mkdirSync(path.dirname(manifestPath), { recursive: true });
-  fs.writeFileSync(manifestPath, `${JSON.stringify(manifest, null, 2)}\n`, "utf8");
+  writeJsonFile(manifestPath, manifest);
 
   return { manifestPath, manifest };
 }
@@ -167,6 +176,7 @@ module.exports = {
   getSelectionsDir,
   getManifestPath,
   readManifest,
+  writeJsonFile,
   buildManifest,
   writeManifest,
 };

@@ -6,10 +6,7 @@ const {
   assertCleanTrackedTarget,
   isDirty,
 } = require("./vault");
-const {
-  extractResultPayload,
-  markResultExported,
-} = require("./asc");
+const { parseWritebackRecords } = require("./pending");
 const { composeMarkdownFromExistingFrontmatter } = require("./markdown");
 
 const fs = require("node:fs");
@@ -104,16 +101,9 @@ function applyWritebackItem({ root, item, options, script }) {
   const fullPath = absVaultPath(root, item.path);
   const targetMarkdown = fs.readFileSync(fullPath, "utf8");
 
-  const exported = extractResultPayload({
-    root,
-    ascBin: options.ascBin,
-    item,
-    script,
-  });
-
   const nextMarkdown = composeMarkdownFromExistingFrontmatter({
     targetMarkdown,
-    resultContent: exported.content,
+    resultContent: item.content,
     relPath: item.path,
     script,
   });
@@ -121,47 +111,76 @@ function applyWritebackItem({ root, item, options, script }) {
   const normalizedTargetMarkdown = targetMarkdown.replace(/\r\n/g, "\n");
 
   if (nextMarkdown === normalizedTargetMarkdown) {
-    markResultExported({
-      root,
-      ascBin: options.ascBin,
-      resultIdentity: item.resultIdentity,
-      script,
-    });
-
     info(script, `unchanged: ${item.promptSlug} -> ${item.path}`);
 
     return {
       ...item,
       changed: false,
-      extractionIdentity: exported.extractionIdentity,
-      extractionIdentityKind: exported.extractionIdentityKind,
     };
   }
 
   fs.writeFileSync(fullPath, nextMarkdown, "utf8");
-
-  markResultExported({
-    root,
-    ascBin: options.ascBin,
-    resultIdentity: item.resultIdentity,
-    script,
-  });
 
   info(script, `wrote: ${item.promptSlug} -> ${item.path}`);
 
   return {
     ...item,
     changed: true,
-    extractionIdentity: exported.extractionIdentity,
-    extractionIdentityKind: exported.extractionIdentityKind,
   };
 }
 
-function main() {
+
+function readStdinText({ script }) {
+  if (process.stdin.isTTY) {
+    fail(script, "expected piped NDJSON on stdin from asc export extract-result/export-result");
+  }
+
+  process.stdin.setEncoding("utf8");
+
+  return new Promise((resolve, reject) => {
+    let text = "";
+
+    process.stdin.on("data", chunk => {
+      text += chunk;
+    });
+
+    process.stdin.on("end", () => {
+      resolve(text);
+    });
+
+    process.stdin.on("error", error => {
+      reject(error);
+    });
+  });
+}
+
+function parseWritebackInput(text, { script }) {
+  try {
+    return parseWritebackRecords(text);
+  } catch (error) {
+    fail(script, `could not parse writeback input: ${error.message}`);
+  }
+}
+
+async function main() {
+  const script = "writeback";
+  let text;
+
+  try {
+    text = await readStdinText({ script });
+  } catch (error) {
+    fail(script, `could not read writeback input: ${error.message}`);
+  }
+
+  const inputRecords = parseWritebackInput(text, { script });
+
   return runWritingCommand({
-    script: "writeback",
+    script,
     mode: "writeback",
     defaultTargetDir: null,
+    inputLabel: "writeback input records",
+    marksExports: false,
+    loadInputRecords: () => inputRecords,
     selectCandidates: selectWritebackCandidates,
     applyItem: applyWritebackItem,
   });
@@ -173,4 +192,9 @@ module.exports = {
   applyWritebackItem,
 };
 
-if (require.main === module) main();
+if (require.main === module) {
+  main().catch(error => {
+    console.error(`writeback: ERROR: ${error.message}`);
+    process.exit(1);
+  });
+}

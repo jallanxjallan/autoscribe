@@ -1,59 +1,91 @@
-from __future__ import annotations
-
 from collections.abc import Iterator, Mapping
 from dataclasses import dataclass
+import sys
 from typing import Any, TextIO
 
+from asc.enqueue.call import create_call_from_manifest_record
+from asc.enqueue.plan import LoadedPlan, load_plan_from_manifest_record
+from asc.models.process.call import CallRecord
 from asc.streams.ndjson import iter_ndjson_records
+
+
+ENQUEUE_RECORD_TYPES = {
+    "content": "call",
+    "prompt": "call",
+}
 
 
 @dataclass(frozen=True, slots=True)
 class EnqueueRecord:
-    prompt_slug: str
-    plan_slug: str
+    """One validated dispatch NDJSON row split into enqueue-ready objects."""
+
+    record_type: str
+    call_kind: str
+    plan: LoadedPlan
+    call: CallRecord
     raw_record: Mapping[str, Any]
+
+    @property
+    def source_identity(self) -> str:
+        return str(self.call.source_identity)
 
 
 def iter_enqueue_records(stream: TextIO) -> Iterator[EnqueueRecord]:
-    """Yield validated lightweight prompt/plan dispatch records."""
-
     seen = False
     for parsed in iter_ndjson_records(stream):
         seen = True
         raw = parsed.record
-
         if not isinstance(raw, Mapping):
-            raise ValueError(
-                f"enqueue stream row {parsed.line_number} must be a JSON object"
-            )
+            _skip_enqueue_row(parsed.line_number, "row must be a JSON object")
+            continue
 
         try:
-            yield EnqueueRecord(
-                prompt_slug=_required_slug(raw, "prompt_slug"),
-                plan_slug=_required_slug(raw, "plan_slug"),
-                raw_record=raw,
+            record_type = str(raw["record_type"])
+        except KeyError:
+            _skip_enqueue_row(parsed.line_number, "missing required field: record_type")
+            continue
+
+        try:
+            call_kind = ENQUEUE_RECORD_TYPES[record_type]
+        except KeyError:
+            allowed = ", ".join(sorted(ENQUEUE_RECORD_TYPES))
+            _skip_enqueue_row(
+                parsed.line_number,
+                f"record_type must be one of: {allowed}; got {record_type!r}",
             )
+            continue
+
+        plan = load_plan_from_manifest_record(raw)
+
+        try:
+            call = create_call_from_manifest_record(raw, plan_key=plan.raw_key)
         except Exception as exc:
-            raise ValueError(
-                f"invalid enqueue record on line {parsed.line_number}: {exc}"
-            ) from exc
+            _skip_enqueue_row(parsed.line_number, str(exc))
+            continue
+
+        yield EnqueueRecord(
+            record_type=record_type,
+            call_kind=call_kind,
+            plan=plan,
+            call=call,
+            raw_record=raw,
+        )
 
     if not seen:
-        raise ValueError("no enqueue records found")
+        print("asc enqueue: no records uploaded", file=sys.stderr)
+        return
+
+
+def _skip_enqueue_row(line_number: int, reason: str) -> None:
+    print(f"asc enqueue: skipping row {line_number}: {reason}", file=sys.stderr)
 
 
 def load_enqueue_records(stream: TextIO) -> list[EnqueueRecord]:
     return list(iter_enqueue_records(stream))
 
 
-def _required_slug(record: Mapping[str, Any], field: str) -> str:
-    value = record.get(field)
-    if not isinstance(value, str) or not value.strip():
-        raise ValueError(f"enqueue record must include {field}")
-    return value.strip()
-
-
 __all__ = [
+    "ENQUEUE_RECORD_TYPES",
     "EnqueueRecord",
     "iter_enqueue_records",
     "load_enqueue_records",

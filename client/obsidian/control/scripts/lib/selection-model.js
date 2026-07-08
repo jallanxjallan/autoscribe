@@ -2,9 +2,29 @@ function normalizeFilterValue(value) {
   return String(value ?? "").trim();
 }
 
+function normalizeFilterValues(value) {
+  const rawValues = Array.isArray(value) ? value : [value];
+  const seen = new Set();
+  const result = [];
+
+  for (const rawValue of rawValues) {
+    const normalized = normalizeFilterValue(rawValue);
+    if (!normalized) continue;
+
+    const key = normalized.toLowerCase();
+    if (seen.has(key)) continue;
+
+    seen.add(key);
+    result.push(normalized);
+  }
+
+  return result;
+}
+
 function sortText(values) {
   return [...values]
     .map(normalizeFilterValue)
+    .filter(Boolean)
     .sort((a, b) => a.localeCompare(b, undefined, {
       numeric: true,
       sensitivity: "base"
@@ -15,8 +35,9 @@ function countValues(rows, key) {
   const counts = new Map();
 
   for (const row of rows) {
-    const value = normalizeFilterValue(row[key]);
-    counts.set(value, (counts.get(value) ?? 0) + 1);
+    for (const value of normalizeFilterValues(row[key])) {
+      counts.set(value, (counts.get(value) ?? 0) + 1);
+    }
   }
 
   return counts;
@@ -24,7 +45,7 @@ function countValues(rows, key) {
 
 function buildFilterGroups(rows, filterFields) {
   return filterFields.map(field => {
-    const values = sortText(new Set(rows.map(row => row[field.key])));
+    const values = sortText(new Set(rows.flatMap(row => normalizeFilterValues(row[field.key]))));
 
     return {
       key: field.key,
@@ -65,9 +86,10 @@ function createSelectionModel({
   }
 
   function rowMatchesFilters(row) {
-    return filterGroups.every(group =>
-      group.selected.has(normalizeFilterValue(row[group.key]))
-    );
+    return filterGroups.every(group => {
+      const rowValues = normalizeFilterValues(row[group.key]);
+      return rowValues.some(value => group.selected.has(value));
+    });
   }
 
   function getFilteredRows() {
@@ -133,6 +155,7 @@ function createSelectionModel({
 
 module.exports = {
   normalizeFilterValue,
+  normalizeFilterValues,
   sortText,
   countValues,
   buildFilterGroups,

@@ -1,32 +1,28 @@
-from __future__ import annotations
+"""Export custody writes owned by asc.ledger."""
 
 from typing import Any
 
-from asc.core.timestamp import timestamp
-from asc.ledger.connect import LedgerConnection, connect
-from asc.ledger.queries import (
-    EXPORT_COLUMNS,
-    INSERT_EXPORT_SQL,
-    SELECT_EXPORT_BY_RESULT_IDENTITY_SQL,
-)
-from asc.ledger.util import execute_and_commit, fetch_one_dict
+from asc.ledger.connect import LedgerConnection
+from asc.ledger.util import execute_and_commit, timestamp_now
 
 
-def insert_export_record(
-    *,
-    result_identity: str,
-    export_message: str,
-    created_at: int | None = None,
-) -> None:
-    """Open the configured ledger and write one export custody row."""
+_FIND_EXPORT_IDENTITY_SQL = """
+    SELECT identity
+    FROM exports
+    WHERE identity = ?
+       OR result_key = ?
+       OR result_key LIKE ?
+    ORDER BY created_at ASC, identity ASC
+    LIMIT 1
+"""
 
-    with connect() as conn:
-        insert_export_record_with_connection(
-            conn=conn,
-            result_identity=result_identity,
-            export_message=export_message,
-            created_at=created_at,
-        )
+_CONFIRM_EXPORT_BY_IDENTITY_SQL = """
+    UPDATE exports
+    SET
+        exported_at = ?,
+        export_message = ?
+    WHERE identity = ?
+"""
 
 
 def insert_export_record_with_connection(
@@ -34,68 +30,39 @@ def insert_export_record_with_connection(
     conn: LedgerConnection,
     result_identity: str,
     export_message: str,
-    created_at: int | None = None,
 ) -> None:
-    """Write one export custody row using an existing ledger connection."""
+    """Mark one pending export as written back.
 
+    ``result_identity`` may be a call identity, a result identity, or a full
+    result key such as ``transform:<identity>:<step>``.
+    """
+
+    identity = _resolve_export_identity(conn=conn, result_identity=result_identity)
     execute_and_commit(
         conn,
-        INSERT_EXPORT_SQL,
-        export_values(
-            result_identity=result_identity,
-            export_message=export_message,
-            created_at=created_at,
-        ),
+        _CONFIRM_EXPORT_BY_IDENTITY_SQL,
+        (int(timestamp_now()), export_message, identity),
     )
 
 
-def read_export_record(
-    *,
-    result_identity: str,
-) -> dict[str, Any] | None:
-    """Open the configured ledger and read one export row by result identity."""
+def _resolve_export_identity(*, conn: LedgerConnection, result_identity: str) -> str:
+    text = str(result_identity).strip()
+    if not text:
+        raise ValueError("result_identity must be non-empty")
 
-    with connect() as conn:
-        return read_export_record_with_connection(
-            conn=conn,
-            result_identity=result_identity,
-        )
-
-
-def read_export_record_with_connection(
-    *,
-    conn: LedgerConnection,
-    result_identity: str,
-) -> dict[str, Any] | None:
-    """Read one export row by result identity using an existing connection."""
-
-    return fetch_one_dict(
-        conn,
-        SELECT_EXPORT_BY_RESULT_IDENTITY_SQL,
-        (result_identity,),
-    )
+    identity = _identity_part(text)
+    like = f"%:{identity}:%"
+    row = conn.execute(_FIND_EXPORT_IDENTITY_SQL, (text, text, like)).fetchone()
+    if row is None:
+        raise ValueError(f"no export row found for result_identity: {text}")
+    return str(row["identity"])
 
 
-def export_values(
-    *,
-    result_identity: str,
-    export_message: str,
-    created_at: int | None = None,
-) -> tuple[Any, ...]:
-    exported_at = timestamp() if created_at is None else int(created_at)
-
-    return (
-        result_identity,
-        export_message,
-        exported_at,
-    )
+def _identity_part(value: str) -> str:
+    parts = value.split(":")
+    if len(parts) >= 2:
+        return parts[1]
+    return value
 
 
-__all__ = [
-    "EXPORT_COLUMNS",
-    "export_values",
-    "insert_export_record",
-    "insert_export_record_with_connection",
-    "read_export_record",
-    "read_export_record_with_connection",
-]
+__all__ = ["insert_export_record_with_connection"]

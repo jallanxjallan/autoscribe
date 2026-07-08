@@ -32,38 +32,9 @@ const COMPONENTS = {
     prefixes: new Set(['ins', 'gbl', 'cxt', 'spc']),
     label: 'instructions',
   },
-  plans: {
-    singular: 'plan',
-    recordType: 'plan',
-    prefixes: new Set(['plan']),
-    label: 'plans',
-  },
 };
 
 function usage(script, component) {
-  if (component.recordType === 'plan') {
-    console.error(`Usage:
-  ${script} [--dry-run] [--force]
-
-Behavior:
-  Normal mode uploads local plan JSON records marked pending_upload=true.
-  Plan records are read from the AutoScribe Obsidian workflow store, not from
-  Markdown files in the vault and not from git dirty state.
-
-  Force mode uploads every local plan JSON record for the active vault,
-  regardless of pending_upload state.
-
-  Human messages are written to stderr; valid plan records are emitted as
-  clean NDJSON on stdout.
-
-Options:
-  -n, --dry-run              Show what would be uploaded; do not emit NDJSON or reset state.
-  -f, --force                Upload all local plans for this vault.
-  -h, --help                 Show this help.
-`);
-    return;
-  }
-
   console.error(`Usage:
   ${script} [--dry-run] [--force]
 
@@ -195,195 +166,6 @@ function candidatePaths({ root, force }) {
     .sort((a, b) => a.localeCompare(b));
 }
 
-function discoverComponentItems({ root, script, componentName, force = false }) {
-  const component = COMPONENTS[componentName];
-  if (!component) fail(script, `unknown control component: ${componentName}`);
-
-  const items = candidatePaths({ root, force })
-    .map((relPath, index) => hydrateControlPath({
-      root,
-      relPath,
-      script,
-      component,
-      order: index + 1,
-    }))
-    .filter(Boolean);
-
-  return dropDuplicateSlugItems({ items, script, component });
-}
-
-function planJsonFiles(root) {
-  const plansDir = path.join(path.resolve(root), '.autoscribe', 'workflow', 'plans');
-  let planEntries = [];
-
-  try {
-    planEntries = fs.readdirSync(plansDir, { withFileTypes: true });
-  } catch {
-    return [];
-  }
-
-  return planEntries
-    .filter((entry) => entry.isFile() && entry.name.endsWith('.json'))
-    .map((entry) => path.join(plansDir, entry.name))
-    .sort((a, b) => a.localeCompare(b));
-}
-
-function readPlanJson(file) {
-  const text = fs.readFileSync(file, 'utf8');
-  return JSON.parse(text);
-}
-
-function planBelongsToRoot(record, root, file) {
-  const expectedRoot = path.resolve(root);
-  const recordRoot = record?.vault?.root ? path.resolve(record.vault.root) : '';
-
-  if (recordRoot && recordRoot === expectedRoot) {
-    return true;
-  }
-
-  const recordVaultName = String(record?.vault?.name || '').trim().toLowerCase();
-  const rootName = path.basename(expectedRoot).trim().toLowerCase();
-
-  if (recordVaultName && recordVaultName === rootName) {
-    return true;
-  }
-
-  const localPlansDir = path.join(expectedRoot, '.autoscribe', 'workflow', 'plans');
-  return path.dirname(file) === localPlansDir;
-}
-
-function planRecordIdentity(record) {
-  return typeof record?.record_identity === 'string'
-    ? record.record_identity.trim()
-    : '';
-}
-
-function isPlanUploadRecord(record) {
-  return record && record.record_type === 'plan' && Boolean(planRecordIdentity(record));
-}
-
-function loadPlanItems({ root, script, force = false }) {
-  const items = [];
-
-  for (const file of planJsonFiles(root)) {
-    try {
-      const record = readPlanJson(file);
-
-      if (!isPlanUploadRecord(record)) {
-        continue;
-      }
-
-      if (!planBelongsToRoot(record, root, file)) {
-        continue;
-      }
-
-      if (!force && record.pending_upload !== true) {
-        continue;
-      }
-
-      const recordIdentity = planRecordIdentity(record);
-
-      items.push({
-        order: items.length + 1,
-        slug: recordIdentity,
-        prefix: slugPrefix(recordIdentity) || 'plan',
-        recordType: 'plan',
-        path: file,
-        basename: path.basename(file),
-        label: record.label || recordIdentity,
-        record,
-      });
-    } catch (error) {
-      info(script, `ERROR: ${file}: ${error.message || error}`);
-    }
-  }
-
-  return dropDuplicateSlugItems({
-    items,
-    script,
-    component: COMPONENTS.plans,
-  });
-}
-
-function planUploadRecord({ item }) {
-  return {
-    record_type: 'plan',
-    record_identity: item.slug,
-    record_content: JSON.stringify(item.record),
-  };
-}
-
-function markPlanUploaded(item, uploadedAt) {
-  const record = {
-    ...item.record,
-    pending_upload: false,
-    uploaded_at: uploadedAt,
-  };
-
-  fs.writeFileSync(item.path, `${JSON.stringify(record, null, 2)}\n`, 'utf8');
-}
-
-function logStoredPlanUpload({ script, root, items, force }) {
-  info(script, `vault: ${root}`);
-  info(script, force ? 'selection: all local plan records (--force)' : 'selection: pending local plan records');
-  info(script, `matched plans: ${items.length}`);
-
-  for (const item of items) {
-    const pending = item.record.pending_upload === true ? ' [pending]' : '';
-    info(script, `  ${item.recordType.padEnd(11)} ${item.slug}  ${item.path}${pending}`);
-  }
-}
-
-function runUploadPlansFromStore({ script, options }) {
-  const root = getGitRoot(process.cwd());
-  assertVaultRoot({ root, script });
-
-  const items = loadPlanItems({ root, script, force: options.force });
-  logStoredPlanUpload({ script, root, items, force: options.force });
-
-  if (items.length === 0) {
-    info(script, options.force
-      ? 'no local plans found'
-      : 'no pending local plans found');
-    return;
-  }
-
-  if (options.dryRun) {
-    info(script, 'dry run: no NDJSON emitted and no plan upload state changed');
-    return;
-  }
-
-  const uploadedAt = new Date().toISOString();
-  let emitted = 0;
-
-  for (const item of items) {
-    try {
-      process.stdout.write(`${JSON.stringify(planUploadRecord({
-        item,
-      }))}\n`);
-      emitted += 1;
-    } catch (error) {
-      info(script, `ERROR: ${item.path}: ${error.message || error}`);
-    }
-  }
-
-  if (emitted === 0) {
-    info(script, 'no valid plans to upload after skipping errors');
-    process.exitCode = 1;
-    return;
-  }
-
-  for (const item of items) {
-    try {
-      markPlanUploaded(item, uploadedAt);
-    } catch (error) {
-      info(script, `ERROR: ${item.path}: could not reset pending_upload: ${error.message || error}`);
-    }
-  }
-
-  info(script, `emitted ${emitted} plan record(s); reset pending_upload on local plan JSON`);
-}
-
 function dropDuplicateSlugItems({ items, script, component }) {
   const bySlug = new Map();
   const duplicates = new Map();
@@ -418,6 +200,23 @@ function dropDuplicateSlugItems({ items, script, component }) {
   return items.filter((item) => !duplicateSlugs.has(item.slug));
 }
 
+function discoverComponentItems({ root, script, componentName, force = false }) {
+  const component = COMPONENTS[componentName];
+  if (!component) fail(script, `unknown control component: ${componentName}`);
+
+  const items = candidatePaths({ root, force })
+    .map((relPath, index) => hydrateControlPath({
+      root,
+      relPath,
+      script,
+      component,
+      order: index + 1,
+    }))
+    .filter(Boolean);
+
+  return dropDuplicateSlugItems({ items, script, component });
+}
+
 function commitComponentFiles({ root, items, component, force }) {
   const stamp = formatFileStamp();
   const paths = items.map((item) => item.path);
@@ -444,8 +243,7 @@ function commitComponentFiles({ root, items, component, force }) {
 }
 
 function buildComponentUploadMetadata({ root, item, uploadCommit = '', uploadedAt, component, force }) {
-  const markdown = readVaultFile(root, item.path);
-  const metadata = {
+  return {
     slug: item.slug,
     record_identity: item.slug,
     record_type: item.recordType,
@@ -463,8 +261,6 @@ function buildComponentUploadMetadata({ root, item, uploadCommit = '', uploadedA
       selection_order: item.order,
     },
   };
-
-  return metadata;
 }
 
 function prepareUploadRecords({ root, items, script, component, force }) {
@@ -520,12 +316,6 @@ function runUploadControlComponent(config = {}) {
   if (!component) fail(script, `unknown control component: ${componentName}`);
 
   const options = parseArgs(process.argv.slice(2), script, component);
-
-  if (componentName === 'plans') {
-    runUploadPlansFromStore({ script, options });
-    return;
-  }
-
   const root = getGitRoot(process.cwd());
 
   assertVaultRoot({ root, script });

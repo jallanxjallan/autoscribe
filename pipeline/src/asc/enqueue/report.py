@@ -1,14 +1,14 @@
-from __future__ import annotations
-
 from dataclasses import dataclass
 
 
 @dataclass(frozen=True, slots=True)
 class EnqueuedCall:
     call: str
-    cursor_key: str
+    source_identity: str
     call_key: str
+    call_index_key: str
     plan_key: str
+    step_count: int
 
 
 @dataclass(frozen=True, slots=True)
@@ -24,4 +24,4 @@ class EnqueueReport:
         return len(self.records)
 
 
-__all__ = ["EnqueueReport", "EnqueuedCall"]
+__all__ = ["EnqueuedCall", "EnqueueReport"]

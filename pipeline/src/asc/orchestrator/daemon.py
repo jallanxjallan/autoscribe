@@ -1,141 +1,287 @@
+"""Orchestrator daemon entrypoint using the active-call zset.
+
+``python -m asc.orchestrator.daemon`` runs the production orchestrator loop
+until stopped by ``asc run stop``.
+"""
+
 from __future__ import annotations
 
+from dataclasses import dataclass
+import atexit
+import importlib
 import logging
-from typing import Any
+import os
+import subprocess
+import sys
+import time
 
-from asc.ledger.connect import LedgerConnection
-from asc.orchestrator.errors import OrchestratorContractError
-from asc.orchestrator.queues import claim_orchestrator_pending, claim_outcome
-from asc.orchestrator.receive import handle_orchestrator_signal
-from asc.orchestrator.signals import ORCHESTRATOR_PENDING, WORKER_OUTCOME
+from asc.orchestrator.active import (
+    IDLE_SLEEP_SECONDS,
+    active_call_window,
+    bump_active_call,
+    complete_active_call,
+    defer_active_call,
+    retry_active_call,
+    seconds_until_next_visible,
+)
+from asc.orchestrator.handle import handle
+from asc.redis.key import RedisKey
+from asc.state.daemon import DEFAULT_CLAIM_TIMEOUT_SECONDS, configure_logging
 
-log = logging.getLogger(__name__)
 
-OUTCOME_BLOCK_TIMEOUT_SECONDS = 1
-PENDING_BLOCK_TIMEOUT_SECONDS = 1
-MAX_PENDING_CURSORS_PER_TICK = 100
+LOG = logging.getLogger(__name__)
+DOWNSTREAM_INBOXES: tuple[str, ...] = ("asc.worker.inbox", "asc.scrivener.inbox")
+DOWNSTREAM_DAEMONS: tuple[str, ...] = ("asc.worker.daemon", "asc.scrivener.daemon")
+MANAGE_DOWNSTREAM = os.environ.get("ASC_ORCHESTRATOR_MANAGE_DOWNSTREAM", "1") != "0"
 
 
-class OrchestratorDaemon:
-    """Long-lived orchestrator over blocking custody queues.
+class _ManagedDownstream:
+    def __init__(self, modules: tuple[str, ...]) -> None:
+        self.modules = modules
+        self.processes: dict[str, subprocess.Popen] = {}
 
-    Normal custody moves through Redis LIST queues:
-
-    - state:orchestrator:pending
-    - state:worker:pending
-    - state:worker:outcome
-
-    The active cursor index remains a passive observability/recovery index. It is
-    updated by queue helpers, but this daemon does not inspect it, lease it,
-    retry from it, or requeue from it.
-    """
-
-    def __init__(
-        self,
-        *,
-        ledger: LedgerConnection | None = None,
-        outcome_block_timeout_seconds: int = OUTCOME_BLOCK_TIMEOUT_SECONDS,
-        pending_block_timeout_seconds: int = PENDING_BLOCK_TIMEOUT_SECONDS,
-        max_pending_cursors_per_tick: int = MAX_PENDING_CURSORS_PER_TICK,
-    ) -> None:
-        self.ledger = ledger or LedgerConnection()
-        self.outcome_block_timeout_seconds = int(outcome_block_timeout_seconds)
-        self.pending_block_timeout_seconds = int(pending_block_timeout_seconds)
-        self.max_pending_cursors_per_tick = int(max_pending_cursors_per_tick)
-
-    def run_forever(self) -> None:
-        while True:
-            self.run_once_blocking()
-
-    def run_once_blocking(self) -> int:
-        """Process one blocking foreground tick and return custody work touched."""
-        processed = 0
-
-        outcome = claim_outcome(block=True, timeout=self.outcome_block_timeout_seconds)
-        if outcome is not None:
-            self._process_signal(outcome, source=WORKER_OUTCOME)
-            processed += 1
-            processed += self._drain_foreground()
-            return processed
-
-        pending = claim_orchestrator_pending(
-            limit=self.max_pending_cursors_per_tick,
-            block=True,
-            timeout=self.pending_block_timeout_seconds,
-        )
-        for signal in pending:
-            self._process_signal(signal, source=ORCHESTRATOR_PENDING)
-            processed += 1
-
-        if processed:
-            processed += self._drain_foreground()
-
-        return processed
-
-    def run_once(self) -> int:
-        """Compatibility alias for old CLI/tests."""
-        return self.run_once_blocking()
-
-    def _drain_foreground(self) -> int:
-        """Drain immediately available live custody work without blocking."""
-        processed = 0
-
-        while True:
-            outcome = claim_outcome()
-            if outcome is None:
-                break
-            self._process_signal(outcome, source=WORKER_OUTCOME)
-            processed += 1
-
-        for signal in claim_orchestrator_pending(limit=self.max_pending_cursors_per_tick):
-            self._process_signal(signal, source=ORCHESTRATOR_PENDING)
-            processed += 1
-
-        return processed
-
-    def _process_signal(self, claimed: Any, *, source: str) -> None:
-        cursor_key = _claimed_identity(claimed)
-        try:
-            result = handle_orchestrator_signal(
-                ledger=self.ledger,
-                cursor_key=cursor_key,
-                source=source,
-            )
-            log.info("orchestrator source=%s cursor=%s result=%s", source, cursor_key, result)
-        except OrchestratorContractError:
-            log.exception("Dropped invalid runtime cursor signal %s from %s", cursor_key, source)
+    def start(self) -> None:
+        if not MANAGE_DOWNSTREAM:
             return
 
+        for module in self.modules:
+            process = self.processes.get(module)
+            if process is not None and process.poll() is None:
+                continue
 
-def _claimed_identity(claimed: Any) -> str:
-    value = getattr(claimed, "cursor_key", None)
-    if value is None:
-        value = getattr(claimed, "identity", None)
-    if value is None:
-        value = getattr(claimed, "key", None)
-    if value is None:
-        value = claimed
-    if isinstance(value, bytes):
-        value = value.decode("utf-8")
-    if not isinstance(value, str) or not value.strip():
-        raise OrchestratorContractError(
-            "orchestrator signal must provide a full RuntimeCursor key"
+            LOG.info("orchestrator operation=downstream_start module=%s", module)
+            self.processes[module] = subprocess.Popen(
+                [sys.executable, "-m", module],
+                start_new_session=True,
+            )
+
+    def stop(self) -> None:
+        if not MANAGE_DOWNSTREAM:
+            return
+
+        for module, process in list(self.processes.items()):
+            if process.poll() is not None:
+                self.processes.pop(module, None)
+                continue
+
+            LOG.info("orchestrator operation=downstream_stop module=%s pid=%s", module, process.pid)
+            process.terminate()
+            try:
+                process.wait(timeout=5)
+            except subprocess.TimeoutExpired:
+                LOG.warning("orchestrator operation=downstream_kill module=%s pid=%s", module, process.pid)
+                process.kill()
+                process.wait(timeout=5)
+            self.processes.pop(module, None)
+
+
+DOWNSTREAM = _ManagedDownstream(DOWNSTREAM_DAEMONS)
+atexit.register(DOWNSTREAM.stop)
+
+
+@dataclass(frozen=True, slots=True)
+class OrchestratorRunReport:
+    claimed: bool
+    call_key: str | None = None
+    active: bool | None = None
+    waiting: bool | None = None
+    retry: bool | None = None
+    action: str | None = None
+
+    @property
+    def post_key(self) -> str | None:
+        return self.call_key
+
+    @property
+    def kind(self) -> str | None:
+        if self.call_key is None:
+            return None
+        return RedisKey(self.call_key).kind
+
+
+def _module_count(module) -> int | None:
+    for attr_name in ("count", "length", "llen", "size"):
+        attr = getattr(module, attr_name, None)
+        if callable(attr):
+            try:
+                return int(attr())
+            except TypeError:
+                continue
+    return None
+
+
+def _module_queue_key(module):
+    for name in dir(module):
+        if name.endswith("INBOX_KEY") or name.endswith("QUEUE_KEY"):
+            return getattr(module, name)
+    return None
+
+
+def _queue_count_from_key(queue_key) -> int | None:
+    try:
+        lists = importlib.import_module("asc.redis.primitives.lists")
+    except ModuleNotFoundError:
+        return None
+
+    for attr_name in ("llen", "length", "count", "size"):
+        attr = getattr(lists, attr_name, None)
+        if callable(attr):
+            try:
+                return int(attr(queue_key))
+            except Exception:
+                pass
+    return None
+
+
+def _inbox_count(module_name: str) -> int | None:
+    try:
+        module = importlib.import_module(module_name)
+    except ModuleNotFoundError:
+        return None
+
+    count = _module_count(module)
+    if count is not None:
+        return count
+
+    queue_key = _module_queue_key(module)
+    if queue_key is None:
+        return None
+    return _queue_count_from_key(queue_key)
+
+
+def _downstream_sleeping() -> bool:
+    """Return true when worker and scrivener have no queued work visible.
+
+    The daemons sleep in Redis blocking claims. From the orchestrator's point of
+    view, empty worker/scrivener inboxes mean downstream is asleep.
+    """
+
+    counts = [_inbox_count(module_name) for module_name in DOWNSTREAM_INBOXES]
+    sleeping = all(count == 0 for count in counts if count is not None) and all(count is not None for count in counts)
+    LOG.info("orchestrator operation=downstream_state counts=%s sleeping=%s", counts, sleeping)
+    return sleeping
+
+
+def _sleep_until_next(window) -> None:
+    delay = seconds_until_next_visible(calls=window)
+    sleep_seconds = delay if delay is not None else IDLE_SLEEP_SECONDS
+    LOG.info("orchestrator operation=sleep no_visible_calls seconds=%.3f", sleep_seconds)
+    time.sleep(sleep_seconds)
+
+
+def run_once(*, timeout: int | None = None, empty_limit: int | None = None, wait: bool = True) -> OrchestratorRunReport:
+    """Inspect and advance one active call."""
+
+    del timeout, empty_limit
+
+    now = time.time()
+    window = active_call_window()
+    LOG.info("orchestrator operation=poll_window size=%s", len(window))
+
+    visible = [call for call in window if call.score <= now]
+    if not visible:
+        DOWNSTREAM.stop()
+        if wait:
+            _sleep_until_next(window)
+        return OrchestratorRunReport(claimed=False, action="sleep")
+
+    DOWNSTREAM.start()
+
+    for call in visible:
+        LOG.info("orchestrator operation=handle call_key=%s score=%s", call.key, call.score)
+        result = handle(call.key)
+
+        if not result.active:
+            complete_active_call(call.key)
+            LOG.info("orchestrator operation=complete call_key=%s", call.key)
+            if not active_call_window():
+                DOWNSTREAM.stop()
+            return OrchestratorRunReport(
+                claimed=True,
+                call_key=call.key,
+                active=False,
+                waiting=False,
+                retry=False,
+                action="complete",
+            )
+
+        if result.retry:
+            retry_active_call(call.key)
+            LOG.info("orchestrator operation=retry_later call_key=%s", call.key)
+            return OrchestratorRunReport(
+                claimed=True,
+                call_key=call.key,
+                active=True,
+                waiting=False,
+                retry=True,
+                action="retry_later",
+            )
+
+        if result.waiting:
+            if _downstream_sleeping():
+                bump_active_call(call.key)
+                LOG.info("orchestrator operation=bump_waiting call_key=%s", call.key)
+                return OrchestratorRunReport(
+                    claimed=True,
+                    call_key=call.key,
+                    active=True,
+                    waiting=True,
+                    retry=False,
+                    action="bump_waiting",
+                )
+
+            defer_active_call(call.key)
+            LOG.info("orchestrator operation=defer_waiting call_key=%s", call.key)
+            return OrchestratorRunReport(
+                claimed=True,
+                call_key=call.key,
+                active=True,
+                waiting=True,
+                action="defer_waiting",
+            )
+
+        bump_active_call(call.key)
+        LOG.info("orchestrator operation=bump_active call_key=%s", call.key)
+        return OrchestratorRunReport(
+            claimed=True,
+            call_key=call.key,
+            active=True,
+            waiting=False,
+            retry=False,
+            action="bump_active",
         )
-    return value.strip()
+
+    DOWNSTREAM.stop()
+    if wait:
+        _sleep_until_next(window)
+    return OrchestratorRunReport(claimed=False, action="sleep")
+
+
+def run_forever(*, timeout: int = DEFAULT_CLAIM_TIMEOUT_SECONDS, empty_limit: int | None = None) -> None:
+    """Run the orchestrator daemon forever."""
+
+    configure_logging()
+    LOG.info("orchestrator daemon start timeout=%s empty_limit=%s", timeout, empty_limit)
+    try:
+        while True:
+            report = run_once(timeout=timeout, empty_limit=empty_limit, wait=True)
+            LOG.info("orchestrator daemon report=%r", report)
+    except KeyboardInterrupt:
+        LOG.info("orchestrator daemon stop signal=KeyboardInterrupt")
+        raise
+    except Exception:
+        LOG.exception("orchestrator daemon crash")
+        raise
 
 
 def main() -> None:
-    logging.basicConfig(level=logging.INFO)
-    OrchestratorDaemon().run_forever()
+    """Run the production orchestrator loop."""
+
+    run_forever()
 
 
 if __name__ == "__main__":
     main()
 
 
-__all__ = [
-    "MAX_PENDING_CURSORS_PER_TICK",
-    "OrchestratorDaemon",
-    "OUTCOME_BLOCK_TIMEOUT_SECONDS",
-    "PENDING_BLOCK_TIMEOUT_SECONDS",
-]
+__all__ = ["OrchestratorRunReport", "main", "run_forever", "run_once"]

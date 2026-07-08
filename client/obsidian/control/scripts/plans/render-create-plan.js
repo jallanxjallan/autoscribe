@@ -1,11 +1,9 @@
+const fs = require('fs');
+const path = require('path');
+
 const { el, clear, button } = require('../lib/dom.js');
 const { vaultRoot } = require('../lib/vault-state.js');
-const {
-  controlRoots,
-  loadRegistrySnapshot,
-  loadControlSnapshot,
-  snapshotList,
-} = require('../lib/control-loader.js');
+
 const {
   buildPlanRecord,
   savePlanRecord,
@@ -19,6 +17,256 @@ const STEP_KINDS = [
   { value: 'script', label: 'Script' },
   { value: 'rag', label: 'RAG' },
 ];
+
+const GLOBAL_INSTRUCTIONS_DIR = '/home/jeremy/Library/instructions';
+const GLOBAL_PLANS_DIR = '/home/jeremy/Library/instructions';
+const ENGINES_DIR = '/home/jeremy/AutoScribe/extensions/engines';
+const LOCAL_SCRIPTS_DIR = '/home/jeremy/AutoScribe/extensions/scripts';
+
+function fileExists(file) {
+  try {
+    return fs.existsSync(file);
+  } catch {
+    return false;
+  }
+}
+
+function safeStat(file) {
+  try {
+    return fs.statSync(file);
+  } catch {
+    return null;
+  }
+}
+
+function walkFiles(root, extensions) {
+  const base = String(root || '');
+  const found = [];
+  const stat = safeStat(base);
+  if (!stat || !stat.isDirectory()) return found;
+
+  function walk(dir) {
+    for (const entry of fs.readdirSync(dir, { withFileTypes: true })) {
+      if (entry.name.startsWith('.')) continue;
+      const full = path.join(dir, entry.name);
+      if (entry.isDirectory()) {
+        walk(full);
+        continue;
+      }
+      if (!entry.isFile()) continue;
+      const ext = path.extname(entry.name).toLowerCase();
+      if (extensions.has(ext)) found.push(full);
+    }
+  }
+
+  walk(base);
+  return found;
+}
+
+function relativeSlug(root, file) {
+  const rel = path.relative(root, file);
+  const parsed = path.parse(rel);
+  const withoutExt = path.join(parsed.dir, parsed.name);
+  return withoutExt.split(path.sep).filter(Boolean).join('/');
+}
+
+function labelFromSlug(slug) {
+  const leaf = String(slug || '').split('/').filter(Boolean).pop() || String(slug || '');
+  return leaf
+    .replace(/[-_]+/g, ' ')
+    .replace(/\s+/g, ' ')
+    .trim()
+    || String(slug || '');
+}
+
+function recordModified(file) {
+  const stat = safeStat(file);
+  return stat ? stat.mtime.toISOString() : '';
+}
+
+function listInstructionFolder(root, source) {
+  return walkFiles(root, new Set(['.md', '.txt']))
+    .map((file) => {
+      const slug = relativeSlug(root, file);
+      return {
+        source,
+        key: slug,
+        slug,
+        label: labelFromSlug(slug),
+        path: file,
+        kind: 'instruction',
+        modified: recordModified(file),
+      };
+    });
+}
+
+function parseFrontmatter(text) {
+  const match = String(text || '').match(/^---\r?\n([\s\S]*?)\r?\n---/);
+  if (!match) return {};
+
+  const data = {};
+  for (const line of match[1].split(/\r?\n/)) {
+    const clean = line.trim();
+    if (!clean || clean.startsWith('#')) continue;
+
+    const sep = clean.indexOf(':');
+    if (sep < 0) continue;
+
+    const key = clean.slice(0, sep).trim();
+    let value = clean.slice(sep + 1).trim();
+    value = value.replace(/^['"]|['"]$/g, '');
+    data[key] = value;
+  }
+
+  return data;
+}
+
+function shouldSkipVaultMarkdown(root, file) {
+  const rel = path.relative(root, file);
+  const parts = rel.split(path.sep);
+  if (parts.some((part) => part.startsWith('.'))) return true;
+  if (parts[0] === '_control') return true;
+  if (parts[0] === 'node_modules') return true;
+  return false;
+}
+
+function listVaultSlugInstructions(root) {
+  return walkFiles(root, new Set(['.md']))
+    .filter((file) => !shouldSkipVaultMarkdown(root, file))
+    .map((file) => {
+      let frontmatter = {};
+      let read_error = '';
+
+      try {
+        frontmatter = parseFrontmatter(fs.readFileSync(file, 'utf8'));
+      } catch (err) {
+        read_error = err.message;
+      }
+
+      const slug = String(frontmatter.slug || '').trim();
+      if (!slug.startsWith('ins.')) return null;
+
+      return {
+        source: 'vault',
+        key: slug,
+        slug,
+        label: frontmatter.title || labelFromSlug(slug),
+        path: file,
+        kind: 'instruction',
+        modified: recordModified(file),
+        read_error,
+      };
+    })
+    .filter(Boolean);
+}
+
+function listPlanFolder(root, source) {
+  return walkFiles(root, new Set(['.json']))
+    .map((file) => {
+      const slug = relativeSlug(root, file);
+      let label = labelFromSlug(slug);
+      let step_count = null;
+      let read_error = '';
+
+      try {
+        const data = JSON.parse(fs.readFileSync(file, 'utf8'));
+        label = data.label || data.title || label;
+        if (Array.isArray(data.steps)) step_count = data.steps.length;
+        else if (data.steps && typeof data.steps === 'object') step_count = Object.keys(data.steps).length;
+      } catch (err) {
+        read_error = err.message;
+      }
+
+      return {
+        source,
+        key: `${source}:${slug}`,
+        slug,
+        record_identity: slug,
+        label,
+        file,
+        step_count,
+        modified: recordModified(file),
+        read_error,
+      };
+    });
+}
+
+function engineKindFromName(name) {
+  const clean = String(name || '').trim().toLowerCase();
+  if (clean === 'script' || clean === 'scripts' || clean.includes('script')) return 'script';
+  if (clean === 'rag' || clean.includes('rag')) return 'rag';
+  return 'llm';
+}
+
+function listEngineFolder(root) {
+  const stat = safeStat(root);
+  if (!stat || !stat.isDirectory()) return [];
+
+  const records = [];
+
+  for (const entry of fs.readdirSync(root, { withFileTypes: true })) {
+    if (entry.name.startsWith('_') || entry.name.startsWith('.')) continue;
+
+    if (entry.isFile() && path.extname(entry.name) === '.py') {
+      const stem = path.basename(entry.name, '.py');
+      if (stem === '__init__') continue;
+      records.push({
+        source: 'local',
+        key: stem,
+        slug: stem,
+        label: labelFromSlug(stem),
+        kind: engineKindFromName(stem),
+        path: path.join(root, entry.name),
+        modified: recordModified(path.join(root, entry.name)),
+      });
+    }
+
+    if (entry.isDirectory()) {
+      const initFile = path.join(root, entry.name, '__init__.py');
+      if (!fileExists(initFile)) continue;
+      records.push({
+        source: 'local',
+        key: entry.name,
+        slug: entry.name,
+        label: labelFromSlug(entry.name),
+        kind: engineKindFromName(entry.name),
+        path: path.join(root, entry.name),
+        modified: recordModified(initFile),
+      });
+    }
+  }
+
+  return records;
+}
+
+function listScriptFolder(root) {
+  return walkFiles(root, new Set(['.py']))
+    .filter((file) => !path.basename(file).startsWith('_'))
+    .map((file) => {
+      const slug = relativeSlug(root, file);
+      const key = slug.split('/').join('.');
+      return {
+        source: 'local',
+        key,
+        slug: key,
+        label: labelFromSlug(slug),
+        kind: 'script',
+        path: file,
+        modified: recordModified(file),
+      };
+    });
+}
+
+function loadPlanFromFile(record) {
+  const data = JSON.parse(fs.readFileSync(record.file, 'utf8'));
+  return {
+    ...data,
+    file: record.file,
+    slug: data.slug || data.record_identity || record.slug,
+    record_identity: data.record_identity || data.slug || record.slug,
+    label: data.label || record.label,
+  };
+}
 
 function normalizeKind(value) {
   return String(value || '').trim().toLowerCase();
@@ -84,8 +332,36 @@ async function copyText(text) {
 
 function hydrateControl(saved, liveRecords, valueField = 'slug') {
   if (!saved) return null;
+
+  if (typeof saved === 'string') {
+    return liveRecords.find((record) => (
+      record[valueField] || record.slug || record.key
+    ) === saved) || { [valueField]: saved, key: saved, slug: saved };
+  }
+
   const savedId = saved[valueField] || saved.slug || saved.key;
   return liveRecords.find((record) => (record[valueField] || record.slug || record.key) === savedId) || saved;
+}
+
+const STEP_CONTRACT_ARG_KEYS = new Set([
+  'index',
+  'kind',
+  'label',
+  'instructions',
+  'instruction_slugs',
+  'engine',
+  'script',
+  'rag_profile',
+  'model',
+]);
+
+function argsForEditor(args) {
+  const compact = {};
+  for (const [key, value] of Object.entries(args || {})) {
+    if (STEP_CONTRACT_ARG_KEYS.has(key)) continue;
+    compact[key] = value;
+  }
+  return compact;
 }
 
 function isScriptEngine(engine) {
@@ -135,6 +411,7 @@ function emptyStep(kind, index, { engines }) {
   const ragEngine = findRagEngine(engines);
   const defaultLlmEngine = llmEngines(engines)[0] || engines[0] || null;
   const step = {
+    index,
     kind,
     label: `Step ${index}`,
     engine: null,
@@ -179,17 +456,31 @@ function ensurePlanUploadContract(record) {
   return plan;
 }
 
+function planStepEntries(steps) {
+  if (Array.isArray(steps)) {
+    return steps.map((step, index) => [index + 1, step]);
+  }
+
+  if (!steps || typeof steps !== 'object') return [];
+
+  return Object.entries(steps)
+    .map(([key, step]) => [Number(key), step])
+    .filter(([number, step]) => Number.isInteger(number) && number > 0 && step)
+    .sort(([a], [b]) => a - b);
+}
+
 function planToScreenSteps(plan, { engines, instructions, scripts, ragProfiles }) {
-  return (plan.steps || []).map((step, index) => {
+  return planStepEntries(plan.steps).map(([stepNumber, step]) => {
     const kind = inferStepKind(step);
     const screenStep = {
+      index: Number(step.index || stepNumber),
       kind,
-      label: step.label || `Step ${index + 1}`,
+      label: step.label || `Step ${stepNumber}`,
       engine: hydrateControl(step.engine, engines, 'key'),
       script: hydrateControl(step.script, scripts, 'key'),
       rag_profile: hydrateControl(step.rag_profile, ragProfiles, 'key'),
       model: step.model || step.args?.model || '',
-      argsJson: JSON.stringify(step.args || {}, null, 2),
+      argsJson: JSON.stringify(argsForEditor(step.args || {}), null, 2),
       instructions: (step.instructions || step.instruction_slugs || [])
         .map((ins) => hydrateControl(typeof ins === 'string' ? { slug: ins } : ins, instructions, 'slug'))
         .filter(Boolean),
@@ -269,7 +560,7 @@ function renderInstructionPicker({ step, instructions, redraw }) {
 
 function renderProviderPicker({ step, engines }) {
   const providers = llmEngines(engines);
-  const engineSelect = selectFor(providers, providers.length ? 'Choose provider/engine' : 'No LLM engines in registry snapshot', 'key');
+  const engineSelect = selectFor(providers, providers.length ? 'Choose provider/engine' : 'No LLM engines in local engines folder', 'key');
   engineSelect.value = step.engine?.key || '';
   engineSelect.addEventListener('change', () => {
     step.engine = selectedRecord(engineSelect, providers, 'key');
@@ -285,7 +576,7 @@ function renderModelInput(step) {
 }
 
 function renderScriptPicker({ step, scripts }) {
-  const scriptSelect = selectFor(scripts, scripts.length ? 'Choose script' : 'No scripts in registry snapshot', 'key');
+  const scriptSelect = selectFor(scripts, scripts.length ? 'Choose script' : 'No scripts in local scripts folder', 'key');
   scriptSelect.value = step.script?.key || '';
   scriptSelect.addEventListener('change', () => {
     step.script = selectedRecord(scriptSelect, scripts, 'key');
@@ -294,7 +585,7 @@ function renderScriptPicker({ step, scripts }) {
 }
 
 function renderRagPicker({ step, ragProfiles }) {
-  const ragSelect = selectFor(ragProfiles, ragProfiles.length ? 'Choose RAG profile' : 'No RAG profiles in registry snapshot', 'key');
+  const ragSelect = selectFor(ragProfiles, ragProfiles.length ? 'Choose RAG profile' : 'No RAG profiles found', 'key');
   ragSelect.value = step.rag_profile?.key || '';
   ragSelect.addEventListener('change', () => {
     step.rag_profile = selectedRecord(ragSelect, ragProfiles, 'key');
@@ -413,16 +704,25 @@ function renderStepEditor({ stepsBox, engines, scripts, instructions, ragProfile
 async function renderCreatePlan({ app, container }) {
   clear(container);
   const root = vaultRoot(app);
-  const roots = controlRoots(app);
-  const registrySnapshot = loadRegistrySnapshot();
-  const controlSnapshot = loadControlSnapshot();
-  const engines = sortByLabel(snapshotList(registrySnapshot.data, 'engines'));
-  const scripts = sortByLabel(snapshotList(registrySnapshot.data, 'local_scripts'));
-  const ragProfiles = sortByLabel(snapshotList(registrySnapshot.data, 'rag_profiles'));
-  const instructions = sortByLabel(snapshotList(controlSnapshot.data, 'instructions'));
+  const vaultControlRoot = path.join(root, '.autoscribe');
+  const vaultPlansDir = path.join(vaultControlRoot, 'plans');
+
+  const engines = sortByLabel(listEngineFolder(ENGINES_DIR));
+  const scripts = sortByLabel(listScriptFolder(LOCAL_SCRIPTS_DIR));
+  const ragProfiles = [];
+  const instructions = sortByLabel([
+    ...listInstructionFolder(GLOBAL_INSTRUCTIONS_DIR, 'global'),
+    ...listVaultSlugInstructions(root),
+  ]);
+  const globalPlans = sortByLabel([
+    ...listPlanFolder(GLOBAL_PLANS_DIR, 'global'),
+    ...listPlanFolder(vaultPlansDir, 'vault'),
+  ]);
+
   const steps = [];
   let loadedPlan = null;
   let newStepKind = 'llm';
+  let availablePlans = [];
 
   container.appendChild(el('h2', { text: 'Define Plan' }));
   container.appendChild(el('p', { text: 'A plan is a reusable ordered set of processing steps. Pick a step type first; the screen then shows only the relevant provider, model, script, RAG, instruction, and args fields.' }));
@@ -434,13 +734,21 @@ async function renderCreatePlan({ app, container }) {
   const currentPlan = el('code', { text: 'new unsaved plan' });
 
   function refreshExistingPlans(selectedSlug = '') {
-    const plans = listPlanRecords(app);
+    const savedPlans = listPlanRecords(app).map((plan) => ({
+      ...plan,
+      source: plan.source || 'saved',
+      key: `saved:${plan.slug}`,
+    }));
+    availablePlans = sortByLabel([...savedPlans, ...globalPlans]);
     existingSelect.innerHTML = '';
-    existingSelect.appendChild(el('option', { value: '', text: plans.length ? 'Choose existing plan' : 'No saved plans found' }));
-    for (const plan of plans) {
-      existingSelect.appendChild(el('option', { value: plan.slug, text: planOptionText(plan) }));
+    existingSelect.appendChild(el('option', { value: '', text: availablePlans.length ? 'Choose existing/local plan' : 'No saved or local plans found' }));
+    for (const plan of availablePlans) {
+      existingSelect.appendChild(el('option', { value: plan.key || plan.slug, text: planOptionText(plan) }));
     }
-    if (selectedSlug) existingSelect.value = selectedSlug;
+    if (selectedSlug) {
+      existingSelect.value = selectedSlug.includes(':') ? selectedSlug : `saved:${selectedSlug}`;
+      if (!existingSelect.value) existingSelect.value = selectedSlug;
+    }
   }
 
   const label = el('input', { type: 'text', placeholder: 'Plan label, e.g. Fact Check' });
@@ -449,16 +757,12 @@ async function renderCreatePlan({ app, container }) {
   description.style.width = '100%';
   description.style.minHeight = '5rem';
 
-  const registryText = registrySnapshot.data
-    ? `Registry snapshot: ${registrySnapshot.command} ${registrySnapshot.args.join(' ')}`
-    : `Registry snapshot failed: ${registrySnapshot.error || 'unknown error'}${registrySnapshot.stderr ? ` — ${registrySnapshot.stderr}` : ''}`;
-  const controlText = controlSnapshot.data
-    ? `Control snapshot: ${controlSnapshot.command} ${controlSnapshot.args.join(' ')}`
-    : `Control snapshot failed: ${controlSnapshot.error || 'unknown error'}${controlSnapshot.stderr ? ` — ${controlSnapshot.stderr}` : ''}`;
   const status = el('p', {
-    text: `${instructions.length} instruction(s), ${llmEngines(engines).length} LLM engine(s), ${scripts.length} script(s), ${ragProfiles.length} RAG profile(s) found. ${controlText}. ${registryText}`,
+    text: `${instructions.length} instruction(s), ${llmEngines(engines).length} LLM engine(s), ${scripts.length} script(s), ${ragProfiles.length} RAG profile(s), ${globalPlans.length} local plan(s) found.`,
   });
-  const rootsText = el('p', { text: `Control roots available for local editing: ${roots.join(', ')}` });
+  const rootsText = el('p', {
+    text: `Local folders: global instructions=${GLOBAL_INSTRUCTIONS_DIR}; active vault instructions=Markdown files with slug ins.*; plans=${GLOBAL_PLANS_DIR}; engines=${ENGINES_DIR}; vault plans=${vaultPlansDir}`,
+  });
   const stepsBox = el('div');
   const savedPath = el('code', { text: '' });
 
@@ -478,10 +782,14 @@ async function renderCreatePlan({ app, container }) {
   }
 
   function loadSelectedPlan() {
-    const slug = existingSelect.value;
-    if (!slug) return;
+    const selectedKey = existingSelect.value;
+    if (!selectedKey) return;
+    const selected = availablePlans.find((plan) => (plan.key || plan.slug) === selectedKey);
+    if (!selected) return;
     try {
-      const plan = loadPlanRecord(app, slug);
+      const plan = selected.source === 'saved'
+        ? loadPlanRecord(app, selected.slug)
+        : loadPlanFromFile(selected);
       loadedPlan = plan;
       currentPlan.textContent = `${planSlug(plan)} (${plan.file || 'saved plan'})`;
       savedPath.textContent = plan.file || '';
@@ -505,22 +813,19 @@ async function renderCreatePlan({ app, container }) {
       existing,
       force_slug: forceSlug,
       registry_snapshot: {
-        command: registrySnapshot.command,
-        args: registrySnapshot.args,
-        schema_version: registrySnapshot.data?.schema_version || null,
-        sources: registrySnapshot.data?.sources || null,
+        source: 'local-folders',
+        engines_dir: ENGINES_DIR,
+        scripts_dir: LOCAL_SCRIPTS_DIR,
       },
       control_snapshot: {
-        command: controlSnapshot.command,
-        args: controlSnapshot.args,
-        schema_version: controlSnapshot.data?.schema_version || null,
-        source: controlSnapshot.data?.source || null,
+        source: 'local-folders',
+        global_instructions_dir: GLOBAL_INSTRUCTIONS_DIR,
+        global_plans_dir: GLOBAL_PLANS_DIR,
+        vault_instruction_rule: 'active vault Markdown files with slug ins.*',
+        vault_plans_dir: vaultPlansDir,
       },
     });
     console.log(JSON.stringify(record, null, 2));
-new Notice(
-  `record keys: ${Object.keys(record).sort().join(', ')}`
-);
     return ensurePlanUploadContract(record);
   }
 
@@ -539,9 +844,11 @@ new Notice(
   const loadBtn = button('Modify Selected Plan', loadSelectedPlan);
   const newBtn = button('New Blank Plan', clearScreen);
   const deleteBtn = button('Delete Selected Plan', () => {
-    const slug = existingSelect.value || planSlug(loadedPlan);
-    if (!slug) {
-      new Notice('Choose a saved plan to delete.');
+    const selectedKey = existingSelect.value;
+    const selected = availablePlans.find((plan) => (plan.key || plan.slug) === selectedKey);
+    const slug = selected?.slug || planSlug(loadedPlan);
+    if (!slug || (selected && selected.source !== 'saved')) {
+      new Notice('Choose a saved plan to delete. Local folder plans are read-only here.');
       return;
     }
     if (!confirm(`Delete plan ${slug}?`)) return;
@@ -623,11 +930,11 @@ new Notice(
   row.append(saveChangesBtn, saveNewBtn, copyBtn, savedPath);
   container.appendChild(row);
 
-  if (!registrySnapshot.data) {
-    new Notice(`Define Plan: asc registry snapshot failed: ${registrySnapshot.error || 'unknown error'}`);
+  if (!engines.length) {
+    new Notice(`Define Plan: no engines found in ${ENGINES_DIR}`);
   }
-  if (!controlSnapshot.data) {
-    new Notice(`Define Plan: asc control snapshot failed: ${controlSnapshot.error || 'unknown error'}`);
+  if (!instructions.length) {
+    new Notice(`Define Plan: no instructions found in ${GLOBAL_INSTRUCTIONS_DIR} or active vault Markdown files with slug ins.*`);
   }
   if (engines.length || scripts.length || ragProfiles.length) addStep.click();
   else redrawSteps();

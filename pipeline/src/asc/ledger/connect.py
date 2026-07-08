@@ -1,7 +1,3 @@
-# asc/ledger/connect.py
-
-from __future__ import annotations
-
 import sqlite3
 from pathlib import Path
 from typing import Any, Protocol, runtime_checkable
@@ -24,7 +20,7 @@ class LedgerConnectionProtocol(Protocol):
     def rollback(self) -> None: ...
     def close(self) -> None: ...
 
-    def __enter__(self) -> LedgerConnectionProtocol: ...
+    def __enter__(self) -> "LedgerConnectionProtocol": ...
     def __exit__(self, exc_type: object, exc: object, tb: object) -> bool | None: ...
 
 

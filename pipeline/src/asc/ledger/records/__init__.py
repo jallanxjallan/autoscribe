@@ -1,3 +1,3 @@
-from __future__ import annotations
+"""Ledger record read/write compatibility APIs."""
 
-__all__ = ["call", "step", "result", "export"]
+__all__: list[str] = []

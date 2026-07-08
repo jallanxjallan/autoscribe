@@ -1,39 +1,44 @@
-# asc/state/queue.py
-from __future__ import annotations
+"""Generic Redis LIST plumbing for package-owned queues and inboxes.
+
+This module deliberately does not define named AutoScribe queues. Owning
+packages declare their own fixed Redis keys, for example::
+
+    class Inbox(RedisQueue):
+        KEY = "control:orchestrator:inbox"
+
+    class Queue(RedisQueue):
+        KEY = "control:worker:queue"
+
+``asc.state`` provides only the reusable LIST mechanics: validation, insert,
+claim, blocking claim, peek, remove, count, and clear.
+"""
 
 from collections.abc import Sequence
 from dataclasses import dataclass
-
+import os
 from asc.core.timestamp import timestamp
 from asc.redis.index_base import FixedRedisIndex
+from asc.redis.primitives import lists
 
 
 @dataclass(frozen=True, slots=True)
 class QueuedKey:
-    """One claimed queue item.
+    """One claimed daemon queue item.
 
-    Redis LIST queues do not store scores. The score field is retained as a
-    compatibility/diagnostic timestamp so older callers that read `.score` do
-    not break during the zset -> list migration.
+    Queue entries are full Redis keys. The owning package decides whether those
+    keys are cursors, tasks, markers, or another model kind. The score is a local
+    timestamp for diagnostics; LIST queues do not persist per-item scores.
     """
 
     key: str
     score: float
 
     @property
-    def identity(self) -> str:
-        return self.key
-
-    @property
     def cursor_key(self) -> str:
         return self.key
 
     @property
-    def call_state_key(self) -> str:
-        return self.key
-
-    @property
-    def step_key(self) -> str:
+    def identity(self) -> str:
         return self.key
 
 
@@ -50,133 +55,148 @@ def require_queue_key(value: object, *, field_name: str = "key") -> str:
     return text
 
 
-class RedisQueue(FixedRedisIndex):
-    """Small Redis LIST FIFO queue.
+def daemon_timeout_seconds(default: int = 5) -> int:
+    value = os.environ.get("AUTOSCRIBE_DAEMON_CLAIM_TIMEOUT")
+    if value is None:
+        return default
+    return max(1, int(value))
 
-    Live handoff queues should block when idle. That is why this class uses
-    RPUSH + LPOP/BLPOP instead of zset polling. Scheduling/watchdog state belongs
-    in a separate zset index, not in the handoff queue.
+
+def daemon_idle_seconds(default: int = 3600) -> int:
+    """Seconds a daemon may sit idle before returning None."""
+
+    value = os.environ.get("AUTOSCRIBE_DAEMON_IDLE_SECONDS")
+    if value is None:
+        return default
+    return max(1, int(value))
+
+
+def daemon_empty_limit(*, timeout: int | None = None, default: int | None = None) -> int:
+    """Return empty BLPOP cycles before a daemon may exit."""
+
+    value = os.environ.get("AUTOSCRIBE_DAEMON_EMPTY_LIMIT")
+    if value is not None:
+        return max(1, int(value))
+
+    cycle_timeout = daemon_timeout_seconds() if timeout is None else max(1, int(timeout))
+    if default is not None:
+        return max(1, int(default))
+    return max(1, daemon_idle_seconds() // cycle_timeout)
+
+
+class RedisQueue(FixedRedisIndex):
+    """Small Redis LIST FIFO queue for daemon handoff.
+
+    RedisKey remains the key value object and central client access point.
+    LIST primitives live here because queues are the modules that use them.
     """
 
     KEY: str
 
-    def insert(self, key: str, *, score: float | None = None) -> int:
-        # score is accepted for compatibility with the old zset interface.
-        # FIFO order is Redis list order: RPUSH at tail, LPOP/BLPOP from head.
-        member = require_queue_key(key)
-        return int(self.key.rpush(member))
+    def rpush(self, *values: str) -> int:
+        if not values:
+            raise ValueError("rpush() requires at least one value")
+        members = tuple(
+            require_queue_key(value, field_name=f"values[{index}]")
+            for index, value in enumerate(values)
+        )
+        return lists.rpush(self.key, *members)
 
-    def insert_many(
-        self,
-        keys: Sequence[str],
-        *,
-        start_score: float | None = None,
-        step: float = 0.001,
-    ) -> int:
-        # start_score/step are compatibility-only; list order is input order.
-        members = [require_queue_key(key, field_name=f"keys[{index}]") for index, key in enumerate(keys)]
-        if not members:
-            return 0
-        return int(self.key.rpush(*members))
+    def lpop(self) -> str | None:
+        return lists.lpop(self.key)
 
-    def claim(self) -> QueuedKey | None:
-        key = self.key.lpop()
-        if key is None:
-            return None
-        return QueuedKey(key=str(key), score=timestamp())
+    def blpop(self, *, timeout: int = 0) -> tuple[str, str] | None:
+        if not isinstance(timeout, int) or timeout < 0:
+            raise ValueError("blpop() timeout must be a non-negative int")
 
-    def block_claim(self, *, timeout: int = 0) -> QueuedKey | None:
-        """Block until one item is available, or until timeout expires.
-
-        timeout=0 means block indefinitely, matching Redis BLPOP semantics.
-        Use a small positive timeout when the caller needs periodic shutdown
-        checks.
-        """
-        item = self.key.blpop(timeout=timeout)
+        item = lists.blpop(self.key, timeout=timeout)
         if item is None:
             return None
 
-        _queue_key, value = item
-        return QueuedKey(key=str(value), score=timestamp())
+        key, value = item
+        return str(key), str(value)
 
-    def peek(self) -> QueuedKey | None:
-        key = self.key.lindex(0)
+    def lindex(self, index: int) -> str | None:
+        return lists.lindex(self.key, int(index))
+
+    def lrem(self, value: str, *, count: int = 0) -> int:
+        return lists.lrem(self.key, require_queue_key(value), count=int(count))
+
+    def llen(self) -> int:
+        return lists.llen(self.key)
+
+    def insert(self, key: str) -> int:
+        return self.rpush(key)
+
+    def insert_many(self, keys: Sequence[str]) -> int:
+        members = [
+            require_queue_key(key, field_name=f"keys[{index}]")
+            for index, key in enumerate(keys)
+        ]
+        if not members:
+            return 0
+        return self.rpush(*members)
+
+    def claim(self) -> QueuedKey | None:
+        key = self.lpop()
         if key is None:
             return None
-        return QueuedKey(key=str(key), score=timestamp())
+        return QueuedKey(key=key, score=float(timestamp()))
+
+    def block_claim(self, *, timeout: int = 0) -> QueuedKey | None:
+        item = self.blpop(timeout=timeout)
+        if item is None:
+            return None
+        _queue_key, value = item
+        return QueuedKey(key=value, score=float(timestamp()))
+
+    def daemon_claim(
+        self,
+        *,
+        timeout: int | None = None,
+        empty_limit: int | None = None,
+    ) -> QueuedKey | None:
+        """Wait for the first daemon handoff item across bounded empty cycles."""
+
+        cycle_timeout = daemon_timeout_seconds() if timeout is None else max(1, int(timeout))
+        max_empty = daemon_empty_limit(timeout=cycle_timeout)
+        if empty_limit is not None:
+            max_empty = int(empty_limit)
+        if max_empty <= 0:
+            return None
+
+        for _ in range(max_empty):
+            claimed = self.block_claim(timeout=cycle_timeout)
+            if claimed is not None:
+                return claimed
+        return None
+
+    def daemon_drain_claim(self) -> QueuedKey | None:
+        """Claim immediately while draining pending daemon work."""
+
+        return self.claim()
+
+    def peek(self) -> QueuedKey | None:
+        key = self.lindex(0)
+        if key is None:
+            return None
+        return QueuedKey(key=key, score=float(timestamp()))
+
+    def remove(self, key: str) -> int:
+        return self.lrem(key)
 
     def count(self) -> int:
-        return int(self.key.llen())
+        return self.llen()
 
     def clear(self) -> int:
         return int(self.delete())
-
-    # Compatibility aliases. Prefer insert()/claim()/block_claim() in new code.
-    def enqueue(self, key: str, *, score: float | None = None) -> int:
-        return self.insert(key, score=score)
-
-    def enqueue_batch(
-        self,
-        keys: Sequence[str],
-        *,
-        start_score: float | None = None,
-        step: float = 0.001,
-    ) -> int:
-        return self.insert_many(keys, start_score=start_score, step=step)
-
-    def claim_next(self) -> QueuedKey | None:
-        return self.claim()
-
-    def block_claim_next(self, *, timeout: int = 0) -> QueuedKey | None:
-        return self.block_claim(timeout=timeout)
-
-    def peek_next(self) -> QueuedKey | None:
-        return self.peek()
-
-
-def insert(queue: RedisQueue, key: str, *, score: float | None = None) -> int:
-    return queue.insert(key, score=score)
-
-
-def insert_many(
-    queue: RedisQueue,
-    keys: Sequence[str],
-    *,
-    start_score: float | None = None,
-    step: float = 0.001,
-) -> int:
-    return queue.insert_many(keys, start_score=start_score, step=step)
-
-
-def claim(queue: RedisQueue) -> QueuedKey | None:
-    return queue.claim()
-
-
-def block_claim(queue: RedisQueue, *, timeout: int = 0) -> QueuedKey | None:
-    return queue.block_claim(timeout=timeout)
-
-
-def peek(queue: RedisQueue) -> QueuedKey | None:
-    return queue.peek()
-
-
-def count(queue: RedisQueue) -> int:
-    return queue.count()
-
-
-def clear(queue: RedisQueue) -> int:
-    return queue.clear()
 
 
 __all__ = [
     "QueuedKey",
     "RedisQueue",
-    "block_claim",
-    "claim",
-    "clear",
-    "count",
-    "insert",
-    "insert_many",
-    "peek",
+    "daemon_empty_limit",
+    "daemon_idle_seconds",
+    "daemon_timeout_seconds",
     "require_queue_key",
 ]

@@ -1,7 +1,15 @@
+
 ```dataviewjs
 const rows = [];
 const MISSING = "—";
 const PREVIEW_LIMIT = 60;
+
+function isExcludedFolder(path) {
+  return path
+    .split("/")
+    .slice(0, -1)
+    .some(part => part.startsWith("_"));
+}
 
 function normalizeMetaValues(value) {
   if (value == null) return [MISSING];
@@ -33,7 +41,7 @@ function truncateAtWord(text, limit = PREVIEW_LIMIT) {
 }
 
 function extractCalloutFirstLine(line) {
-  const match = line.match(/^>\s*(\\?\[!.*)$/i);
+  const match = line.match(/^\s*>\s*(\\?\[!.*)$/i);
   if (!match) return null;
 
   let text = match[1];
@@ -49,7 +57,7 @@ function extractCalloutFirstLine(line) {
 }
 
 for (const file of app.vault.getMarkdownFiles()
-  .filter(file => file.path.startsWith("contents/"))
+  .filter(file => !isExcludedFolder(file.path))
   .sort((a, b) => a.path.localeCompare(b.path))) {
 
   const cache = app.metadataCache.getFileCache(file);
@@ -171,13 +179,21 @@ function render() {
     return;
   }
 
-  dv.table(
-    ["Note", "First line"],
-    filtered.map(row => [
-      dv.fileLink(row.path),
-      row.firstLine
-    ])
-  );
+  const sortedFiltered = filtered.sort((a, b) =>
+  a.path.split("/").pop().localeCompare(
+    b.path.split("/").pop(),
+    undefined,
+    { sensitivity: "base" }
+  )
+);
+
+dv.table(
+  ["Note", "First line"],
+  sortedFiltered.map(row => [
+    dv.fileLink(row.path),
+    row.firstLine
+  ])
+);
 }
 
 render();

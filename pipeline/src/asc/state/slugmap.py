@@ -1,10 +1,11 @@
 from typing import ClassVar, Literal, overload
 
+from asc.redis.primitives import keys
 from asc.redis.index_base import FixedRedisHashIndex
 from asc.redis.key import RedisKey
 
 
-SLUGMAP_KEY = "state:slugmap"
+SLUGMAP_KEY = "state:slugmap:index"
 
 
 def _require_slug(value: object, *, field_name: str = "slug") -> str:
@@ -32,14 +33,11 @@ def _require_key(value: object, *, field_name: str = "key") -> str:
 
 
 def _key_kind(key: str) -> str:
-    return _require_key(key).split(":")[-1]
+    return RedisKey(_require_key(key)).kind
 
 
 def _key_identity(key: str) -> str:
-    parts = _require_key(key).split(":")
-    if len(parts) != 3 or not all(parts):
-        raise ValueError(f"invalid Redis model key: {key}")
-    return parts[1]
+    return RedisKey(_require_key(key)).identity
 
 
 class SlugMap(FixedRedisHashIndex):
@@ -50,7 +48,7 @@ class SlugMap(FixedRedisHashIndex):
     def set(self, slug: str, key: str) -> str:
         normalized_slug = _require_slug(slug)
         normalized_key = _require_key(key)
-        self.key.hset(field=normalized_slug, value=normalized_key)
+        self.hset(field=normalized_slug, value=normalized_key)
         return normalized_key
 
     @overload
@@ -61,7 +59,7 @@ class SlugMap(FixedRedisHashIndex):
 
     def get(self, slug: str, *, require: bool = False) -> str | None:
         normalized_slug = _require_slug(slug)
-        value = self.key.hget(normalized_slug)
+        value = self.hget(normalized_slug)
 
         if value is None:
             if require:
@@ -83,7 +81,7 @@ class SlugMap(FixedRedisHashIndex):
                 f"key kind mismatch: expected {expected_kind}, got {_key_kind(key)} ({key})"
             )
 
-        if not RedisKey(key).exists():
+        if not keys.exists(RedisKey(key)):
             raise KeyError(f"missing key: {key}")
 
         return key
@@ -107,13 +105,13 @@ class SlugMap(FixedRedisHashIndex):
         return None
 
     def delete(self, slug: str) -> int:
-        return int(self.key.hdel(_require_slug(slug)))
+        return self.hdel(_require_slug(slug))
 
     def has(self, slug: str) -> bool:
         return self.get(slug) is not None
 
     def list(self) -> dict[str, str]:
-        entries = self.key.hgetall()
+        entries = self.hgetall()
         return {str(key): str(value) for key, value in sorted(entries.items())}
 
     def clear(self) -> int:

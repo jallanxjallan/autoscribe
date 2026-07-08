@@ -1,17 +1,15 @@
-from __future__ import annotations
-
 import sys
 
 import typer
 
 from asc.enqueue.service import enqueue_from_stream
 
-app = typer.Typer(help="Enqueue prompt/plan dispatch records.")
+app = typer.Typer(help="Enqueue run manifest records.")
 
 
 @app.command("-")
 def enqueue_stdin() -> None:
-    """Read NDJSON dispatch records from stdin and enqueue calls."""
+    """Read NDJSON run manifest records from stdin and enqueue calls."""
 
     report = enqueue_from_stream(sys.stdin)
     print(
@@ -23,7 +21,7 @@ def enqueue_stdin() -> None:
 
 @app.callback(invoke_without_command=True)
 def enqueue(ctx: typer.Context) -> None:
-    """Read NDJSON dispatch records from stdin when no subcommand is given."""
+    """Read NDJSON run manifest records from stdin when no subcommand is given."""
 
     if ctx.invoked_subcommand is not None:
         return

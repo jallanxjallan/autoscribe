@@ -1,5 +1,3 @@
-from __future__ import annotations
-
 from collections.abc import Iterable
 
 from asc.ledger.connect import LedgerConnection
@@ -12,14 +10,13 @@ def create_table_sql(name: str, columns: ColumnSpec) -> str:
     column_defs: list[str] = []
     constraints: list[str] = []
 
-    for col, spec in columns.items():
-        if col == "__constraints__":
+    for column_name, spec in columns.items():
+        if column_name == "__constraints__":
             constraints.extend(spec)  # type: ignore[arg-type]
         else:
-            column_defs.append(f"{col} {spec}")
+            column_defs.append(f"{column_name} {spec}")
 
     rendered = ",\n    ".join(column_defs + constraints)
-
     return f"""
 CREATE TABLE IF NOT EXISTS {name} (
     {rendered}
@@ -34,16 +31,12 @@ def ensure_schema(
     views: Iterable[str] = (),
 ) -> None:
     conn.execute("PRAGMA foreign_keys = ON")
-
     for table_name, columns in tables.items():
         conn.execute(create_table_sql(table_name, columns))
-
-    for stmt in indexes:
-        conn.execute(stmt)
-
-    for stmt in views:
-        conn.execute(stmt)
-
+    for statement in indexes:
+        conn.execute(statement)
+    for statement in views:
+        conn.execute(statement)
     conn.commit()
 
 
@@ -53,13 +46,12 @@ def _foreign_keys_enabled(conn: LedgerConnection) -> bool:
 
 
 def _set_foreign_keys(conn: LedgerConnection, *, enabled: bool) -> None:
-    value = "ON" if enabled else "OFF"
-    conn.execute(f"PRAGMA foreign_keys = {value}")
+    conn.execute(f"PRAGMA foreign_keys = {'ON' if enabled else 'OFF'}")
 
 
 def drop_views(conn: LedgerConnection, view_names: Iterable[str]) -> None:
     for view_name in view_names:
-        conn.execute(f"DROP VIEW IF EXISTS {view_name}")
+        conn.execute(f'DROP VIEW IF EXISTS "{view_name}"')
     conn.commit()
 
 
@@ -68,13 +60,11 @@ def drop_tables(conn: LedgerConnection, table_names: Iterable[str]) -> None:
     try:
         if was_enabled:
             _set_foreign_keys(conn, enabled=False)
-
         for table_name in table_names:
-            conn.execute(f"DROP TABLE IF EXISTS {table_name}")
+            conn.execute(f'DROP TABLE IF EXISTS "{table_name}"')
     finally:
         if was_enabled:
             _set_foreign_keys(conn, enabled=True)
-
     conn.commit()
 
 
@@ -83,7 +73,6 @@ def drop_user_objects(conn: LedgerConnection) -> None:
     try:
         if was_enabled:
             _set_foreign_keys(conn, enabled=False)
-
         rows = conn.execute(
             """
             SELECT type, name
@@ -98,7 +87,6 @@ def drop_user_objects(conn: LedgerConnection) -> None:
               END
             """
         ).fetchall()
-
         for obj_type, name in rows:
             if obj_type == "view":
                 conn.execute(f'DROP VIEW IF EXISTS "{name}"')
@@ -109,63 +97,79 @@ def drop_user_objects(conn: LedgerConnection) -> None:
     finally:
         if was_enabled:
             _set_foreign_keys(conn, enabled=True)
-
     conn.commit()
 
 
+def table_exists(conn: LedgerConnection, table_name: str) -> bool:
+    row = conn.execute(
+        """
+        SELECT 1
+        FROM sqlite_master
+        WHERE type = 'table'
+          AND name = ?
+        LIMIT 1
+        """,
+        (table_name,),
+    ).fetchone()
+    return row is not None
+
+
+def table_columns(conn: LedgerConnection, table_name: str) -> set[str]:
+    if not table_exists(conn, table_name):
+        return set()
+    rows = conn.execute(f'PRAGMA table_info("{table_name}")').fetchall()
+    return {str(row[1]) for row in rows}
+
+
+def require_ledger_columns(conn: LedgerConnection) -> None:
+    required = {
+        "calls": {"identity", "source_identity", "source_json", "created_at"},
+        "steps": {"identity", "step_number", "result_key", "status", "content", "fail_message", "raw_json", "created_at"},
+        "exports": {"identity", "source_identity", "final_step", "result_key", "exported_at", "export_message", "created_at"},
+    }
+    missing: list[str] = []
+    for table_name, expected in required.items():
+        actual = table_columns(conn, table_name)
+        for column_name in sorted(expected - actual):
+            missing.append(f"{table_name}.{column_name}")
+    if missing:
+        raise RuntimeError("ledger schema is incomplete; missing columns: " + ", ".join(missing))
+
+
 CALLS: ColumnSpec = {
-    "call": "TEXT PRIMARY KEY NOT NULL UNIQUE CHECK (length(call) = 26)",
-    "plan": "TEXT NOT NULL",
-    "record_identity": "TEXT NOT NULL",
-    "raw_json": "TEXT NOT NULL",
+    "identity": "TEXT PRIMARY KEY NOT NULL UNIQUE CHECK (length(identity) = 26)",
+    "source_identity": "TEXT NOT NULL",
+    "source_json": "TEXT NOT NULL",
     "created_at": "INTEGER NOT NULL",
 }
 
 
 STEPS: ColumnSpec = {
-    "step_id": "INTEGER PRIMARY KEY AUTOINCREMENT",
-    "call": "TEXT NOT NULL CHECK (length(call) = 26)",
+    "identity": "TEXT NOT NULL CHECK (length(identity) = 26)",
     "step_number": "INTEGER NOT NULL CHECK (step_number > 0)",
-    "handler": "TEXT NOT NULL",
-    "engine": "TEXT NOT NULL",
-    "status": "TEXT NOT NULL CHECK (status IN ('pending', 'running', 'completed', 'failed'))",
-    "prompt": "TEXT NOT NULL",
-    "response": "TEXT",
+    "result_key": "TEXT NOT NULL",
+    "status": "TEXT NOT NULL CHECK (status IN ('completed', 'failed'))",
+    "content": "TEXT",
     "fail_message": "TEXT",
     "raw_json": "TEXT NOT NULL",
-    "input_key": "TEXT",
-    "output_key": "TEXT",
-    "created_at": "INTEGER NOT NULL",
-    "started_at": "INTEGER",
-    "completed_at": "INTEGER",
-    "prompt_tokens": "INTEGER",
-    "completion_tokens": "INTEGER",
-    "total_tokens": "INTEGER",
-    "__constraints__": [
-        "FOREIGN KEY(call) REFERENCES calls(call) ON DELETE CASCADE",
-        "UNIQUE(call, step_number)",
-    ],
-}
-
-
-RESULTS: ColumnSpec = {
-    "result": "TEXT PRIMARY KEY NOT NULL UNIQUE CHECK (length(result) = 26)",
-    "call": "TEXT NOT NULL UNIQUE CHECK (length(call) = 26)",
-    "terminal_step_id": "INTEGER NOT NULL UNIQUE",
     "created_at": "INTEGER NOT NULL",
     "__constraints__": [
-        "FOREIGN KEY(call) REFERENCES calls(call) ON DELETE CASCADE",
-        "FOREIGN KEY(terminal_step_id) REFERENCES steps(step_id) ON DELETE CASCADE",
+        "PRIMARY KEY(identity, step_number)",
+        "FOREIGN KEY(identity) REFERENCES calls(identity) ON DELETE CASCADE",
     ],
 }
 
 
 EXPORTS: ColumnSpec = {
-    "result": "TEXT PRIMARY KEY NOT NULL CHECK (length(result) = 26)",
-    "export_message": "TEXT NOT NULL",
+    "identity": "TEXT PRIMARY KEY NOT NULL UNIQUE CHECK (length(identity) = 26)",
+    "source_identity": "TEXT NOT NULL",
+    "final_step": "INTEGER NOT NULL CHECK (final_step > 0)",
+    "result_key": "TEXT NOT NULL",
+    "exported_at": "INTEGER",
+    "export_message": "TEXT",
     "created_at": "INTEGER NOT NULL",
     "__constraints__": [
-        "FOREIGN KEY(result) REFERENCES results(result) ON DELETE CASCADE",
+        "FOREIGN KEY(identity, final_step) REFERENCES steps(identity, step_number) ON DELETE CASCADE",
     ],
 }
 
@@ -173,22 +177,19 @@ EXPORTS: ColumnSpec = {
 LEDGER_TABLES = {
     "calls": CALLS,
     "steps": STEPS,
-    "results": RESULTS,
     "exports": EXPORTS,
 }
 
 
 LEDGER_INDEXES = (
-    "CREATE INDEX IF NOT EXISTS idx_calls_plan ON calls(plan)",
-    "CREATE INDEX IF NOT EXISTS idx_calls_record_identity ON calls(record_identity)",
+    "CREATE INDEX IF NOT EXISTS idx_calls_source_identity ON calls(source_identity)",
     "CREATE INDEX IF NOT EXISTS idx_calls_created_at ON calls(created_at)",
-    "CREATE INDEX IF NOT EXISTS idx_steps_call ON steps(call)",
-    "CREATE INDEX IF NOT EXISTS idx_steps_call_step_number ON steps(call, step_number)",
+    "CREATE INDEX IF NOT EXISTS idx_steps_identity ON steps(identity)",
     "CREATE INDEX IF NOT EXISTS idx_steps_status ON steps(status)",
-    "CREATE INDEX IF NOT EXISTS idx_steps_completed_at ON steps(completed_at)",
-    "CREATE INDEX IF NOT EXISTS idx_results_call ON results(call)",
-    "CREATE INDEX IF NOT EXISTS idx_results_terminal_step_id ON results(terminal_step_id)",
-    "CREATE INDEX IF NOT EXISTS idx_results_created_at ON results(created_at)",
+    "CREATE INDEX IF NOT EXISTS idx_steps_created_at ON steps(created_at)",
+    "CREATE INDEX IF NOT EXISTS idx_exports_source_identity ON exports(source_identity)",
+    "CREATE INDEX IF NOT EXISTS idx_exports_source_pending ON exports(source_identity, exported_at)",
+    "CREATE INDEX IF NOT EXISTS idx_exports_exported_at ON exports(exported_at)",
     "CREATE INDEX IF NOT EXISTS idx_exports_created_at ON exports(created_at)",
 )
 
@@ -206,17 +207,12 @@ def reset_ledger_views(conn: LedgerConnection) -> None:
 
 def ensure_ledger_schema(conn: LedgerConnection) -> None:
     drop_views(conn, LEDGER_VIEW_NAMES)
-    ensure_schema(
-        conn,
-        LEDGER_TABLES,
-        LEDGER_INDEXES,
-        CREATE_LEDGER_VIEWS_SQL,
-    )
+    ensure_schema(conn, LEDGER_TABLES, LEDGER_INDEXES, CREATE_LEDGER_VIEWS_SQL)
+    require_ledger_columns(conn)
 
 
 def reset_ledger_schema(conn: LedgerConnection) -> None:
-    drop_views(conn, LEDGER_VIEW_NAMES)
-    drop_tables(conn, ("exports", "results", "steps", "calls"))
+    drop_user_objects(conn)
     ensure_ledger_schema(conn)
 
 
@@ -231,7 +227,6 @@ def reset_all_schemas(conn: LedgerConnection) -> None:
 __all__ = [
     "CALLS",
     "STEPS",
-    "RESULTS",
     "EXPORTS",
     "LEDGER_TABLES",
     "LEDGER_INDEXES",
@@ -240,6 +235,9 @@ __all__ = [
     "drop_tables",
     "drop_user_objects",
     "drop_views",
+    "require_ledger_columns",
+    "table_columns",
+    "table_exists",
     "ensure_all_schemas",
     "ensure_ledger_schema",
     "ensure_ledger_views",

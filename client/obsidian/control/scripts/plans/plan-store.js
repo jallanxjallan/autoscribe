@@ -56,6 +56,27 @@ function parseArgsJson(text, stepNumber) {
   return parsed;
 }
 
+const STEP_CONTRACT_ARG_KEYS = new Set([
+  'index',
+  'kind',
+  'label',
+  'instructions',
+  'instruction_slugs',
+  'engine',
+  'script',
+  'rag_profile',
+  'model',
+]);
+
+function compactStepArgs(args) {
+  const compact = {};
+  for (const [key, value] of Object.entries(args || {})) {
+    if (STEP_CONTRACT_ARG_KEYS.has(key)) continue;
+    compact[key] = value;
+  }
+  return compact;
+}
+
 function normalizeStepKind(step) {
   const kind = normalizeKind(step?.kind || step?.step_kind || step?.type);
   if (kind === 'script' || kind === 'rag' || kind === 'llm') return kind;
@@ -76,6 +97,19 @@ function planSlug(record) {
   return record?.record_identity || record?.slug || '';
 }
 
+function stepEntries(steps) {
+  if (Array.isArray(steps)) {
+    return steps.map((step, index) => [index + 1, step]);
+  }
+
+  if (!steps || typeof steps !== 'object') return [];
+
+  return Object.entries(steps)
+    .map(([key, step]) => [Number(key), step])
+    .filter(([number, step]) => Number.isInteger(number) && number > 0 && step)
+    .sort(([a], [b]) => a - b);
+}
+
 function buildPlanRecord({
   app,
   label,
@@ -88,7 +122,7 @@ function buildPlanRecord({
 }) {
   if (!label || !label.trim()) throw new Error('Plan label is required.');
 
-  const cleanSteps = (steps || []).filter(hasExecutableTarget);
+  const cleanSteps = stepEntries(steps).filter(([, step]) => hasExecutableTarget(step));
   if (!cleanSteps.length) throw new Error('At least one executable step is required.');
 
   const root = vaultRoot(app);
@@ -96,8 +130,10 @@ function buildPlanRecord({
   const now = new Date().toISOString();
   const selectedControls = [];
 
-  const planSteps = cleanSteps.map((step, index) => {
-    const stepNumber = index + 1;
+  const planSteps = {};
+
+  cleanSteps.forEach(([screenIndex, step]) => {
+    const stepNumber = screenIndex;
     const kind = normalizeStepKind(step);
     const engine = compactRegistryRecord(step.engine);
     const script = compactRegistryRecord(step.script);
@@ -117,37 +153,33 @@ function buildPlanRecord({
     const instructions = (step.instructions || []).map(compactControl).filter(Boolean);
     for (const ins of instructions) selectedControls.push(ins);
 
-    const args = parseArgsJson(step.argsJson, stepNumber);
+    const args = compactStepArgs(parseArgsJson(step.argsJson, stepNumber));
+    const instructionSlugs = instructions.map((ins) => ins.slug).filter(Boolean);
     const out = {
       index: stepNumber,
       kind,
       label: step.label || `Step ${stepNumber}`,
-      instructions,
-      instruction_slugs: instructions.map((ins) => ins.slug).filter(Boolean),
+      instruction_slugs: instructionSlugs,
       args,
     };
 
-    if (engine) {
-      out.engine = engine;
-      if (!out.args.engine && engine.key) out.args.engine = engine.key;
+    if (engine?.key) {
+      out.engine = engine.key;
     }
 
     if (kind === 'llm' && model) {
       out.model = model;
-      if (!out.args.model) out.args.model = model;
     }
 
-    if (script) {
-      out.script = script;
-      if (!out.args.script && script.key) out.args.script = script.key;
+    if (script?.key) {
+      out.script = script.key;
     }
 
-    if (rag_profile) {
-      out.rag_profile = rag_profile;
-      if (!out.args.rag_profile && rag_profile.key) out.args.rag_profile = rag_profile.key;
+    if (rag_profile?.key) {
+      out.rag_profile = rag_profile.key;
     }
 
-    return out;
+    planSteps[String(stepNumber)] = out;
   });
 
   const warnings = controlWarnings(selectedControls);
@@ -176,7 +208,7 @@ function buildPlanRecord({
     },
     registry_snapshot,
     control_snapshot,
-    step_count: planSteps.length,
+    step_count: Object.keys(planSteps).length,
     preflight: {
       clean: warnings.length === 0,
       warnings,
