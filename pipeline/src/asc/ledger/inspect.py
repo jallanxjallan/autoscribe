@@ -5,7 +5,7 @@ from typing import Any
 from asc.ledger.connect import connect
 
 
-TABLE_NAMES = ("calls", "steps", "exports")
+TABLE_NAMES = ("calls", "responses", "exports")
 
 
 @dataclass(frozen=True, slots=True)
@@ -27,16 +27,16 @@ def recent_calls(*, limit: int = 20) -> list[dict[str, Any]]:
                 c.identity,
                 c.source_identity,
                 c.created_at,
-                COUNT(s.step_number) AS steps,
-                SUM(CASE WHEN s.status = 'completed' THEN 1 ELSE 0 END) AS completed,
-                SUM(CASE WHEN s.status = 'failed' THEN 1 ELSE 0 END) AS failed,
-                CASE WHEN e.identity IS NULL THEN 0 ELSE 1 END AS export_ready,
-                e.exported_at
+                r.status AS response_status,
+                r.final_step,
+                r.result_key,
+                r.created_at AS response_created_at,
+                COUNT(e.export_id) AS exports
             FROM calls AS c
-            LEFT JOIN steps AS s
-                ON s.identity = c.identity
+            LEFT JOIN responses AS r
+                ON r.identity = c.identity
             LEFT JOIN exports AS e
-                ON e.identity = c.identity
+                ON e.response_identity = c.identity
             GROUP BY c.identity
             ORDER BY c.created_at DESC
             LIMIT ?
@@ -46,21 +46,25 @@ def recent_calls(*, limit: int = 20) -> list[dict[str, Any]]:
         return [_row_dict(row) for row in rows]
 
 
-def recent_steps(*, limit: int = 50, statuses: tuple[str, ...] = ()) -> list[dict[str, Any]]:
+def recent_responses(*, limit: int = 50, statuses: tuple[str, ...] = ()) -> list[dict[str, Any]]:
     where = ""
     params: list[Any] = []
     if statuses:
-        where = f"WHERE status IN ({', '.join('?' for _ in statuses)})"
+        where = f"WHERE r.status IN ({', '.join('?' for _ in statuses)})"
         params.extend(statuses)
     params.append(limit)
 
     with connect() as conn:
         rows = conn.execute(
             f"""
-            SELECT *
-            FROM steps
+            SELECT
+                r.*,
+                c.source_identity
+            FROM responses AS r
+            JOIN calls AS c
+                ON c.identity = r.identity
             {where}
-            ORDER BY created_at DESC, identity ASC, step_number ASC
+            ORDER BY r.created_at DESC, r.identity ASC
             LIMIT ?
             """,
             tuple(params),
@@ -73,14 +77,20 @@ def recent_exports(*, limit: int = 30) -> list[dict[str, Any]]:
         rows = conn.execute(
             """
             SELECT
-                e.identity,
-                e.source_identity,
-                e.final_step,
-                e.result_key,
-                e.created_at,
+                e.export_id,
+                e.response_identity,
+                c.source_identity,
+                e.destination,
+                e.export_mode,
+                e.target_slug,
+                e.target_path,
                 e.exported_at,
-                e.export_message
+                e.export_message,
+                e.consumer_json,
+                e.created_at
             FROM exports AS e
+            JOIN calls AS c
+                ON c.identity = e.response_identity
             ORDER BY e.created_at DESC
             LIMIT ?
             """,
@@ -94,14 +104,19 @@ def pending_exports(*, limit: int = 50) -> list[dict[str, Any]]:
         rows = conn.execute(
             """
             SELECT
-                e.identity,
-                e.source_identity,
-                e.final_step,
-                e.result_key,
-                e.created_at
-            FROM exports AS e
-            WHERE e.exported_at IS NULL
-            ORDER BY e.created_at ASC
+                c.source_identity AS record_identity,
+                r.identity AS call_identity,
+                r.final_step,
+                r.result_key,
+                r.created_at
+            FROM responses AS r
+            JOIN calls AS c
+                ON c.identity = r.identity
+            LEFT JOIN exports AS e
+                ON e.response_identity = r.identity
+            WHERE r.status = 'success'
+              AND e.response_identity IS NULL
+            ORDER BY r.created_at ASC
             LIMIT ?
             """,
             (limit,),
@@ -110,20 +125,24 @@ def pending_exports(*, limit: int = 50) -> list[dict[str, Any]]:
 
 
 def pending_export_for_source(source_identity: str) -> dict[str, Any] | None:
-    """Return one unfinished export row for a source document, if any.
-
-    Enqueue code can use this as the guard against starting a new run while
-    an earlier completed run is still waiting to be written back.
-    """
-
     with connect() as conn:
         row = conn.execute(
             """
-            SELECT *
-            FROM exports
-            WHERE source_identity = ?
-              AND exported_at IS NULL
-            ORDER BY created_at ASC, identity ASC
+            SELECT
+                c.source_identity AS record_identity,
+                r.identity AS call_identity,
+                r.final_step,
+                r.result_key,
+                r.created_at
+            FROM responses AS r
+            JOIN calls AS c
+                ON c.identity = r.identity
+            LEFT JOIN exports AS e
+                ON e.response_identity = r.identity
+            WHERE c.source_identity = ?
+              AND r.status = 'success'
+              AND e.response_identity IS NULL
+            ORDER BY r.created_at ASC, r.identity ASC
             LIMIT 1
             """,
             (source_identity,),
@@ -131,14 +150,12 @@ def pending_export_for_source(source_identity: str) -> dict[str, Any] | None:
     return _row_dict(row) if row is not None else None
 
 
+def recent_results(*, limit: int = 30) -> list[dict[str, Any]]:
+    return recent_responses(limit=limit)
+
+
 def pending_work(*, limit: int = 50) -> list[dict[str, Any]]:
-    """Legacy CLI name.
-
-    Scrivener no longer tracks pending/running workflow state.  The nearest
-    useful inspection surface is failed ledgered steps plus pending exports.
-    """
-
-    failed = recent_steps(limit=limit, statuses=("failed",))
+    failed = recent_responses(limit=limit, statuses=("failure",))
     if len(failed) >= limit:
         return failed[:limit]
     exports = pending_exports(limit=limit - len(failed))
@@ -147,48 +164,37 @@ def pending_work(*, limit: int = 50) -> list[dict[str, Any]]:
     return failed + exports
 
 
-def recent_results(*, limit: int = 30) -> list[dict[str, Any]]:
-    """Legacy CLI name.
-
-    The results table was intentionally removed.  Exports now point directly at
-    the terminal step result, so recent exports are the result inspection view.
-    """
-
-    return recent_exports(limit=limit)
-
-
 def show_call(identity: str) -> dict[str, Any]:
     with connect() as conn:
         call_row = conn.execute("SELECT * FROM calls WHERE identity = ?", (identity,)).fetchone()
         if call_row is None:
             raise KeyError(f"call not found: {identity}")
-        step_rows = conn.execute(
-            "SELECT * FROM steps WHERE identity = ? ORDER BY step_number ASC",
+        response_row = conn.execute("SELECT * FROM responses WHERE identity = ?", (identity,)).fetchone()
+        export_rows = conn.execute(
+            "SELECT * FROM exports WHERE response_identity = ? ORDER BY exported_at ASC, export_id ASC",
             (identity,),
         ).fetchall()
-        export_row = conn.execute("SELECT * FROM exports WHERE identity = ?", (identity,)).fetchone()
 
     return {
         "call": _row_dict(call_row),
         "source": _safe_json(call_row["source_json"]),
-        "steps": [_row_dict(row) for row in step_rows],
-        "export": _row_dict(export_row) if export_row is not None else None,
+        "response": _row_dict(response_row) if response_row is not None else None,
+        "exports": [_row_dict(row) for row in export_rows],
     }
 
 
-def show_step(identity: str, step_number: int) -> dict[str, Any]:
+def show_response(identity: str) -> dict[str, Any]:
     with connect() as conn:
         row = conn.execute(
             """
             SELECT *
-            FROM steps
+            FROM responses
             WHERE identity = ?
-              AND step_number = ?
             """,
-            (identity, step_number),
+            (identity,),
         ).fetchone()
         if row is None:
-            raise KeyError(f"step not found: {identity} step {step_number}")
+            raise KeyError(f"response not found: {identity}")
     data = _row_dict(row)
     data["raw"] = _safe_json(data.get("raw_json"))
     return data
@@ -222,8 +228,8 @@ __all__ = [
     "recent_calls",
     "recent_exports",
     "recent_results",
-    "recent_steps",
+    "recent_responses",
     "show_call",
-    "show_step",
+    "show_response",
     "table_counts",
 ]

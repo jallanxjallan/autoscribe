@@ -8,10 +8,11 @@ CALL_COLUMNS = (
     "created_at",
 )
 
-STEP_COLUMNS = (
+RESPONSE_COLUMNS = (
     "identity",
-    "step_number",
+    "final_step",
     "result_key",
+    "result_kind",
     "status",
     "content",
     "fail_message",
@@ -20,26 +21,20 @@ STEP_COLUMNS = (
 )
 
 EXPORT_COLUMNS = (
-    "identity",
-    "source_identity",
-    "final_step",
-    "result_key",
+    "response_identity",
+    "destination",
+    "export_mode",
+    "target_slug",
+    "target_path",
     "exported_at",
     "export_message",
+    "consumer_json",
     "created_at",
 )
 
 INSERT_CALL_SQL = insert_sql("calls", CALL_COLUMNS)
-INSERT_STEP_SQL = insert_sql("steps", STEP_COLUMNS)
+INSERT_RESPONSE_SQL = insert_sql("responses", RESPONSE_COLUMNS)
 INSERT_EXPORT_SQL = insert_sql("exports", EXPORT_COLUMNS)
-
-CONFIRM_EXPORT_SQL = """
-    UPDATE exports
-    SET
-        exported_at = ?,
-        export_message = ?
-    WHERE identity = ?
-"""
 
 SELECT_CALL_SQL = f"""
     SELECT {", ".join(CALL_COLUMNS)}
@@ -61,39 +56,88 @@ SELECT_CALLS_SQL = f"""
     ORDER BY created_at ASC
 """
 
-SELECT_STEP_BY_IDENTITY_NUMBER_SQL = f"""
-    SELECT {", ".join(STEP_COLUMNS)}
-    FROM steps
-    WHERE identity = ?
-      AND step_number = ?
-"""
-
-SELECT_STEPS_FOR_IDENTITY_SQL = f"""
-    SELECT {", ".join(STEP_COLUMNS)}
-    FROM steps
-    WHERE identity = ?
-    ORDER BY step_number ASC
-"""
-
-SELECT_EXPORT_BY_IDENTITY_SQL = f"""
-    SELECT {", ".join(EXPORT_COLUMNS)}
-    FROM exports
+SELECT_RESPONSE_SQL = f"""
+    SELECT {", ".join(RESPONSE_COLUMNS)}
+    FROM responses
     WHERE identity = ?
 """
 
-SELECT_PENDING_EXPORTS_SQL = f"""
-    SELECT {", ".join(EXPORT_COLUMNS)}
-    FROM exports
-    WHERE exported_at IS NULL
-    ORDER BY created_at ASC, identity ASC
+SELECT_RESPONSES_SQL = f"""
+    SELECT {", ".join(RESPONSE_COLUMNS)}
+    FROM responses
+    ORDER BY created_at ASC
 """
 
-SELECT_PENDING_EXPORT_BY_SOURCE_IDENTITY_SQL = f"""
-    SELECT {", ".join(EXPORT_COLUMNS)}
+SELECT_EXPORT_BY_ID_SQL = """
+    SELECT
+        export_id,
+        response_identity,
+        destination,
+        export_mode,
+        target_slug,
+        target_path,
+        exported_at,
+        export_message,
+        consumer_json,
+        created_at
     FROM exports
-    WHERE source_identity = ?
-      AND exported_at IS NULL
-    ORDER BY created_at ASC, identity ASC
+    WHERE export_id = ?
+"""
+
+SELECT_EXPORTS_FOR_RESPONSE_SQL = """
+    SELECT
+        export_id,
+        response_identity,
+        destination,
+        export_mode,
+        target_slug,
+        target_path,
+        exported_at,
+        export_message,
+        consumer_json,
+        created_at
+    FROM exports
+    WHERE response_identity = ?
+    ORDER BY exported_at ASC, export_id ASC
+"""
+
+SELECT_PENDING_EXPORTS_SQL = """
+    SELECT
+        c.source_identity AS record_identity,
+        r.identity AS call_identity,
+        r.final_step AS final_step,
+        r.result_key AS result_key,
+        r.content AS content,
+        r.raw_json AS raw_json,
+        r.created_at AS created_at
+    FROM responses AS r
+    JOIN calls AS c
+        ON c.identity = r.identity
+    LEFT JOIN exports AS e
+        ON e.response_identity = r.identity
+    WHERE r.status = 'success'
+      AND e.response_identity IS NULL
+    ORDER BY c.source_identity ASC, r.identity ASC
+"""
+
+SELECT_PENDING_EXPORT_BY_SOURCE_IDENTITY_SQL = """
+    SELECT
+        c.source_identity AS record_identity,
+        r.identity AS call_identity,
+        r.final_step AS final_step,
+        r.result_key AS result_key,
+        r.content AS content,
+        r.raw_json AS raw_json,
+        r.created_at AS created_at
+    FROM responses AS r
+    JOIN calls AS c
+        ON c.identity = r.identity
+    LEFT JOIN exports AS e
+        ON e.response_identity = r.identity
+    WHERE r.status = 'success'
+      AND e.response_identity IS NULL
+      AND c.source_identity = ?
+    ORDER BY r.created_at ASC, r.identity ASC
     LIMIT 1
 """
 
@@ -103,38 +147,38 @@ SELECT_EXTRACT_RESULT_BY_CALL_IDENTITY_SQL = """
         c.source_identity AS source_identity,
         c.source_json AS source_json,
         c.created_at AS call_created_at,
-        e.final_step AS step_number,
-        e.result_key AS result_key,
-        s.content AS content,
-        s.raw_json AS raw_json,
-        s.created_at AS step_created_at,
+        r.final_step AS step_number,
+        r.result_key AS result_key,
+        r.content AS content,
+        r.raw_json AS raw_json,
+        r.created_at AS step_created_at,
         e.created_at AS export_created_at,
         e.exported_at AS exported_at,
         e.export_message AS export_message
     FROM calls AS c
-    JOIN exports AS e
-        ON e.identity = c.identity
-    JOIN steps AS s
-        ON s.identity = e.identity
-       AND s.step_number = e.final_step
+    JOIN responses AS r
+        ON r.identity = c.identity
+    LEFT JOIN exports AS e
+        ON e.response_identity = r.identity
     WHERE c.identity = ?
+    ORDER BY e.exported_at DESC, e.export_id DESC
+    LIMIT 1
 """
-
 
 __all__ = [
     "CALL_COLUMNS",
-    "STEP_COLUMNS",
+    "RESPONSE_COLUMNS",
     "EXPORT_COLUMNS",
     "INSERT_CALL_SQL",
-    "INSERT_STEP_SQL",
+    "INSERT_RESPONSE_SQL",
     "INSERT_EXPORT_SQL",
-    "CONFIRM_EXPORT_SQL",
     "SELECT_CALL_SQL",
     "SELECT_CALL_BY_SOURCE_IDENTITY_SQL",
     "SELECT_CALLS_SQL",
-    "SELECT_STEP_BY_IDENTITY_NUMBER_SQL",
-    "SELECT_STEPS_FOR_IDENTITY_SQL",
-    "SELECT_EXPORT_BY_IDENTITY_SQL",
+    "SELECT_RESPONSE_SQL",
+    "SELECT_RESPONSES_SQL",
+    "SELECT_EXPORT_BY_ID_SQL",
+    "SELECT_EXPORTS_FOR_RESPONSE_SQL",
     "SELECT_PENDING_EXPORTS_SQL",
     "SELECT_PENDING_EXPORT_BY_SOURCE_IDENTITY_SQL",
     "SELECT_EXTRACT_RESULT_BY_CALL_IDENTITY_SQL",

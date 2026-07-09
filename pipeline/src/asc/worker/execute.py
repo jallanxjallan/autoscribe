@@ -178,9 +178,9 @@ def _runtime_failure(
 
 
 def _step_number(step: Step) -> str:
-    value = getattr(step, "step_number", None)
+    value = getattr(step, "ordinal", None)
     if value in (None, ""):
-        raise ValueError("step.step_number must not be empty")
+        raise ValueError("step.ordinal must not be empty")
     return str(value)
 
 

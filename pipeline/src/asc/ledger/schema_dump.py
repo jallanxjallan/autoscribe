@@ -1,5 +1,4 @@
 from dataclasses import dataclass
-from typing import Any
 
 from asc.ledger.connect import LedgerConnection, connect
 from asc.ledger.schema import ensure_ledger_schema

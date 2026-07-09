@@ -1,4 +1,4 @@
-"""Small guarded SQL primitives for Scrivener."""
+"""Small guarded SQL primitives for ledger writes."""
 
 from __future__ import annotations
 
@@ -10,8 +10,8 @@ from asc.ledger.maps import LEDGER_FIELDS
 from asc.ledger.util import execute_and_commit
 
 
-class ScrivenerWriteError(RuntimeError):
-    """Raised when SQLite rejects a Scrivener ledger write."""
+class LedgerWriteError(RuntimeError):
+    """Raised when SQLite rejects a ledger write."""
 
 
 def insert_row(
@@ -20,16 +20,16 @@ def insert_row(
     table: str,
     data: Mapping[str, Any],
 ) -> None:
-    """Insert an exact-shape data hash into a known ledger table."""
+    """Insert an exact-shape data mapping into a known ledger table."""
 
     expected = LEDGER_FIELDS.get(table)
     if expected is None:
-        raise ValueError(f"unknown scrivener ledger table: {table!r}")
+        raise ValueError(f"unknown ledger table: {table!r}")
 
     actual = tuple(data.keys())
     if actual != expected:
         raise ValueError(
-            f"scrivener row shape mismatch for {table!r}: "
+            f"ledger row shape mismatch for {table!r}: "
             f"expected {expected!r}, got {actual!r}"
         )
 
@@ -56,11 +56,8 @@ def execute_update(
             details += f" table={table!r}"
         if data is not None:
             details += f" data={dict(data)!r}"
-        message = (
-            "sqlite rejected scrivener write:"
-            f"{details} sqlite_error={str(exc)!r}"
-        )
-        raise ScrivenerWriteError(message) from exc
+        message = "sqlite rejected ledger write:" f"{details} sqlite_error={str(exc)!r}"
+        raise LedgerWriteError(message) from exc
 
 
-__all__ = ["ScrivenerWriteError", "execute_update", "insert_row"]
+__all__ = ["LedgerWriteError", "execute_update", "insert_row"]

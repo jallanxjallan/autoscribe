@@ -4,10 +4,8 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
-from asc.ledger.connect import connect
-from asc.ledger.schema import ensure_ledger_schema
+from asc.ledger.write import table_for_action, write_task
 from asc.models.process.task import ScrivenerTask
-from asc.scrivener.write import write_task, write_task_with_connection
 
 
 @dataclass(frozen=True, slots=True)
@@ -30,15 +28,12 @@ class ScrivenerExecutor:
         task_key = _required_text(task_key, "scrivener task key")
         task = ScrivenerTask.load(task_key)
         _validate_task(task)
-
-        with connect() as conn:
-            ensure_ledger_schema(conn)
-            write_task_with_connection(conn=conn, task=task)
+        write_task(task)
 
         return ScrivenerExecutionReport(
             task_key=task_key,
             action=task.action,
-            table=task.table,
+            table=table_for_action(task.action),
             data_key=task.data_key,
         )
 
@@ -61,9 +56,4 @@ def _required_text(value: object, field: str) -> str:
     return text
 
 
-__all__ = [
-    "ScrivenerExecutionReport",
-    "ScrivenerExecutor",
-    "write_task",
-    "write_task_with_connection",
-]
+__all__ = ["ScrivenerExecutionReport", "ScrivenerExecutor"]

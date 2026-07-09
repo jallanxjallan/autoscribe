@@ -169,13 +169,19 @@ def _sleep_until_next(window) -> None:
     time.sleep(sleep_seconds)
 
 
-def run_once(*, timeout: int | None = None, empty_limit: int | None = None, wait: bool = True) -> OrchestratorRunReport:
+def run_once(
+    *,
+    timeout: int | None = None,
+    empty_limit: int | None = None,
+    wait: bool = True,
+    target_keys: set[str] | None = None,
+) -> OrchestratorRunReport:
     """Inspect and advance one active call."""
 
     del timeout, empty_limit
 
     now = time.time()
-    window = active_call_window()
+    window = active_call_window(target_keys=target_keys)
     LOG.info("orchestrator operation=poll_window size=%s", len(window))
 
     visible = [call for call in window if call.score <= now]
@@ -194,7 +200,7 @@ def run_once(*, timeout: int | None = None, empty_limit: int | None = None, wait
         if not result.active:
             complete_active_call(call.key)
             LOG.info("orchestrator operation=complete call_key=%s", call.key)
-            if not active_call_window():
+            if not active_call_window(target_keys=target_keys):
                 DOWNSTREAM.stop()
             return OrchestratorRunReport(
                 claimed=True,
@@ -257,14 +263,24 @@ def run_once(*, timeout: int | None = None, empty_limit: int | None = None, wait
     return OrchestratorRunReport(claimed=False, action="sleep")
 
 
-def run_forever(*, timeout: int = DEFAULT_CLAIM_TIMEOUT_SECONDS, empty_limit: int | None = None) -> None:
+def run_forever(
+    *,
+    timeout: int = DEFAULT_CLAIM_TIMEOUT_SECONDS,
+    empty_limit: int | None = None,
+    target_keys: set[str] | None = None,
+) -> None:
     """Run the orchestrator daemon forever."""
 
     configure_logging()
     LOG.info("orchestrator daemon start timeout=%s empty_limit=%s", timeout, empty_limit)
     try:
         while True:
-            report = run_once(timeout=timeout, empty_limit=empty_limit, wait=True)
+            report = run_once(
+                timeout=timeout,
+                empty_limit=empty_limit,
+                wait=True,
+                target_keys=target_keys,
+            )
             LOG.info("orchestrator daemon report=%r", report)
     except KeyboardInterrupt:
         LOG.info("orchestrator daemon stop signal=KeyboardInterrupt")

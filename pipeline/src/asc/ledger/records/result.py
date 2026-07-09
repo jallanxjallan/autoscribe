@@ -1,8 +1,4 @@
-"""Result/export query APIs owned by asc.ledger.
-
-These functions preserve the older ``asc.scrivener.records.result`` contract
-while moving the SQL read boundary into ``asc.ledger``.
-"""
+"""Response/export query APIs owned by asc.ledger."""
 
 from collections import Counter
 from typing import Any
@@ -27,11 +23,11 @@ def require_unique_pending_export_slugs_with_connection(
     conn: LedgerConnection,
 ) -> None:
     rows = read_pending_result_export_records_with_connection(conn=conn)
-    counts = Counter(str(row["source_identity"]) for row in rows)
+    counts = Counter(str(row["record_identity"]) for row in rows)
     duplicates = sorted(source for source, count in counts.items() if count > 1)
     if duplicates:
         joined = ", ".join(duplicates)
-        raise ValueError(f"multiple pending exports for source_identity: {joined}")
+        raise ValueError(f"multiple pending exports for record_identity: {joined}")
 
 
 def read_extract_result_record_by_call_identity_with_connection(
@@ -46,26 +42,16 @@ def read_extract_result_record_by_call_identity_with_connection(
     data.setdefault("call_identity", data.get("identity"))
     data.setdefault("record_identity", data.get("source_identity"))
     data.setdefault("record_content", data.get("content"))
-    data.setdefault("result_identity", _result_identity(data.get("result_key")))
+    data.setdefault("result_identity", data.get("identity"))
     return data
 
 
 def _pending_row(row: Any) -> dict[str, Any]:
     data = _row_dict(row)
-    data["call_identity"] = data.get("identity")
-    data["record_identity"] = data.get("source_identity")
-    data["result_identity"] = _result_identity(data.get("result_key"))
+    data.setdefault("identity", data.get("call_identity"))
+    data.setdefault("source_identity", data.get("record_identity"))
+    data.setdefault("result_identity", data.get("call_identity"))
     return data
-
-
-def _result_identity(result_key: object) -> str:
-    text = str(result_key or "").strip()
-    if not text:
-        return ""
-    parts = text.split(":")
-    if len(parts) >= 2:
-        return parts[1]
-    return text
 
 
 def _row_dict(row: Any) -> dict[str, Any]:

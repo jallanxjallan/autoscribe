@@ -3,26 +3,9 @@
 from typing import Any
 
 from asc.ledger.connect import LedgerConnection
-from asc.ledger.util import execute_and_commit, timestamp_now
-
-
-_FIND_EXPORT_IDENTITY_SQL = """
-    SELECT identity
-    FROM exports
-    WHERE identity = ?
-       OR result_key = ?
-       OR result_key LIKE ?
-    ORDER BY created_at ASC, identity ASC
-    LIMIT 1
-"""
-
-_CONFIRM_EXPORT_BY_IDENTITY_SQL = """
-    UPDATE exports
-    SET
-        exported_at = ?,
-        export_message = ?
-    WHERE identity = ?
-"""
+from asc.ledger.maps import EXPORTS_TABLE
+from asc.ledger.sql import insert_row
+from asc.ledger.util import json_blob, optional_text, timestamp_now
 
 
 def insert_export_record_with_connection(
@@ -30,39 +13,41 @@ def insert_export_record_with_connection(
     conn: LedgerConnection,
     result_identity: str,
     export_message: str,
+    destination: str | None = None,
+    export_mode: str = "manual",
+    target_slug: str | None = None,
+    target_path: str | None = None,
+    consumer_data: dict[str, Any] | None = None,
 ) -> None:
-    """Mark one pending export as written back.
+    """Record an export/writeback receipt for a terminal response.
 
-    ``result_identity`` may be a call identity, a result identity, or a full
-    result key such as ``transform:<identity>:<step>``.
+    ``result_identity`` may be a call identity or a full result key such as
+    ``response:<identity>:<step>``. The response table is keyed by call identity.
     """
 
-    identity = _resolve_export_identity(conn=conn, result_identity=result_identity)
-    execute_and_commit(
-        conn,
-        _CONFIRM_EXPORT_BY_IDENTITY_SQL,
-        (int(timestamp_now()), export_message, identity),
-    )
-
-
-def _resolve_export_identity(*, conn: LedgerConnection, result_identity: str) -> str:
-    text = str(result_identity).strip()
-    if not text:
-        raise ValueError("result_identity must be non-empty")
-
-    identity = _identity_part(text)
-    like = f"%:{identity}:%"
-    row = conn.execute(_FIND_EXPORT_IDENTITY_SQL, (text, text, like)).fetchone()
-    if row is None:
-        raise ValueError(f"no export row found for result_identity: {text}")
-    return str(row["identity"])
+    now = int(timestamp_now())
+    row = {
+        "response_identity": _identity_part(result_identity),
+        "destination": optional_text(destination),
+        "export_mode": optional_text(export_mode) or "manual",
+        "target_slug": optional_text(target_slug),
+        "target_path": optional_text(target_path),
+        "exported_at": now,
+        "export_message": optional_text(export_message),
+        "consumer_json": None if consumer_data is None else json_blob(consumer_data),
+        "created_at": now,
+    }
+    insert_row(conn, table=EXPORTS_TABLE, data=row)
 
 
 def _identity_part(value: str) -> str:
-    parts = value.split(":")
+    text = str(value).strip()
+    if not text:
+        raise ValueError("result_identity must be non-empty")
+    parts = text.split(":")
     if len(parts) >= 2:
         return parts[1]
-    return value
+    return text
 
 
 __all__ = ["insert_export_record_with_connection"]

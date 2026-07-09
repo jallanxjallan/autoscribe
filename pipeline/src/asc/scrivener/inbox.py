@@ -1,9 +1,4 @@
-"""Public inbox for scrivener tasks.
-
-External packages should import only this module and call post(key). The key is
-an opaque Redis key string. No caller should know the scrivener inbox
-implementation.
-"""
+"""Public inbox for scrivener tasks."""
 
 from asc.redis.key import RedisKey
 from asc.state.queue import RedisQueue

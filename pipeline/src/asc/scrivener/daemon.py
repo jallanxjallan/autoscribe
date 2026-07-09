@@ -1,8 +1,4 @@
-"""Scrivener daemon entrypoint.
-
-``python -m asc.scrivener.daemon`` runs the production scrivener loop until
-stopped by ``asc run stop``.
-"""
+"""Scrivener daemon entrypoint."""
 
 from __future__ import annotations
 
@@ -34,7 +30,11 @@ def run_once(
 ) -> ScrivenerRunReport:
     """Claim and execute one scrivener task."""
 
-    claimed = scrivener_inbox.daemon_claim(timeout=timeout or 0, empty_limit=None) if wait else scrivener_inbox.claim()
+    claimed = (
+        scrivener_inbox.daemon_claim(timeout=timeout or 0, empty_limit=empty_limit)
+        if wait
+        else scrivener_inbox.claim()
+    )
 
     if claimed is None:
         return ScrivenerRunReport(claimed=False)
@@ -44,7 +44,6 @@ def run_once(
         raise ValueError("scrivener claimed an empty task key")
 
     LOG.info("scrivener operation=claimed task_key=%s", task_key)
-
     result = ScrivenerExecutor().execute(task_key)
 
     report = ScrivenerRunReport(
@@ -72,8 +71,6 @@ def run_forever(*, timeout: int = DEFAULT_CLAIM_TIMEOUT_SECONDS, empty_limit: in
 
 
 def main() -> None:
-    """Run the production scrivener loop."""
-
     run_forever()
 
 

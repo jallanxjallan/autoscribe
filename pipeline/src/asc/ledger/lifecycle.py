@@ -23,10 +23,10 @@ class RotateReport:
     active_path: Path
     archive_path: Path | None
     carried_calls: int
-    carried_steps: int
+    carried_responses: int
     carried_exports: int
     old_deleted_calls: int
-    old_deleted_steps: int
+    old_deleted_responses: int
     old_deleted_exports: int
 
 
@@ -68,10 +68,10 @@ def rotate_ledger(*, archive_dir: Path | None = None) -> RotateReport:
             active_path=initialized,
             archive_path=None,
             carried_calls=0,
-            carried_steps=0,
+            carried_responses=0,
             carried_exports=0,
             old_deleted_calls=0,
-            old_deleted_steps=0,
+            old_deleted_responses=0,
             old_deleted_exports=0,
         )
 
@@ -83,7 +83,7 @@ def rotate_ledger(*, archive_dir: Path | None = None) -> RotateReport:
     active_path.rename(target_archive)
     try:
         ensure_active_ledger()
-        report_counts = _carry_unfinished_rows(
+        report_counts = _carry_unexported_rows(
             archived_path=target_archive,
             new_active_path=active_path,
         )
@@ -96,7 +96,7 @@ def rotate_ledger(*, archive_dir: Path | None = None) -> RotateReport:
     return RotateReport(active_path=active_path, archive_path=target_archive, **report_counts)
 
 
-def _carry_unfinished_rows(*, archived_path: Path, new_active_path: Path) -> dict[str, int]:
+def _carry_unexported_rows(*, archived_path: Path, new_active_path: Path) -> dict[str, int]:
     old = sqlite3.connect(str(archived_path))
     new = sqlite3.connect(str(new_active_path))
     old.row_factory = sqlite3.Row
@@ -105,28 +105,28 @@ def _carry_unfinished_rows(*, archived_path: Path, new_active_path: Path) -> dic
     new.execute("PRAGMA foreign_keys = ON")
 
     try:
-        identities = _unfinished_identities(old)
+        identities = _unexported_response_identities(old)
         if not identities:
             old.commit()
             new.commit()
             return _zero_counts()
 
         carried_calls = _copy_rows(old, new, table="calls", where=f"identity IN ({_placeholders(identities)})", params=identities)
-        carried_steps = _copy_rows(old, new, table="steps", where=f"identity IN ({_placeholders(identities)})", params=identities)
-        carried_exports = _copy_rows(old, new, table="exports", where=f"identity IN ({_placeholders(identities)})", params=identities)
+        carried_responses = _copy_rows(old, new, table="responses", where=f"identity IN ({_placeholders(identities)})", params=identities)
+        carried_exports = _copy_rows(old, new, table="exports", where=f"response_identity IN ({_placeholders(identities)})", params=identities)
         new.commit()
 
-        old_deleted_exports = _delete_rows(old, table="exports", where=f"identity IN ({_placeholders(identities)})", params=identities)
-        old_deleted_steps = _delete_rows(old, table="steps", where=f"identity IN ({_placeholders(identities)})", params=identities)
+        old_deleted_exports = _delete_rows(old, table="exports", where=f"response_identity IN ({_placeholders(identities)})", params=identities)
+        old_deleted_responses = _delete_rows(old, table="responses", where=f"identity IN ({_placeholders(identities)})", params=identities)
         old_deleted_calls = _delete_rows(old, table="calls", where=f"identity IN ({_placeholders(identities)})", params=identities)
         old.commit()
 
         return {
             "carried_calls": carried_calls,
-            "carried_steps": carried_steps,
+            "carried_responses": carried_responses,
             "carried_exports": carried_exports,
             "old_deleted_calls": old_deleted_calls,
-            "old_deleted_steps": old_deleted_steps,
+            "old_deleted_responses": old_deleted_responses,
             "old_deleted_exports": old_deleted_exports,
         }
     except Exception:
@@ -138,13 +138,16 @@ def _carry_unfinished_rows(*, archived_path: Path, new_active_path: Path) -> dic
         new.close()
 
 
-def _unfinished_identities(conn: sqlite3.Connection) -> tuple[str, ...]:
+def _unexported_response_identities(conn: sqlite3.Connection) -> tuple[str, ...]:
     rows = conn.execute(
         """
-        SELECT DISTINCT identity
-        FROM exports
-        WHERE exported_at IS NULL
-        ORDER BY identity ASC
+        SELECT r.identity
+        FROM responses AS r
+        LEFT JOIN exports AS e
+            ON e.response_identity = r.identity
+        WHERE r.status = 'success'
+          AND e.response_identity IS NULL
+        ORDER BY r.identity ASC
         """
     ).fetchall()
     return tuple(str(row["identity"]) for row in rows)
@@ -156,37 +159,11 @@ def _copy_rows(old: sqlite3.Connection, new: sqlite3.Connection, *, table: str, 
         return 0
 
     columns = tuple(rows[0].keys())
-    if table == "exports" and "source_identity" not in columns:
-        # Rotation may be run once against a pre-guard ledger.  The new schema
-        # stores source_identity directly on exports, so recover it from calls
-        # while carrying unfinished export custody rows forward.
-        columns = ("identity", "source_identity", "final_step", "result_key", "exported_at", "export_message", "created_at")
-        values = [
-            (
-                row["identity"],
-                _source_identity_for_old_call(old, str(row["identity"])),
-                row["final_step"],
-                row["result_key"],
-                row["exported_at"],
-                row["export_message"],
-                row["created_at"],
-            )
-            for row in rows
-        ]
-    else:
-        values = [tuple(row[col] for col in columns) for row in rows]
-
+    values = [tuple(row[col] for col in columns) for row in rows]
     col_sql = ", ".join(columns)
     placeholders = ", ".join("?" for _ in columns)
     new.executemany(f"INSERT INTO {table} ({col_sql}) VALUES ({placeholders})", values)
     return len(rows)
-
-
-def _source_identity_for_old_call(conn: sqlite3.Connection, identity: str) -> str:
-    row = conn.execute("SELECT source_identity FROM calls WHERE identity = ?", (identity,)).fetchone()
-    if row is None:
-        raise RuntimeError(f"cannot carry export without source call row: {identity}")
-    return str(row["source_identity"])
 
 
 def _delete_rows(conn: sqlite3.Connection, *, table: str, where: str, params: tuple[str, ...]) -> int:
@@ -203,10 +180,10 @@ def _placeholders(values: tuple[str, ...]) -> str:
 def _zero_counts() -> dict[str, int]:
     return {
         "carried_calls": 0,
-        "carried_steps": 0,
+        "carried_responses": 0,
         "carried_exports": 0,
         "old_deleted_calls": 0,
-        "old_deleted_steps": 0,
+        "old_deleted_responses": 0,
         "old_deleted_exports": 0,
     }
 

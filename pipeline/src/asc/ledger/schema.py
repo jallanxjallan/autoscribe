@@ -124,8 +124,29 @@ def table_columns(conn: LedgerConnection, table_name: str) -> set[str]:
 def require_ledger_columns(conn: LedgerConnection) -> None:
     required = {
         "calls": {"identity", "source_identity", "source_json", "created_at"},
-        "steps": {"identity", "step_number", "result_key", "status", "content", "fail_message", "raw_json", "created_at"},
-        "exports": {"identity", "source_identity", "final_step", "result_key", "exported_at", "export_message", "created_at"},
+        "responses": {
+            "identity",
+            "final_step",
+            "result_key",
+            "result_kind",
+            "status",
+            "content",
+            "fail_message",
+            "raw_json",
+            "created_at",
+        },
+        "exports": {
+            "export_id",
+            "response_identity",
+            "destination",
+            "export_mode",
+            "target_slug",
+            "target_path",
+            "exported_at",
+            "export_message",
+            "consumer_json",
+            "created_at",
+        },
     }
     missing: list[str] = []
     for table_name, expected in required.items():
@@ -144,39 +165,44 @@ CALLS: ColumnSpec = {
 }
 
 
-STEPS: ColumnSpec = {
-    "identity": "TEXT NOT NULL CHECK (length(identity) = 26)",
-    "step_number": "INTEGER NOT NULL CHECK (step_number > 0)",
+RESPONSES: ColumnSpec = {
+    # Primary key is the call identity. This is deliberate: calls.identity joins
+    # directly to responses.identity.
+    "identity": "TEXT PRIMARY KEY NOT NULL UNIQUE CHECK (length(identity) = 26)",
+    "final_step": "INTEGER NOT NULL CHECK (final_step > 0)",
     "result_key": "TEXT NOT NULL",
-    "status": "TEXT NOT NULL CHECK (status IN ('completed', 'failed'))",
+    "result_kind": "TEXT NOT NULL CHECK (result_kind IN ('response', 'transform', 'retrieval', 'result', 'failure'))",
+    "status": "TEXT NOT NULL CHECK (status IN ('success', 'failure'))",
     "content": "TEXT",
     "fail_message": "TEXT",
     "raw_json": "TEXT NOT NULL",
     "created_at": "INTEGER NOT NULL",
     "__constraints__": [
-        "PRIMARY KEY(identity, step_number)",
         "FOREIGN KEY(identity) REFERENCES calls(identity) ON DELETE CASCADE",
     ],
 }
 
 
 EXPORTS: ColumnSpec = {
-    "identity": "TEXT PRIMARY KEY NOT NULL UNIQUE CHECK (length(identity) = 26)",
-    "source_identity": "TEXT NOT NULL",
-    "final_step": "INTEGER NOT NULL CHECK (final_step > 0)",
-    "result_key": "TEXT NOT NULL",
-    "exported_at": "INTEGER",
+    "export_id": "INTEGER PRIMARY KEY AUTOINCREMENT",
+    "response_identity": "TEXT NOT NULL CHECK (length(response_identity) = 26)",
+    "destination": "TEXT",
+    "export_mode": "TEXT NOT NULL DEFAULT 'manual'",
+    "target_slug": "TEXT",
+    "target_path": "TEXT",
+    "exported_at": "INTEGER NOT NULL",
     "export_message": "TEXT",
+    "consumer_json": "TEXT",
     "created_at": "INTEGER NOT NULL",
     "__constraints__": [
-        "FOREIGN KEY(identity, final_step) REFERENCES steps(identity, step_number) ON DELETE CASCADE",
+        "FOREIGN KEY(response_identity) REFERENCES responses(identity) ON DELETE CASCADE",
     ],
 }
 
 
 LEDGER_TABLES = {
     "calls": CALLS,
-    "steps": STEPS,
+    "responses": RESPONSES,
     "exports": EXPORTS,
 }
 
@@ -184,13 +210,13 @@ LEDGER_TABLES = {
 LEDGER_INDEXES = (
     "CREATE INDEX IF NOT EXISTS idx_calls_source_identity ON calls(source_identity)",
     "CREATE INDEX IF NOT EXISTS idx_calls_created_at ON calls(created_at)",
-    "CREATE INDEX IF NOT EXISTS idx_steps_identity ON steps(identity)",
-    "CREATE INDEX IF NOT EXISTS idx_steps_status ON steps(status)",
-    "CREATE INDEX IF NOT EXISTS idx_steps_created_at ON steps(created_at)",
-    "CREATE INDEX IF NOT EXISTS idx_exports_source_identity ON exports(source_identity)",
-    "CREATE INDEX IF NOT EXISTS idx_exports_source_pending ON exports(source_identity, exported_at)",
+    "CREATE INDEX IF NOT EXISTS idx_responses_status ON responses(status)",
+    "CREATE INDEX IF NOT EXISTS idx_responses_created_at ON responses(created_at)",
+    "CREATE INDEX IF NOT EXISTS idx_responses_result_key ON responses(result_key)",
+    "CREATE INDEX IF NOT EXISTS idx_exports_response_identity ON exports(response_identity)",
     "CREATE INDEX IF NOT EXISTS idx_exports_exported_at ON exports(exported_at)",
     "CREATE INDEX IF NOT EXISTS idx_exports_created_at ON exports(created_at)",
+    "CREATE INDEX IF NOT EXISTS idx_exports_target_slug ON exports(target_slug)",
 )
 
 
@@ -226,7 +252,7 @@ def reset_all_schemas(conn: LedgerConnection) -> None:
 
 __all__ = [
     "CALLS",
-    "STEPS",
+    "RESPONSES",
     "EXPORTS",
     "LEDGER_TABLES",
     "LEDGER_INDEXES",

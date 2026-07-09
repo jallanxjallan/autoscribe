@@ -9,11 +9,7 @@ SqlParams = Sequence[Any] | dict[str, Any]
 
 
 def insert_sql(table: str, columns: Sequence[str]) -> str:
-    """Render an explicit INSERT statement for ledger custody writes.
-
-    Ledger writes should fail loudly on duplicate/conflicting identities. Silent
-    INSERT OR IGNORE behavior hides custody bugs.
-    """
+    """Render an explicit INSERT statement for custody writes."""
 
     cols = ", ".join(columns)
     placeholders = ", ".join("?" for _ in columns)
@@ -115,22 +111,32 @@ def result_timestamp(result: object) -> int:
 
     from asc.core.timestamp import timestamp
 
-    if model_value(result, "completed_at") is not None:
-        return int(model_value(result, "completed_at"))
+    for name in ("completed_at", "started_at", "created_at"):
+        value = model_value(result, name)
+        if value is not None:
+            return int(value)
 
-    if model_value(result, "started_at") is not None:
-        return int(model_value(result, "started_at"))
-
-    if model_value(result, "created_at") is not None:
-        return int(model_value(result, "created_at"))
-
-    return timestamp()
+    return int(timestamp())
 
 
 def timestamp_now() -> int:
     from asc.core.timestamp import timestamp
 
     return int(timestamp())
+
+
+def optional_text(value: object) -> str | None:
+    if value is None:
+        return None
+    text = str(value).strip()
+    return text or None
+
+
+def required_text(value: object, field: str) -> str:
+    text = optional_text(value)
+    if text is None:
+        raise ValueError(f"{field} must be non-empty")
+    return text
 
 
 __all__ = [
@@ -144,6 +150,8 @@ __all__ = [
     "json_blob",
     "model_json_blob",
     "model_value",
+    "optional_text",
+    "required_text",
     "result_timestamp",
     "row_dict",
     "rows_dict",

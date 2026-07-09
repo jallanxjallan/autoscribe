@@ -1,9 +1,8 @@
 """Active-call state-machine for the orchestrator.
 
-The orchestrator no longer consumes initial call notices or outcome messages.
 The active zset points at call records; each call already has a call index built
-by enqueue. The orchestrator inspects that index and dispatches tasks according
-to the artifacts that exist.
+by enqueue. The orchestrator advances that index and posts only crucial ledger
+events to scrivener: call intake and terminal response/failure.
 """
 
 from __future__ import annotations
@@ -17,16 +16,13 @@ from asc.redis.primitives.keys import delete, exists
 from asc.scrivener import inbox as scrivener_inbox
 from asc.worker import inbox as worker_inbox
 
-from .contracts import (
-    WORKER_EXECUTE_STEP,
-)
+from .contracts import WORKER_EXECUTE_STEP
 from .errors import OrchestratorContractError
 from .handlers import call_index
 from .tasks import (
     make_scrivener_call_completed,
     make_scrivener_call_failed,
     make_scrivener_write_call,
-    make_scrivener_write_step,
     make_worker_step,
     save_task,
 )
@@ -35,6 +31,7 @@ SCRIVENER_PACKAGE = "scrivener"
 WORKER_PACKAGE = "worker"
 TASK_KIND = "task"
 FAILURE_KIND = "failure"
+SUCCESS_RESULT_KINDS = {"response", "transform", "retrieval", "result"}
 
 
 @dataclass(frozen=True, slots=True)
@@ -67,11 +64,7 @@ class TaskState:
 
 
 def handle(call_key: str | RedisKey) -> HandleResult:
-    """Inspect one active call and dispatch the next required task.
-
-    Returns an active/waiting result. Waiting means the current index slot is a
-    task whose expected success/failure artifact does not exist yet.
-    """
+    """Inspect one active call and dispatch the next required task."""
 
     call_record_key = _canonical_call_record_key(call_key)
     index = call_index.for_call_key(call_record_key)
@@ -90,6 +83,7 @@ def handle(call_key: str | RedisKey) -> HandleResult:
     raise OrchestratorContractError(
         f"call index slot 0 must be call/failure; got {slot0!r}"
     )
+
 
 def _advance_steps(index, *, call_identity: str) -> HandleResult:
     process_slot = call_index.first_process_slot(index)
@@ -184,13 +178,13 @@ def _apply_worker_success(*, index, slot: int, state: TaskState, call_identity: 
         )
 
     call_index.set_slot(index, slot, state.expected_key)
-    _post_scrivener_write_step(result_key=state.expected_key)
     return _advance_from_persisted_result(
         index=index,
         slot=slot,
         result_key=state.expected_key,
         call_identity=call_identity,
     )
+
 
 def _handle_failure_artifact(*, index, slot: int, failure_key: str) -> HandleResult:
     key = RedisKey(failure_key)
@@ -203,9 +197,9 @@ def _handle_failure_artifact(*, index, slot: int, failure_key: str) -> HandleRes
     if slot == 0:
         return HandleResult(active=False)
 
-    _post_scrivener_write_step(result_key=failure_key)
     _post_terminal_failure(result_key=failure_key)
     return HandleResult(active=False)
+
 
 def _advance_from_persisted_result(
     *,
@@ -219,9 +213,9 @@ def _advance_from_persisted_result(
     if result.kind == FAILURE_KIND:
         return _handle_failure_artifact(index=index, slot=slot, failure_key=result_key)
 
-    if result.kind not in {"response", "transform", "retrieval"}:
+    if result.kind not in SUCCESS_RESULT_KINDS:
         raise OrchestratorContractError(
-            f"step result must be response/transform/retrieval/failure; got {result_key!r}"
+            f"step result must be response/transform/retrieval/result/failure; got {result_key!r}"
         )
 
     next_step = call_index.next_step_slot(index, slot)
@@ -244,6 +238,7 @@ def _post_scrivener_write_call(*, call_key: str) -> None:
     task_key = save_task(task)
     scrivener_inbox.post(task_key)
 
+
 def _dispatch_worker_step(
     *,
     index,
@@ -261,12 +256,6 @@ def _dispatch_worker_step(
     task_key = save_task(task)
     call_index.set_slot(index, slot, task_key)
     worker_inbox.post(task_key)
-
-
-def _post_scrivener_write_step(*, result_key: str) -> None:
-    task = make_scrivener_write_step(data_key=result_key)
-    task_key = save_task(task)
-    scrivener_inbox.post(task_key)
 
 
 def _post_terminal_success(*, result_key: str) -> None:
@@ -305,6 +294,7 @@ def _truthy(value: object) -> bool:
 def _falsey(value: object) -> bool:
     text = str(value or "").strip().lower()
     return text in {"0", "false", "no", "n", "off"}
+
 
 def _load_task(task_key: str) -> TaskState:
     key = RedisKey(task_key)

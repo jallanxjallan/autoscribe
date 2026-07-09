@@ -1,7 +1,7 @@
-"""Ledger persistence package.
+"""SQLite ledger interface for AutoScribe custody records.
 
-Ledger owns the SQLite schema, connection helpers, and record read/write
-functions. Scrivener is one writer client of this package.
+Ledger owns the database schema, SQL, and Python-object-to-row conversion.
+Scrivener is only one writer client of this package.
 """
 
 __all__: list[str] = []

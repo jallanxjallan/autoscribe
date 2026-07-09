@@ -7,10 +7,7 @@ from asc.core.config import config
 
 @runtime_checkable
 class LedgerConnectionProtocol(Protocol):
-    """Structural contract for objects usable as ledger connections.
-
-    This stays as a typing/interface concept only.  Do not instantiate it.
-    """
+    """Structural contract for objects usable as ledger connections."""
 
     row_factory: Any
 
@@ -25,13 +22,7 @@ class LedgerConnectionProtocol(Protocol):
 
 
 class LedgerConnection:
-    """Concrete ledger connection factory.
-
-    This class exists so callers may write ``LedgerConnection()`` without
-    confusing a typing Protocol with a runtime constructor.  It returns the
-    configured SQLite ledger connection for now.  Future database-specific
-    connection classes can follow the same pattern.
-    """
+    """Concrete ledger connection factory."""
 
     def __new__(cls) -> sqlite3.Connection:
         return connect()

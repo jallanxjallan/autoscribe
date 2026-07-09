@@ -47,7 +47,7 @@ def make_step_record(
         **plan.step_definition(step_number),
         **plan.step_args(step_number),
         "identity": str(plan.identity),
-        "step_number": str(step_number),
+        "ordinal": str(step_number),
         "engine": plan.step_engine(step_number),
     }
 

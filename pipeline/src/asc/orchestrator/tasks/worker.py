@@ -61,8 +61,8 @@ def _worker_failure_key(*, step_key: str, data_key: str) -> str:
 
 
 def _step_suffix(*, step_key: str, step: Step) -> str:
-    if step.number not in (None, ""):
-        return str(step.number)
+    if step.ordinal not in (None, ""):
+        return str(step.ordinal)
 
     suffix = RedisKey(step_key).suffix
     if not suffix:
