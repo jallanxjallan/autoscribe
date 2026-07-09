@@ -73,7 +73,7 @@ def make_call(*, content: Any, step: Any, call: Any) -> Response | ExternalFailu
     except Exception as exc:
         return ExternalFailure(
             identity=call.identity,
-            suffix=step.step_number,
+            suffix=step.ordinal,
             content=str(exc),
             failure_reason=type(exc).__name__,
             raw_json={
@@ -89,7 +89,7 @@ def make_call(*, content: Any, step: Any, call: Any) -> Response | ExternalFailu
     raw_json = result.model_dump(mode="json")
     return Response(
         identity=call.identity,
-        suffix=step.step_number,
+        suffix=step.ordinal,
         content=result.output_text,
         raw_json={
             "engine": ENGINE,

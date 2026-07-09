@@ -1,7 +1,9 @@
-import json
-from typing import Any, ClassVar, TypeVar
+from __future__ import annotations
 
-from pydantic import BaseModel
+import json
+from typing import Any, ClassVar, Self, TypeVar
+
+from pydantic import BaseModel, model_validator
 
 from asc.redis.key import RedisKey
 
@@ -11,9 +13,29 @@ _UNSET = object()
 
 
 class RedisModel(BaseModel):
+    """Base class for self-addressed Redis hash records.
+
+    A RedisModel is persisted data. It must resolve to a three-segment Redis key:
+
+        kind:identity:component
+        kind:identity:ordinal
+
+    ``component`` is a static class-level key segment such as ``record`` or
+    ``index``. ``ordinal`` is an instance-level ordered key segment such as a
+    step/result number. A model must use exactly one of them.
+    """
+
     kind: ClassVar[str]
-    suffix: ClassVar[str | int | None] = None
+    component: ClassVar[str | int | None] = None
+
     identity: str
+
+    @model_validator(mode="after")
+    def validate_redis_key_contract(self) -> Self:
+        # Force the key contract to be checked at model construction/load time,
+        # not later when save() happens to be called.
+        self.key_segment
+        return self
 
     @classmethod
     def redis_key_from_raw(cls, value: str | RedisKey) -> RedisKey:
@@ -26,14 +48,37 @@ class RedisModel(BaseModel):
         cls,
         identity: str,
         *,
-        kind: str | None = None,
-        suffix: str | int | None | object = _UNSET,
+        component: str | int | None | object = _UNSET,
+        ordinal: str | int | None | object = _UNSET,
     ) -> RedisKey:
         return RedisKey.from_parts(
-            cls.kind if kind is None else kind,
+            cls.kind,
             identity,
-            cls.suffix if suffix is _UNSET else suffix,
+            cls._resolve_key_segment(component=component, ordinal=ordinal),
         )
+
+    @classmethod
+    def _resolve_key_segment(
+        cls,
+        *,
+        component: str | int | None | object = _UNSET,
+        ordinal: str | int | None | object = _UNSET,
+    ) -> str | int:
+        if component is not _UNSET and ordinal is not _UNSET:
+            raise ValueError(
+                f"{cls.__name__} key requires either component or ordinal, not both"
+            )
+
+        if component is not _UNSET:
+            return _validated_key_segment(component, "component", cls.__name__)
+
+        if ordinal is not _UNSET:
+            return _validated_key_segment(ordinal, "ordinal", cls.__name__)
+
+        if cls.component is not None:
+            return _validated_key_segment(cls.component, "component", cls.__name__)
+
+        raise ValueError(f"{cls.__name__} key requires component or ordinal")
 
     @classmethod
     def load(cls: type[T], key: str | RedisKey) -> T:
@@ -48,8 +93,28 @@ class RedisModel(BaseModel):
         return cls.model_validate(data)
 
     @property
+    def key_segment(self) -> str | int:
+        component = self.__class__.component
+        ordinal = getattr(self, "ordinal", None)
+
+        if component is not None and ordinal is not None:
+            raise ValueError(
+                f"{self.__class__.__name__} defines both component and ordinal"
+            )
+
+        if component is None and ordinal is None:
+            raise ValueError(
+                f"{self.__class__.__name__} must define component or ordinal"
+            )
+
+        if ordinal is not None:
+            return _validated_key_segment(ordinal, "ordinal", self.__class__.__name__)
+
+        return _validated_key_segment(component, "component", self.__class__.__name__)
+
+    @property
     def redis_key(self) -> RedisKey:
-        return self.__class__.key_for_identity(self.identity)
+        return RedisKey.from_parts(self.kind, self.identity, self.key_segment)
 
     @property
     def raw_key(self) -> str:
@@ -79,47 +144,20 @@ class RedisModel(BaseModel):
             for field_name, value in dumped.items()
         }
 
-    def save(
-        self,
-        key: str | RedisKey | None = None,
-        *,
-        kind: str | None = None,
-        identity: str | None = None,
-        suffix: str | int | None | object = _UNSET,
-        ttl: int | None = None,
-    ) -> str:
-        if key is not None and (
-            kind is not None or identity is not None or suffix is not _UNSET
-        ):
-            raise ValueError("save() accepts either a raw key or key parts, not both")
-
+    def save(self, *, ttl: int | None = None) -> str:
         if ttl is not None and ttl < 1:
             raise ValueError("save() ttl must be a positive integer")
 
-        redis_key = (
-            self.__class__.key_for_identity(
-                self.identity if identity is None else identity,
-                kind=kind,
-                suffix=suffix,
-            )
-            if key is None
-            else self.__class__.redis_key_from_raw(key)
-        )
+        redis_key = self.redis_key
         redis_key.hset(mapping=self.dump_json())
+
         if ttl is not None:
             redis_key.expire(ttl)
+
         return redis_key.raw_key
 
-    def overwrite(
-        self,
-        key: str | RedisKey | None = None,
-        *,
-        kind: str | None = None,
-        identity: str | None = None,
-        suffix: str | int | None | object = _UNSET,
-        ttl: int | None = None,
-    ) -> str:
-        return self.save(key, kind=kind, identity=identity, suffix=suffix, ttl=ttl)
+    def overwrite(self, *, ttl: int | None = None) -> str:
+        return self.save(ttl=ttl)
 
     def exists(self) -> bool:
         return self.redis_key.exists()
@@ -137,6 +175,20 @@ class RedisModel(BaseModel):
         if seconds < 1:
             raise ValueError("expire() requires positive int seconds")
         return self.redis_key.expire(seconds)
+
+
+def _validated_key_segment(value: object, label: str, class_name: str) -> str | int:
+    if value is None:
+        raise ValueError(f"{class_name} {label} must not be None")
+
+    if isinstance(value, int):
+        return value
+
+    text = str(value).strip()
+    if not text:
+        raise ValueError(f"{class_name} {label} must not be empty")
+
+    return text
 
 
 __all__ = ["RedisModel"]

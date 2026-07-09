@@ -2,11 +2,18 @@ from __future__ import annotations
 
 from typing import Any, ClassVar, Self
 
-from pydantic import ConfigDict, Field, field_serializer, field_validator
+from pydantic import (
+    AliasChoices,
+    ConfigDict,
+    Field,
+    field_serializer,
+    field_validator,
+)
 
 from asc.core.timestamp import timestamp
 from asc.models.helpers.plain import redis_key_segment_text
 from asc.redis.key import RedisKey
+from asc.redis.message_base import RedisMessage
 from asc.redis.model_base import RedisModel
 
 
@@ -18,51 +25,49 @@ class Result(RedisModel):
     kind: ClassVar[str] = "result"
 
     identity: str
-    result_suffix: str = Field(alias="suffix")
+    ordinal: int = Field(
+        validation_alias=AliasChoices("ordinal", "suffix", "result_suffix", "step_number")
+    )
     content: str
     raw_json: Any = Field(default_factory=dict)
     created_at: int = Field(default_factory=timestamp)
 
     @classmethod
-    def output_key_for(cls, *, identity: object, suffix: object) -> str:
+    def output_key_for(
+        cls,
+        *,
+        identity: object,
+        ordinal: object | None = None,
+        suffix: object | None = None,
+    ) -> str:
         return RedisKey(
             kind=cls.kind,
             identity=_identity(identity),
-            suffix=_step_suffix(suffix),
+            suffix=_required_ordinal(_coalesced_ordinal(ordinal=ordinal, suffix=suffix)),
         ).raw_key
 
     @property
-    def redis_key(self) -> RedisKey:
-        return RedisKey(
-            kind=self.kind,
-            identity=_identity(self.identity),
-            suffix=_step_suffix(self.result_suffix),
-        )
-
-    @property
-    def raw_key(self) -> str:
-        return self.redis_key.raw_key
-
-    def save(self) -> str:  # type: ignore[override]
-        return super().save(self.redis_key)
+    def result_suffix(self) -> str:
+        """Compatibility alias while older result consumers are migrated."""
+        return str(self.ordinal)
 
     @field_validator("identity", mode="before")
     @classmethod
     def validate_identity(cls, value: object) -> str:
         return _identity(value)
 
-    @field_validator("result_suffix", mode="before")
+    @field_validator("ordinal", mode="before")
     @classmethod
-    def validate_result_suffix(cls, value: object) -> str:
-        return _step_suffix(value)
+    def validate_ordinal(cls, value: object) -> int:
+        return _required_ordinal(value)
 
     @field_validator("content", mode="before")
     @classmethod
     def validate_content(cls, value: object) -> str:
         return "" if value is None else str(value)
 
-    @field_serializer("created_at")
-    def serialize_created_at(self, value: int) -> str:
+    @field_serializer("created_at", "ordinal")
+    def serialize_ints(self, value: int) -> str:
         return str(value)
 
 
@@ -86,7 +91,10 @@ class Failure(RedisModel):
     kind: ClassVar[str] = "failure"
 
     identity: str
-    result_suffix: str | None = Field(default=None, alias="suffix")
+    ordinal: int | None = Field(
+        default=None,
+        validation_alias=AliasChoices("ordinal", "suffix", "result_suffix", "step_number"),
+    )
     failure_type: str
     content: str
     failure_reason: str
@@ -123,9 +131,10 @@ class Failure(RedisModel):
         failure_reason: str,
         raw_json: Any,
     ) -> ExternalFailure:
+        ordinal = _step_ordinal(step)
         return ExternalFailure(
             identity=RedisKey(getattr(task, "data_key")).identity,
-            suffix=getattr(step, "step_number"),
+            ordinal=ordinal,
             content=content,
             failure_reason=failure_reason,
             raw_json={
@@ -133,7 +142,8 @@ class Failure(RedisModel):
                 "task_identity": getattr(task, "identity", None),
                 "data_key": getattr(task, "data_key", None),
                 "step_key": getattr(task, "step_key", None),
-                "step_number": getattr(step, "step_number", None),
+                "ordinal": ordinal,
+                "step_number": ordinal,
                 "executor": getattr(step, "executor", None) or getattr(step, "engine", None),
                 "action": getattr(step, "action", None),
                 "provider": raw_json,
@@ -159,37 +169,40 @@ class Failure(RedisModel):
         )
 
     @classmethod
-    def output_key_for(cls, *, identity: object, suffix: object | None = None) -> str:
+    def output_key_for(
+        cls,
+        *,
+        identity: object,
+        ordinal: object | None = None,
+        suffix: object | None = None,
+    ) -> str:
+        supplied_ordinal = _coalesced_ordinal(ordinal=ordinal, suffix=suffix)
+
+        if supplied_ordinal is None and cls.component is not None:
+            return RedisKey.from_parts(cls.kind, _identity(identity), cls.component).raw_key
+
         return RedisKey(
             kind=cls.kind,
             identity=_identity(identity),
-            suffix=_optional_suffix(suffix),
+            suffix=_required_ordinal(supplied_ordinal),
         ).raw_key
 
     @property
-    def redis_key(self) -> RedisKey:
-        return RedisKey(
-            kind=self.kind,
-            identity=_identity(self.identity),
-            suffix=_optional_suffix(self.result_suffix),
-        )
-
-    @property
-    def raw_key(self) -> str:
-        return self.redis_key.raw_key
-
-    def save(self) -> str:  # type: ignore[override]
-        return super().save(self.redis_key)
+    def result_suffix(self) -> str | None:
+        """Compatibility alias while older failure consumers are migrated."""
+        return None if self.ordinal is None else str(self.ordinal)
 
     @field_validator("identity", mode="before")
     @classmethod
     def validate_identity(cls, value: object) -> str:
         return _identity(value)
 
-    @field_validator("result_suffix", mode="before")
+    @field_validator("ordinal", mode="before")
     @classmethod
-    def validate_failure_suffix(cls, value: object | None) -> str | None:
-        return _optional_suffix(value)
+    def validate_ordinal(cls, value: object | None) -> int | None:
+        if value in (None, ""):
+            return None
+        return _required_ordinal(value)
 
     @field_validator("failure_type", "content", "failure_reason", "boundary", mode="before")
     @classmethod
@@ -202,8 +215,14 @@ class Failure(RedisModel):
     def serialize_created_at(self, value: int) -> str:
         return str(value)
 
+    @field_serializer("ordinal")
+    def serialize_ordinal(self, value: int | None) -> str:
+        return "" if value is None else str(value)
+
 
 class InternalFailure(Failure):
+    component: ClassVar[str] = "internal"
+
     failure_type: str = "internal"
 
     @classmethod
@@ -234,7 +253,6 @@ class InternalFailure(Failure):
 
         return cls(
             identity=identity,
-            suffix=context.get("suffix"),
             content=str(exc),
             failure_reason=type(exc).__name__,
             raw_json=raw_json,
@@ -246,7 +264,9 @@ class ExternalFailure(Failure):
     failure_type: str = "external"
 
 
-class Committed(RedisModel):
+class Committed(RedisMessage):
+    """Transient scrivener completion message, not a persisted Redis hash model."""
+
     model_config = ConfigDict(extra="allow")
 
     kind: ClassVar[str] = "committed"
@@ -289,22 +309,29 @@ def _identity(value: object) -> str:
     return redis_key_segment_text(value, "identity")
 
 
-def _step_suffix(value: object) -> str:
+def _coalesced_ordinal(*, ordinal: object | None, suffix: object | None) -> object | None:
+    if ordinal not in (None, "") and suffix not in (None, ""):
+        raise ValueError("pass either ordinal or suffix, not both")
+    return ordinal if ordinal not in (None, "") else suffix
+
+
+def _required_ordinal(value: object) -> int:
     text = "" if value is None else str(value).strip()
     if not text:
-        raise ValueError("result suffix must not be empty")
+        raise ValueError("ordinal must not be empty")
 
     number = int(text)
     if number < 1:
-        raise ValueError(f"result suffix must be >= 1: {number}")
+        raise ValueError(f"ordinal must be >= 1: {number}")
 
-    return str(number)
+    return number
 
 
-def _optional_suffix(value: object | None) -> str | None:
+def _step_ordinal(step: Any) -> int:
+    value = getattr(step, "ordinal", None)
     if value in (None, ""):
-        return None
-    return _step_suffix(value)
+        value = getattr(step, "step_number", None)
+    return _required_ordinal(value)
 
 
 __all__ = [

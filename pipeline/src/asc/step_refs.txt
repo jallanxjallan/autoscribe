@@ -1,0 +1,171 @@
+autoscribe_ordinal_refactor_checklist.md:28:Keep `step_number` in the SQLite ledger/reporting layer for now. This pass is about Redis model addressing and runtime contracts, not ledger schema migration.
+autoscribe_ordinal_refactor_checklist.md:92:rg -n "Step\.suffix|model_post_init|step_number|result_suffix|Field\(alias=\"suffix\"\)|Step\(RedisMessage|suffix: ClassVar|\.number\b|\.ordinal\b|RESULT_KIND_BY_ENGINE" asc
+autoscribe_ordinal_refactor_checklist.md:98:rg -n "step_number|result_suffix|suffix=|step\.number|step\.ordinal|Response\(|Transform\(|Retrieval\(|Failure\(|Result\(" /home/jeremy/AutoScribe/extensions
+autoscribe_ordinal_refactor_checklist.md:176:suffix: ClassVar[str] = ""
+autoscribe_ordinal_refactor_checklist.md:177:def model_post_init(...): ...
+autoscribe_ordinal_refactor_checklist.md:178:step_number: int
+autoscribe_ordinal_refactor_checklist.md:192:    return self.ordinal
+autoscribe_ordinal_refactor_checklist.md:227:        return self.ordinal
+autoscribe_ordinal_refactor_checklist.md:230:No `suffix` ClassVar. No `model_post_init`. No `step_number` field.
+autoscribe_ordinal_refactor_checklist.md:236:Goal: materialized Step records store `ordinal`, not `step_number`.
+autoscribe_ordinal_refactor_checklist.md:243:"step_number": number,
+autoscribe_ordinal_refactor_checklist.md:264:- Optional naming cleanup only: `_step_number()` can stay if it describes uploaded plan numbering. Or rename to `_step_ordinal()` if you want the ingest terminology fully aligned.
+autoscribe_ordinal_refactor_checklist.md:280:    ordinal = str(step.ordinal)
+autoscribe_ordinal_refactor_checklist.md:303:- Do not add fallback to `step_number`.
+autoscribe_ordinal_refactor_checklist.md:331:Goal: worker execution should validate artifact ordinals, not `result_suffix` or `step_number`.
+autoscribe_ordinal_refactor_checklist.md:335:- Replace `_step_number(step)` with `_step_ordinal(step)`:
+autoscribe_ordinal_refactor_checklist.md:341:        raise ValueError("step.ordinal must not be empty")
+autoscribe_ordinal_refactor_checklist.md:348:step.step_number
+autoscribe_ordinal_refactor_checklist.md:349:artifact.result_suffix
+autoscribe_ordinal_refactor_checklist.md:350:getattr(artifact, "result_suffix", ...)
+autoscribe_ordinal_refactor_checklist.md:356:step.ordinal
+autoscribe_ordinal_refactor_checklist.md:357:artifact.ordinal
+autoscribe_ordinal_refactor_checklist.md:363:"ordinal": step.ordinal,
+autoscribe_ordinal_refactor_checklist.md:369:"suffix": step_number,
+autoscribe_ordinal_refactor_checklist.md:375:"step_ordinal": step.ordinal,
+autoscribe_ordinal_refactor_checklist.md:378:rather than `step_number`. If you want to preserve human readability, it is okay to include both, but do not make `step_number` a runtime contract.
+autoscribe_ordinal_refactor_checklist.md:384:artifact.ordinal == expected.suffix
+autoscribe_ordinal_refactor_checklist.md:394:Goal: remove the custom `result_suffix` workaround once the base class understands `ordinal`.
+autoscribe_ordinal_refactor_checklist.md:401:result_suffix: str = Field(alias="suffix")
+autoscribe_ordinal_refactor_checklist.md:420:- Rename `validate_result_suffix()` to validate `ordinal`.
+autoscribe_ordinal_refactor_checklist.md:427:result_suffix: str | None = Field(default=None, alias="suffix")
+autoscribe_ordinal_refactor_checklist.md:441:suffix=getattr(step, "step_number")
+autoscribe_ordinal_refactor_checklist.md:482:rg -n "step_number|result_suffix|suffix=|step\.number|step\.ordinal|Response\(|Transform\(|Retrieval\(|Failure\(|Result\(" /home/jeremy/AutoScribe/extensions
+autoscribe_ordinal_refactor_checklist.md:488:Response(identity=call.identity, suffix=step.step_number, ...)
+autoscribe_ordinal_refactor_checklist.md:494:Response(identity=call.identity, result_suffix=..., ...)
+autoscribe_ordinal_refactor_checklist.md:500:Response(identity=call.identity, ordinal=step.ordinal, ...)
+autoscribe_ordinal_refactor_checklist.md:513:- SQLite schema fields called `step_number`.
+autoscribe_ordinal_refactor_checklist.md:514:- Exporter queries that join on `steps.step_number`.
+autoscribe_ordinal_refactor_checklist.md:515:- CLI display commands that call the ledger field `step_number`.
+autoscribe_ordinal_refactor_checklist.md:517:Active ledger/scrivener code may still calculate ledger `step_number` from the runtime key tail. That is okay. Ledger/reporting vocabulary can stay human-facing.
+autoscribe_ordinal_refactor_checklist.md:527:rg -n "Step\.suffix|model_post_init|Step\(RedisMessage|result_suffix|Field\(alias=\"suffix\"\)|step\.step_number|getattr\(step, \"step_number\"" asc
+autoscribe_ordinal_refactor_checklist.md:535:rg -n "step_number" asc
+autoscribe_ordinal_refactor_checklist.md:543:asc/exporter/* queries that read ledger step_number
+autoscribe_ordinal_refactor_checklist.md:564:Old Redis records will contain `step_number`, not `ordinal`. Do not support both. Flush or delete the active test keys and re-upload plans.
+autoscribe_ordinal_refactor_checklist.md:625:step_number
+autoscribe_ordinal_refactor_checklist.md:646:result_suffix
+worker/execute.py:114:    expected_suffix = _step_number(step)
+worker/execute.py:115:    actual_suffix = str(getattr(artifact, "result_suffix", getattr(artifact, "suffix", ""))).strip()
+worker/execute.py:138:    if expected.identity != artifact.identity or str(expected.suffix) != str(getattr(artifact, "result_suffix", "")):
+worker/execute.py:153:    step_number = _step_number(step)
+worker/execute.py:158:            "suffix": step_number,
+worker/execute.py:169:                "step_number": step_number,
+worker/execute.py:180:def _step_number(step: Step) -> str:
+worker/execute.py:181:    value = getattr(step, "step_number", None)
+worker/execute.py:183:        raise ValueError("step.step_number must not be empty")
+cli/orchestrator/materialize.py:25:    for step_number in range(1, plan_step_count(plan) + 1):
+cli/orchestrator/materialize.py:28:            step_number=step_number,
+cli/orchestrator/materialize.py:32:        index.set_slot(step_number, step.raw_key)
+cli/orchestrator/materialize.py:41:    step_number: int,
+cli/orchestrator/materialize.py:47:        **plan.step_definition(step_number),
+cli/orchestrator/materialize.py:48:        **plan.step_args(step_number),
+cli/orchestrator/materialize.py:50:        "step_number": str(step_number),
+cli/orchestrator/materialize.py:51:        "engine": plan.step_engine(step_number),
+cli/orchestrator/materialize.py:68:def step_executor_key(plan: Any, step_number: int) -> str:
+cli/orchestrator/materialize.py:69:    return plan.step_engine(step_number).removeprefix("engines.").replace("-", "_")
+cli/orchestrator/materialize.py:72:def step_action_key(step: dict[str, Any], plan: Any, step_number: int) -> str:
+cli/orchestrator/materialize.py:78:        or step_executor_key(plan, step_number)
+cli/storage.py:249:            "step_number",
+cli/storage.py:278:def step_command(identity: str, step_number: int) -> None:
+cli/storage.py:282:        data = show_step(identity, step_number)
+cli/storage.py:294:            "step_number",
+ingest/handlers/plan.py:49:        number = _step_number(raw_step, fallback=fallback_number)
+ingest/handlers/plan.py:122:        "step_number": number,
+ingest/handlers/plan.py:143:def _step_number(raw_step: Mapping[str, Any], *, fallback: int) -> int:
+cli/orchestrator/tasks/worker.py:13:RESULT_KIND_BY_ENGINE = {
+cli/orchestrator/tasks/worker.py:42:    result_kind = RESULT_KIND_BY_ENGINE.get(engine)
+cli/orchestrator/tasks/worker.py:63:    for name in ("step_number", "number"):
+scrivener/writers/steps.py:41:    step_number = step_number_from_task(task)
+scrivener/writers/steps.py:45:        "step_number": step_number,
+scrivener/writers/steps.py:70:def step_number_from_task(task: Any) -> int:
+scrivener/writers/steps.py:73:    step_number = int(suffix)
+scrivener/writers/steps.py:74:    if step_number <= 0:
+scrivener/writers/steps.py:75:        raise ValueError(f"ledger step_number must be > 0: {step_number}")
+scrivener/writers/steps.py:76:    return step_number
+scrivener/writers/steps.py:85:    "step_number_from_task",
+scrivener/writers/exports.py:39:        "final_step": final_step_number(task),
+scrivener/writers/exports.py:55:def final_step_number(task: Any) -> int:
+scrivener/writers/exports.py:81:    "final_step_number",
+redis/model_base.py:15:    suffix: ClassVar[str | int | None] = None
+exporter/_ledger.py:9:- steps(identity, step_number, result_key, status, content, fail_message, raw_json, created_at)
+exporter/_ledger.py:101:         AND s.step_number = e.final_step
+exporter/_ledger.py:143:         AND s.step_number = e.final_step
+state/calls.py:146:    def input_key_for_step(self, step_number: int) -> str:
+state/calls.py:152:        step = _required_int(step_number, "step_number")
+state/calls.py:155:            raise ValueError("step_number must be >= 1")
+state/calls.py:173:    def insert_step_key(self, step_number: int, key: str) -> None:
+state/calls.py:180:        self.claim_slot(step_number, key)
+state/calls.py:184:        step_number: int,
+state/calls.py:192:            step_number,
+ledger/writers/steps.py:38:    step_number = int(task.task_number)
+ledger/writers/steps.py:39:    if step_number <= 0:
+ledger/writers/steps.py:40:        raise ValueError(f"ledger step_number must be > 0: {step_number}")
+ledger/writers/steps.py:44:        "step_number": step_number,
+ledger/queries.py:13:    "step_number",
+ledger/queries.py:68:      AND step_number = ?
+ledger/queries.py:75:    ORDER BY step_number ASC
+ledger/queries.py:106:        e.final_step AS step_number,
+ledger/queries.py:119:       AND s.step_number = e.final_step
+ledger/writers/exports.py:59:def final_step_number(task: Any) -> int:
+ledger/writers/exports.py:73:    "final_step_number",
+models/process/call.py:16:    suffix: ClassVar[str] = "record"
+ledger/schema.py:127:        "steps": {"identity", "step_number", "result_key", "status", "content", "fail_message", "raw_json", "created_at"},
+ledger/schema.py:149:    "step_number": "INTEGER NOT NULL CHECK (step_number > 0)",
+ledger/schema.py:157:        "PRIMARY KEY(identity, step_number)",
+ledger/schema.py:172:        "FOREIGN KEY(identity, final_step) REFERENCES steps(identity, step_number) ON DELETE CASCADE",
+ledger/views.py:17:       AND s.step_number = e.final_step
+models/process/result.py:21:    result_suffix: str = Field(alias="suffix")
+models/process/result.py:39:            suffix=_step_suffix(self.result_suffix),
+models/process/result.py:54:    @field_validator("result_suffix", mode="before")
+models/process/result.py:56:    def validate_result_suffix(cls, value: object) -> str:
+models/process/result.py:89:    result_suffix: str | None = Field(default=None, alias="suffix")
+models/process/result.py:128:            suffix=getattr(step, "step_number"),
+models/process/result.py:136:                "step_number": getattr(step, "step_number", None),
+models/process/result.py:174:            suffix=_optional_suffix(self.result_suffix),
+models/process/result.py:189:    @field_validator("result_suffix", mode="before")
+ledger/maps.py:30:        "step_number",
+ledger/write.py:97:        "step_number": key_suffix_number(data_key, "task.data_key"),
+ledger/inspect.py:30:                COUNT(s.step_number) AS steps,
+ledger/inspect.py:63:            ORDER BY created_at DESC, identity ASC, step_number ASC
+ledger/inspect.py:166:            "SELECT * FROM steps WHERE identity = ? ORDER BY step_number ASC",
+ledger/inspect.py:179:def show_step(identity: str, step_number: int) -> dict[str, Any]:
+ledger/inspect.py:186:              AND step_number = ?
+ledger/inspect.py:188:            (identity, step_number),
+ledger/inspect.py:191:            raise KeyError(f"step not found: {identity} step {step_number}")
+models/control/step.py:14:class Step(RedisMessage):
+models/control/step.py:22:        step:<plan_identity>:<step_number>
+models/control/step.py:24:    Only ``step_number`` and ``engine`` are part of the contract. Everything
+models/control/step.py:32:    suffix: ClassVar[str] = ""
+models/control/step.py:35:    step_number: int
+models/control/step.py:39:    def model_post_init(self, __context: Any) -> None:
+models/control/step.py:40:        Step.suffix = str(self.step_number)
+models/control/step.py:42:    @field_serializer("created_at", "step_number")
+models/control/plan.py:35:    suffix: ClassVar[str] = "record"
+models/control/plan.py:179:    def step_definition(self, step_number: int) -> dict[str, Any]:
+models/control/plan.py:180:        if step_number < 1:
+models/control/plan.py:181:            raise IndexError(f"step_number must be >= 1, got {step_number}")
+models/control/plan.py:183:            return dict(self.steps[step_number - 1])
+models/control/plan.py:185:            raise IndexError(f"plan {self.slug} has no step {step_number}; total_steps={self.total_steps}") from exc
+models/control/plan.py:187:    def step_args(self, step_number: int) -> dict[str, Any]:
+models/control/plan.py:188:        args = self.step_definition(step_number).get("args", {})
+models/control/plan.py:192:            raise ValueError(f"plan step {step_number} args must be an object")
+models/control/plan.py:195:    def step_engine(self, step_number: int) -> str:
+models/control/plan.py:196:        step = self.step_definition(step_number)
+models/control/plan.py:197:        args = self.step_args(step_number)
+models/control/plan.py:203:            raise ValueError(f"plan step {step_number} must provide an engine")
+orchestrator/materialize.py:25:    for step_number in range(1, plan_step_count(plan) + 1):
+orchestrator/materialize.py:28:            step_number=step_number,
+orchestrator/materialize.py:32:        index.set_slot(step_number, step.raw_key)
+orchestrator/materialize.py:41:    step_number: int,
+orchestrator/materialize.py:47:        **plan.step_definition(step_number),
+orchestrator/materialize.py:48:        **plan.step_args(step_number),
+orchestrator/materialize.py:50:        "step_number": str(step_number),
+orchestrator/materialize.py:51:        "engine": plan.step_engine(step_number),
+orchestrator/materialize.py:68:def step_executor_key(plan: Any, step_number: int) -> str:
+orchestrator/materialize.py:69:    return plan.step_engine(step_number).removeprefix("engines.").replace("-", "_")
+orchestrator/materialize.py:72:def step_action_key(step: dict[str, Any], plan: Any, step_number: int) -> str:
+orchestrator/materialize.py:78:        or step_executor_key(plan, step_number)
+orchestrator/tasks/worker.py:16:RESULT_KIND_BY_ENGINE = {
+orchestrator/tasks/worker.py:45:    result_kind = RESULT_KIND_BY_ENGINE[engine]
+orchestrator/tasks/worker.py:64:    if step.number not in (None, ""):
+orchestrator/tasks/worker.py:65:        return str(step.number)
