@@ -31,6 +31,7 @@ class Instruction(RedisModel):
     """
 
     kind: ClassVar[str] = "instruction"
+    component: ClassVar[str] = "record"
 
     model_config = ConfigDict(extra="allow")
 

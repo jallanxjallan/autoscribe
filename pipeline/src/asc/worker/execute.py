@@ -9,20 +9,20 @@ Runtime execution loads:
 - current content from WorkerTask.data_key
 - source CallRecord from the identity embedded in WorkerTask.data_key
 
-The registered engine receives only content, step, and call. It returns an
+The registered engine receives only content text, step, and call. It returns an
 instantiated runtime artifact model. The worker validates the artifact custody
 coordinates and materializes it in Redis. It does not post anything to the
-orchestrator; materialized Redis artifacts are the signal the orchestrator
-will discover during its active-call polling loop.
+orchestrator; materialized Redis artifacts are the signal the orchestrator will
+find during active-call polling.
 """
 
 from __future__ import annotations
 
 from dataclasses import dataclass
 
+from asc.models.control.step import Step
 from asc.models.process.call import CallRecord
 from asc.models.process.result import Failure, Response, Result, Retrieval, Transform
-from asc.models.control.step import Step
 from asc.models.process.task import WorkerTask
 from asc.redis.key import RedisKey
 from asc.worker.loader import load_engine_call
@@ -43,13 +43,25 @@ class WorkerResult:
 
 class WorkerExecutor:
     def execute(self, task: WorkerTask, task_key: str) -> WorkerResult:
-        step = Step.load(task.step_key)
-        content = load_runtime_input(task.data_key)
-        call = _load_call_for_data_key(task.data_key)
-        engine_call = load_engine_call(step.engine)
+        """Execute one task and always try to materialize a failure artifact.
+
+        Loading runtime input and the engine is part of the worker boundary. If
+        any of that fails after the task has been claimed, leaving no Redis
+        artifact would strand the call index on a task key. The orchestrator
+        would then keep waiting for an expected/failure key that will never
+        appear. So the worker converts boundary exceptions into a failure
+        artifact using coordinates from the task itself.
+        """
+
+        step: Step | None = None
 
         try:
-            artifact = engine_call(content=content, step=step, call=call)
+            step = Step.load(task.step_key)
+            runtime_input = load_runtime_input(task.data_key)
+            call = _load_call_for_data_key(task.data_key)
+            engine_call = load_engine_call(step.engine)
+
+            artifact = engine_call(content=runtime_input.content, step=step, call=call)
             _validate_engine_artifact(
                 artifact=artifact,
                 task=task,
@@ -146,11 +158,12 @@ def _runtime_failure(
     *,
     task: WorkerTask,
     task_key: str,
-    step: Step,
+    step: Step | None,
     call_identity: str,
     exc: Exception,
 ) -> Failure:
-    step_number = _step_number(step)
+    step_number = _step_number_from_task(task=task, step=step)
+    engine = "" if step is None else str(step.engine)
 
     return Failure.model_validate(
         {
@@ -167,7 +180,7 @@ def _runtime_failure(
                 "expected_key": _optional_task_text(task, "expected_key") or "",
                 "failure_key": _optional_task_text(task, "failure_key") or "",
                 "step_number": step_number,
-                "engine": step.engine,
+                "engine": engine,
                 "error": str(exc),
                 "error_type": type(exc).__name__,
                 "boundary": "worker.runtime",
@@ -182,6 +195,16 @@ def _step_number(step: Step) -> str:
     if value in (None, ""):
         raise ValueError("step.ordinal must not be empty")
     return str(value)
+
+
+def _step_number_from_task(*, task: WorkerTask, step: Step | None) -> str:
+    if step is not None:
+        return _step_number(step)
+
+    suffix = RedisKey(task.step_key).suffix
+    if suffix in (None, ""):
+        raise ValueError(f"worker task step_key has no suffix: {task.step_key!r}")
+    return str(suffix)
 
 
 def _optional_task_text(task: WorkerTask, name: str) -> str | None:

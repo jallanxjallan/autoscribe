@@ -224,18 +224,10 @@ def run_once(
             )
 
         if result.waiting:
-            if _downstream_sleeping():
-                bump_active_call(call.key)
-                LOG.info("orchestrator operation=bump_waiting call_key=%s", call.key)
-                return OrchestratorRunReport(
-                    claimed=True,
-                    call_key=call.key,
-                    active=True,
-                    waiting=True,
-                    retry=False,
-                    action="bump_waiting",
-                )
-
+            # A claimed worker/scrivener task has already left its inbox, so an
+            # empty inbox does not prove the downstream daemon is idle. Bumping
+            # immediately here creates a hot poll loop while the orchestrator is
+            # waiting for the expected Redis artifact. Always defer briefly.
             defer_active_call(call.key)
             LOG.info("orchestrator operation=defer_waiting call_key=%s", call.key)
             return OrchestratorRunReport(

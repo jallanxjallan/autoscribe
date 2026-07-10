@@ -123,6 +123,10 @@ def _daemon_env() -> dict[str, str]:
     env = os.environ.copy()
     env["PYTHONUNBUFFERED"] = "1"
     env["AUTOSCRIBE_DAEMON_LOG"] = str(LOG_FILE)
+    # asc run owns the three production daemon processes. Do not let the
+    # orchestrator spawn a second worker/scrivener pair when it is launched
+    # under this command surface.
+    env["ASC_ORCHESTRATOR_MANAGE_DOWNSTREAM"] = "0"
     return env
 
 
