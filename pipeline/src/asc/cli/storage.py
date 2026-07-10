@@ -4,42 +4,42 @@ from typing import Any
 
 import typer
 
-from asc.scrivener.inspect import (
+from asc.ledger.inspect import (
     pending_export_for_source,
     pending_work,
     recent_calls,
     recent_exports,
     recent_results,
-    recent_steps,
+    recent_responses,
     show_call,
-    show_step,
+    show_response,
     table_counts,
 )
-from asc.scrivener.lifecycle import (
+from asc.ledger.lifecycle import (
     active_ledger_path,
     ensure_active_ledger,
     reset_ledger,
     rotate_ledger,
 )
-from asc.scrivener.schema_dump import schema_columns, schema_sql
+from asc.ledger.schema_dump import schema_columns, schema_sql
 
 app = typer.Typer(
     no_args_is_help=True,
     add_completion=False,
-    help="Inspect and maintain the Scrivener ledger.",
+    help="Inspect and maintain the AutoScribe ledger.",
 )
 
 
 @app.command("path")
 def path_command() -> None:
-    """Print the active Scrivener ledger path."""
+    """Print the active ledger path."""
 
     typer.echo(str(active_ledger_path()))
 
 
 @app.command("init")
 def init_command() -> None:
-    """Create or update the active Scrivener ledger schema."""
+    """Create or update the active ledger schema."""
 
     path = ensure_active_ledger()
     typer.echo(f"initialized: {path}")
@@ -49,7 +49,7 @@ def init_command() -> None:
 def reset_command(
     yes: bool = typer.Option(False, "--yes", help="Actually reset the ledger."),
 ) -> None:
-    """Drop and recreate all Scrivener ledger objects.
+    """Drop and recreate all ledger objects.
 
     Without --yes this is a dry run, so accidental resets are noisy and safe.
     """
@@ -77,25 +77,20 @@ def rotate_command() -> None:
     typer.echo(
         "carried: "
         f"calls={report.carried_calls} "
-        f"steps={report.carried_steps} "
+        f"responses={report.carried_responses} "
         f"exports={report.carried_exports}"
     )
     typer.echo(
         "removed from archive: "
         f"calls={report.old_deleted_calls} "
-        f"steps={report.old_deleted_steps} "
+        f"responses={report.old_deleted_responses} "
         f"exports={report.old_deleted_exports}"
     )
 
 
 @app.command("rotate-db")
 def rotate_db_command() -> None:
-    """Compatibility alias for ``rotate``.
-
-    The old storage command renamed the SQLite file and initialized a blank
-    database.  Ledger rotation now belongs to ``asc.scrivener.lifecycle`` so
-    pending export custody can be carried into the fresh active ledger.
-    """
+    """Compatibility alias for ``rotate``."""
 
     rotate_command()
 
@@ -136,7 +131,7 @@ def blocked_command(source_identity: str) -> None:
     if row is None:
         typer.echo(f"not blocked: {source_identity}")
         return
-    _print_dict_rows([row], ("identity", "source_identity", "final_step", "result_key", "created_at", "exported_at"))
+    _print_dict_rows([row], ("record_identity", "call_identity", "final_step", "result_key", "created_at"))
 
 
 @app.command("counts")
@@ -151,13 +146,7 @@ def counts_command() -> None:
 def calls_command(
     limit: int = typer.Option(20, "--limit", "-n", min=1, help="Maximum rows to print."),
 ) -> None:
-    """Print recent call rows.
-
-    The ledger no longer owns workflow state.  It records calls, completed or
-    failed steps, and export custody.  Therefore this view deliberately reports
-    ledger facts only: source identity, step counts, terminal export readiness,
-    and timestamps.
-    """
+    """Print recent call rows."""
 
     rows = recent_calls(limit=limit)
     _print_dict_rows(
@@ -166,25 +155,37 @@ def calls_command(
             "identity",
             "source_identity",
             "created_at",
-            "steps",
-            "completed",
-            "failed",
-            "export_ready",
-            "exported_at",
+            "response_status",
+            "final_step",
+            "result_key",
+            "response_created_at",
+            "exports",
         ),
     )
+
+
+@app.command("responses")
+def responses_command(
+    limit: int = typer.Option(50, "--limit", "-n", min=1, help="Maximum rows to print."),
+    status: list[str] | None = typer.Option(None, "--status", "-s", help="Filter by success or failure."),
+) -> None:
+    """Print recent terminal response rows."""
+
+    statuses = tuple(status or ())
+    rows = recent_responses(limit=limit, statuses=statuses)
+    _print_response_rows(rows)
 
 
 @app.command("steps")
 def steps_command(
     limit: int = typer.Option(50, "--limit", "-n", min=1, help="Maximum rows to print."),
-    status: list[str] | None = typer.Option(None, "--status", "-s", help="Filter by completed or failed."),
+    status: list[str] | None = typer.Option(None, "--status", "-s", help="Filter by success or failure."),
 ) -> None:
-    """Print recent ledgered step rows."""
+    """Compatibility alias: print terminal responses, not intermediate steps."""
 
     statuses = tuple(status or ())
-    rows = recent_steps(limit=limit, statuses=statuses)
-    _print_step_rows(rows)
+    rows = recent_responses(limit=limit, statuses=statuses)
+    _print_response_rows(rows)
 
 
 @app.command("exports")
@@ -197,13 +198,16 @@ def exports_command(
     _print_dict_rows(
         rows,
         (
-            "identity",
+            "export_id",
+            "response_identity",
             "source_identity",
-            "final_step",
-            "result_key",
-            "created_at",
+            "destination",
+            "export_mode",
+            "target_slug",
+            "target_path",
             "exported_at",
             "export_message",
+            "created_at",
         ),
     )
 
@@ -212,41 +216,26 @@ def exports_command(
 def results_command(
     limit: int = typer.Option(30, "--limit", "-n", min=1, help="Maximum rows to print."),
 ) -> None:
-    """Legacy alias: print recent export-backed terminal results."""
+    """Legacy alias: print recent terminal responses."""
 
     rows = recent_results(limit=limit)
-    _print_dict_rows(
-        rows,
-        (
-            "identity",
-            "source_identity",
-            "final_step",
-            "result_key",
-            "created_at",
-            "exported_at",
-            "export_message",
-        ),
-    )
+    _print_response_rows(rows)
 
 
 @app.command("pending")
 def pending_command(
     limit: int = typer.Option(50, "--limit", "-n", min=1, help="Maximum rows to print."),
 ) -> None:
-    """Print failed steps plus pending exports.
-
-    Scrivener no longer tracks pending/running workflow state.  This command is
-    retained as a convenience inspection surface for work that still needs human
-    or export attention.
-    """
+    """Print failed responses plus pending exports."""
 
     rows = pending_work(limit=limit)
     _print_dict_rows(
         rows,
         (
             "identity",
+            "record_identity",
             "source_identity",
-            "step_number",
+            "call_identity",
             "final_step",
             "status",
             "result_key",
@@ -258,7 +247,7 @@ def pending_command(
 
 @app.command("show")
 def show_command(identity: str) -> None:
-    """Print one call with its steps and export row as JSON."""
+    """Print one call with its terminal response and export rows as JSON."""
 
     try:
         data = show_call(identity)
@@ -274,24 +263,41 @@ def show_command(identity: str) -> None:
     typer.echo(json.dumps(data, ensure_ascii=False, indent=2, sort_keys=True))
 
 
-@app.command("step")
-def step_command(identity: str, step_number: int) -> None:
-    """Print one ledgered step as JSON."""
+@app.command("response")
+def response_command(identity: str) -> None:
+    """Print one terminal response as JSON."""
 
     try:
-        data = show_step(identity, step_number)
+        data = show_response(identity)
     except KeyError as exc:
         typer.echo(f"ERROR: {exc}", err=True)
         raise typer.Exit(1) from exc
     typer.echo(json.dumps(data, ensure_ascii=False, indent=2, sort_keys=True))
 
 
-def _print_step_rows(rows: list[dict[str, Any]]) -> None:
+@app.command("step")
+def step_command(identity: str, step_number: int | None = None) -> None:
+    """Compatibility alias: print the terminal response for a call identity.
+
+    ``step_number`` is ignored because intermediate steps are no longer durable
+    ledger rows.
+    """
+
+    try:
+        data = show_response(identity)
+    except KeyError as exc:
+        typer.echo(f"ERROR: {exc}", err=True)
+        raise typer.Exit(1) from exc
+    typer.echo(json.dumps(data, ensure_ascii=False, indent=2, sort_keys=True))
+
+
+def _print_response_rows(rows: list[dict[str, Any]]) -> None:
     _print_dict_rows(
         rows,
         (
             "identity",
-            "step_number",
+            "source_identity",
+            "final_step",
             "status",
             "result_key",
             "fail_message",

@@ -14,7 +14,7 @@ from asc.exporter.export_result import (
     write_result_record_by_slug,
 )
 from asc.exporter.pending_exports import pending_export_records
-from asc.scrivener.connect import connect
+from asc.ledger.connect import connect
 
 app = typer.Typer(
     add_completion=False,
@@ -137,7 +137,7 @@ def re_export(
         help="Message to store in the exports row.",
     ),
 ) -> None:
-    """Emit one slug's latest result as NDJSON and refresh exported_at."""
+    """Emit one slug's latest result as NDJSON and record a fresh export receipt."""
 
     cleaned = slug.strip()
     if not cleaned:
@@ -171,7 +171,7 @@ def re_export(
 def update_exports(
     result_identity: str = typer.Argument(
         ...,
-        help="Result key, result identity, or call identity that was successfully exported.",
+        help="Call identity or full terminal result key that was successfully exported.",
     ),
     export_message: str = typer.Option(
         "writeback",
@@ -180,7 +180,7 @@ def update_exports(
         help="Message to store in the exports row.",
     ),
 ) -> None:
-    """Mark one result as exported after successful client-side writeback."""
+    """Record an export receipt after successful client-side writeback."""
 
     with connect() as conn:
         mark_result_exported(
@@ -194,16 +194,16 @@ def update_exports(
 def reset_exports(
     identities: list[str] = typer.Argument(
         ...,
-        help="Call, result, result-key, or source identities to mark pending again.",
+        help="Call, result-key, response, or source identities to mark pending again.",
     ),
     export_message: str = typer.Option(
         "reset",
         "--export-message",
         "--message",
-        help="Message to store in the exports row.",
+        help="Ignored under the receipt-table model; retained for CLI compatibility.",
     ),
 ) -> None:
-    """Reset exported_at to 0 for the supplied identities."""
+    """Delete export receipts for the supplied identities, making responses pending again."""
 
     cleaned = [identity.strip() for identity in identities if identity.strip()]
     if not cleaned:
@@ -216,25 +216,21 @@ def reset_exports(
             conn=conn,
             export_message=export_message,
         )
-    typer.echo(f"Reset {count} export row(s).")
+    typer.echo(f"Reset {count} export receipt(s).")
 
 
-def _write_table(
-    headers: tuple[str, ...],
-    rows: Iterable[tuple[Any, ...]],
-    *,
-    sink: TextIO,
-) -> None:
-    materialized = [tuple(_text(cell) for cell in row) for row in rows]
-    widths = [len(header) for header in headers]
-    for row in materialized:
+def _write_table(headers: Iterable[str], rows: Iterable[Iterable[str]], *, sink: TextIO) -> None:
+    header_values = tuple(headers)
+    row_values = [tuple(row) for row in rows]
+    widths = [len(header) for header in header_values]
+    for row in row_values:
         for index, cell in enumerate(row):
             widths[index] = max(widths[index], len(cell))
 
-    print("  ".join(header.ljust(widths[index]) for index, header in enumerate(headers)), file=sink)
+    print("  ".join(header.ljust(widths[index]) for index, header in enumerate(header_values)), file=sink)
     print("  ".join("─" * width for width in widths), file=sink)
-    for row in materialized:
-        print("  ".join(row[index].ljust(widths[index]) for index in range(len(headers))), file=sink)
+    for row in row_values:
+        print("  ".join(row[index].ljust(widths[index]) for index in range(len(header_values))), file=sink)
 
 
 if __name__ == "__main__":
