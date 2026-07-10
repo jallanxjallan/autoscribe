@@ -56,7 +56,7 @@ app.add_typer(
 app.add_typer(
     registry_app,
     name="registry",
-    help="Inspect and register runtime components.",
+    help="Inspect live extensions and emit the Obsidian registry snapshot.",
 )
 
 

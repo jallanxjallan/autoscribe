@@ -50,7 +50,8 @@ def make_call(*, content: Any, step: Any, call: Any) -> Response | ExternalFailu
     provider object into the runtime result models.
     """
 
-    model = MODEL_LABELS[step.model]
+    # model = MODEL_LABELS[step.model]
+    model = "gpt-5.4-nano"
     request: dict[str, Any] = {
         "model": model,
         "input": content.content,
@@ -73,7 +74,7 @@ def make_call(*, content: Any, step: Any, call: Any) -> Response | ExternalFailu
     except Exception as exc:
         return ExternalFailure(
             identity=call.identity,
-            suffix=step.ordinal,
+            ordinal=step.ordinal,
             content=str(exc),
             failure_reason=type(exc).__name__,
             raw_json={
@@ -89,7 +90,7 @@ def make_call(*, content: Any, step: Any, call: Any) -> Response | ExternalFailu
     raw_json = result.model_dump(mode="json")
     return Response(
         identity=call.identity,
-        suffix=step.ordinal,
+        ordinal=step.ordinal,
         content=result.output_text,
         raw_json={
             "engine": ENGINE,
