@@ -1,84 +1,104 @@
+"""Build the fully hydrated input for one engine call."""
+
 from __future__ import annotations
 
-import json
 from dataclasses import dataclass
-from typing import Any, Mapping
 
+from asc.models.control.instruction import Instruction
+from asc.models.control.step import Step
+from asc.models.process.call import CallRecord
+from asc.models.process.result import Response, Retrieval, Transform
 from asc.redis.key import RedisKey
-from asc.redis.primitives.hashes import hgetall
 
 
-CONTENT_FIELDS = (
-    "content",
-    "record_content",
-    "text",
-    "body",
-)
+ContentSource = CallRecord | Response | Transform | Retrieval
+
+_SOURCE_MODELS: dict[str, type[ContentSource]] = {
+    "call": CallRecord,
+    "response": Response,
+    "transform": Transform,
+    "retrieval": Retrieval,
+}
 
 
 @dataclass(frozen=True, slots=True)
-class RuntimeInput:
-    """Concrete runtime input loaded from Redis for an engine call."""
+class EngineInput:
+    """Validated, fully hydrated context passed across the engine boundary."""
 
-    key: str
+    call: CallRecord
+    source: ContentSource
+    step: Step
+    instructions: tuple[Instruction, ...]
     content: str
-    fields: Mapping[str, Any]
 
 
-def load_runtime_input(key: str) -> RuntimeInput:
-    """Load the worker input record without interpreting engine semantics."""
-    if not isinstance(key, str) or not key.strip():
-        raise ValueError("runtime input key must be non-empty")
+def build_engine_input(
+    *,
+    data_key: str,
+    step: Step,
+) -> EngineInput:
+    """Load all persisted models needed to execute one step."""
+    source = load_content_source(data_key)
+    call = load_source_call(data_key)
+    instructions = load_instructions(step.instruction_keys)
 
-    clean_key = key.strip()
-    data = hgetall(RedisKey(clean_key))
-    if not data:
-        raise ValueError(f"runtime input key is missing or empty: {clean_key}")
-
-    content = _content_from_fields(data)
-    if content is None:
+    if source.identity != call.identity:
         raise ValueError(
-            f"runtime input key has no content field: {clean_key} "
-            f"available={sorted(str(name) for name in data)}"
+            "runtime source identity does not match call identity: "
+            f"source={source.identity!r} call={call.identity!r}"
         )
 
-    return RuntimeInput(
-        key=clean_key,
-        content=content,
-        fields=data,
+    return EngineInput(
+        call=call,
+        source=source,
+        step=step,
+        instructions=instructions,
+        content=source.content,
     )
 
 
-def load_runtime_content(key: str) -> str:
-    """Backward-compatible helper for callers that only need the text body."""
-    return load_runtime_input(key).content
+def load_content_source(key: str) -> ContentSource:
+    """Load the canonical content-bearing model addressed by key."""
+    if not isinstance(key, str) or not key.strip():
+        raise ValueError("worker data key must be non-empty")
 
+    redis_key = RedisKey(key.strip())
 
-def _content_from_fields(data: Mapping[str, Any]) -> str | None:
-    for field in CONTENT_FIELDS:
-        value = data.get(field)
-        if value is not None:
-            return str(value)
-
-    raw_json = data.get("raw_json") or data.get("record_content_json") or data.get("raw_record_json")
-    if raw_json:
-        return _content_from_json(raw_json)
-
-    return None
-
-
-def _content_from_json(raw_json: Any) -> str | None:
     try:
-        payload = json.loads(str(raw_json))
-    except (TypeError, ValueError):
-        return None
+        model = _SOURCE_MODELS[redis_key.kind]
+    except KeyError as exc:
+        supported = ", ".join(sorted(_SOURCE_MODELS))
+        raise ValueError(
+            f"unsupported worker data kind {redis_key.kind!r}: "
+            f"{redis_key.raw_key!r}; expected one of {supported}"
+        ) from exc
 
-    if isinstance(payload, dict):
-        for field in CONTENT_FIELDS:
-            value = payload.get(field)
-            if value is not None:
-                return str(value)
-    return None
+    return model.load(redis_key)
 
 
-__all__ = ["RuntimeInput", "load_runtime_content", "load_runtime_input"]
+def load_source_call(data_key: str) -> CallRecord:
+    """Load the original call sharing the runtime source identity."""
+    source_key = RedisKey(data_key)
+    call_key = RedisKey(
+        kind="call",
+        identity=source_key.identity,
+        suffix="record",
+    )
+    return CallRecord.load(call_key)
+
+
+def load_instructions(
+    instruction_keys: list[str],
+) -> tuple[Instruction, ...]:
+    """Hydrate the instructions referenced by a Step, preserving order."""
+    return tuple(Instruction.load(key) for key in instruction_keys)
+
+
+__all__ = [
+    "ContentSource",
+    "EngineInput",
+    "build_engine_input",
+    "load_content_source",
+    "load_instructions",
+    "load_source_call",
+]

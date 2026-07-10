@@ -1,19 +1,11 @@
 """Worker execution boundary.
 
-The worker queue carries a WorkerTask key. The task is the local custody record
-for claiming work. It stays inside the worker.
+The worker claims a WorkerTask, loads the persisted models needed for one step,
+builds one immutable EngineInput object, and passes that object to the selected
+engine.
 
-Runtime execution loads:
-
-- Step from WorkerTask.step_key
-- current content from WorkerTask.data_key
-- source CallRecord from the identity embedded in WorkerTask.data_key
-
-The registered engine receives only content text, step, and call. It returns an
-instantiated runtime artifact model. The worker validates the artifact custody
-coordinates and materializes it in Redis. It does not post anything to the
-orchestrator; materialized Redis artifacts are the signal the orchestrator will
-find during active-call polling.
+The engine owns provider-specific formatting. The worker owns custody checks
+and Redis materialization.
 """
 
 from __future__ import annotations
@@ -21,12 +13,11 @@ from __future__ import annotations
 from dataclasses import dataclass
 
 from asc.models.control.step import Step
-from asc.models.process.call import CallRecord
 from asc.models.process.result import Failure, Response, Result, Retrieval, Transform
 from asc.models.process.task import WorkerTask
 from asc.redis.key import RedisKey
 from asc.worker.loader import load_engine_call
-from asc.worker.runtime_io import load_runtime_input
+from asc.worker.runtime_io import build_engine_input
 
 
 RESULT_TYPES = (Response, Transform, Retrieval, Failure)
@@ -43,32 +34,28 @@ class WorkerResult:
 
 class WorkerExecutor:
     def execute(self, task: WorkerTask, task_key: str) -> WorkerResult:
-        """Execute one task and always try to materialize a failure artifact.
-
-        Loading runtime input and the engine is part of the worker boundary. If
-        any of that fails after the task has been claimed, leaving no Redis
-        artifact would strand the call index on a task key. The orchestrator
-        would then keep waiting for an expected/failure key that will never
-        appear. So the worker converts boundary exceptions into a failure
-        artifact using coordinates from the task itself.
-        """
+        """Execute one claimed task and materialize a result or failure."""
 
         step: Step | None = None
 
         try:
             step = Step.load(task.step_key)
-            runtime_input = load_runtime_input(task.data_key)
-            call = _load_call_for_data_key(task.data_key)
+            engine_input = build_engine_input(
+                data_key=task.data_key,
+                step=step,
+            )
             engine_call = load_engine_call(step.engine)
 
-            artifact = engine_call(content=runtime_input.content, step=step, call=call)
+            artifact = engine_call(engine_input)
+
             _validate_engine_artifact(
                 artifact=artifact,
                 task=task,
                 step=step,
-                call=call,
+                call_identity=engine_input.call.identity,
             )
             artifact_key = artifact.save()
+
         except Exception as exc:
             artifact = _runtime_failure(
                 task=task,
@@ -93,21 +80,12 @@ class WorkerExecutor:
         )
 
 
-def _load_call_for_data_key(data_key: str) -> CallRecord:
-    call_key = RedisKey(
-        kind="call",
-        identity=RedisKey(data_key).identity,
-        suffix="record",
-    )
-    return CallRecord.load(call_key)
-
-
 def _validate_engine_artifact(
     *,
     artifact: object,
     task: WorkerTask,
     step: Step,
-    call: CallRecord,
+    call_identity: str,
 ) -> None:
     if not isinstance(artifact, RESULT_TYPES):
         raise TypeError(
@@ -115,42 +93,44 @@ def _validate_engine_artifact(
             "expected instantiated Response, Transform, Retrieval, or Failure"
         )
 
-    expected_identity = call.identity
-    actual_identity = str(getattr(artifact, "identity", "")).strip()
-    if actual_identity != expected_identity:
+    if artifact.identity != call_identity:
         raise ValueError(
             "engine artifact identity does not match source call identity: "
-            f"artifact={actual_identity!r} call={expected_identity!r}"
+            f"artifact={artifact.identity!r} call={call_identity!r}"
         )
 
-    expected_suffix = _step_number(step)
-    actual_suffix = str(getattr(artifact, "result_suffix", getattr(artifact, "suffix", ""))).strip()
-    if actual_suffix != expected_suffix:
+    expected_ordinal = str(step.ordinal)
+    actual_ordinal = str(artifact.ordinal)
+
+    if actual_ordinal != expected_ordinal:
         raise ValueError(
-            "engine artifact suffix does not match step number: "
-            f"artifact={actual_suffix!r} step={expected_suffix!r}"
+            "engine artifact ordinal does not match step ordinal: "
+            f"artifact={actual_ordinal!r} step={expected_ordinal!r}"
         )
 
     if isinstance(artifact, SUCCESS_TYPES):
-        _validate_success_kind_matches_task(artifact=artifact, task=task)
+        _validate_success_key(artifact=artifact, task=task)
 
 
-def _validate_success_kind_matches_task(*, artifact: Result, task: WorkerTask) -> None:
-    expected_key = _optional_task_text(task, "expected_key")
-    if not expected_key:
-        return
+def _validate_success_key(*, artifact: Result, task: WorkerTask) -> None:
+    expected = RedisKey(task.expected_key)
 
-    expected = RedisKey(expected_key)
     if expected.kind != artifact.kind:
         raise ValueError(
             "engine artifact kind does not match task expected_key: "
             f"artifact_kind={artifact.kind!r} expected_key={expected.raw_key!r}"
         )
 
-    if expected.identity != artifact.identity or str(expected.suffix) != str(getattr(artifact, "result_suffix", "")):
+    if expected.identity != artifact.identity:
         raise ValueError(
-            "engine artifact key does not match task expected_key: "
-            f"artifact_key={artifact.raw_key!r} expected_key={expected.raw_key!r}"
+            "engine artifact identity does not match task expected_key: "
+            f"artifact={artifact.identity!r} expected={expected.identity!r}"
+        )
+
+    if str(expected.suffix) != str(artifact.ordinal):
+        raise ValueError(
+            "engine artifact ordinal does not match task expected_key: "
+            f"artifact={artifact.ordinal!r} expected={expected.suffix!r}"
         )
 
 
@@ -162,13 +142,13 @@ def _runtime_failure(
     call_identity: str,
     exc: Exception,
 ) -> Failure:
-    step_number = _step_number_from_task(task=task, step=step)
-    engine = "" if step is None else str(step.engine)
+    ordinal = _task_ordinal(task=task, step=step)
+    engine = "" if step is None else step.engine
 
     return Failure.model_validate(
         {
             "identity": call_identity,
-            "suffix": step_number,
+            "ordinal": ordinal,
             "failure_type": "runtime",
             "content": str(exc),
             "failure_reason": type(exc).__name__,
@@ -177,9 +157,9 @@ def _runtime_failure(
                 "task_identity": task.identity,
                 "data_key": task.data_key,
                 "step_key": task.step_key,
-                "expected_key": _optional_task_text(task, "expected_key") or "",
-                "failure_key": _optional_task_text(task, "failure_key") or "",
-                "step_number": step_number,
+                "expected_key": task.expected_key,
+                "failure_key": task.failure_key,
+                "ordinal": ordinal,
                 "engine": engine,
                 "error": str(exc),
                 "error_type": type(exc).__name__,
@@ -190,28 +170,14 @@ def _runtime_failure(
     )
 
 
-def _step_number(step: Step) -> str:
-    value = getattr(step, "ordinal", None)
-    if value in (None, ""):
-        raise ValueError("step.ordinal must not be empty")
-    return str(value)
-
-
-def _step_number_from_task(*, task: WorkerTask, step: Step | None) -> str:
+def _task_ordinal(*, task: WorkerTask, step: Step | None) -> str:
     if step is not None:
-        return _step_number(step)
+        return str(step.ordinal)
 
     suffix = RedisKey(task.step_key).suffix
     if suffix in (None, ""):
-        raise ValueError(f"worker task step_key has no suffix: {task.step_key!r}")
+        raise ValueError(f"worker task step_key has no ordinal: {task.step_key!r}")
     return str(suffix)
-
-
-def _optional_task_text(task: WorkerTask, name: str) -> str | None:
-    value = getattr(task, name, None)
-    if value in (None, ""):
-        return None
-    return str(value).strip() or None
 
 
 __all__ = ["WorkerExecutor", "WorkerResult"]
