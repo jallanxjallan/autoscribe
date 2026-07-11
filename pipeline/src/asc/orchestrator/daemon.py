@@ -26,7 +26,7 @@ from asc.orchestrator.active import (
 )
 from asc.orchestrator.handle import handle
 from asc.redis.key import RedisKey
-from asc.state.daemon import DEFAULT_CLAIM_TIMEOUT_SECONDS, configure_logging
+from asc.state.daemon import configure_logging
 
 
 LOG = logging.getLogger(__name__)
@@ -169,16 +169,12 @@ def _sleep_until_next(window) -> None:
     time.sleep(sleep_seconds)
 
 
-def run_once(
+def run_cycle(
     *,
-    timeout: int | None = None,
-    empty_limit: int | None = None,
     wait: bool = True,
     target_keys: set[str] | None = None,
 ) -> OrchestratorRunReport:
     """Inspect and advance one active call."""
-
-    del timeout, empty_limit
 
     now = time.time()
     window = active_call_window(target_keys=target_keys)
@@ -255,24 +251,14 @@ def run_once(
     return OrchestratorRunReport(claimed=False, action="sleep")
 
 
-def run_forever(
-    *,
-    timeout: int = DEFAULT_CLAIM_TIMEOUT_SECONDS,
-    empty_limit: int | None = None,
-    target_keys: set[str] | None = None,
-) -> None:
+def run_forever(*, target_keys: set[str] | None = None) -> None:
     """Run the orchestrator daemon forever."""
 
     configure_logging()
-    LOG.info("orchestrator daemon start timeout=%s empty_limit=%s", timeout, empty_limit)
+    LOG.info("orchestrator daemon start")
     try:
         while True:
-            report = run_once(
-                timeout=timeout,
-                empty_limit=empty_limit,
-                wait=True,
-                target_keys=target_keys,
-            )
+            report = run_cycle(wait=True, target_keys=target_keys)
             LOG.info("orchestrator daemon report=%r", report)
     except KeyboardInterrupt:
         LOG.info("orchestrator daemon stop signal=KeyboardInterrupt")
@@ -292,4 +278,4 @@ if __name__ == "__main__":
     main()
 
 
-__all__ = ["OrchestratorRunReport", "main", "run_forever", "run_once"]
+__all__ = ["OrchestratorRunReport", "main", "run_cycle", "run_forever"]

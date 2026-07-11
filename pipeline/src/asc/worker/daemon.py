@@ -1,11 +1,14 @@
 """Worker daemon entrypoint."""
 
 from dataclasses import dataclass
+import logging
 
-from asc.models.process.task import WorkerTask
 from asc.state.daemon import DEFAULT_CLAIM_TIMEOUT_SECONDS, configure_logging, run_daemon
 from asc.worker import inbox as worker_inbox
 from asc.worker.execute import WorkerExecutor
+
+
+LOG = logging.getLogger(__name__)
 
 
 @dataclass(frozen=True, slots=True)
@@ -17,22 +20,10 @@ class WorkerRunReport:
     action: str | None = None
 
 
-def run_once(
-    *,
-    timeout: int | None = None,
-    empty_limit: int | None = None,
-    wait: bool = False,
-) -> WorkerRunReport:
-    """Claim and execute one worker task."""
+def process_next(*, timeout: int = 0) -> WorkerRunReport:
+    """Claim and execute the next worker task."""
 
-    if wait:
-        claimed = worker_inbox.daemon_claim(
-            timeout=timeout or 0,
-            empty_limit=empty_limit,
-        )
-    else:
-        claimed = worker_inbox.claim()
-
+    claimed = worker_inbox.daemon_claim(timeout=timeout, empty_limit=None)
     if claimed is None:
         return WorkerRunReport(claimed=False)
 
@@ -40,50 +31,39 @@ def run_once(
     if not task_key:
         raise ValueError("worker claimed an empty task key")
 
-    print(f"worker claimed_task_key={task_key}", flush=True)
+    LOG.info("worker operation=claimed task_key=%s", task_key)
+    result = WorkerExecutor().execute(task_key)
 
-    task = WorkerTask.load(task_key)
-    result = WorkerExecutor().execute(task, task_key)
-
-    return WorkerRunReport(
+    report = WorkerRunReport(
         claimed=True,
-        task_key=task_key,
+        task_key=result.task_key,
         artifact_key=result.artifact_key,
         failure_key=result.failure_key,
-        action=task.action,
+        action=result.action,
     )
+    LOG.info(
+        "worker operation=executed task_key=%s action=%s artifact_key=%s failure_key=%s",
+        report.task_key,
+        report.action,
+        report.artifact_key,
+        report.failure_key,
+    )
+    return report
 
 
-def run_forever(
-    *,
-    timeout: int = DEFAULT_CLAIM_TIMEOUT_SECONDS,
-    empty_limit: int | None = None,
-) -> None:
-    """Run the worker daemon loop until idle shutdown or interruption."""
+def run_forever(*, timeout: int = DEFAULT_CLAIM_TIMEOUT_SECONDS) -> None:
+    """Run the worker daemon until process termination."""
 
     configure_logging()
-    run_daemon(
-        name="worker",
-        run_once=run_once,
-        timeout=timeout,
-        empty_limit=empty_limit,
-    )
+    run_daemon(name="worker", run_cycle=process_next, timeout=timeout)
 
 
 def main() -> None:
-    """Run one non-blocking worker cycle."""
-
-    configure_logging()
-    report = run_once(timeout=0, empty_limit=0, wait=False)
-    print(
-        f"worker claimed={report.claimed} "
-        f"task_key={report.task_key} action={report.action} "
-        f"artifact_key={report.artifact_key} failure_key={report.failure_key}"
-    )
+    run_forever()
 
 
 if __name__ == "__main__":
     main()
 
 
-__all__ = ["WorkerRunReport", "main", "run_forever", "run_once"]
+__all__ = ["WorkerRunReport", "main", "process_next", "run_forever"]

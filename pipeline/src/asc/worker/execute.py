@@ -30,15 +30,18 @@ class WorkerResult:
     task_key: str
     artifact_key: str
     failure_key: str | None = None
+    action: str | None = None
 
 
 class WorkerExecutor:
-    def execute(self, task: WorkerTask, task_key: str) -> WorkerResult:
-        """Execute one claimed task and materialize a result or failure."""
+    def execute(self, task_key: str) -> WorkerResult:
+        """Load and execute one claimed task."""
 
+        task: WorkerTask | None = None
         step: Step | None = None
 
         try:
+            task = WorkerTask.load(task_key)
             step = Step.load(task.step_key)
             engine_input = build_engine_input(
                 data_key=task.data_key,
@@ -57,6 +60,11 @@ class WorkerExecutor:
             artifact_key = artifact.save()
 
         except Exception as exc:
+            if task is None:
+                raise RuntimeError(
+                    f"worker could not load claimed task {task_key!r}"
+                ) from exc
+
             artifact = _runtime_failure(
                 task=task,
                 task_key=task_key,
@@ -70,6 +78,7 @@ class WorkerExecutor:
                 task_key=task_key,
                 artifact_key=artifact_key,
                 failure_key=artifact_key,
+                action=task.action,
             )
 
         return WorkerResult(
@@ -77,6 +86,7 @@ class WorkerExecutor:
             task_key=task_key,
             artifact_key=artifact_key,
             failure_key=artifact_key if isinstance(artifact, Failure) else None,
+            action=task.action,
         )
 
 

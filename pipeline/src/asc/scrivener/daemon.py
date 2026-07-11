@@ -22,20 +22,10 @@ class ScrivenerRunReport:
     data_key: str | None = None
 
 
-def run_once(
-    *,
-    timeout: int | None = None,
-    empty_limit: int | None = None,
-    wait: bool = True,
-) -> ScrivenerRunReport:
-    """Claim and execute one scrivener task."""
+def process_next(*, timeout: int = 0) -> ScrivenerRunReport:
+    """Claim and execute the next scrivener task."""
 
-    claimed = (
-        scrivener_inbox.daemon_claim(timeout=timeout or 0, empty_limit=empty_limit)
-        if wait
-        else scrivener_inbox.claim()
-    )
-
+    claimed = scrivener_inbox.daemon_claim(timeout=timeout, empty_limit=None)
     if claimed is None:
         return ScrivenerRunReport(claimed=False)
 
@@ -63,11 +53,11 @@ def run_once(
     return report
 
 
-def run_forever(*, timeout: int = DEFAULT_CLAIM_TIMEOUT_SECONDS, empty_limit: int | None = None) -> None:
-    """Run the scrivener daemon loop until process termination."""
+def run_forever(*, timeout: int = DEFAULT_CLAIM_TIMEOUT_SECONDS) -> None:
+    """Run the scrivener daemon until process termination."""
 
     configure_logging()
-    run_daemon(name="scrivener", run_once=run_once, timeout=timeout, empty_limit=empty_limit)
+    run_daemon(name="scrivener", run_cycle=process_next, timeout=timeout)
 
 
 def main() -> None:
@@ -78,4 +68,4 @@ if __name__ == "__main__":
     main()
 
 
-__all__ = ["ScrivenerRunReport", "main", "run_forever", "run_once"]
+__all__ = ["ScrivenerRunReport", "main", "process_next", "run_forever"]

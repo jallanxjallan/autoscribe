@@ -14,7 +14,6 @@ from typing import Protocol, TypeVar
 log = logging.getLogger(__name__)
 
 DEFAULT_CLAIM_TIMEOUT_SECONDS = int(os.environ.get("AUTOSCRIBE_DAEMON_CLAIM_TIMEOUT", "0"))
-DEFAULT_IDLE_SECONDS = int(os.environ.get("AUTOSCRIBE_DAEMON_IDLE_SECONDS", "3600"))
 DEFAULT_LOG_PATH = Path(os.environ.get("AUTOSCRIBE_DAEMON_LOG", "/tmp/autoscribe/logs/runtime.log"))
 
 
@@ -23,7 +22,7 @@ class RunReport(Protocol):
 
 
 ReportT = TypeVar("ReportT", bound=RunReport)
-RunOnce = Callable[..., ReportT]
+RunCycle = Callable[..., ReportT]
 
 
 def configure_logging() -> None:
@@ -41,7 +40,11 @@ def configure_logging() -> None:
         datefmt="%Y-%m-%dT%H:%M:%S%z",
     )
 
-    if not any(isinstance(handler, WatchedFileHandler) and Path(handler.baseFilename) == log_path for handler in root.handlers):
+    if not any(
+        isinstance(handler, WatchedFileHandler)
+        and Path(handler.baseFilename) == log_path
+        for handler in root.handlers
+    ):
         file_handler = WatchedFileHandler(log_path, encoding="utf-8")
         file_handler.setFormatter(formatter)
         root.addHandler(file_handler)
@@ -53,40 +56,21 @@ def configure_logging() -> None:
         root.addHandler(stderr_handler)
 
 
-def idle_empty_limit(*, timeout: int | None = None, idle_seconds: int | None = None) -> int:
-    """Return how many empty blocking-claim cycles make up the idle window.
-
-    Kept for compatibility with imports. Production daemons no longer use this
-    to exit when idle; they block in Redis until ``asc run stop`` terminates
-    the process.
-    """
-
-    actual_timeout = max(1, int(timeout or DEFAULT_CLAIM_TIMEOUT_SECONDS or 1))
-    actual_idle = max(1, int(idle_seconds or DEFAULT_IDLE_SECONDS))
-    return max(1, actual_idle // actual_timeout)
-
-
 def run_daemon(
     *,
     name: str,
-    run_once: RunOnce[ReportT],
+    run_cycle: RunCycle[ReportT],
     timeout: int | None = None,
-    empty_limit: int | None = None,
 ) -> None:
-    """Run a package daemon until the process is stopped.
-
-    Worker and scrivener sleep inside the Redis blocking claim path. There is no
-    idle shutdown and no test/drain mode in the daemon lifecycle anymore.
-    """
+    """Run a blocking-queue daemon until the process is stopped."""
 
     actual_timeout = 0 if timeout is None else max(0, int(timeout))
-
-    log.info("daemon start name=%s timeout=%s empty_limit=%s", name, actual_timeout, empty_limit)
+    log.info("daemon start name=%s timeout=%s", name, actual_timeout)
 
     try:
         while True:
             log.info("daemon sleep name=%s operation=claim_wait", name)
-            report = run_once(timeout=actual_timeout, empty_limit=None, wait=True)
+            report = run_cycle(timeout=actual_timeout)
             if not report.claimed:
                 log.info("daemon wake name=%s operation=claim_empty", name)
                 continue
@@ -101,9 +85,7 @@ def run_daemon(
 
 __all__ = [
     "DEFAULT_CLAIM_TIMEOUT_SECONDS",
-    "DEFAULT_IDLE_SECONDS",
     "RunReport",
     "configure_logging",
-    "idle_empty_limit",
     "run_daemon",
 ]
