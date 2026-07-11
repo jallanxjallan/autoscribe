@@ -3,6 +3,7 @@ from __future__ import annotations
 from openai import OpenAI
 
 from asc.core.config import config
+from asc.models.control.step import LLMStep
 from asc.models.process.result import ExternalFailure, Response
 from asc.worker.runtime_io import EngineInput
 
@@ -36,7 +37,14 @@ def make_call(data: EngineInput) -> Response | ExternalFailure:
     """Run one ChatGPT Responses API call from a hydrated EngineInput."""
 
     step = data.step
-    model = MODEL_LABELS[step.model]
+    if not isinstance(step, LLMStep):
+        raise TypeError(
+            f"{ENGINE} requires LLMStep, got {type(step).__name__}"
+        )
+    try:
+        model = MODEL_LABELS[step.model]
+    except KeyError as exc:
+        raise ValueError(f"unknown ChatGPT model label: {step.model!r}") from exc
 
     request: dict[str, object] = {
         "model": model,

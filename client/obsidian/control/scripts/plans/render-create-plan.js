@@ -3,6 +3,7 @@ const path = require('path');
 
 const { el, clear, button } = require('../lib/dom.js');
 const { vaultRoot } = require('../lib/vault-state.js');
+const { loadRegistrySnapshot, snapshotList } = require('../lib/control-loader.js');
 
 const {
   buildPlanRecord,
@@ -398,6 +399,19 @@ function llmEngines(engines) {
   return engines.filter((engine) => !isScriptEngine(engine) && !isRagEngine(engine));
 }
 
+function modelEngineKey(model) {
+  return String(model?.engine || model?.engine_key || model?.provider || model?.provider_key || '').trim();
+}
+
+function modelsForEngine(models, engine) {
+  if (!engine) return [];
+  const engineKey = String(engine.key || '').trim();
+  return models.filter((model) => {
+    const owner = modelEngineKey(model);
+    return !owner || owner === engineKey;
+  });
+}
+
 function inferStepKind(step) {
   const savedKind = normalizeKind(step.kind || step.step_kind || step.type);
   if (savedKind === 'llm' || savedKind === 'script' || savedKind === 'rag') return savedKind;
@@ -415,7 +429,7 @@ function emptyStep(kind, index, { engines }) {
     kind,
     label: `Step ${index}`,
     engine: null,
-    model: '',
+    model: null,
     script: null,
     rag_profile: null,
     argsJson: '{}',
@@ -432,11 +446,11 @@ function coerceStepKind(step, kind, { engines }) {
   if (kind === 'script') {
     step.engine = findScriptEngine(engines);
     step.rag_profile = null;
-    step.model = '';
+    step.model = null;
   } else if (kind === 'rag') {
     step.engine = findRagEngine(engines);
     step.script = null;
-    step.model = '';
+    step.model = null;
   } else {
     step.engine = llmEngines(engines).find((engine) => engine.key === step.engine?.key) || llmEngines(engines)[0] || step.engine || null;
     step.script = null;
@@ -469,7 +483,7 @@ function planStepEntries(steps) {
     .sort(([a], [b]) => a - b);
 }
 
-function planToScreenSteps(plan, { engines, instructions, scripts, ragProfiles }) {
+function planToScreenSteps(plan, { engines, models, instructions, scripts, ragProfiles }) {
   return planStepEntries(plan.steps).map(([stepNumber, step]) => {
     const kind = inferStepKind(step);
     const screenStep = {
@@ -479,7 +493,7 @@ function planToScreenSteps(plan, { engines, instructions, scripts, ragProfiles }
       engine: hydrateControl(step.engine, engines, 'key'),
       script: hydrateControl(step.script, scripts, 'key'),
       rag_profile: hydrateControl(step.rag_profile, ragProfiles, 'key'),
-      model: step.model || step.args?.model || '',
+      model: hydrateControl(step.model || step.args?.model, models, 'key'),
       argsJson: JSON.stringify(argsForEditor(step.args || {}), null, 2),
       instructions: (step.instructions || step.instruction_slugs || [])
         .map((ins) => hydrateControl(typeof ins === 'string' ? { slug: ins } : ins, instructions, 'slug'))
@@ -558,25 +572,34 @@ function renderInstructionPicker({ step, instructions, redraw }) {
   return wrapper;
 }
 
-function renderProviderPicker({ step, engines }) {
+function renderProviderPicker({ step, engines, redraw }) {
   const providers = llmEngines(engines);
-  const engineSelect = selectFor(providers, providers.length ? 'Choose provider/engine' : 'No LLM engines in local engines folder', 'key');
+  const engineSelect = selectFor(providers, providers.length ? 'Choose provider/engine' : 'No LLM engines in registry snapshot', 'key');
   engineSelect.value = step.engine?.key || '';
   engineSelect.addEventListener('change', () => {
     step.engine = selectedRecord(engineSelect, providers, 'key');
+    step.model = null;
+    redraw();
   });
   return el('label', {}, ['Provider / engine', engineSelect]);
 }
 
-function renderModelInput(step) {
-  const model = el('input', { type: 'text', placeholder: 'Model, e.g. gpt-5.5-mini', value: step.model || '' });
-  model.style.width = '100%';
-  model.addEventListener('input', () => { step.model = model.value; });
-  return el('label', {}, ['Model', model]);
+function renderModelPicker({ step, models }) {
+  const choices = modelsForEngine(models, step.engine);
+  const modelSelect = selectFor(
+    choices,
+    choices.length ? 'Choose model' : 'No models registered for this engine',
+    'key'
+  );
+  modelSelect.value = step.model?.key || '';
+  modelSelect.addEventListener('change', () => {
+    step.model = selectedRecord(modelSelect, choices, 'key');
+  });
+  return el('label', {}, ['Model', modelSelect]);
 }
 
 function renderScriptPicker({ step, scripts }) {
-  const scriptSelect = selectFor(scripts, scripts.length ? 'Choose script' : 'No scripts in local scripts folder', 'key');
+  const scriptSelect = selectFor(scripts, scripts.length ? 'Choose script' : 'No scripts in registry snapshot', 'key');
   scriptSelect.value = step.script?.key || '';
   scriptSelect.addEventListener('change', () => {
     step.script = selectedRecord(scriptSelect, scripts, 'key');
@@ -602,7 +625,7 @@ function renderArgsEditor(step, labelText = 'Optional args JSON') {
   return el('label', {}, [labelText, args]);
 }
 
-function renderStepSpecificControls({ step, engines, scripts, instructions, ragProfiles, redraw }) {
+function renderStepSpecificControls({ step, engines, models, scripts, instructions, ragProfiles, redraw }) {
   const wrapper = el('div');
   if (step.kind === 'script') {
     const engine = step.engine || findScriptEngine(engines);
@@ -623,16 +646,16 @@ function renderStepSpecificControls({ step, engines, scripts, instructions, ragP
     return wrapper;
   }
 
-  wrapper.appendChild(renderProviderPicker({ step, engines }));
-  wrapper.appendChild(renderModelInput(step));
+  wrapper.appendChild(renderProviderPicker({ step, engines, redraw }));
+  wrapper.appendChild(renderModelPicker({ step, models }));
   wrapper.appendChild(renderInstructionPicker({ step, instructions, redraw }));
   wrapper.appendChild(renderArgsEditor(step, 'Optional LLM args JSON'));
   return wrapper;
 }
 
-function renderStepEditor({ stepsBox, engines, scripts, instructions, ragProfiles, steps }) {
+function renderStepEditor({ stepsBox, engines, models, scripts, instructions, ragProfiles, steps }) {
   function redraw() {
-    renderStepEditor({ stepsBox, engines, scripts, instructions, ragProfiles, steps });
+    renderStepEditor({ stepsBox, engines, models, scripts, instructions, ragProfiles, steps });
   }
 
   stepsBox.innerHTML = '';
@@ -695,7 +718,7 @@ function renderStepEditor({ stepsBox, engines, scripts, instructions, ragProfile
     card.appendChild(el('h3', { text: `Step ${index + 1}` }));
     card.appendChild(el('label', {}, ['Step label', title]));
     card.appendChild(kindRow);
-    card.appendChild(renderStepSpecificControls({ step, engines, scripts, instructions, ragProfiles, redraw }));
+    card.appendChild(renderStepSpecificControls({ step, engines, models, scripts, instructions, ragProfiles, redraw }));
     card.appendChild(controls);
     stepsBox.appendChild(card);
   });
@@ -707,9 +730,15 @@ async function renderCreatePlan({ app, container }) {
   const vaultControlRoot = path.join(root, '.autoscribe');
   const vaultPlansDir = path.join(vaultControlRoot, 'plans');
 
-  const engines = sortByLabel(listEngineFolder(ENGINES_DIR));
-  const scripts = sortByLabel(listScriptFolder(LOCAL_SCRIPTS_DIR));
-  const ragProfiles = [];
+  const registryResult = loadRegistrySnapshot();
+  if (registryResult.error) {
+    throw new Error(`Could not load AutoScribe registry snapshot: ${registryResult.error}${registryResult.stderr ? `; ${registryResult.stderr}` : ''}`);
+  }
+  const registrySnapshot = registryResult.data;
+  const engines = sortByLabel(snapshotList(registrySnapshot, 'engines'));
+  const models = sortByLabel(snapshotList(registrySnapshot, 'models'));
+  const scripts = sortByLabel(snapshotList(registrySnapshot, 'local_scripts'));
+  const ragProfiles = sortByLabel(snapshotList(registrySnapshot, 'rag_profiles'));
   const instructions = sortByLabel([
     ...listInstructionFolder(GLOBAL_INSTRUCTIONS_DIR, 'global'),
     ...listVaultSlugInstructions(root),
@@ -758,16 +787,16 @@ async function renderCreatePlan({ app, container }) {
   description.style.minHeight = '5rem';
 
   const status = el('p', {
-    text: `${instructions.length} instruction(s), ${llmEngines(engines).length} LLM engine(s), ${scripts.length} script(s), ${ragProfiles.length} RAG profile(s), ${globalPlans.length} local plan(s) found.`,
+    text: `${instructions.length} instruction(s), ${llmEngines(engines).length} LLM engine(s), ${models.length} model(s), ${scripts.length} script(s), ${ragProfiles.length} RAG profile(s), ${globalPlans.length} local plan(s) found.`,
   });
   const rootsText = el('p', {
-    text: `Local folders: global instructions=${GLOBAL_INSTRUCTIONS_DIR}; active vault instructions=Markdown files with slug ins.*; plans=${GLOBAL_PLANS_DIR}; engines=${ENGINES_DIR}; vault plans=${vaultPlansDir}`,
+    text: `Registry source: asc registry snapshot; global instructions=${GLOBAL_INSTRUCTIONS_DIR}; active vault instructions=Markdown files with slug ins.*; plans=${GLOBAL_PLANS_DIR}; vault plans=${vaultPlansDir}`,
   });
   const stepsBox = el('div');
   const savedPath = el('code', { text: '' });
 
   function redrawSteps() {
-    renderStepEditor({ stepsBox, engines, scripts, instructions, ragProfiles, steps });
+    renderStepEditor({ stepsBox, engines, models, scripts, instructions, ragProfiles, steps });
   }
 
   function clearScreen() {
@@ -795,7 +824,7 @@ async function renderCreatePlan({ app, container }) {
       savedPath.textContent = plan.file || '';
       label.value = plan.label || '';
       description.value = plan.description || '';
-      steps.splice(0, steps.length, ...planToScreenSteps(plan, { engines, instructions, scripts, ragProfiles }));
+      steps.splice(0, steps.length, ...planToScreenSteps(plan, { engines, models, instructions, scripts, ragProfiles }));
       redrawSteps();
       new Notice(`Loaded plan: ${plan.label || plan.slug}`);
     } catch (err) {
@@ -812,11 +841,7 @@ async function renderCreatePlan({ app, container }) {
       steps,
       existing,
       force_slug: forceSlug,
-      registry_snapshot: {
-        source: 'local-folders',
-        engines_dir: ENGINES_DIR,
-        scripts_dir: LOCAL_SCRIPTS_DIR,
-      },
+      registry_snapshot: registrySnapshot,
       control_snapshot: {
         source: 'local-folders',
         global_instructions_dir: GLOBAL_INSTRUCTIONS_DIR,
@@ -931,7 +956,7 @@ async function renderCreatePlan({ app, container }) {
   container.appendChild(row);
 
   if (!engines.length) {
-    new Notice(`Define Plan: no engines found in ${ENGINES_DIR}`);
+    new Notice('Define Plan: no engines found in the registry snapshot.');
   }
   if (!instructions.length) {
     new Notice(`Define Plan: no instructions found in ${GLOBAL_INSTRUCTIONS_DIR} or active vault Markdown files with slug ins.*`);

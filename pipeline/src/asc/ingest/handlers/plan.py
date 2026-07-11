@@ -1,10 +1,10 @@
-import json
 from collections.abc import Mapping, Sequence
 from typing import Any
 
 from asc.models.control.plan import Plan
 from asc.models.control.step import Step
 from asc.redis.key import RedisKey
+from asc.registries.snapshot import build_registry_snapshot
 from asc.state.slugmap import SlugKeyResolver, SlugMap
 from asc.ingest.common import IngestedItem
 from asc.ingest.expiry import expire_old_key
@@ -42,6 +42,7 @@ def fanout_steps(plan: Plan) -> tuple[str, ...]:
 
     plan.save(ttl=PLAN_TTL_SECONDS)
 
+    registry = build_registry_snapshot()["registries"]
     saved: list[str] = []
     index_entries: dict[int, str] = {}
 
@@ -50,14 +51,21 @@ def fanout_steps(plan: Plan) -> tuple[str, ...]:
         if number in index_entries:
             raise ValueError(f"duplicate plan step number: {number}")
 
+        engine = plan.step_engine(number)
+        engine_kind = _validate_registered_step(
+            raw_step,
+            number=number,
+            engine=engine,
+            registry=registry,
+        )
         instruction_keys = _instruction_keys(raw_step, number=number)
-        step = Step(
-            **_step_payload(
-                plan=plan,
-                number=number,
-                raw_step=raw_step,
-                instruction_keys=instruction_keys,
-            )
+        step = Step.from_plan(
+            raw_step,
+            identity=plan.identity,
+            ordinal=number,
+            engine=engine,
+            engine_kind=engine_kind,
+            instruction_keys=instruction_keys,
         )
         step_key = step.save(ttl=STEP_TTL_SECONDS)
 
@@ -106,27 +114,61 @@ def save_step_index(plan: Plan, entries: Mapping[int | str, str]) -> str:
     return key.raw_key
 
 
-def _step_payload(
-    *,
-    plan: Plan,
-    number: int,
+
+def _validate_registered_step(
     raw_step: Mapping[str, Any],
-    instruction_keys: Sequence[str],
-) -> dict[str, Any]:
-    args = raw_step.get("args", {})
-    if not isinstance(args, Mapping):
-        raise ValueError(f"step {number} args must be an object")
+    *,
+    number: int,
+    engine: str,
+    registry: Mapping[str, Any],
+) -> str:
+    engines = registry.get("engines", {})
+    if not isinstance(engines, Mapping) or engine not in engines:
+        raise ValueError(f"step {number} engine is not registered: {engine!r}")
 
-    return {
-        "identity": plan.identity,
-        "step_number": number,
-        "engine": plan.step_engine(number),
-        "instruction_keys": list(instruction_keys),
-        "script": str(raw_step.get("script", "")),
-        "rag_profile": str(raw_step.get("rag_profile", "")),
-        "args_json": json.dumps(dict(args), ensure_ascii=False, sort_keys=True),
-    }
+    engine_record = engines[engine]
+    if not isinstance(engine_record, Mapping):
+        raise ValueError(f"step {number} engine registry record is invalid: {engine!r}")
 
+    engine_kind = str(engine_record.get("kind", "")).strip()
+    declared_kind = str(raw_step.get("kind", raw_step.get("engine_kind", ""))).strip()
+    if declared_kind and declared_kind != engine_kind:
+        raise ValueError(
+            f"step {number} kind does not match engine {engine!r}: "
+            f"declared={declared_kind!r} registered={engine_kind!r}"
+        )
+
+    if engine_kind == "llm":
+        model = str(raw_step.get("model", "")).strip()
+        model_key = f"{engine}.{model}"
+        models = registry.get("models", {})
+        if not model:
+            raise ValueError(f"step {number} LLM model must not be empty")
+        if not isinstance(models, Mapping) or model_key not in models:
+            raise ValueError(
+                f"step {number} model is not registered for {engine!r}: {model!r}"
+            )
+
+    elif engine_kind == "script":
+        script = str(raw_step.get("script", "")).strip()
+        scripts = registry.get("local_scripts", {})
+        if not script:
+            raise ValueError(f"step {number} script must not be empty")
+        if not isinstance(scripts, Mapping) or script not in scripts:
+            raise ValueError(f"step {number} script is not registered: {script!r}")
+
+    elif engine_kind == "rag":
+        profile = str(raw_step.get("rag_profile", "")).strip()
+        profiles = registry.get("rag_profiles", {})
+        if not profile:
+            raise ValueError(f"step {number} RAG profile must not be empty")
+        if not isinstance(profiles, Mapping) or profile not in profiles:
+            raise ValueError(f"step {number} RAG profile is not registered: {profile!r}")
+
+    else:
+        raise ValueError(f"step {number} engine has unsupported kind: {engine_kind!r}")
+
+    return engine_kind
 
 def _instruction_keys(raw_step: Mapping[str, Any], *, number: int) -> list[str]:
     slugs = _string_list(

@@ -13,12 +13,6 @@ ENGINE_ALIASES = {
     "chatgpt": "llm",
 }
 
-RESULT_KIND_BY_ENGINE = {
-    "llm": "response",
-    "script": "transform",
-    "rag": "retrieval",
-}
-
 
 def make_worker_step(
     *,
@@ -41,15 +35,15 @@ def make_worker_step(
 
 def _expected_worker_result_key(*, step_key: str, data_key: str) -> str:
     step = Step.load(step_key)
-    engine = ENGINE_ALIASES.get(step.engine, step.engine)
-    result_kind = RESULT_KIND_BY_ENGINE[engine]
+    call_identity = RedisKey(data_key).identity
 
-    return RedisKey(
-        kind=result_kind,
-        identity=RedisKey(data_key).identity,
-        suffix=_step_suffix(step_key=step_key, step=step),
-    ).raw_key
-
+    return str(
+        RedisKey(
+            kind="response",
+            identity=call_identity,
+            suffix=str(step.ordinal),
+        )
+    )
 
 def _worker_failure_key(*, step_key: str, data_key: str) -> str:
     step = Step.load(step_key)

@@ -1,37 +1,39 @@
 from __future__ import annotations
 
-from typing import Any
-
+from asc.models.control.step import ScriptStep
+from asc.models.process.result import Transform
 from asc.registries.extensions import load_transform
+from asc.worker.runtime_io import EngineInput
 
 
 ENGINE = "scripts"
 ENGINE_COMPONENT = {
     "label": "Local script",
     "kind": "script",
-    "step_fields": ["script", "args", "instructions", "ad_hoc"],
+    "step_fields": ["script", "instruction_keys"],
 }
 
 
-def make_call(*, step: Any, content: Any, task: Any) -> dict[str, Any]:
-    transform = load_transform(step.script)
-    output = transform(_content_text(content))
+def make_call(data: EngineInput) -> Transform:
+    """Run one validated local script transform."""
 
-    return {
-        "content": output,
-        "engine": ENGINE,
-        "script": step.script,
-        "raw_json": {
+    if not isinstance(data.step, ScriptStep):
+        raise TypeError(
+            f"{ENGINE} requires ScriptStep, got {type(data.step).__name__}"
+        )
+
+    transform = load_transform(data.step.script)
+    output = transform(data.content)
+
+    return Transform(
+        identity=data.call.identity,
+        ordinal=data.step.ordinal,
+        content=output,
+        raw_json={
             "engine": ENGINE,
-            "script": step.script,
-            "args": step.args,
+            "script": data.step.script,
         },
-    }
-
-
-def _content_text(content: Any) -> str:
-    value = getattr(content, "content", content)
-    return "" if value is None else str(value)
+    )
 
 
 __all__ = ["ENGINE", "ENGINE_COMPONENT", "make_call"]

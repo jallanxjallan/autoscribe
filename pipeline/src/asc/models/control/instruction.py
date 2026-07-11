@@ -1,45 +1,37 @@
-from collections.abc import Mapping
-from typing import Any, ClassVar, Literal
+"""Reusable uploaded instruction control records."""
 
-from pydantic import ConfigDict, Field, field_validator
+from __future__ import annotations
+
+from collections.abc import Mapping
+from typing import Any, ClassVar
+
+from pydantic import ConfigDict, Field
 
 from asc.core.identity import generate_identity
 from asc.models.helpers.upload import (
     RecordIdentity,
     RedisIdentity,
     RequiredRecordContent,
-    asset_list,
 )
 from asc.redis.model_base import RedisModel
 
 
 class Instruction(RedisModel):
-    """Uploaded reusable instruction control asset.
+    """Canonical persisted instruction.
 
-    Upload accepts the public NDJSON record shape::
-
-        {
-            "record_type": "instruction",
-            "record_identity": "ins.example.slug",
-            "record_content": "instruction text",
-            ...extra metadata...
-        }
-
-    The stored Redis model keeps the canonical fields used by the runtime:
-    ``type``, ``identity``, ``slug``, ``content``, and any allowed extra
-    metadata from the upload record.
+    Public upload envelopes are validated and converted by ``from_ndjson``.
+    Redis hydration should reconstruct this canonical model without rerunning
+    upload-boundary validation.
     """
 
     kind: ClassVar[str] = "instruction"
     component: ClassVar[str] = "record"
 
-    model_config = ConfigDict(extra="allow")
+    model_config = ConfigDict(extra="forbid")
 
-    type: Literal["instruction"] = "instruction"
     identity: RedisIdentity = Field(default_factory=generate_identity)
     slug: RecordIdentity
     content: RequiredRecordContent
-    assets: list[str] = Field(default_factory=list)
 
     @classmethod
     def from_ndjson(
@@ -48,36 +40,29 @@ class Instruction(RedisModel):
         *,
         identity: str | None = None,
     ) -> "Instruction":
-        """Build an Instruction from the upload NDJSON envelope.
+        """Validate an instruction upload envelope and build its stored model."""
 
-        ``asc.upload.upload_records`` validates that ``record_type``,
-        ``record_identity``, and ``record_content`` are present before calling
-        this method. This method performs only the shape conversion from public
-        upload fields to the stored model fields.
-        """
-
-        data = dict(record)
-
-        record_type = data.pop("record_type", "instruction")
+        record_type = record.get("record_type")
         if record_type != "instruction":
-            raise ValueError(f"record_type must be 'instruction', got {record_type!r}")
+            raise ValueError(
+                f"record_type must be 'instruction', got {record_type!r}"
+            )
 
-        record_identity = data.pop("record_identity")
-        record_content = data.pop("record_content")
+        try:
+            slug = record["record_identity"]
+            content = record["record_content"]
+        except KeyError as exc:
+            raise ValueError(
+                f"instruction upload missing required field: {exc.args[0]}"
+            ) from exc
 
-        data.pop("identity", None)
-
-        data["type"] = "instruction"
-        data["identity"] = identity or generate_identity()
-        data["slug"] = record_identity
-        data["content"] = record_content
-
-        return cls.model_validate(data)
-
-    @field_validator("assets", mode="before")
-    @classmethod
-    def validate_assets(cls, value: object) -> list[str]:
-        return asset_list(value)
+        return cls.model_validate(
+            {
+                "identity": identity or generate_identity(),
+                "slug": slug,
+                "content": content,
+            }
+        )
 
 
 __all__ = ["Instruction"]

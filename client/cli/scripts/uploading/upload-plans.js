@@ -139,21 +139,14 @@ function stepEntries(steps) {
 }
 
 function normalizeStep(rawStep, index) {
-  const source = rawStep && typeof rawStep === 'object' ? rawStep : {};
-  const number = Number(source.index || source.number || index);
-  const args = source.args && typeof source.args === 'object' && !Array.isArray(source.args)
-    ? source.args
-    : {};
+  if (!rawStep || typeof rawStep !== 'object' || Array.isArray(rawStep)) {
+    throw new Error(`step ${index} must be an object`);
+  }
 
+  const number = Number(rawStep.index || rawStep.number || index);
   return {
+    ...rawStep,
     index: Number.isInteger(number) && number > 0 ? number : index,
-    kind: String(source.kind || ''),
-    label: String(source.label || `Step ${index}`),
-    engine: controlRef(source.engine),
-    script: controlRef(source.script),
-    rag_profile: controlRef(source.rag_profile || source.ragProfile),
-    instruction_slugs: normalizeInstructionSlugs(source.instruction_slugs || source.instructionSlugs),
-    args,
   };
 }
 

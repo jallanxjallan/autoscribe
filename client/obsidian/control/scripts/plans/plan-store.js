@@ -138,7 +138,8 @@ function buildPlanRecord({
     const engine = compactRegistryRecord(step.engine);
     const script = compactRegistryRecord(step.script);
     const rag_profile = compactRegistryRecord(step.rag_profile);
-    const model = String(step.model || '').trim();
+    const model = compactRegistryRecord(step.model);
+    const modelKey = String(model?.key || step.model || '').trim();
 
     if (kind === 'script' && !script) {
       throw new Error(`Step ${stepNumber}: choose a local script.`);
@@ -159,16 +160,23 @@ function buildPlanRecord({
       index: stepNumber,
       kind,
       label: step.label || `Step ${stepNumber}`,
-      instruction_slugs: instructionSlugs,
-      args,
     };
+
+    if (instructionSlugs.length) {
+      out.instruction_slugs = instructionSlugs;
+    }
+
+    if (Object.keys(args).length) {
+      out.args = args;
+    }
 
     if (engine?.key) {
       out.engine = engine.key;
     }
 
-    if (kind === 'llm' && model) {
-      out.model = model;
+    if (kind === 'llm') {
+      if (!modelKey) throw new Error(`Step ${stepNumber}: choose a model.`);
+      out.model = modelKey;
     }
 
     if (script?.key) {

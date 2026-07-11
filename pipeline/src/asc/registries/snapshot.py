@@ -13,20 +13,21 @@ from asc.core.config import (
 )
 
 ENGINE_STEP_FIELDS: dict[str, list[str]] = {
-    "llm": ["args", "instructions", "ad_hoc"],
-    "rag": ["rag_profile", "args", "instructions", "ad_hoc"],
-    "script": ["script", "args", "instructions", "ad_hoc"],
+    "llm": ["model", "instruction_keys", "temperature", "max_output_tokens"],
+    "rag": ["rag_profile", "instruction_keys"],
+    "script": ["script", "instruction_keys"],
 }
 
 
 def build_registry_snapshot() -> dict[str, Any]:
-    """Describe every extension available to the Obsidian plan compiler.
+    """Describe extensions available to the Obsidian plan compiler.
 
-    This is discovery, not validation. Python files are listed whether or not
-    they currently import or expose the expected runtime callable.
+    Extension modules are parsed rather than imported, so generating a snapshot
+    does not execute provider code or require provider dependencies.
     """
+    engines, models = _engine_and_model_records(AUTOSCRIBE_ENGINE_PACKAGES)
     return {
-        "schema_version": 1,
+        "schema_version": 2,
         "type": "autoscribe.registries",
         "sources": {
             "extension_root": str(AUTOSCRIBE_EXTENSIONS_ROOT),
@@ -34,39 +35,88 @@ def build_registry_snapshot() -> dict[str, Any]:
             "local_script_packages": list(AUTOSCRIBE_SCRIPT_PACKAGES),
         },
         "registries": {
-            "engines": _engine_records(AUTOSCRIBE_ENGINE_PACKAGES),
+            "engines": engines,
+            "models": models,
             "local_scripts": _script_records(AUTOSCRIBE_SCRIPT_PACKAGES),
             "rag_profiles": _rag_profile_records(),
         },
     }
 
 
-def _engine_records(packages: Iterable[str]) -> dict[str, dict[str, Any]]:
-    records: dict[str, dict[str, Any]] = {}
+def _engine_and_model_records(
+    packages: Iterable[str],
+) -> tuple[dict[str, dict[str, Any]], dict[str, dict[str, Any]]]:
+    engines: dict[str, dict[str, Any]] = {}
+    models: dict[str, dict[str, Any]] = {}
+
     for key, module, path in _python_extensions(packages):
         metadata = _literal_module_metadata(path)
+        component = metadata.get("ENGINE_COMPONENT")
+        component = component if isinstance(component, dict) else {}
+
         kind = str(
-            metadata.get("REGISTRY_KIND")
+            component.get("kind")
+            or metadata.get("REGISTRY_KIND")
             or metadata.get("ENGINE_KIND")
             or _default_engine_kind(key)
         )
         label = str(
-            metadata.get("REGISTRY_LABEL")
+            component.get("label")
+            or metadata.get("REGISTRY_LABEL")
             or metadata.get("ENGINE_LABEL")
             or _title(key)
         )
-        step_fields = metadata.get("STEP_FIELDS")
+        step_fields = component.get("step_fields") or metadata.get("STEP_FIELDS")
         if not isinstance(step_fields, list):
             step_fields = ENGINE_STEP_FIELDS.get(kind, ENGINE_STEP_FIELDS["llm"])
 
-        records[key] = {
+        engine_record: dict[str, Any] = {
             "key": key,
             "kind": kind,
             "label": label,
             "module": module,
             "step_fields": list(step_fields),
         }
-    return records
+
+        component_models = component.get("models")
+        if not isinstance(component_models, dict):
+            component_models = metadata.get("MODEL_LABELS")
+        model_keys = _add_model_records(models, key, component_models)
+        if model_keys:
+            engine_record["models"] = model_keys
+
+        engines[key] = engine_record
+
+    return engines, models
+
+
+def _add_model_records(
+    records: dict[str, dict[str, Any]],
+    engine: str,
+    declared_models: Any,
+) -> list[str]:
+    """Add an engine's model aliases to the global models registry.
+
+    Runtime plans store the alias (for example ``cheap``), while ``model`` is
+    the provider-facing model identifier resolved by the engine.
+    """
+    if not isinstance(declared_models, dict):
+        return []
+
+    keys: list[str] = []
+    for alias, provider_model in declared_models.items():
+        if not isinstance(alias, str) or not isinstance(provider_model, str):
+            raise TypeError(f"{engine} model declarations must map strings to strings")
+
+        registry_key = f"{engine}.{alias}"
+        records[registry_key] = {
+            "key": alias,
+            "label": f"{_title(alias)} — {provider_model}",
+            "engine": engine,
+            "model": provider_model,
+        }
+        keys.append(registry_key)
+    return keys
 
 
 def _script_records(packages: Iterable[str]) -> dict[str, dict[str, Any]]:
@@ -132,7 +182,11 @@ def _python_extensions(
 
 
 def _literal_module_metadata(path: Path) -> dict[str, Any]:
-    """Read simple top-level constants without importing the extension."""
+    """Resolve simple top-level constants without importing the extension.
+
+    Supports both normal and annotated assignments, plus references from one
+    constant to another, such as ``ENGINE_COMPONENT = {"models": MODEL_LABELS}``.
+    """
     try:
         tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
     except (OSError, SyntaxError, UnicodeError):
@@ -140,16 +194,53 @@ def _literal_module_metadata(path: Path) -> dict[str, Any]:
 
     metadata: dict[str, Any] = {}
     for node in tree.body:
-        if not isinstance(node, ast.Assign) or len(node.targets) != 1:
+        name: str | None = None
+        value_node: ast.expr | None = None
+
+        if isinstance(node, ast.Assign) and len(node.targets) == 1:
+            target = node.targets[0]
+            if isinstance(target, ast.Name):
+                name = target.id
+                value_node = node.value
+        elif isinstance(node, ast.AnnAssign) and isinstance(node.target, ast.Name):
+            name = node.target.id
+            value_node = node.value
+
+        if name is None or value_node is None:
             continue
-        target = node.targets[0]
-        if not isinstance(target, ast.Name):
-            continue
+
         try:
-            metadata[target.id] = ast.literal_eval(node.value)
-        except (ValueError, TypeError):
+            metadata[name] = _literal_value(value_node, metadata)
+        except (KeyError, TypeError, ValueError):
             continue
+
     return metadata
+
+
+def _literal_value(node: ast.AST, names: dict[str, Any]) -> Any:
+    if isinstance(node, ast.Name):
+        return names[node.id]
+    if isinstance(node, ast.Constant):
+        return node.value
+    if isinstance(node, ast.Dict):
+        return {
+            _literal_value(key, names): _literal_value(value, names)
+            for key, value in zip(node.keys, node.values, strict=True)
+            if key is not None
+        }
+    if isinstance(node, (ast.List, ast.Tuple, ast.Set)):
+        values = [_literal_value(item, names) for item in node.elts]
+        if isinstance(node, ast.Tuple):
+            return tuple(values)
+        if isinstance(node, ast.Set):
+            return set(values)
+        return values
+    if isinstance(node, ast.UnaryOp) and isinstance(node.op, (ast.UAdd, ast.USub)):
+        value = _literal_value(node.operand, names)
+        if not isinstance(value, (int, float, complex)):
+            raise TypeError("unary operators require numeric literals")
+        return value if isinstance(node.op, ast.UAdd) else -value
+    raise ValueError(f"unsupported metadata expression: {type(node).__name__}")
 
 
 def _default_engine_kind(key: str) -> str:
