@@ -6,7 +6,6 @@ const CONFIG = {
   // Topic Index displays only files with one of these slug prefixes.
   slugPrefixes: ["tpc", "fnd"],
 
-  defaultStatus: "—",
   defaultTopic: "—",
   defaultTag: "—",
 
@@ -26,6 +25,7 @@ const nodeRequire =
     : window.require;
 
 const pathMod = nodeRequire("path");
+const { Modal } = nodeRequire("obsidian");
 const vaultBasePath = app.vault.adapter.getBasePath?.() || app.vault.adapter.basePath;
 const queryPathForBootstrap = app.workspace.getActiveFile().path;
 const markerIndexForBootstrap = queryPathForBootstrap.indexOf("/queries/");
@@ -74,6 +74,102 @@ const {
   summaryText,
 } = logic;
 
+function slugPrefix(value) {
+  return String(value || "").split(/[._-]/, 1)[0].toLowerCase();
+}
+
+function isContentFile(file, frontmatter) {
+  const slug = frontmatter?.slug || file.basename;
+  return ["cnt", "img"].includes(slugPrefix(slug));
+}
+
+function collectFrontmatterLinktexts(value, output = new Set()) {
+  if (value == null) return output;
+
+  if (Array.isArray(value)) {
+    for (const item of value) collectFrontmatterLinktexts(item, output);
+    return output;
+  }
+
+  if (typeof value === "object") {
+    for (const item of Object.values(value)) {
+      collectFrontmatterLinktexts(item, output);
+    }
+    return output;
+  }
+
+  if (typeof value !== "string") return output;
+
+  for (const match of value.matchAll(/\[\[([^\]|#]+)(?:#[^\]|]+)?(?:\|[^\]]+)?\]\]/g)) {
+    const linktext = match[1].trim();
+    if (linktext) output.add(linktext);
+  }
+
+  return output;
+}
+
+function buildContentReferenceIndex() {
+  const references = new Map();
+
+  for (const file of app.vault.getMarkdownFiles()) {
+    const cache = app.metadataCache.getFileCache(file);
+    const frontmatter = cache?.frontmatter;
+    if (!frontmatter || !isContentFile(file, frontmatter)) continue;
+
+    const targetPaths = new Set();
+
+    for (const linktext of collectFrontmatterLinktexts(frontmatter)) {
+      const target = app.metadataCache.getFirstLinkpathDest(linktext, file.path);
+      if (target) targetPaths.add(target.path);
+    }
+
+    for (const targetPath of targetPaths) {
+      if (!references.has(targetPath)) references.set(targetPath, []);
+      references.get(targetPath).push({
+        path: file.path,
+        title: frontmatter.title || file.basename,
+      });
+    }
+  }
+
+  for (const files of references.values()) {
+    files.sort((a, b) => a.title.localeCompare(b.title));
+  }
+
+  return references;
+}
+
+const contentReferencesByTarget = buildContentReferenceIndex();
+
+function showContentLinksModal(row, links, api) {
+  class ContentLinksModal extends Modal {
+    onOpen() {
+      const { contentEl } = this;
+      contentEl.empty();
+      contentEl.createEl("h2", { text: `Content linked to ${row.title}` });
+
+      if (!links.length) {
+        contentEl.createEl("p", {
+          text: "No content files link to this note through frontmatter.",
+        });
+        return;
+      }
+
+      const list = contentEl.createEl("ul");
+      for (const link of links) {
+        const item = list.createEl("li");
+        api.createInternalLink(item, link.path, link.title);
+      }
+    }
+
+    onClose() {
+      this.contentEl.empty();
+    }
+  }
+
+  new ContentLinksModal(app).open();
+}
+
 function renderGroupHeading(parent, group, api) {
   const headingRow = parent.createDiv();
   headingRow.style.display = "flex";
@@ -121,10 +217,9 @@ function renderRowsTable(parent, rows, api) {
   [
     "",
     "File",
-    "Status",
     "Topic",
     "Tags",
-    "Modified",
+    "Content",
   ].forEach(text => headRow.createEl("th", { text }));
 
   const tbody = table.createEl("tbody");
@@ -147,10 +242,25 @@ function renderRowsTable(parent, rows, api) {
     const noteCell = tr.createEl("td");
     api.createInternalLink(noteCell, row.path, row.title);
 
-    tr.createEl("td", { text: row.status_display });
     tr.createEl("td", { text: row.topic_display });
     tr.createEl("td", { text: row.tag_display });
-    tr.createEl("td", { text: row.modified_display });
+
+    const contentCell = tr.createEl("td");
+    const contentLinks = contentReferencesByTarget.get(row.path) || [];
+
+    if (!contentLinks.length) {
+      contentCell.setText("0");
+    } else {
+      const countLink = contentCell.createEl("a", {
+        text: String(contentLinks.length),
+        href: "#",
+      });
+      countLink.title = "Show linked content files";
+      countLink.onclick = event => {
+        event.preventDefault();
+        showContentLinksModal(row, contentLinks, api);
+      };
+    }
   }
 }
 
@@ -284,7 +394,7 @@ async function saveSelectionManifest(api) {
     options: {
       ordering: "kind-title",
       slug_prefixes: CONFIG.slugPrefixes,
-      filters: ["status", "tag", "topic"],
+      filters: ["tag", "topic"],
       note: "Filter rows are scalar-expanded for selector behavior; rendered rows are deduped by selection_key.",
     },
     savedSelectionExtras({ rows }) {
@@ -320,7 +430,6 @@ await renderSelectionQuery({
   columns: [],
 
   filterFields: [
-    { key: "status", title: "Status" },
     { key: "tag", title: "Tag" },
     { key: "topic", title: "Topic" },
   ],
