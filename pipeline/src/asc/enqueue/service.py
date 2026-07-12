@@ -1,3 +1,4 @@
+import sys
 from collections.abc import Iterable
 from typing import TextIO
 
@@ -7,7 +8,17 @@ from asc.enqueue.runtime import activate_call, create_call_index
 
 
 def enqueue_from_stream(stream: TextIO) -> EnqueueReport:
-    return enqueue_records(iter_enqueue_records(stream))
+    try:
+        records = tuple(iter_enqueue_records(stream))
+        if not records:
+            print("asc enqueue: no records sent in stream", file=sys.stderr)
+            sys.exit(1)
+        return enqueue_records(records)
+    except SystemExit:
+        raise
+    except Exception as exc:
+        print(f"asc enqueue: record(s) failed validation: {exc}", file=sys.stderr)
+        sys.exit(1)
 
 
 def enqueue_records(records: Iterable[EnqueueRecord]) -> EnqueueReport:
