@@ -1,5 +1,7 @@
 from typing import Final
 
+from asc.ingest.common import IngestInputError
+
 RECORD_TYPE_ALIASES: Final[dict[str, str]] = {
     "instruction": "instruction",
     "instructions": "instruction",
@@ -24,26 +26,26 @@ TARGET_ALIASES: Final[dict[str, str]] = {
 
 def canonical_record_type(value: object) -> str:
     if not isinstance(value, str) or not value.strip():
-        raise ValueError("record_type must be a non-empty string")
+        raise IngestInputError("record_type must be a non-empty string")
 
     key = value.strip().lower()
     try:
         return RECORD_TYPE_ALIASES[key]
     except KeyError as exc:
         known = ", ".join(sorted(RECORD_TYPE_ALIASES))
-        raise ValueError(f"unknown record_type {value!r}; known: {known}") from exc
+        raise IngestInputError(f"unknown record_type {value!r}; known: {known}") from exc
 
 
 def canonical_target(value: object) -> str:
     if not isinstance(value, str) or not value.strip():
-        raise ValueError("target must be a non-empty string")
+        raise IngestInputError("target must be a non-empty string")
 
     key = value.strip().lower()
     try:
         return TARGET_ALIASES[key]
     except KeyError as exc:
         known = ", ".join(sorted(TARGET_ALIASES))
-        raise ValueError(f"unknown ingest target {value!r}; known: {known}") from exc
+        raise IngestInputError(f"unknown ingest target {value!r}; known: {known}") from exc
 
 
 __all__ = ["RECORD_TYPE_ALIASES", "TARGET_ALIASES", "canonical_record_type", "canonical_target"]

@@ -1,6 +1,10 @@
 from dataclasses import dataclass, field
 
 
+class IngestInputError(ValueError):
+    """Expected malformed or invalid upload input."""
+
+
 @dataclass(frozen=True, slots=True)
 class IngestedItem:
     record_type: str
@@ -25,4 +29,4 @@ class IngestReport:
     skipped: tuple[SkippedIngest, ...] = ()
 
 
-__all__ = ["IngestReport", "IngestedItem", "SkippedIngest"]
+__all__ = ["IngestInputError", "IngestReport", "IngestedItem", "SkippedIngest"]

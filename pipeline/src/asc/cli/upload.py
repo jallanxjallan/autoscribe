@@ -1,7 +1,9 @@
 import sys
-from typing import Any, Iterable, TextIO
+from typing import Any, Iterable
 
 import typer
+
+from asc.ingest.common import IngestInputError
 
 
 app = typer.Typer(
@@ -18,12 +20,12 @@ def _report_value(report: Any, name: str) -> int:
     return int(value)
 
 
-def _ingest_stream(target: str, source: Iterable[str], *, error_stream: TextIO = sys.stderr) -> Any:
+def _ingest_stream(target: str, source: Iterable[str]) -> Any:
     """Load the ingest package only when an ingest command is invoked."""
 
     from asc.ingest.stream import ingest_stream
 
-    return ingest_stream(source, target=target, error_stream=error_stream)
+    return ingest_stream(source, target=target)
 
 
 def _run_ingest(target: str) -> None:
@@ -32,7 +34,7 @@ def _run_ingest(target: str) -> None:
     except NotImplementedError as exc:
         typer.echo(f"[ingest:{target}] not implemented: {exc}", err=True)
         raise typer.Exit(code=1) from exc
-    except Exception as exc:
+    except IngestInputError as exc:
         typer.echo(f"[ingest:{target}] error: {exc}", err=True)
         raise typer.Exit(code=1) from exc
 

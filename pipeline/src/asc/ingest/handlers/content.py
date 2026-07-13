@@ -6,7 +6,7 @@ from pydantic import ValidationError
 from asc.core.identity import generate_identity
 from asc.models.process.call import CallRecord
 from asc.state.slugmap import SlugMap
-from asc.ingest.common import IngestedItem
+from asc.ingest.common import IngestedItem, IngestInputError
 from asc.ingest.expiry import expire_old_key
 
 
@@ -21,7 +21,7 @@ def ingest_content(record: Mapping[str, Any]) -> IngestedItem:
         else:
             content = CallRecord.model_validate(data)
     except ValidationError as exc:
-        raise ValueError(f"validation failed: {exc}") from exc
+        raise IngestInputError(f"validation failed: {exc}") from exc
 
     slugmap = SlugMap()
     old_key = slugmap.get(slug)

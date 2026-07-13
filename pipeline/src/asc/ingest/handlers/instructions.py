@@ -6,7 +6,7 @@ from pydantic import ValidationError
 from asc.core.identity import generate_identity
 from asc.models.control.instruction import Instruction
 from asc.state.slugmap import SlugMap
-from asc.ingest.common import IngestedItem
+from asc.ingest.common import IngestedItem, IngestInputError
 from asc.ingest.expiry import expire_old_key
 
 
@@ -16,7 +16,7 @@ def ingest_instruction(record: Mapping[str, Any]) -> IngestedItem:
     try:
         instruction = Instruction.from_ndjson(record, identity=generate_identity())
     except ValidationError as exc:
-        raise ValueError(f"validation failed: {exc}") from exc
+        raise IngestInputError(f"validation failed: {exc}") from exc
 
     slugmap = SlugMap()
     old_key = slugmap.get(slug)

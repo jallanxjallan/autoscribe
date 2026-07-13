@@ -3,10 +3,8 @@ const CONFIG = {
   tempRoot: "",
   debug: false,
 
-  // Topic Index displays only files with one of these slug prefixes.
   slugPrefixes: ["tpc", "fnd"],
 
-  defaultTopic: "—",
   defaultTag: "—",
 
   excludePaths: [
@@ -44,15 +42,15 @@ const runtimePath = pathMod.join(
 );
 
 const { createQueryRuntime } = nodeRequire(runtimePath);
-const runtime = createQueryRuntime({ app, queryTitle: "Topic Index query" });
+const runtime = createQueryRuntime({ app, queryTitle: "Materials Index query" });
 const { loader, queryPath, vaultName } = runtime;
 
 const { renderSelectionQuery } = loader.requireControl("scripts/lib/selection-query.js");
 const { setTriState } = loader.requireControl("scripts/lib/dom.js");
 const rg = loader.requireControl("scripts/lib/rg.js");
-const { createTopicIndexLogic } = loader.requireControl("scripts/lib/topic-index.js");
+const { createTopicIndexLogic: createMaterialsIndexLogic } = loader.requireControl("scripts/lib/topic-index.js");
 
-const logic = createTopicIndexLogic({
+const logic = createMaterialsIndexLogic({
   app,
   dv,
   pathMod,
@@ -202,6 +200,28 @@ function renderGroupHeading(parent, group, api) {
   countText.setText(`(${checkedCount}/${group.rows.length})`);
 }
 
+function renderTagCell(cell, value) {
+  const tags = String(value || "—")
+    .split(/\s*(?:,|·|\|)\s*/)
+    .map(tag => tag.trim())
+    .filter(Boolean);
+
+  const wrap = cell.createDiv();
+  wrap.style.display = "grid";
+  wrap.style.gridTemplateRows = "repeat(2, min-content)";
+  wrap.style.gridAutoFlow = "column";
+  wrap.style.gridAutoColumns = "max-content";
+  wrap.style.justifyContent = "start";
+  wrap.style.columnGap = "0.75em";
+  wrap.style.rowGap = "0.15em";
+  wrap.style.lineHeight = "1.25";
+  wrap.style.whiteSpace = "nowrap";
+
+  for (const tag of tags) {
+    wrap.createEl("span", { text: tag });
+  }
+}
+
 function renderRowsTable(parent, rows, api) {
   const tableWrap = parent.createDiv();
   tableWrap.style.overflowX = "auto";
@@ -217,7 +237,6 @@ function renderRowsTable(parent, rows, api) {
   [
     "",
     "File",
-    "Topic",
     "Tags",
     "Content",
   ].forEach(text => headRow.createEl("th", { text }));
@@ -242,8 +261,9 @@ function renderRowsTable(parent, rows, api) {
     const noteCell = tr.createEl("td");
     api.createInternalLink(noteCell, row.path, row.title);
 
-    tr.createEl("td", { text: row.topic_display });
-    tr.createEl("td", { text: row.tag_display });
+    const tagCell = tr.createEl("td");
+    tagCell.style.width = "45%";
+    renderTagCell(tagCell, row.tag_display);
 
     const contentCell = tr.createEl("td");
     const contentLinks = contentReferencesByTarget.get(row.path) || [];
@@ -384,17 +404,17 @@ function renderBookmarkLookup(parent, { api }) {
 
 async function saveSelectionManifest(api) {
   await api.saveDataviewSelection({
-    operation: "topic-index",
-    queryName: "Topic Index",
-    namespace: "topic-index",
-    selectionSource: "topic-index",
-    selectionKind: "topic-index",
+    operation: "materials-index",
+    queryName: "Materials Index",
+    namespace: "materials-index",
+    selectionSource: "materials-index",
+    selectionKind: "materials-index",
     selectionKey: "selection_key",
     serializeRow: serializeIndexRow,
     options: {
       ordering: "kind-title",
       slug_prefixes: CONFIG.slugPrefixes,
-      filters: ["tag", "topic"],
+      filters: ["tag"],
       note: "Filter rows are scalar-expanded for selector behavior; rendered rows are deduped by selection_key.",
     },
     savedSelectionExtras({ rows }) {
@@ -417,9 +437,9 @@ await renderSelectionQuery({
   dv,
   nodeRequire: runtime.nodeRequire,
 
-  title: "Topic Index",
-  namespace: "topic-index",
-  bridgeName: "__topicIndexSelection",
+  title: "Materials Index",
+  namespace: "materials-index",
+  bridgeName: "__materialsIndexSelection",
 
   vaultName,
   queryPath,
@@ -431,7 +451,6 @@ await renderSelectionQuery({
 
   filterFields: [
     { key: "tag", title: "Tag" },
-    { key: "topic", title: "Topic" },
   ],
 
   sortModes: [
@@ -440,7 +459,7 @@ await renderSelectionQuery({
 
   defaultSortMode: "kind-title",
 
-  selectionKind: "topic-index",
+  selectionKind: "materials-index",
   selectionKey: "selection_key",
   serializeRow: serializeIndexRow,
   savedSelectionExtras({ rows }) {
@@ -450,7 +469,7 @@ await renderSelectionQuery({
   maxFilterChoices: CONFIG.maxFilterChoices,
 
   emptyMessage: `No Markdown files matched slug prefixes ${CONFIG.slugPrefixes.join(", ")}.`,
-  noMatchesMessage: "No matching topic or finding files.",
+  noMatchesMessage: "No matching material files.",
 
   renderSummaryExtras(parent, context) {
     renderBookmarkLookup(parent, context);
