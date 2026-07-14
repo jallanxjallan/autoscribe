@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import os
-import sys
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -84,16 +83,12 @@ def require_secret(*names: str) -> str:
 
 
 def ensure_runtime_paths() -> None:
-    """Make configured runtime extension roots importable once per process."""
+    """Validate configured runtime paths without changing Python import state."""
 
     if not AUTOSCRIBE_EXTENSIONS_ROOT.is_dir():
         raise FileNotFoundError(
             f"AutoScribe extensions root not found: {AUTOSCRIBE_EXTENSIONS_ROOT}"
         )
-
-    root = str(AUTOSCRIBE_EXTENSIONS_ROOT)
-    if root not in sys.path:
-        sys.path.insert(0, root)
 
 
 @dataclass(frozen=True)
