@@ -6,6 +6,7 @@ from typing import Iterator
 
 from .errors import ObsError
 from .markdown import parse_markdown
+from .process import run
 
 
 @dataclass(frozen=True)
@@ -24,16 +25,18 @@ class Vault:
             raise ObsError(f"refusing to run without _control in vault root: {self.root}")
 
     def markdown_paths(self, *, public_only: bool = False) -> Iterator[Path]:
-        excluded = {".git", ".obsidian"}
-        for path in sorted(self.root.rglob("*.md")):
-            rel = path.relative_to(self.root)
-            if any(part in excluded for part in rel.parts):
-                continue
-            if rel.parts and rel.parts[0] == "_control":
-                continue
+        args = [
+            "rg", "--files", "--glob", "*.md",
+            "--glob", "!.git/**", "--glob", "!.obsidian/**", "--glob", "!_control/**",
+        ]
+        result = run(args, cwd=self.root, check=False)
+        if result.returncode not in {0, 1}:
+            raise ObsError(f"rg file index failed: {(result.stderr or result.stdout).strip()}")
+        for value in sorted(line for line in result.stdout.splitlines() if line.strip()):
+            rel = Path(value)
             if public_only and any(part.startswith("_") for part in rel.parts[:-1]):
                 continue
-            yield path
+            yield self.root / rel
 
     def records(self, *, public_only: bool = False) -> list[VaultRecord]:
         records: list[VaultRecord] = []

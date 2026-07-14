@@ -8,6 +8,7 @@ from pathlib import Path
 from . import git
 from .downloads import writeback, writenew
 from .errors import ObsError
+from .ipc import handle as handle_ipc
 from .state import VaultState
 from .uploads import dispatch_run, upload_instructions, upload_plans
 from .vault import Vault
@@ -18,6 +19,7 @@ def parser() -> argparse.ArgumentParser:
     root.add_argument("--vault", type=Path, help="target vault/repository; defaults to current git root")
     sub = root.add_subparsers(dest="command", required=True)
     state = sub.add_parser("state")
+    sub.add_parser("ipc")
     scan = sub.add_parser("scan")
     scan.add_argument("--public", action="store_true")
     for name in ("upload-instructions", "upload-plans"):
@@ -41,7 +43,10 @@ def main(argv: list[str] | None = None) -> int:
     args = parser().parse_args(argv)
     try:
         repo = args.vault.resolve() if args.vault else git.root(Path.cwd())
-        if args.command == "state":
+        if args.command == "ipc":
+            request = json.load(sys.stdin)
+            print(json.dumps(handle_ipc(repo, request), ensure_ascii=False))
+        elif args.command == "state":
             current = VaultState.for_vault(repo)
             print(json.dumps({"vault_root": str(repo), "state_root": str(current.root)}, indent=2))
         elif args.command == "scan":
