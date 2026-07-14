@@ -3,6 +3,7 @@
 ```dataviewjs
 const { spawnSync } = require("child_process");
 const vaultRoot = app.vault.adapter.basePath;
+const root = dv.container;
 const state = {
   files: [],
   selected: new Set(),
@@ -12,14 +13,44 @@ const state = {
 };
 
 function ipc(request) {
-  const result = spawnSync("obs", ["--vault", vaultRoot, "ipc"], {
-    input: JSON.stringify(request),
-    encoding: "utf8",
-  });
-  if (result.status !== 0) {
-    throw new Error((result.stderr || result.stdout || "obs IPC failed").trim());
+  const obsExecutable = "/home/jeremy/Python3.13Env/bin/obs";
+  const result = spawnSync(
+    obsExecutable,
+    ["--vault", vaultRoot, "ipc"],
+    {
+      input: JSON.stringify(request),
+      encoding: "utf8",
+      cwd: vaultRoot,
+      maxBuffer: 16 * 1024 * 1024,
+      timeout: 30000,
+    },
+  );
+  if (result.error) {
+    throw new Error(`obs IPC could not start: ${result.error.message}`);
   }
-  return JSON.parse(result.stdout);
+  if (result.status !== 0) {
+    console.error("Stage Files IPC stderr:", result.stderr);
+    console.error("Stage Files IPC stdout:", result.stdout);
+    const lines = (result.stderr || result.stdout || `exit status ${result.status}`)
+      .trim()
+      .split("\n")
+      .filter(Boolean);
+    const detail = lines.at(-1) || `exit status ${result.status}`;
+    throw new Error(`obs IPC failed: ${detail}`);
+  }
+  try {
+    const response = JSON.parse(result.stdout);
+    if (response && response.ok === false) {
+      throw new Error(response.error || response.error_type || "obs IPC failed");
+    }
+    return response;
+  } catch (error) {
+    if (error instanceof Error && !error.message.startsWith("Unexpected token")) {
+      throw error;
+    }
+    console.error("Invalid Stage Files IPC output:", result.stdout);
+    throw new Error("obs IPC returned invalid JSON; see developer console");
+  }
 }
 
 function el(tag, attrs = {}, text = null) {
@@ -39,7 +70,7 @@ function shortHash(commit) {
 }
 
 function render() {
-  container.empty();
+  root.replaceChildren();
   const controls = el("div", { className: "stage-files-controls" });
   const stage = el("input", { placeholder: "stage (blank = all)", value: state.stage });
   const status = el("input", { placeholder: "status (blank = all)", value: state.status });
@@ -67,6 +98,13 @@ function render() {
         },
         sort: state.sort,
       });
+      if (!response || response.ok !== true) {
+        throw new Error(response?.error || "Stage Files refresh failed");
+      }
+      if (!Array.isArray(response.files)) {
+        console.error("Unexpected Stage Files response:", response);
+        throw new Error("Stage Files returned no file list");
+      }
       state.files = response.files;
       state.selected.clear();
       render();
@@ -75,7 +113,7 @@ function render() {
     }
   };
   controls.append(stage, status, sort, refresh);
-  container.append(controls);
+  root.append(controls);
 
   const table = el("table", { className: "stage-files-table" });
   const head = el("tr");
@@ -92,22 +130,25 @@ function render() {
       event.preventDefault();
       app.workspace.openLinkText(file.path, "", false);
     };
-    const user = file.user_commit;
+    const user = file.user_commit ?? null;
+    const gitState = file.worktree?.label ?? "unknown";
+    const dispatchState = file.dispatch?.state ?? "unknown";
+    const dispatchReason = file.dispatch?.reason ?? "";
     row.append(
       el("td", {}, null),
       el("td", {}, null),
       el("td", {}, file.stage || "—"),
       el("td", {}, file.status || "—"),
-      el("td", {}, file.worktree.label),
-      el("td", {}, user ? `${shortHash(user)} · ${user.subject}` : "—"),
-      el("td", {}, file.dispatch.reason ? `${file.dispatch.state}: ${file.dispatch.reason}` : file.dispatch.state),
+      el("td", {}, gitState),
+      el("td", {}, user ? `${shortHash(user)} · ${user.subject ?? ""}` : "—"),
+      el("td", {}, dispatchReason ? `${dispatchState}: ${dispatchReason}` : dispatchState),
       el("td", {}, shortDate(file.mtime)),
     );
     row.children[0].append(checkbox);
     row.children[1].append(link);
     table.append(row);
   }
-  container.append(table);
+  root.append(table);
 
   const commitBox = el("div", { className: "stage-files-commit" });
   const message = el("input", { placeholder: "Git message / batch label" });
@@ -119,7 +160,12 @@ function render() {
     try {
       const paths = [...state.selected];
       const response = ipc({ action: "stage_files.commit", paths, message: message.value, amend: amend.checked });
-      new Notice(`Committed ${response.files.length} file(s): ${response.commit.slice(0, 8)}`);
+      if (!response || response.ok !== true) {
+        throw new Error(response?.error || "Stage Files commit failed");
+      }
+      const committedFiles = Array.isArray(response.files) ? response.files.length : paths.length;
+      const commitHash = response.commit ? response.commit.slice(0, 8) : "unknown";
+      new Notice(`Committed ${committedFiles} file(s): ${commitHash}`);
       state.selected.clear();
       refresh.click();
     } catch (error) {
@@ -127,7 +173,7 @@ function render() {
     }
   };
   commitBox.append(message, amendLabel, commit);
-  container.append(commitBox);
+  root.append(commitBox);
 }
 
 render();

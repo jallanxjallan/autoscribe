@@ -16,7 +16,7 @@ def refresh(
     stages: list[str] | None = None,
     statuses: list[str] | None = None,
     sort: str = "title_asc",
-) -> tuple[list[dict[str, Any]], list[dict[str, str]]]:
+) -> list[dict[str, Any]]:
     if sort not in SORTS:
         raise ObsError(f"unknown Stage Files sort: {sort}")
     stage_filter = {value.strip() for value in (stages or []) if value.strip()}
@@ -24,8 +24,7 @@ def refresh(
     states = git.status_map(repo)
     events = git.dispatch_events(repo)
     rows: list[dict[str, Any]] = []
-    scan = Vault(repo).scan()
-    for record in scan.records:
+    for record in Vault(repo).records():
         stage = str(record.frontmatter.get("stage") or "").strip()
         status = str(record.frontmatter.get("status") or "").strip()
         if stage_filter and stage not in stage_filter:
@@ -61,4 +60,4 @@ def refresh(
             (row["user_commit"] or {}).get("hash", ""),
             row["title"].casefold(),
         ))
-    return rows, [error.as_dict() for error in scan.errors]
+    return rows

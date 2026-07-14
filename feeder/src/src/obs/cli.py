@@ -3,7 +3,6 @@ from __future__ import annotations
 import argparse
 import json
 import sys
-import traceback
 from pathlib import Path
 
 from . import git
@@ -76,25 +75,8 @@ def main(argv: list[str] | None = None) -> int:
             _report(args.command, items, args.dry_run)
         return 0
     except (ObsError, OSError, ValueError, json.JSONDecodeError) as exc:
-        if getattr(args, "command", None) == "ipc":
-            print(json.dumps({
-                "ok": False,
-                "error": str(exc),
-                "error_type": type(exc).__name__,
-            }, ensure_ascii=False))
-            return 0
         print(f"obs: ERROR: {exc}", file=sys.stderr)
         return 1
-    except Exception as exc:
-        if getattr(args, "command", None) == "ipc":
-            traceback.print_exc(file=sys.stderr)
-            print(json.dumps({
-                "ok": False,
-                "error": f"{type(exc).__name__}: {exc}",
-                "error_type": type(exc).__name__,
-            }, ensure_ascii=False))
-            return 0
-        raise
 
 
 def _report(command: str, items: list[dict], dry_run: bool) -> None:

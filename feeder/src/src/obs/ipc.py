@@ -13,13 +13,13 @@ def handle(repo: Path, request: dict[str, Any]) -> dict[str, Any]:
     action = str(request.get("action") or "").strip()
     if action == "stage_files.refresh":
         filters = request.get("filters") or {}
-        files, scan_errors = refresh(
+        files = refresh(
             repo,
             stages=_strings(filters.get("stage")),
             statuses=_strings(filters.get("status")),
             sort=str(request.get("sort") or "title_asc"),
         )
-        return {"ok": True, "files": files, "scan_errors": scan_errors}
+        return {"ok": True, "files": files}
     if action == "stage_files.commit":
         paths = _indexed_paths(repo, _strings(request.get("paths")))
         commit = git.commit_files(
