@@ -209,6 +209,7 @@ async function renderSelectionQuery(rawOptions) {
   }
 
   const expandedFilterGroups = new Set();
+  let showSelectedOnly = false;
 
   function filterChoiceLimit() {
     const limit = Number(options.maxFilterChoices ?? 0);
@@ -296,6 +297,7 @@ async function renderSelectionQuery(rawOptions) {
 
       sortMode: model.getSortMode(),
       filters,
+      showSelectedOnly,
 
       selectionKind: options.selectionKind,
       selectionKey: options.selectionKey,
@@ -333,6 +335,8 @@ async function renderSelectionQuery(rawOptions) {
         }
       }
     }
+
+    showSelectedOnly = state.showSelectedOnly === true;
 
     model.selectedKeys.clear();
 
@@ -455,6 +459,7 @@ async function renderSelectionQuery(rawOptions) {
     try {
       await stateStore.remove();
       model.reset();
+      showSelectedOnly = false;
       notify(`${options.title ?? options.namespace} state cleared.`);
       render();
     } catch (error) {
@@ -551,6 +556,15 @@ async function renderSelectionQuery(rawOptions) {
     const saveCurrentButton = buttonRow.createEl("button", { text: "Save current selection" });
     saveCurrentButton.onclick = async () => {
       await saveCurrentSelection();
+    };
+
+    const showSelectedButton = buttonRow.createEl("button", {
+      text: showSelectedOnly ? "Show all" : "Show selected"
+    });
+    showSelectedButton.onclick = async () => {
+      showSelectedOnly = !showSelectedOnly;
+      await saveCurrentState({ quiet: true, action: "display-mode" });
+      render();
     };
 
     const reloadButton = buttonRow.createEl("button", { text: "Reload query state" });
@@ -782,7 +796,10 @@ async function renderSelectionQuery(rawOptions) {
     const root = dv.container;
     root.innerHTML = "";
 
-    const displayedRows = model.getDisplayedRows();
+    const filteredRows = model.getDisplayedRows();
+    const displayedRows = showSelectedOnly
+      ? filteredRows.filter(row => model.selectedKeys.has(model.getRowKey(row)))
+      : filteredRows;
     const selectedDisplayedCount = model.getSelectedDisplayedCount(displayedRows);
     const selectedRows = model.getSelectedRows();
 

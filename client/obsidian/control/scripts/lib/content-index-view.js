@@ -4,6 +4,17 @@ const { makeContentIndexModel } = require("./content-index-model.js");
 const { setTriState } = require("./dom.js");
 
 function makeContentIndexView({ app, dv, nodeRequire, queryPath, vaultName, config, renderSelectionQuery }) {
+  const queryTitle = config.queryTitle || "Content Index";
+  const namespace = config.namespace || "content-index";
+  const bridgeName = config.bridgeName || "__contentIndexSelection";
+  const showTagColumn = config.showTagColumn !== false;
+  const visibleFilterKeys = new Set(config.visibleFilterKeys || [
+    "slug_prefix",
+    "class",
+    "tag_values",
+    "layout_component",
+  ]);
+
   const modelBuilder = makeContentIndexModel({ app, dv, queryPath, config });
 
   function rowBelongsToHeading(row, heading) {
@@ -64,7 +75,10 @@ function makeContentIndexView({ app, dv, nodeRequire, queryPath, vaultName, conf
 
     const thead = table.createEl("thead");
     const headRow = thead.createEl("tr");
-    ["", "Title", "Class", "Tags", "Layout component"].forEach(text => headRow.createEl("th", { text }));
+    const headings = ["", "Title", "Class"];
+    if (showTagColumn) headings.push("Tags");
+    headings.push("Layout component");
+    headings.forEach(text => headRow.createEl("th", { text }));
 
     const tbody = table.createEl("tbody");
     for (const row of sortedRows) {
@@ -82,7 +96,7 @@ function makeContentIndexView({ app, dv, nodeRequire, queryPath, vaultName, conf
       const noteCell = tr.createEl("td");
       api.createInternalLink(noteCell, row.path, row.title);
       tr.createEl("td", { text: row.class });
-      tr.createEl("td", { text: row.tags_display });
+      if (showTagColumn) tr.createEl("td", { text: row.tags_display });
       tr.createEl("td", { text: row.layout_component });
     }
   }
@@ -241,17 +255,17 @@ function makeContentIndexView({ app, dv, nodeRequire, queryPath, vaultName, conf
   async function saveSelectionManifest(api, state) {
     await api.saveDataviewSelection({
       operation: "content-index",
-      queryName: "Content Index",
-      namespace: "content-index",
-      selectionSource: "content-index",
-      selectionKind: "content-index",
+      queryName: queryTitle,
+      namespace,
+      selectionSource: namespace,
+      selectionKind: namespace,
       selectionKey: "selection_key",
       serializeRow: state.serializeRow,
       options: {
         toc_path: state.selectedTocFile?.path || "",
         ordering: state.selectedTocFile ? "table-of-contents" : "alphabetical",
         slug_prefixes: config.slugPrefixes,
-        filters: ["slug_prefix", "class", "tag_values", "layout_component"],
+        filters: [...visibleFilterKeys],
       },
       savedSelectionExtras: state.savedSelectionExtras,
     });
@@ -269,9 +283,9 @@ function makeContentIndexView({ app, dv, nodeRequire, queryPath, vaultName, conf
       app,
       dv,
       nodeRequire,
-      title: "Content Index",
-      namespace: "content-index",
-      bridgeName: "__contentIndexSelection",
+      title: queryTitle,
+      namespace,
+      bridgeName,
       vaultName,
       queryPath,
       stateVersion: 2,
@@ -283,10 +297,10 @@ function makeContentIndexView({ app, dv, nodeRequire, queryPath, vaultName, conf
         { key: "class", title: "Class" },
         { key: "tag_values", title: "Tags" },
         { key: "layout_component", title: "Layout component" },
-      ],
+      ].filter(field => visibleFilterKeys.has(field.key)),
       sortModes: [["toc", "TOC order"]],
       defaultSortMode: "toc",
-      selectionKind: "content-index",
+      selectionKind: namespace,
       selectionKey: "selection_key",
       serializeRow: state.serializeRow,
       savedSelectionExtras: state.savedSelectionExtras,

@@ -4,11 +4,11 @@ const CONFIG = {
   tempRoot: "",
   debug: false,
 
-  queryTitle: "Content Index",
-  namespace: "content-index",
-  bridgeName: "__contentIndexSelection",
-  showTagColumn: false,
-  visibleFilterKeys: ["class", "layout_component"],
+  queryTitle: "Tag Index",
+  namespace: "tag-index",
+  bridgeName: "__tagIndexSelection",
+  showTagColumn: true,
+  visibleFilterKeys: ["tag_values"],
 
   // Keep these as the content filter, but do not expose them as a selector.
   slugPrefixes: ["cnt_", "img_"],
@@ -54,7 +54,7 @@ const runtimePath = pathMod.join(
 );
 
 const { createQueryRuntime } = nodeRequire(runtimePath);
-const runtime = createQueryRuntime({ app, queryTitle: "Content Index query" });
+const runtime = createQueryRuntime({ app, queryTitle: "Tag Index query" });
 const { loader, queryPath, vaultName } = runtime;
 
 const { renderSelectionQuery } = loader.requireControl("scripts/lib/selection-query.js");
