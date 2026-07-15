@@ -3,7 +3,7 @@ const path = require('path');
 
 const { el, clear, button } = require('../lib/dom.js');
 const { vaultRoot } = require('../lib/vault-state.js');
-const { loadRegistrySnapshot, snapshotList } = require('../lib/control-loader.js');
+const { loadRegistrySnapshot, snapshotList, listInstructions } = require('../lib/feeder-control-loader.js');
 
 const {
   buildPlanRecord,
@@ -727,10 +727,8 @@ function renderStepEditor({ stepsBox, engines, models, scripts, instructions, ra
 async function renderCreatePlan({ app, container }) {
   clear(container);
   const root = vaultRoot(app);
-  const vaultControlRoot = path.join(root, '.autoscribe');
-  const vaultPlansDir = path.join(vaultControlRoot, 'plans');
 
-  const registryResult = loadRegistrySnapshot();
+  const registryResult = loadRegistrySnapshot(app);
   if (registryResult.error) {
     throw new Error(`Could not load AutoScribe registry snapshot: ${registryResult.error}${registryResult.stderr ? `; ${registryResult.stderr}` : ''}`);
   }
@@ -739,14 +737,8 @@ async function renderCreatePlan({ app, container }) {
   const models = sortByLabel(snapshotList(registrySnapshot, 'models'));
   const scripts = sortByLabel(snapshotList(registrySnapshot, 'local_scripts'));
   const ragProfiles = sortByLabel(snapshotList(registrySnapshot, 'rag_profiles'));
-  const instructions = sortByLabel([
-    ...listInstructionFolder(GLOBAL_INSTRUCTIONS_DIR, 'global'),
-    ...listVaultSlugInstructions(root),
-  ]);
-  const globalPlans = sortByLabel([
-    ...listPlanFolder(GLOBAL_PLANS_DIR, 'global'),
-    ...listPlanFolder(vaultPlansDir, 'vault'),
-  ]);
+  const instructions = sortByLabel(listInstructions(app));
+  const globalPlans = [];
 
   const steps = [];
   let loadedPlan = null;
@@ -790,7 +782,7 @@ async function renderCreatePlan({ app, container }) {
     text: `${instructions.length} instruction(s), ${llmEngines(engines).length} LLM engine(s), ${models.length} model(s), ${scripts.length} script(s), ${ragProfiles.length} RAG profile(s), ${globalPlans.length} local plan(s) found.`,
   });
   const rootsText = el('p', {
-    text: `Registry source: asc registry snapshot; global instructions=${GLOBAL_INSTRUCTIONS_DIR}; active vault instructions=Markdown files with slug ins.*; plans=${GLOBAL_PLANS_DIR}; vault plans=${vaultPlansDir}`,
+    text: `Registry and plans: feeder IPC; instructions: merged pipeline, active vault, and configured Library vault`,
   });
   const stepsBox = el('div');
   const savedPath = el('code', { text: '' });

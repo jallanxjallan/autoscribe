@@ -73,62 +73,6 @@ def upload_instructions(repo: Path, *, force: bool = False, dry_run: bool = Fals
     return items, output
 
 
-def upload_plans(repo: Path, *, force: bool = False, dry_run: bool = False) -> tuple[list[dict[str, Any]], str]:
-    Vault(repo)
-    directory = VaultState.for_vault(repo).plans
-    items: list[dict[str, Any]] = []
-    for path in sorted(directory.glob("*.json")) if directory.exists() else []:
-        record = read_json(path)
-        identity = str(record.get("record_identity") or "").strip()
-        if record.get("record_type") != "plan" or not identity:
-            continue
-        if not force and record.get("pending_upload") is not True:
-            continue
-        items.append({"slug": identity, "path": path, "record": record})
-    _assert_unique(items, "plan")
-    if dry_run or not items:
-        return items, ""
-    uploaded_at = now_iso()
-    output_lines: list[str] = []
-    for item in items:
-        record = item["record"]
-        raw_steps = record.get("steps")
-        if isinstance(raw_steps, dict):
-            sequence = [raw_steps[key] for key in sorted(raw_steps, key=lambda value: int(value))]
-        elif isinstance(raw_steps, list):
-            sequence = raw_steps
-        else:
-            sequence = []
-        steps = []
-        for index, step in enumerate(sequence, 1):
-            if not isinstance(step, dict):
-                raise ObsError(f"{item['path']}: step {index} must be an object")
-            normalized = dict(step)
-            number = normalized.get("index", normalized.get("number", index))
-            normalized["index"] = number if isinstance(number, int) and number > 0 else index
-            steps.append(normalized)
-        if not steps:
-            raise ObsError(f"plan has no executable steps: {item['slug']}")
-        content = {
-            "version": int(record.get("version") or 1),
-            "label": str(record.get("label") or item["slug"]),
-            "slug": item["slug"], "description": str(record.get("description") or ""),
-            "step_count": len(steps),
-            "preflight": record.get("preflight") if isinstance(record.get("preflight"), dict)
-                         else {"clean": True, "warnings": []},
-            "steps": steps,
-            "source": {"origin": "obsidian.upload-plans", "path": str(item["path"]),
-                       "uploaded_at": uploaded_at,
-                       "source_sha256": _sha256(json.dumps(record, sort_keys=True))},
-        }
-        output_lines.append(json.dumps({"record_type": "plan", "record_identity": item["slug"],
-                                        "record_content": content}, ensure_ascii=False))
-        record["pending_upload"] = False
-        record["uploaded_at"] = uploaded_at
-        item["path"].write_text(json.dumps(record, indent=2, ensure_ascii=False) + "\n", encoding="utf-8")
-    return items, "\n".join(output_lines) + "\n"
-
-
 def dispatch_run(repo: Path, *, manifest_path: Path | None = None, dry_run: bool = False,
                  defaults: list[str] | None = None) -> tuple[list[dict[str, Any]], str]:
     vault = Vault(repo)

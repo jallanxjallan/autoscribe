@@ -64,3 +64,41 @@ def commit_files(repo: Path, paths: list[str], message: str, body: str = "") -> 
     args.extend(["--", *paths])
     run(args, cwd=repo)
     return head(repo)
+
+
+def status_records(repo: Path) -> list[dict[str, str]]:
+    output = run(["git", "status", "--porcelain=v1", "-z", "--untracked-files=all"], cwd=repo).stdout
+    entries = [entry for entry in output.split("\0") if entry]
+    records: list[dict[str, str]] = []
+    index = 0
+    while index < len(entries):
+        entry = entries[index]
+        status = entry[:2]
+        value = entry[3:].strip()
+        record = {"path": value, "index": status[0], "worktree": status[1], "status": status}
+        if "R" in status or "C" in status:
+            if index + 1 < len(entries):
+                record["renamed_from"] = entries[index + 1]
+            index += 2
+        else:
+            index += 1
+        records.append(record)
+    return records
+
+
+def file_state(repo: Path, relpath: str) -> dict[str, object]:
+    records = [record for record in status_records(repo) if record["path"] == relpath]
+    commit = last_commit(repo, relpath)
+    if not records:
+        state = "clean" if commit else "untracked"
+        status = ""
+    else:
+        status = records[0]["status"]
+        state = "untracked" if status == "??" else "dirty"
+    return {
+        "repo_state": state,
+        "git_status": status,
+        "git_commit": commit or None,
+        "short_commit": commit[:8] if commit else None,
+        "has_prior_commit": bool(commit),
+    }

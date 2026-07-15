@@ -1,27 +1,5 @@
-# cli package
+# Deprecated client CLI
 
-Node-side helpers and command implementations for shell/Electron-facing Obsidian workflows.
+Operational scripts were migrated to the Python `feeder` package on the development branch.
 
-This package is deliberately isolated from `control/`. Do not require files from `control/` here.
-External command paths are read from environment variables, not from a shared config module.
-
-## Current public command surface
-
-Vault commands:
-
-- `create-vault`
-- `open-vault`
-- `update-vault`
-- `update-core`
-- `push-vault`
-
-AutoScribe commands:
-
-- `upload-instructions`
-- `upload-plans`
-- `upload-prompts`
-- `writeback`
-- `writenew`
-
-Stale legacy command wrappers have been removed from this tree; the supported command surface is the list above.
-
+Use the `obs` command or the Obsidian control-panel IPC bridge. This directory remains only to make the removed boundary explicit; no filesystem, Git, Pandoc, upload, dispatch, plan, or writeback logic belongs in the client package.
