@@ -1,17 +1,13 @@
 from __future__ import annotations
 
 import json
-import os
 from pathlib import Path
 from typing import Any
 
 from .catalog import pipeline_snapshot
 from .errors import ObsError
 from .process import run
-
-
-def _asc_bin() -> str:
-    return os.environ.get("AUTOSCRIBE_BIN") or os.environ.get("ASC_BIN") or "asc"
+from .executables import autoscribe_bin
 
 
 def _plan_values(snapshot: dict[str, Any]) -> list[dict[str, Any]]:
@@ -58,7 +54,7 @@ def save_plan(record: dict[str, Any], *, cwd: Path) -> dict[str, Any]:
         raise ObsError(f"{slug}: plan has no executable steps")
     payload = {**record, "record_type": "plan", "record_identity": slug, "slug": slug}
     line = json.dumps(payload, ensure_ascii=False) + "\n"
-    result = run([_asc_bin(), "upload", "plans"], cwd=cwd, input_text=line)
+    result = run([autoscribe_bin(), "upload", "plans"], cwd=cwd, input_text=line)
     return {"record": payload, "pipeline_output": result.stdout.strip()}
 
 

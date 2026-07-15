@@ -1,7 +1,9 @@
 from __future__ import annotations
 
 import json
-import os
+import re
+
+import yaml
 from pathlib import Path
 from typing import Any, Iterable
 
@@ -9,10 +11,7 @@ from . import git
 from .errors import ObsError
 from .markdown import parse_markdown
 from .process import run
-
-
-def _asc_bin() -> str:
-    return os.environ.get("AUTOSCRIBE_BIN") or os.environ.get("ASC_BIN") or "asc"
+from .executables import autoscribe_bin
 
 
 def pipeline_snapshot(kind: str) -> dict[str, Any]:
@@ -22,7 +21,7 @@ def pipeline_snapshot(kind: str) -> dict[str, Any]:
     }
     if kind not in commands:
         raise ObsError(f"unsupported pipeline snapshot: {kind}")
-    result = run([_asc_bin(), *commands[kind]], cwd=Path.cwd())
+    result = run([autoscribe_bin(), *commands[kind]], cwd=Path.cwd())
     value = json.loads(result.stdout)
     if not isinstance(value, dict):
         raise ObsError(f"asc {kind} snapshot did not return an object")
@@ -46,8 +45,19 @@ def _roots(active: Path, roots: Iterable[str] | None, library_vault: str | None)
     return result
 
 
+_INSTRUCTION_SLUG = re.compile(r"(?mi)^\s*slug\s*:\s*[\"']?ins\.")
+
+
 def _local_instruction(active: Path, root: Path, path: Path) -> dict[str, Any] | None:
-    document = parse_markdown(path.read_text(encoding="utf-8"))
+    text = path.read_text(encoding="utf-8")
+    # Do not parse every Markdown file in the vault. The catalogue is keyed by
+    # instruction slugs, so cheaply reject unrelated files before YAML parsing.
+    if not _INSTRUCTION_SLUG.search(text):
+        return None
+    try:
+        document = parse_markdown(text)
+    except (yaml.YAMLError, ValueError) as exc:
+        raise ObsError(f"invalid instruction frontmatter in {path}: {exc}") from exc
     slug = str(document.frontmatter.get("slug") or "").strip()
     if not slug.startswith("ins."):
         return None

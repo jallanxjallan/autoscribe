@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import json
-import os
 import re
 from pathlib import Path
 from typing import Any
@@ -11,12 +10,9 @@ from .errors import ObsError
 from .manifests import now_iso, write_json
 from .markdown import parse_markdown, render_markdown, strip_frontmatter
 from .process import run
+from .executables import autoscribe_bin
 from .state import VaultState
 from .vault import Vault
-
-
-def _asc_bin() -> str:
-    return os.environ.get("AUTOSCRIBE_BIN") or os.environ.get("ASC_BIN") or "asc"
 
 
 def _ndjson(text: str) -> list[dict[str, Any]]:
@@ -39,7 +35,7 @@ def _first_string(record: dict[str, Any], *keys: str) -> str:
 
 
 def pending_exports(repo: Path) -> list[dict[str, Any]]:
-    output = run([_asc_bin(), "export", "list-pending-exports"], cwd=repo).stdout
+    output = run([autoscribe_bin(), "export", "list-pending-exports"], cwd=repo).stdout
     records = []
     for raw in _ndjson(output):
         records.append({
@@ -77,7 +73,7 @@ def _extract_content(value: Any, seen: set[str] | None = None) -> str:
 
 
 def extract_result(repo: Path, item: dict[str, Any]) -> tuple[str, dict[str, Any]]:
-    output = run([_asc_bin(), "export", "extract-result", item["call_identity"]], cwd=repo).stdout
+    output = run([autoscribe_bin(), "export", "extract-result", item["call_identity"]], cwd=repo).stdout
     records = _ndjson(output)
     if len(records) != 1:
         raise ObsError(f"expected exactly one extracted result record, got {len(records)}")
@@ -88,7 +84,7 @@ def extract_result(repo: Path, item: dict[str, Any]) -> tuple[str, dict[str, Any
 
 
 def mark_exported(repo: Path, result_identity: str) -> None:
-    run([_asc_bin(), "export", "update-exports", result_identity], cwd=repo)
+    run([autoscribe_bin(), "export", "update-exports", result_identity], cwd=repo)
 
 
 def writeback(repo: Path, *, dry_run: bool = False, limit: int | None = None) -> list[dict[str, Any]]:

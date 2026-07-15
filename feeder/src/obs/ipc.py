@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import os
 import sys
+import traceback
 from pathlib import Path
 from typing import Any, Callable
 
@@ -12,7 +13,7 @@ from .downloads import writeback, writenew
 from .errors import ObsError
 from .instruction_upload import upload_instruction
 from .plans import delete_plan, list_plans, load_plan, save_plan
-from .uploads import dispatch_run
+from .uploads import dispatch_paths, dispatch_run
 from .vault import Vault
 
 Handler = Callable[[Path, dict[str, Any]], Any]
@@ -62,10 +63,24 @@ def _upload_instruction(repo: Path, request: dict[str, Any]) -> dict[str, Any]:
     )
 
 
+def _user_commits(repo: Path, request: dict[str, Any]) -> list[dict[str, object]]:
+    return git.user_commits(repo, limit=int(request.get("limit") or 100))
+
+
+def _commit_files(repo: Path, request: dict[str, Any]) -> list[str]:
+    return git.files_in_commit(repo, str(request.get("commit") or ""))
+
+
 def _dispatch(repo: Path, request: dict[str, Any]) -> dict[str, Any]:
-    items, output = dispatch_run(repo, manifest_path=Path(request["manifest"]) if request.get("manifest") else None,
-                                 dry_run=bool(request.get("dry_run")))
-    return {"items": items, "output": output}
+    paths = request.get("paths")
+    if not isinstance(paths, list):
+        raise ObsError("dispatch.run requires paths list")
+    return dispatch_paths(
+        repo,
+        paths=[str(path) for path in paths],
+        plan_slug=str(request.get("plan_slug") or ""),
+        dry_run=bool(request.get("dry_run")),
+    )
 
 
 def _writeback(repo: Path, request: dict[str, Any]) -> list[dict[str, Any]]:
@@ -102,6 +117,8 @@ HANDLERS: dict[str, Handler] = {
     "instructions.catalog": _instructions,
     "pipeline.snapshot": _snapshot,
     "git.commit": _commit,
+    "git.user_commits": _user_commits,
+    "git.commit_files": _commit_files,
     "instruction.upload": _upload_instruction,
     "plans.list": _plans_list,
     "plan.load": _plan_load,
@@ -129,6 +146,9 @@ def main() -> int:
             raise ObsError("IPC request must be a JSON object")
         print(json.dumps(handle(request), ensure_ascii=False))
         return 0
-    except (ObsError, OSError, ValueError, json.JSONDecodeError) as exc:
-        print(json.dumps({"ok": False, "error": str(exc)}, ensure_ascii=False))
+    except Exception as exc:
+        # stdout must remain valid JSON for the Obsidian caller. Preserve the
+        # traceback on stderr for diagnosis while returning a structured error.
+        traceback.print_exc(file=sys.stderr)
+        print(json.dumps({"ok": False, "error": str(exc), "error_type": type(exc).__name__}, ensure_ascii=False))
         return 1

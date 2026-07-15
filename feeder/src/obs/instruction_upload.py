@@ -12,6 +12,7 @@ from .errors import ObsError
 from .markdown import parse_markdown
 from .pandoc import capture
 from .process import run
+from .executables import autoscribe_bin
 
 
 def _metadata(path: Path | None) -> dict[str, Any]:
@@ -54,7 +55,7 @@ def upload_instruction(repo: Path, *, source_path: str, input_path: Path,
         "uploaded_at": datetime.now(timezone.utc).isoformat(),
     })
     ndjson = capture(repo=repo, input_path=str(input_path), defaults=["upload_control"], metadata=metadata)
-    result = run(["asc", "upload", "instructions"], cwd=repo, input_text=ndjson)
+    result = run([autoscribe_bin(), "upload", "instructions"], cwd=repo, input_text=ndjson)
     response = result.stdout.strip()
     return {"slug": slug, "source_path": source_path, "input_path": str(input_path),
             "upload_commit": upload_commit, "pipeline_output": response}

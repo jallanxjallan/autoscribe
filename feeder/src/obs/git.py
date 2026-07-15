@@ -102,3 +102,65 @@ def file_state(repo: Path, relpath: str) -> dict[str, object]:
         "short_commit": commit[:8] if commit else None,
         "has_prior_commit": bool(commit),
     }
+
+_AUTOSCRIBE_SUBJECT_PREFIXES = (
+    "UPLOAD ",
+    "WRITEBACK",
+    "AUTOSCRIBE ",
+    "AUTOSCRIBE:",
+    "PIPELINE ",
+    "PIPELINE:",
+)
+
+
+def user_commits(repo: Path, *, limit: int = 100) -> list[dict[str, object]]:
+    """Return recent commits that were not created by AutoScribe operations."""
+    if limit < 1:
+        raise ObsError("commit list limit must be positive")
+    separator = "\x1f"
+    record_separator = "\x1e"
+    output = run(
+        [
+            "git", "log", f"--max-count={limit}",
+            f"--format=%H{separator}%h{separator}%s{separator}%ct{record_separator}",
+        ],
+        cwd=repo,
+    ).stdout
+    commits: list[dict[str, object]] = []
+    for raw in output.split(record_separator):
+        raw = raw.strip()
+        if not raw:
+            continue
+        parts = raw.split(separator)
+        if len(parts) != 4:
+            continue
+        commit_hash, short_hash, subject, timestamp = parts
+        if subject.upper().startswith(tuple(prefix.upper() for prefix in _AUTOSCRIBE_SUBJECT_PREFIXES)):
+            continue
+        files = files_in_commit(repo, commit_hash)
+        if not files:
+            continue
+        commits.append({
+            "hash": commit_hash,
+            "short_hash": short_hash,
+            "subject": subject,
+            "timestamp": int(timestamp),
+            "files": files,
+            "count": len(files),
+        })
+    return commits
+
+
+def files_in_commit(repo: Path, commit_hash: str) -> list[str]:
+    """Return files introduced or changed by one commit, including a root commit."""
+    value = str(commit_hash or "").strip()
+    if not value:
+        raise ObsError("commit hash is required")
+    output = run(
+        [
+            "git", "diff-tree", "--root", "--no-commit-id", "--name-only", "-r",
+            "--diff-filter=ACMRT", value,
+        ],
+        cwd=repo,
+    ).stdout
+    return sorted({line.strip() for line in output.splitlines() if line.strip()})
