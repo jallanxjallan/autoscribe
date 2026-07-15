@@ -5,6 +5,7 @@ const { forceCurrentLeafPresentation } = require("./workspace");
 const { createSelectionModel } = require("./selection-model");
 const { createStateStore } = require("../selections/selection-state");
 const { writeManifest } = require("./operation-manifest");
+const { setCurrentSelection } = require("./current-selection");
 
 function defaultSerializeRow(row, index) {
   return {
@@ -140,6 +141,47 @@ async function saveDataviewSelection(api, config = {}) {
   return { manifestPath, manifest, items };
 }
 
+async function saveCurrentSelection(api, config = {}) {
+  if (!api || typeof api !== "object") {
+    throw new Error("saveCurrentSelection requires the selection query api.");
+  }
+
+  const options = api.options ?? {};
+  const selectedRows = api.getSelectedRows();
+  const serializeRow = config.serializeRow ?? options.serializeRow ?? defaultSerializeRow;
+  const items = selectedRows.map((row, index) => serializeRow(row, index));
+  const source = config.selectionSource ?? options.namespace;
+  const manifestOptions = {
+    selection_source: source,
+    selection_kind: config.selectionKind ?? options.selectionKind,
+    selection_key: config.selectionKey ?? options.selectionKey,
+    ...(config.options && typeof config.options === "object" ? config.options : {})
+  };
+
+  if (typeof config.savedSelectionExtras === "function") {
+    Object.assign(manifestOptions, config.savedSelectionExtras({
+      rows: items, selectedRows, items, api, options
+    }));
+  }
+
+  const manifest = setCurrentSelection({
+    app: api.app,
+    queryName: config.queryName ?? options.title ?? source,
+    namespace: config.namespace ?? options.namespace ?? source,
+    options: manifestOptions,
+    items,
+    extra: config.extra ?? {},
+  });
+
+  if (config.saveState !== false && typeof api.saveCurrentState === "function") {
+    await api.saveCurrentState({ quiet: true, action: "current-selection" });
+  }
+  if (config.notify !== false && typeof api.notify === "function") {
+    api.notify(`Set current selection to ${items.length} item(s) from ${source}.`);
+  }
+  return { manifest, items };
+}
+
 async function renderSelectionQuery(rawOptions) {
   const options = {
     stateVersion: 2,
@@ -229,6 +271,9 @@ async function renderSelectionQuery(rawOptions) {
       saveCurrentState,
       saveDataviewSelection(config = {}) {
         return saveDataviewSelection(getApi(), config);
+      },
+      saveCurrentSelection(config = {}) {
+        return saveCurrentSelection(getApi(), config);
       },
       reloadSavedState,
       clearSavedState,
@@ -757,4 +802,5 @@ async function renderSelectionQuery(rawOptions) {
 module.exports = {
   renderSelectionQuery,
   saveDataviewSelection,
+  saveCurrentSelection,
 };
