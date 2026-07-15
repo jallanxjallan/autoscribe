@@ -261,8 +261,9 @@ function makeContentStatusView({
   }
 
   async function saveSelectionManifest(api) {
-    await api.saveCurrentSelection({
-            queryName: "Content Status",
+    await api.saveDataviewSelection({
+      operation: "content-status",
+      queryName: "Content Status",
       namespace: "content-status",
       selectionSource: "content-status",
       selectionKind: "slug",
@@ -333,7 +334,7 @@ function makeContentStatusView({
       },
 
       renderActions(parent, api) {
-        const saveButton = parent.createEl("button", { text: "Set current selection" });
+        const saveButton = parent.createEl("button", { text: "Save selection manifest" });
         saveButton.onclick = async () => {
           await saveSelectionManifest(api);
         };

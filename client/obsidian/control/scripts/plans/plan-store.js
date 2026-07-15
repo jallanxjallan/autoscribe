@@ -1,5 +1,7 @@
+const fs = require('fs');
+const path = require('path');
 const { makeSlug } = require('../lib/slug.js');
-const { callFeeder, vaultRoot } = require('../lib/feeder-ipc.js');
+const { vaultRoot, writeJson } = require('../lib/vault-state.js');
 const { controlWarnings } = require('../lib/control-loader.js');
 
 function normalizeKind(value) {
@@ -205,10 +207,12 @@ function buildPlanRecord({
     description: cleanDescription,
     created: existing?.created || now,
     modified: now,
+    pending_upload: true,
+    uploaded_at: existing?.uploaded_at || null,
     vault: {
       name: path.basename(root),
       root,
-      storage: 'pipeline',
+      storage: 'vault-local',
     },
     registry_snapshot,
     control_snapshot,
@@ -221,31 +225,109 @@ function buildPlanRecord({
   };
 }
 
+function localAutoscribeDir(app) {
+  return path.join(vaultRoot(app), '.autoscribe');
+}
+
+function workflowDir(app, name) {
+  return path.join(localAutoscribeDir(app), 'workflow', name);
+}
+
+function planDir(app) {
+  return workflowDir(app, 'plans');
+}
+
+function planFileFor(app, slug) {
+  return path.join(planDir(app), `${slug}.json`);
+}
+
 function savePlanRecord(app, record) {
   const slug = planSlug(record);
   if (!slug) throw new Error('Plan record missing record_identity.');
-  const result = callFeeder(app, 'plan.save', { record });
-  return result.record || record;
+  const file = planFileFor(app, slug);
+  writeJson(file, record);
+  return file;
+}
+
+function readJsonFile(file) {
+  const text = fs.readFileSync(file, 'utf8');
+  return JSON.parse(text);
+}
+
+function isPlanRecord(record) {
+  return record && record.record_type === 'plan' && Boolean(record.record_identity);
 }
 
 function listPlanRecords(app) {
-  return callFeeder(app, 'plans.list');
+  const dir = planDir(app);
+  let entries = [];
+  try { entries = fs.readdirSync(dir, { withFileTypes: true }); } catch { return []; }
+
+  const records = [];
+  for (const entry of entries) {
+    if (!entry.isFile() || !entry.name.endsWith('.json')) continue;
+
+    const file = path.join(dir, entry.name);
+    try {
+      const record = readJsonFile(file);
+      if (!isPlanRecord(record)) continue;
+
+      const stat = fs.statSync(file);
+      records.push({
+        ...record,
+        slug: record.record_identity,
+        file,
+        file_mtime: stat.mtime.toISOString(),
+      });
+    } catch (err) {
+      const fallbackSlug = path.basename(entry.name, '.json');
+      records.push({
+        record_type: 'plan',
+        record_identity: fallbackSlug,
+        slug: fallbackSlug,
+        label: fallbackSlug,
+        file,
+        read_error: err.message,
+      });
+    }
+  }
+
+  records.sort((a, b) => {
+    const am = String(a.modified || a.file_mtime || a.created || '');
+    const bm = String(b.modified || b.file_mtime || b.created || '');
+    const cmp = bm.localeCompare(am);
+    if (cmp) return cmp;
+    return String(a.label || a.record_identity || a.slug).localeCompare(
+      String(b.label || b.record_identity || b.slug)
+    );
+  });
+
+  return records;
 }
 
 function loadPlanRecord(app, slug) {
-  return callFeeder(app, 'plan.load', { slug });
+  const found = listPlanRecords(app).find((record) => planSlug(record) === slug);
+  if (!found) throw new Error(`Plan not found: ${slug}`);
+  if (found.read_error) throw new Error(`Could not read ${found.file}: ${found.read_error}`);
+  return found;
 }
 
-function listPendingPlanRecords() {
-  return [];
+function listPendingPlanRecords(app) {
+  return listPlanRecords(app).filter((record) => record.pending_upload === true);
 }
 
-function markPlanRecordUploaded(app, slug) {
-  return loadPlanRecord(app, slug);
+function markPlanRecordUploaded(app, slug, uploadedAt = new Date().toISOString()) {
+  const record = loadPlanRecord(app, slug);
+  record.pending_upload = false;
+  record.uploaded_at = uploadedAt;
+  savePlanRecord(app, record);
+  return record;
 }
 
 function deletePlanRecord(app, slug) {
-  return callFeeder(app, 'plan.delete', { slug });
+  const record = loadPlanRecord(app, slug);
+  fs.unlinkSync(record.file || planFileFor(app, slug));
+  return record.file || planFileFor(app, slug);
 }
 
 module.exports = {

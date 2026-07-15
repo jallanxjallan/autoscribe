@@ -5,7 +5,7 @@ const { forceCurrentLeafPresentation } = require("./workspace");
 const { createSelectionModel } = require("./selection-model");
 const { createStateStore } = require("../selections/selection-state");
 const { writeManifest } = require("./operation-manifest");
-const { setCurrentSelection } = require("./current-selection");
+const { readCurrentSelection, writeCurrentSelection } = require("../selections/current-selection");
 
 function defaultSerializeRow(row, index) {
   return {
@@ -141,47 +141,6 @@ async function saveDataviewSelection(api, config = {}) {
   return { manifestPath, manifest, items };
 }
 
-async function saveCurrentSelection(api, config = {}) {
-  if (!api || typeof api !== "object") {
-    throw new Error("saveCurrentSelection requires the selection query api.");
-  }
-
-  const options = api.options ?? {};
-  const selectedRows = api.getSelectedRows();
-  const serializeRow = config.serializeRow ?? options.serializeRow ?? defaultSerializeRow;
-  const items = selectedRows.map((row, index) => serializeRow(row, index));
-  const source = config.selectionSource ?? options.namespace;
-  const manifestOptions = {
-    selection_source: source,
-    selection_kind: config.selectionKind ?? options.selectionKind,
-    selection_key: config.selectionKey ?? options.selectionKey,
-    ...(config.options && typeof config.options === "object" ? config.options : {})
-  };
-
-  if (typeof config.savedSelectionExtras === "function") {
-    Object.assign(manifestOptions, config.savedSelectionExtras({
-      rows: items, selectedRows, items, api, options
-    }));
-  }
-
-  const manifest = setCurrentSelection({
-    app: api.app,
-    queryName: config.queryName ?? options.title ?? source,
-    namespace: config.namespace ?? options.namespace ?? source,
-    options: manifestOptions,
-    items,
-    extra: config.extra ?? {},
-  });
-
-  if (config.saveState !== false && typeof api.saveCurrentState === "function") {
-    await api.saveCurrentState({ quiet: true, action: "current-selection" });
-  }
-  if (config.notify !== false && typeof api.notify === "function") {
-    api.notify(`Set current selection to ${items.length} item(s) from ${source}.`);
-  }
-  return { manifest, items };
-}
-
 async function renderSelectionQuery(rawOptions) {
   const options = {
     stateVersion: 2,
@@ -272,10 +231,9 @@ async function renderSelectionQuery(rawOptions) {
       saveDataviewSelection(config = {}) {
         return saveDataviewSelection(getApi(), config);
       },
-      saveCurrentSelection(config = {}) {
-        return saveCurrentSelection(getApi(), config);
-      },
       reloadSavedState,
+      loadCurrentSelection,
+      saveCurrentSelection,
       clearSavedState,
       render,
       notify,
@@ -433,6 +391,66 @@ async function renderSelectionQuery(rawOptions) {
     return true;
   }
 
+  function applyCurrentSelection(selection) {
+    if (!selection || !Array.isArray(selection.items)) return false;
+
+    const pathKeys = new Set(selection.items.map(item => item.path).filter(Boolean));
+    const slugKeys = new Set(selection.items.map(item => item.slug).filter(Boolean));
+    const validKeys = model.getValidSelectionKeys();
+    model.selectedKeys.clear();
+
+    for (const row of rows) {
+      const key = model.getRowKey(row);
+      const matches =
+        (typeof row.path === "string" && pathKeys.has(row.path)) ||
+        (typeof row.slug === "string" && slugKeys.has(row.slug)) ||
+        validKeys.has(key) && (pathKeys.has(key) || slugKeys.has(key));
+      if (matches) model.selectedKeys.add(key);
+    }
+    return true;
+  }
+
+  async function loadCurrentSelection({ quiet = false } = {}) {
+    try {
+      const selection = readCurrentSelection(app);
+      if (!selection) {
+        if (!quiet) notify("No current selection exists for this vault session.");
+        return false;
+      }
+      applyCurrentSelection(selection);
+      await saveCurrentState({ quiet: true, action: "load-current-selection" });
+      if (!quiet) notify(`Loaded ${model.selectedKeys.size} current item(s) into ${options.title ?? options.namespace}.`);
+      render();
+      return true;
+    } catch (error) {
+      console.error(error);
+      if (!quiet) notify("Could not load the current selection.");
+      return false;
+    }
+  }
+
+  async function saveCurrentSelection({ quiet = false } = {}) {
+    try {
+      const serializeRow = options.serializeRow ?? defaultSerializeRow;
+      const items = model.getSelectedRows().map((row, index) => serializeRow(row, index));
+      const result = writeCurrentSelection(app, {
+        items,
+        source: {
+          namespace: options.namespace,
+          queryPath: options.queryPath,
+          title: options.title ?? options.namespace,
+        },
+        action: "save",
+      });
+      if (!quiet) notify(`Saved ${result.selection.count} item(s) as the current selection.`);
+      return result.selection;
+    } catch (error) {
+      console.error(error);
+      if (!quiet) notify("Could not save the current selection.");
+      return null;
+    }
+  }
+
   async function clearSavedState() {
     try {
       await stateStore.remove();
@@ -525,12 +543,22 @@ async function renderSelectionQuery(rawOptions) {
     buttonRow.style.alignItems = "center";
     buttonRow.style.gap = "0.5em";
 
-    const reloadButton = buttonRow.createEl("button", { text: "Reload state" });
+    const loadCurrentButton = buttonRow.createEl("button", { text: "Load current selection" });
+    loadCurrentButton.onclick = async () => {
+      await loadCurrentSelection();
+    };
+
+    const saveCurrentButton = buttonRow.createEl("button", { text: "Save current selection" });
+    saveCurrentButton.onclick = async () => {
+      await saveCurrentSelection();
+    };
+
+    const reloadButton = buttonRow.createEl("button", { text: "Reload query state" });
     reloadButton.onclick = async () => {
       await reloadSavedState();
     };
 
-    const clearStateButton = buttonRow.createEl("button", { text: "Clear state" });
+    const clearStateButton = buttonRow.createEl("button", { text: "Clear query state" });
     clearStateButton.onclick = async () => {
       await clearSavedState();
     };
@@ -802,5 +830,4 @@ async function renderSelectionQuery(rawOptions) {
 module.exports = {
   renderSelectionQuery,
   saveDataviewSelection,
-  saveCurrentSelection,
 };

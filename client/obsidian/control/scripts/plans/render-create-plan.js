@@ -3,7 +3,7 @@ const path = require('path');
 
 const { el, clear, button } = require('../lib/dom.js');
 const { vaultRoot } = require('../lib/vault-state.js');
-const { loadRegistrySnapshot, snapshotList, listInstructions } = require('../lib/feeder-control-loader.js');
+const { loadRegistrySnapshot, snapshotList } = require('../lib/control-loader.js');
 
 const {
   buildPlanRecord,
@@ -20,6 +20,7 @@ const STEP_KINDS = [
 ];
 
 const GLOBAL_INSTRUCTIONS_DIR = '/home/jeremy/Library/instructions';
+const GLOBAL_PLANS_DIR = '/home/jeremy/Library/instructions';
 const ENGINES_DIR = '/home/jeremy/AutoScribe/extensions/engines';
 const LOCAL_SCRIPTS_DIR = '/home/jeremy/AutoScribe/extensions/scripts';
 
@@ -524,15 +525,50 @@ function renderKindRadios({ currentKind, onChange, name }) {
   return wrapper;
 }
 
-function renderInstructionPicker({ step, instructions }) {
+function renderInstructionPicker({ step, instructions, redraw }) {
   const wrapper = el('div');
-  const insSelect = selectFor(instructions, 'Choose instruction', 'slug');
-  insSelect.value = step.instructions?.[0]?.slug || '';
-  insSelect.addEventListener('change', () => {
-    const selected = selectedRecord(insSelect, instructions, 'slug');
-    step.instructions = selected ? [selected] : [];
+  const insSelect = selectFor(instructions, 'Add uploaded instruction', 'slug');
+  const insList = el('ul');
+
+  function redrawInstructions() {
+    insList.innerHTML = '';
+    if (!step.instructions.length) {
+      insList.appendChild(el('li', { text: 'No instructions selected.' }));
+      return;
+    }
+    step.instructions.forEach((ins, insIndex) => {
+      const li = el('li');
+      li.appendChild(el('code', { text: ins.slug || ins.key }));
+      li.appendChild(document.createTextNode(` — ${ins.label || ins.identity || ''} `));
+      li.appendChild(button('↑', () => {
+        if (insIndex === 0) return;
+        [step.instructions[insIndex - 1], step.instructions[insIndex]] = [step.instructions[insIndex], step.instructions[insIndex - 1]];
+        redraw();
+      }));
+      li.appendChild(button('↓', () => {
+        if (insIndex >= step.instructions.length - 1) return;
+        [step.instructions[insIndex + 1], step.instructions[insIndex]] = [step.instructions[insIndex], step.instructions[insIndex + 1]];
+        redraw();
+      }));
+      li.appendChild(button('Remove', () => {
+        step.instructions.splice(insIndex, 1);
+        redraw();
+      }));
+      insList.appendChild(li);
+    });
+  }
+
+  const addIns = button('Add Instruction', () => {
+    const rec = selectedRecord(insSelect, instructions, 'slug');
+    if (!rec) return;
+    if (!step.instructions.some((i) => i.slug === rec.slug)) step.instructions.push(rec);
+    insSelect.value = '';
+    redraw();
   });
-  wrapper.appendChild(el('label', {}, ['Instruction', insSelect]));
+
+  wrapper.appendChild(el('label', {}, ['Instructions', insSelect]));
+  wrapper.append(addIns, insList);
+  redrawInstructions();
   return wrapper;
 }
 
@@ -605,14 +641,14 @@ function renderStepSpecificControls({ step, engines, models, scripts, instructio
     step.engine = engine;
     wrapper.appendChild(el('p', {}, ['Engine: ', el('code', { text: engine?.label || engine?.key || 'RAG engine not found' })]));
     wrapper.appendChild(renderRagPicker({ step, ragProfiles }));
-    wrapper.appendChild(renderInstructionPicker({ step, instructions }));
+    wrapper.appendChild(renderInstructionPicker({ step, instructions, redraw }));
     wrapper.appendChild(renderArgsEditor(step, 'Optional RAG args JSON'));
     return wrapper;
   }
 
   wrapper.appendChild(renderProviderPicker({ step, engines, redraw }));
   wrapper.appendChild(renderModelPicker({ step, models }));
-  wrapper.appendChild(renderInstructionPicker({ step, instructions }));
+  wrapper.appendChild(renderInstructionPicker({ step, instructions, redraw }));
   wrapper.appendChild(renderArgsEditor(step, 'Optional LLM args JSON'));
   return wrapper;
 }
@@ -690,9 +726,21 @@ function renderStepEditor({ stepsBox, engines, models, scripts, instructions, ra
 
 async function renderCreatePlan({ app, container }) {
   clear(container);
-  const root = vaultRoot(app);
 
-  const registryResult = loadRegistrySnapshot(app);
+  const refreshBtn = button('Refresh', async () => {
+    try {
+      await renderCreatePlan({ app, container });
+    } catch (error) {
+      new Notice(`Define Plan refresh failed: ${error.message}`, 10000);
+      console.error(error);
+    }
+  });
+  container.appendChild(refreshBtn);
+  const root = vaultRoot(app);
+  const vaultControlRoot = path.join(root, '.autoscribe');
+  const vaultPlansDir = path.join(vaultControlRoot, 'plans');
+
+  const registryResult = loadRegistrySnapshot();
   if (registryResult.error) {
     throw new Error(`Could not load AutoScribe registry snapshot: ${registryResult.error}${registryResult.stderr ? `; ${registryResult.stderr}` : ''}`);
   }
@@ -701,15 +749,22 @@ async function renderCreatePlan({ app, container }) {
   const models = sortByLabel(snapshotList(registrySnapshot, 'models'));
   const scripts = sortByLabel(snapshotList(registrySnapshot, 'local_scripts'));
   const ragProfiles = sortByLabel(snapshotList(registrySnapshot, 'rag_profiles'));
-  const instructions = sortByLabel(listInstructions(app));
-  
+  const instructions = sortByLabel([
+    ...listInstructionFolder(GLOBAL_INSTRUCTIONS_DIR, 'global'),
+    ...listVaultSlugInstructions(root),
+  ]);
+  const globalPlans = sortByLabel([
+    ...listPlanFolder(GLOBAL_PLANS_DIR, 'global'),
+    ...listPlanFolder(vaultPlansDir, 'vault'),
+  ]);
+
   const steps = [];
   let loadedPlan = null;
   let newStepKind = 'llm';
   let availablePlans = [];
 
   container.appendChild(el('h2', { text: 'Define Plan' }));
-  container.appendChild(el('p', { text: 'Load a plan stored in the pipeline, or create a new one. Each step uses one instruction.' }));
+  container.appendChild(el('p', { text: 'A plan is a reusable ordered set of processing steps. Pick a step type first; the screen then shows only the relevant provider, model, script, RAG, instruction, and args fields.' }));
   container.appendChild(el('p', {}, ['Helper path: ', el('code', { text: `${root}/_control/scripts/plans/render-create-plan.js` })]));
 
   const existingPlansBox = el('div');
@@ -723,9 +778,9 @@ async function renderCreatePlan({ app, container }) {
       source: plan.source || 'saved',
       key: `saved:${plan.slug}`,
     }));
-    availablePlans = sortByLabel(savedPlans);
+    availablePlans = sortByLabel([...savedPlans, ...globalPlans]);
     existingSelect.innerHTML = '';
-    existingSelect.appendChild(el('option', { value: '', text: availablePlans.length ? 'Choose remote plan' : 'No remote plans found' }));
+    existingSelect.appendChild(el('option', { value: '', text: availablePlans.length ? 'Choose existing/local plan' : 'No saved or local plans found' }));
     for (const plan of availablePlans) {
       existingSelect.appendChild(el('option', { value: plan.key || plan.slug, text: planOptionText(plan) }));
     }
@@ -742,10 +797,10 @@ async function renderCreatePlan({ app, container }) {
   description.style.minHeight = '5rem';
 
   const status = el('p', {
-    text: `${instructions.length} instruction(s), ${llmEngines(engines).length} LLM engine(s), ${models.length} model(s), ${scripts.length} script(s), and ${ragProfiles.length} RAG profile(s) found.`,
+    text: `${instructions.length} instruction(s), ${llmEngines(engines).length} LLM engine(s), ${models.length} model(s), ${scripts.length} script(s), ${ragProfiles.length} RAG profile(s), ${globalPlans.length} local plan(s) found.`,
   });
   const rootsText = el('p', {
-    text: `Registry and plans: feeder IPC; instructions: merged pipeline, active vault, and configured Library vault`,
+    text: `Registry source: asc registry snapshot; global instructions=${GLOBAL_INSTRUCTIONS_DIR}; active vault instructions=Markdown files with slug ins.*; plans=${GLOBAL_PLANS_DIR}; vault plans=${vaultPlansDir}`,
   });
   const stepsBox = el('div');
   const savedPath = el('code', { text: '' });
@@ -771,7 +826,9 @@ async function renderCreatePlan({ app, container }) {
     const selected = availablePlans.find((plan) => (plan.key || plan.slug) === selectedKey);
     if (!selected) return;
     try {
-      const plan = loadPlanRecord(app, selected.slug);
+      const plan = selected.source === 'saved'
+        ? loadPlanRecord(app, selected.slug)
+        : loadPlanFromFile(selected);
       loadedPlan = plan;
       currentPlan.textContent = `${planSlug(plan)} (${plan.file || 'saved plan'})`;
       savedPath.textContent = plan.file || '';
@@ -798,6 +855,7 @@ async function renderCreatePlan({ app, container }) {
       control_snapshot: {
         source: 'local-folders',
         global_instructions_dir: GLOBAL_INSTRUCTIONS_DIR,
+        global_plans_dir: GLOBAL_PLANS_DIR,
         vault_instruction_rule: 'active vault Markdown files with slug ins.*',
         vault_plans_dir: vaultPlansDir,
       },
@@ -818,14 +876,14 @@ async function renderCreatePlan({ app, container }) {
     new Notice(`Saved plan: ${record.label}${warn}`);
   }
 
-  const loadBtn = button('Load Remote Plan', loadSelectedPlan);
-  const newBtn = button('Make New Plan', clearScreen);
+  const loadBtn = button('Modify Selected Plan', loadSelectedPlan);
+  const newBtn = button('New Blank Plan', clearScreen);
   const deleteBtn = button('Delete Selected Plan', () => {
     const selectedKey = existingSelect.value;
     const selected = availablePlans.find((plan) => (plan.key || plan.slug) === selectedKey);
     const slug = selected?.slug || planSlug(loadedPlan);
     if (!slug || (selected && selected.source !== 'saved')) {
-      new Notice('Choose a remote plan to delete.');
+      new Notice('Choose a saved plan to delete. Local folder plans are read-only here.');
       return;
     }
     if (!confirm(`Delete plan ${slug}?`)) return;
@@ -875,7 +933,7 @@ async function renderCreatePlan({ app, container }) {
   existingRow.style.alignItems = 'center';
   existingRow.style.flexWrap = 'wrap';
   existingRow.append(loadBtn, newBtn, deleteBtn, el('span', {}, ['Current: ', currentPlan]));
-  existingPlansBox.appendChild(el('label', {}, ['Remote plans', existingSelect]));
+  existingPlansBox.appendChild(el('label', {}, ['Existing plans', existingSelect]));
   existingPlansBox.appendChild(existingRow);
 
   const addStepRow = el('div');

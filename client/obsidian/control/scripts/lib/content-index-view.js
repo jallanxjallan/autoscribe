@@ -239,8 +239,9 @@ function makeContentIndexView({ app, dv, nodeRequire, queryPath, vaultName, conf
   }
 
   async function saveSelectionManifest(api, state) {
-    await api.saveCurrentSelection({
-            queryName: "Content Index",
+    await api.saveDataviewSelection({
+      operation: "content-index",
+      queryName: "Content Index",
       namespace: "content-index",
       selectionSource: "content-index",
       selectionKind: "content-index",
@@ -303,7 +304,7 @@ function makeContentIndexView({ app, dv, nodeRequire, queryPath, vaultName, conf
       renderActions(parent, api) {
         renderSelectedTocLink(parent, api, state.selectedTocFile);
         renderUnicodeReference(parent);
-        const saveButton = parent.createEl("button", { text: "Set current selection" });
+        const saveButton = parent.createEl("button", { text: "Save selection manifest" });
         saveButton.onclick = async () => saveSelectionManifest(api, state);
       },
       renderResults(parent, displayedRows, api) {
