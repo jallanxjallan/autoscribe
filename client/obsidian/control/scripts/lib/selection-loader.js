@@ -33,6 +33,16 @@ function candidateItems(data) {
     if (Array.isArray(value)) return value;
   }
 
+  const paths = Array.isArray(data?.paths) ? data.paths : [];
+  const slugs = Array.isArray(data?.slugs) ? data.slugs : [];
+  const count = Math.max(paths.length, slugs.length);
+  if (count) {
+    return Array.from({ length: count }, (_unused, index) => ({
+      path: paths[index] || '',
+      slug: slugs[index] || '',
+    }));
+  }
+
   return [];
 }
 

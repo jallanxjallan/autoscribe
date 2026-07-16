@@ -57,6 +57,7 @@ def _snapshot_record(*, slug: str, key: RedisKey, kind: str) -> dict[str, Any]:
         "type": kind,
         "slug": slug,
         "key": str(key),
+        "ttl": keys.ttl(key),
     }
 
     identity = _identity_from_key(key)

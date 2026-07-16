@@ -43,10 +43,31 @@ function normalizeItem(item, index) {
   };
 }
 
+function sourceItems(selection) {
+  if (Array.isArray(selection)) return selection;
+  if (!selection || typeof selection !== "object") return [];
+  if (Array.isArray(selection.items)) return selection.items;
+
+  const paths = Array.isArray(selection.paths) ? selection.paths : [];
+  const slugs = Array.isArray(selection.slugs) ? selection.slugs : [];
+  const count = Math.max(paths.length, slugs.length);
+  if (count) {
+    return Array.from({ length: count }, (_unused, index) => ({
+      path: paths[index] || "",
+      slug: slugs[index] || "",
+    }));
+  }
+
+  for (const key of ["records", "selected", "files", "prompts"]) {
+    if (Array.isArray(selection[key])) return selection[key];
+  }
+  return [];
+}
+
 function normalizeItems(items) {
   const seen = new Set();
   const output = [];
-  for (const item of Array.isArray(items) ? items : []) {
+  for (const item of sourceItems(items)) {
     const normalized = normalizeItem(item, output.length);
     if (!normalized) continue;
     const identity = normalized.path ? `path:${normalized.path}` : `slug:${normalized.slug}`;
@@ -104,7 +125,13 @@ function readCurrentSelection(app) {
   const live = typeof window !== "undefined"
     ? window.__autoscribeCurrentSelections?.[key]
     : null;
-  if (live?.session_token === sessionToken()) return live;
+  if (live?.session_token === sessionToken()) {
+    live.items = normalizeItems(live);
+    live.count = live.items.length;
+    live.paths = live.items.map(item => item.path).filter(Boolean);
+    live.slugs = live.items.map(item => item.slug).filter(Boolean);
+    return live;
+  }
 
   const file = currentSelectionPath(app);
   let selection;
@@ -118,8 +145,10 @@ function readCurrentSelection(app) {
   if (selection?.type !== "current_selection") return null;
   if (selection?.vault_key !== key) return null;
   if (selection?.session_token !== sessionToken()) return null;
-  selection.items = normalizeItems(selection.items);
+  selection.items = normalizeItems(selection);
   selection.count = selection.items.length;
+  selection.paths = selection.items.map(item => item.path).filter(Boolean);
+  selection.slugs = selection.items.map(item => item.slug).filter(Boolean);
   publish(app, selection);
   return selection;
 }
@@ -137,6 +166,7 @@ module.exports = {
   clearCurrentSelection,
   currentSelectionPath,
   readCurrentSelection,
+  sourceItems,
   sessionToken,
   vaultKey,
   writeCurrentSelection,

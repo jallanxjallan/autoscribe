@@ -70,7 +70,8 @@ def main(argv: list[str] | None = None) -> int:
             items, output = dispatch_run(repo, manifest_path=args.manifest, dry_run=args.dry_run)
             _report(args.command, items, args.dry_run)
             if output:
-                sys.stdout.write(output)
+                sys.stdout.buffer.write(output)
+                sys.stdout.buffer.flush()
         elif args.command == "writeback":
             items = writeback(repo, dry_run=args.dry_run, limit=args.limit)
             _report(args.command, items, args.dry_run)

@@ -1,26 +1,64 @@
-const fs = require('fs');
 const path = require('path');
 const { spawnSync } = require('child_process');
 const { el, clear, button } = require('../lib/dom.js');
-const { vaultRoot, workflowDir, safeReadJson, statInfo } = require('../lib/vault-state.js');
+const { vaultRoot } = require('../lib/vault-state.js');
 const { currentSelectionSummary } = require('../lib/selection-loader.js');
 const { currentSelectionPath, readCurrentSelection } = require('../selections/current-selection.js');
+const { loadControlSnapshot, snapshotList } = require('../lib/control-loader.js');
+const { listPlanRecords } = require('../plans/plan-store.js');
 
-const OBS_EXECUTABLE = '/home/jeremy/Python3.13Env/bin/obs';
+const PYTHON_EXECUTABLE = '/home/jeremy/Python3.13Env/bin/python';
+const DISPATCH_HELPER = path.join(__dirname, 'dispatch_run.py');
 
-function listPlans(app) {
-  const dir = workflowDir(app, 'plans');
-  if (!fs.existsSync(dir)) return [];
-  return fs.readdirSync(dir)
-    .filter((name) => name.endsWith('.json'))
-    .map((name) => {
-      const file = path.join(dir, name);
-      const record = safeReadJson(file, null);
-      const stat = statInfo(file);
-      return { file, name, record, mtime_ms: stat.mtime_ms || 0, mtime: stat.mtime };
+function helperRequest(root, request) {
+  const result = spawnSync(PYTHON_EXECUTABLE, [DISPATCH_HELPER], {
+    input: JSON.stringify({ ...request, vault_root: root }),
+    encoding: 'utf8',
+    cwd: root,
+    maxBuffer: 16 * 1024 * 1024,
+    timeout: 120000,
+  });
+  let response = null;
+  try {
+    response = JSON.parse(result.stdout || '{}');
+  } catch {
+    const detail = (result.stderr || result.stdout || `exit status ${result.status}`).trim();
+    throw new Error(`Dispatch helper returned invalid JSON: ${detail || '(empty output)'}`);
+  }
+  if (result.error) throw new Error(`Dispatch helper could not start: ${result.error.message}`);
+  if (result.status !== 0 || response?.ok === false) {
+    const detail = response?.error || result.stderr || result.stdout || `exit status ${result.status}`;
+    throw new Error(String(detail).trim());
+  }
+  return response;
+}
+
+function uploadedPlans(app) {
+  const snapshotResult = loadControlSnapshot();
+  if (snapshotResult.error) {
+    const detail = snapshotResult.stderr ? `; ${snapshotResult.stderr}` : '';
+    throw new Error(`Could not load AutoScribe control snapshot: ${snapshotResult.error}${detail}`);
+  }
+
+  const localBySlug = new Map(
+    listPlanRecords(app).map((record) => [record.record_identity || record.slug, record])
+  );
+
+  return snapshotList(snapshotResult.data, 'plans')
+    .map((record) => {
+      const ttl = Number(record.ttl);
+      return {
+        ...record,
+        ttl: Number.isFinite(ttl) ? ttl : -2,
+        local_record: localBySlug.get(record.slug) || null,
+        label: localBySlug.get(record.slug)?.label || record.slug,
+      };
     })
-    .filter((item) => item.record?.slug)
-    .sort((a, b) => String(a.record.label || a.record.slug).localeCompare(String(b.record.label || b.record.slug)));
+    .filter((record) => record.ttl !== -2)
+    .sort((a, b) => {
+      if (a.ttl !== b.ttl) return b.ttl - a.ttl;
+      return String(a.label || a.slug).localeCompare(String(b.label || b.slug));
+    });
 }
 
 function planStepEntries(plan) {
@@ -42,9 +80,11 @@ function planStepCount(plan) {
 }
 
 function planOptionText(planFile) {
-  const plan = planFile.record;
-  const count = planStepCount(plan);
-  return `${plan.label || plan.slug} — ${plan.slug} (${count} step${count === 1 ? '' : 's'})`;
+  const plan = planFile.local_record || planFile;
+  const count = Number.isInteger(planFile.step_count) ? planFile.step_count : planStepCount(plan);
+  const ttl = planFile.ttl < 0 ? 'persistent' : `${planFile.ttl}s TTL`;
+  const steps = Number.isInteger(count) ? `, ${count} step${count === 1 ? '' : 's'}` : '';
+  return `${planFile.label || planFile.slug} — ${planFile.slug} (${ttl}${steps})`;
 }
 
 function statusText(selection) {
@@ -72,28 +112,16 @@ function stateText(item) {
   return 'clean';
 }
 
-function lastUserCommitText(item) {
-  const commit = item.user_commit || item.raw?.user_commit || null;
-  if (commit) {
-    const hash = String(commit.hash || commit.commit || '').slice(0, 8);
-    const subject = String(commit.subject || '').trim();
-    return [hash, subject].filter(Boolean).join(' · ') || '—';
-  }
-  const hash = String(item.short_commit || item.git_commit || '').slice(0, 8);
-  const subject = String(item.git_subject || '').trim();
-  return [hash, subject].filter(Boolean).join(' · ') || '—';
-}
 
 function renderPromptTable(container, items) {
   const table = el('table');
   table.style.width = '100%';
-  table.appendChild(el('tr', {}, ['#', 'Filename', 'Slug', 'Last user commit', 'State'].map((h) => el('th', { text: h }))));
+  table.appendChild(el('tr', {}, ['#', 'Filename', 'Slug', 'State'].map((h) => el('th', { text: h }))));
   for (const item of items) {
     table.appendChild(el('tr', {}, [
       el('td', { text: item.index }),
       el('td', { text: item.path ? path.basename(item.path) : item.label }),
       el('td', { text: item.slug || '—' }),
-      el('td', { text: lastUserCommitText(item) }),
       el('td', { text: stateText(item) }),
     ]));
   }
@@ -142,29 +170,6 @@ function renderPlanTable(container, plan) {
   container.appendChild(table);
 }
 
-function ipc(root, request) {
-  const result = spawnSync(OBS_EXECUTABLE, ['--vault', root, 'ipc'], {
-    input: JSON.stringify(request),
-    encoding: 'utf8',
-    cwd: root,
-    maxBuffer: 16 * 1024 * 1024,
-    timeout: 120000,
-  });
-  if (result.error) throw new Error(`obs IPC could not start: ${result.error.message}`);
-  if (result.status !== 0) {
-    const detail = (result.stderr || result.stdout || `exit status ${result.status}`).trim();
-    throw new Error(detail || `obs IPC exited with status ${result.status}`);
-  }
-  let response;
-  try {
-    response = JSON.parse(result.stdout);
-  } catch {
-    throw new Error(`obs IPC returned invalid JSON:\n${result.stdout || '(empty output)'}`);
-  }
-  if (response?.ok === false) throw new Error(response.error || response.message || 'Dispatch failed');
-  return response;
-}
-
 function readableMessages(response) {
   if (Array.isArray(response?.messages)) return response.messages.map(String).join('\n');
   if (Array.isArray(response?.output)) return response.output.map(String).join('\n');
@@ -177,11 +182,11 @@ function readableMessages(response) {
 async function renderCreateRun({ app, container }) {
   clear(container);
   const root = vaultRoot(app);
-  const plans = listPlans(app);
+  const plans = uploadedPlans(app);
   let loadedSelection = null;
 
   container.appendChild(el('h2', { text: 'Dispatch Run' }));
-  container.appendChild(el('p', { text: 'Uses the live current selection for this vault session.' }));
+  container.appendChild(el('p', { text: 'Automatically loads the live current selection. Dispatch resolves and commits the live selection, streams absolute paths and plan metadata through xargs/Pandoc, then pipes Pandoc NDJSON to `asc enqueue`.' }));
 
   const planSelect = el('select');
   planSelect.style.width = '100%';
@@ -189,7 +194,7 @@ async function renderCreateRun({ app, container }) {
     planSelect.appendChild(el('option', { text: 'No uploaded plans found.' }));
     planSelect.disabled = true;
   } else {
-    for (const plan of plans) planSelect.appendChild(el('option', { value: plan.file, text: planOptionText(plan) }));
+    for (const plan of plans) planSelect.appendChild(el('option', { value: plan.slug, text: planOptionText(plan) }));
   }
 
   const summary = el('p', { text: 'No current selection loaded.' });
@@ -199,7 +204,7 @@ async function renderCreateRun({ app, container }) {
   output.style.whiteSpace = 'pre-wrap';
 
   function selectedPlan() {
-    return plans.find((p) => p.file === planSelect.value)?.record || null;
+    return plans.find((p) => p.slug === planSelect.value) || null;
   }
 
   function refreshPreview() {
@@ -217,7 +222,9 @@ async function renderCreateRun({ app, container }) {
     planBox.appendChild(el('h3', { text: 'Plan steps' }));
     if (plan) {
       planBox.appendChild(el('p', { text: `${plan.label || plan.slug} — ${plan.slug}` }));
-      renderPlanTable(planBox, plan);
+      const planRecord = plan.local_record || null;
+      if (planRecord) renderPlanTable(planBox, planRecord);
+      else planBox.appendChild(el('p', { text: 'Uploaded plan details are not present in the local plan cache.' }));
     } else {
       planBox.appendChild(el('p', { text: 'No plan selected.' }));
     }
@@ -238,16 +245,17 @@ async function renderCreateRun({ app, container }) {
     try {
       refreshPreview();
       const plan = selectedPlan();
-      if (!loadedSelection?.items?.length) throw new Error('The current selection is empty.');
+      if (!loadedSelection?.items?.length) throw new Error(`The current selection at ${currentSelectionPath(app)} contains no usable file records.`);
       if (!plan?.slug) throw new Error('Select an uploaded plan.');
-      const paths = loadedSelection.items.map((item) => item.path).filter(Boolean);
-      if (paths.length !== loadedSelection.items.length) throw new Error('Every selected item must have a filepath.');
+      const items = loadedSelection.items.map((item) => ({ path: item.path, slug: item.slug }));
+      if (items.some((item) => !item.path)) throw new Error('Every selected item must have a filepath.');
+      if (items.some((item) => !item.slug)) throw new Error('Every selected item must have a slug.');
 
       dispatchBtn.disabled = true;
       output.textContent = 'Dispatching…';
-      const response = ipc(root, {
-        operation: 'dispatch_run.enqueue',
-        paths,
+      const response = helperRequest(root, {
+        operation: 'dispatch',
+        items,
         plan_slug: plan.slug,
       });
       output.textContent = readableMessages(response);

@@ -74,3 +74,36 @@ def test_user_commits_exclude_autoscribe_commits(tmp_path: Path):
     commits = git.user_commits(tmp_path)
     assert [commit["subject"] for commit in commits] == ["Editorial pass"]
     assert commits[0]["files"] == ["one.md"]
+
+
+def test_dispatch_run_emits_nul_pandoc_arguments_and_commits(tmp_path: Path):
+    import json
+    import subprocess
+    from obs.uploads import dispatch_run
+
+    subprocess.run(["git", "init"], cwd=tmp_path, check=True, capture_output=True)
+    subprocess.run(["git", "config", "user.email", "test@example.com"], cwd=tmp_path, check=True)
+    subprocess.run(["git", "config", "user.name", "Test"], cwd=tmp_path, check=True)
+    source = tmp_path / "One File.md"
+    source.write_text("---\nslug: cnt.one\n---\nText\n", encoding="utf-8")
+    subprocess.run(["git", "add", "."], cwd=tmp_path, check=True)
+    subprocess.run(["git", "commit", "-m", "Initial"], cwd=tmp_path, check=True, capture_output=True)
+
+    manifest = tmp_path / "run.json"
+    manifest.write_text(json.dumps({
+        "vault": {"root": str(tmp_path)},
+        "plan_slug": "plan.test",
+        "items": [{"path": "One File.md", "prompt_slug": "cnt.one"}],
+    }), encoding="utf-8")
+
+    items, output = dispatch_run(tmp_path, manifest_path=manifest)
+    assert items[0]["absolute_path"] == str(source.resolve())
+    assert output.split(b"\0") == [
+        b"--metadata=record_plan:plan.test",
+        str(source.resolve()).encode(),
+        b"",
+    ]
+    subject = subprocess.run(
+        ["git", "log", "-1", "--format=%s"], cwd=tmp_path, check=True, capture_output=True, text=True
+    ).stdout.strip()
+    assert subject.startswith("plan.test ")

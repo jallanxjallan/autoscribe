@@ -73,46 +73,81 @@ def upload_instructions(repo: Path, *, force: bool = False, dry_run: bool = Fals
     return items, output
 
 
-def dispatch_run(repo: Path, *, manifest_path: Path | None = None, dry_run: bool = False,
-                 defaults: list[str] | None = None) -> tuple[list[dict[str, Any]], str]:
-    vault = Vault(repo)
+def dispatch_run(
+    repo: Path,
+    *,
+    manifest_path: Path | None = None,
+    dry_run: bool = False,
+) -> tuple[list[dict[str, Any]], bytes]:
+    """Resolve a run into NUL-delimited Pandoc argument pairs.
+
+    The CLI stream is consumed by ``xargs -0 -r -n 2 pandoc``. Each file adds
+    one ``record_plan`` metadata option and one absolute Markdown filename.
+    """
     manifest_path = manifest_path or VaultState.for_vault(repo).current_run
     manifest = read_json(manifest_path)
     manifest_root = manifest.get("vault_root") or (manifest.get("vault") or {}).get("root")
     if manifest_root and Path(manifest_root).resolve() != repo.resolve():
         raise ObsError(f"run manifest belongs to a different vault: {manifest_root}")
-    slug_map = vault.slug_map()
+
+    root = repo.resolve()
     calls: list[dict[str, Any]] = []
+    seen: set[str] = set()
     for index, raw in enumerate(rows(manifest), 1):
         if str(raw.get("upload_status") or "pending") != "pending":
             continue
-        prompt_slug = raw.get("prompt_slug") or raw.get("call_slug") or raw.get("record_identity") or raw.get("slug")
         plan_slug = raw.get("plan_slug") or raw.get("job_slug") or raw.get("plan") or manifest.get("plan_slug")
-        if not prompt_slug or not plan_slug:
-            raise ObsError(f"manifest row {index}: missing prompt_slug or plan_slug")
-        record = slug_map.get(str(prompt_slug))
-        if not record:
-            raise ObsError(f"{prompt_slug}: prompt slug not found in active vault")
-        calls.append({"index": index, "raw": raw, "prompt_slug": str(prompt_slug),
-                      "call_slug": str(raw.get("call_slug") or prompt_slug),
-                      "plan_slug": str(plan_slug), "path": record.path})
-    if dry_run or not calls:
-        return calls, ""
-    uploaded_at = now_iso()
-    output = ""
-    manifest_rows = rows(manifest)
-    for call in calls:
+        relpath = str(raw.get("path") or "").replace("\\", "/").lstrip("./")
+        prompt_slug = raw.get("prompt_slug") or raw.get("call_slug") or raw.get("record_identity") or raw.get("slug")
+        if not relpath or not plan_slug:
+            raise ObsError(f"manifest row {index}: missing path or plan_slug")
+
+        absolute = (root / relpath).resolve()
         try:
-            output += _emit_pandoc(repo, call["path"], defaults or ["upload_prompt"],
-                                   {"record_plan": call["plan_slug"]})
-            manifest_rows[call["index"] - 1].update({"upload_status": "uploaded", "uploaded_at": uploaded_at,
-                                                       "upload_error": ""})
-        except Exception as exc:
-            manifest_rows[call["index"] - 1].update({"upload_status": "error", "upload_error": str(exc)})
-            write_json(manifest_path, manifest)
-            raise
-    write_json(manifest_path, manifest)
-    return calls, output
+            normalized = absolute.relative_to(root).as_posix()
+        except ValueError as exc:
+            raise ObsError(f"manifest row {index}: path is outside active vault: {relpath}") from exc
+        if normalized in seen:
+            continue
+        if absolute.suffix.lower() != ".md":
+            raise ObsError(f"manifest row {index}: selected file is not Markdown: {normalized}")
+        if not absolute.is_file():
+            raise ObsError(f"manifest row {index}: selected file not found: {normalized}")
+
+        seen.add(normalized)
+        calls.append({
+            "index": index,
+            "prompt_slug": str(prompt_slug or ""),
+            "plan_slug": str(plan_slug),
+            "path": normalized,
+            "absolute_path": str(absolute),
+        })
+
+    if not calls:
+        raise ObsError("current selection contains no dispatchable Markdown files")
+
+    plan_slugs = {call["plan_slug"] for call in calls}
+    if len(plan_slugs) != 1:
+        raise ObsError("dispatch run must use exactly one plan slug")
+    plan_slug = next(iter(plan_slugs))
+
+    if not dry_run:
+        stamp = datetime.now().astimezone().strftime("%Y-%m-%d %H:%M:%S %z")
+        commit = git.commit_files(
+            repo,
+            [call["path"] for call in calls],
+            f"{plan_slug} {stamp}",
+        )
+        for call in calls:
+            call["dispatch_commit"] = commit
+
+    output = bytearray()
+    for call in calls:
+        output.extend(f"--metadata=record_plan:{plan_slug}".encode("utf-8"))
+        output.append(0)
+        output.extend(call["absolute_path"].encode("utf-8"))
+        output.append(0)
+    return calls, bytes(output)
 
 
 def dispatch_paths(
