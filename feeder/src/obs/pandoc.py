@@ -44,9 +44,12 @@ def _pandoc_bin() -> str:
 
 
 def capture(
-    *, repo: Path, input_path: str, defaults: Iterable[str], metadata: dict[str, Any]
+    *, repo: Path, input_path: str | None = None, input_paths: Iterable[str] | None = None, defaults: Iterable[str], metadata: dict[str, Any]
 ) -> str:
     defaults = list(defaults)
+    paths = list(input_paths or ([] if input_path is None else [input_path]))
+    if not paths:
+        raise ObsError("pandoc invocation requires at least one input file")
     if not defaults:
         raise ObsError("pandoc invocation requires at least one defaults file")
 
@@ -58,7 +61,7 @@ def capture(
             *(f"--defaults={value}" for value in defaults),
             f"--metadata-file={metadata_file}",
             "--output=-",
-            input_path,
+            *paths,
         ]
         return run(args, cwd=repo).stdout
 

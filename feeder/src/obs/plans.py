@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import os
 from pathlib import Path
 from typing import Any
 
@@ -8,6 +9,7 @@ from .catalog import pipeline_snapshot
 from .errors import ObsError
 from .process import run
 from .executables import autoscribe_bin
+from .instruction_upload import sync_instructions
 
 
 def _plan_values(snapshot: dict[str, Any]) -> list[dict[str, Any]]:
@@ -45,17 +47,18 @@ def load_plan(slug: str) -> dict[str, Any]:
     raise ObsError(f"plan not found in pipeline: {slug}")
 
 
-def save_plan(record: dict[str, Any], *, cwd: Path) -> dict[str, Any]:
+def save_plan(record: dict[str, Any], *, cwd: Path, instruction_sets: list[dict[str, Any]] | None = None) -> dict[str, Any]:
     slug = str(record.get("record_identity") or record.get("slug") or "").strip()
     if not slug:
         raise ObsError("plan record missing record_identity")
     steps = record.get("steps")
     if not isinstance(steps, (dict, list)) or not steps:
         raise ObsError(f"{slug}: plan has no executable steps")
+    instruction_results = sync_instructions(cwd, instruction_sets or [])
     payload = {**record, "record_type": "plan", "record_identity": slug, "slug": slug}
     line = json.dumps(payload, ensure_ascii=False) + "\n"
     result = run([autoscribe_bin(), "upload", "plans"], cwd=cwd, input_text=line)
-    return {"record": payload, "pipeline_output": result.stdout.strip()}
+    return {"record": payload, "instructions": instruction_results, "pipeline_output": result.stdout.strip()}
 
 
 def delete_plan(slug: str, *, cwd: Path) -> dict[str, Any]:

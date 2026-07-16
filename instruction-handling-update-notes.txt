@@ -1,0 +1,7 @@
+Modified files:
+client/obsidian/control/scripts/plans/render-create-plan.js
+feeder/src/obs/instruction_upload.py
+feeder/src/obs/pandoc.py
+feeder/src/obs/plans.py
+feeder/src/obs/ipc.py
+pipeline/src/asc/control/snapshot.py

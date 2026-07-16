@@ -3,6 +3,10 @@ const { el, clear, button } = require('../lib/dom.js');
 const { vaultRoot } = require('../lib/vault-state.js');
 const { snapshotList } = require('../lib/control-loader.js');
 const { buildPlanRecord } = require('./plan-record.js');
+const { callFeeder } = require('../lib/feeder-ipc.js');
+const { createInternalLink } = require('../lib/internal-link.js');
+const { getFrontmatterEntry } = require('../lib/frontmatter.js');
+const { normalizeWikiTarget } = require('../lib/wikilinks.js');
 
 const STEP_KINDS = [
   { value: 'llm', label: 'LLM call' },
@@ -14,8 +18,7 @@ const STEP_KINDS = [
  * ASC / FEEDER TRANSPORT BOUNDARY
  * --------------------------------
  * Read-only catalogs come directly from the existing ASC snapshot commands.
- * Full-plan retrieval and plan upload remain explicit feeder stubs until the
- * existing feeder transport functions are connected here.
+ * Full-plan retrieval and plan upload go through feeder IPC.
  */
 const ZSH = '/usr/bin/zsh';
 const sessionPlanStore = new Map();
@@ -78,30 +81,17 @@ async function feederListPlans(controlSnapshot) {
   });
 }
 
-async function feederLoadPlan(slug, availablePlans) {
-  const sessionPlan = sessionPlanStore.get(slug);
-  if (sessionPlan) return structuredClone(sessionPlan);
-
-  const plan = availablePlans.find((record) => planSlug(record) === slug);
-  if (!plan) throw new Error(`Plan not found in control snapshot: ${slug}`);
-  if (!plan.steps) {
-    throw new Error(
-      `Plan ${slug} is listed in the control snapshot, but its full record ` +
-      'must be loaded through the existing feeder function.'
-    );
-  }
-  return structuredClone(plan);
+async function feederLoadPlan(app, slug) {
+  if (!slug) throw new Error('Select an uploaded plan to load.');
+  return callFeeder(app, 'plan.load', { slug });
 }
 
-async function feederUploadPlan(record) {
-  // TODO: replace with the existing feeder plan-upload function.
-  // The session overlay exists only so create/update UI behavior can be tested.
-  sessionPlanStore.set(record.record_identity, structuredClone(record));
-  return { ok: true, slug: record.record_identity };
+async function feederUploadPlan(app, record, instructionSets) {
+  return callFeeder(app, 'plan.save', { record, instruction_sets: instructionSets });
 }
 
-async function feederListInstructions(controlSnapshot) {
-  return snapshotList(controlSnapshot, 'instructions');
+async function feederListInstructions(app) {
+  return callFeeder(app, 'instructions.catalog', { include_pipeline: true });
 }
 
 function normalizeKind(value) {
@@ -247,17 +237,72 @@ function renderArgsEditor(step) {
   return el('label', {}, ['Optional args JSON', textarea]);
 }
 
-function renderInstructionPicker(step, instructions) {
+function renderInstructionPicker(app, step, instructions) {
+  const wrapper = el('div');
   const select = selectFor(instructions, 'No instruction', 'slug');
+  const linkBox = el('div');
+  linkBox.style.marginTop = '0.25rem';
+
+  function redrawLink() {
+    linkBox.innerHTML = '';
+    const record = step.instruction;
+    if (!record?.path) return;
+    linkBox.appendChild(document.createTextNode('Selected: '));
+    createInternalLink(linkBox, app, record.path, `[[${record.label || record.slug}]]`);
+  }
+
   select.value = step.instruction?.slug || step.instruction?.key || '';
   select.addEventListener('change', () => {
     step.instruction = selectedRecord(select, instructions, 'slug');
+    redrawLink();
   });
-  return el('label', {}, ['Instruction', select]);
+  wrapper.append(select, linkBox);
+  redrawLink();
+  return el('label', {}, ['Instruction', wrapper]);
 }
 
-function renderStepEditor({ stepsBox, steps, catalogs }) {
-  const redraw = () => renderStepEditor({ stepsBox, steps, catalogs });
+function resolveInstructionSet(app, record) {
+  if (!record?.path || !record?.abspath) {
+    throw new Error(`Instruction ${record?.slug || '<unknown>'} has no local source file.`);
+  }
+  const specificFile = app.vault.getAbstractFileByPath(record.path);
+  if (!specificFile) throw new Error(`Instruction file not found in vault: ${record.path}`);
+
+  const role = normalizeWikiTarget(getFrontmatterEntry(app, specificFile, 'role'));
+  const context = normalizeWikiTarget(getFrontmatterEntry(app, specificFile, 'context'));
+  if (!role || !context) {
+    throw new Error(`${record.path}: instruction frontmatter requires role and context wikilinks.`);
+  }
+
+  const roleFile = app.metadataCache.getFirstLinkpathDest(role, record.path);
+  const contextFile = app.metadataCache.getFirstLinkpathDest(context, record.path);
+  if (!roleFile) throw new Error(`${record.path}: unresolved role wikilink: ${role}`);
+  if (!contextFile) throw new Error(`${record.path}: unresolved context wikilink: ${context}`);
+
+  const root = vaultRoot(app);
+  return {
+    slug: record.slug,
+    source_path: record.path,
+    paths: [
+      require('node:path').resolve(root, roleFile.path),
+      require('node:path').resolve(root, contextFile.path),
+      require('node:path').resolve(root, record.path),
+    ],
+  };
+}
+
+function instructionSetsForSteps(app, steps) {
+  const bySlug = new Map();
+  for (const step of steps) {
+    if (!step.instruction) continue;
+    const item = resolveInstructionSet(app, step.instruction);
+    bySlug.set(item.slug, item);
+  }
+  return [...bySlug.values()];
+}
+
+function renderStepEditor({ app, stepsBox, steps, catalogs }) {
+  const redraw = () => renderStepEditor({ app, stepsBox, steps, catalogs });
   stepsBox.innerHTML = '';
 
   if (!steps.length) {
@@ -307,7 +352,7 @@ function renderStepEditor({ stepsBox, steps, catalogs }) {
         step.model = selectedRecord(modelSelect, modelChoices);
       });
       card.appendChild(el('label', {}, ['Model', modelSelect]));
-      card.appendChild(renderInstructionPicker(step, catalogs.instructions));
+      card.appendChild(renderInstructionPicker(app, step, catalogs.instructions));
     } else if (step.kind === 'script') {
       const scriptSelect = selectFor(catalogs.scripts, 'Choose script');
       scriptSelect.value = step.script?.key || '';
@@ -322,7 +367,7 @@ function renderStepEditor({ stepsBox, steps, catalogs }) {
         step.rag_profile = selectedRecord(ragSelect, catalogs.ragProfiles);
       });
       card.appendChild(el('label', {}, ['RAG profile', ragSelect]));
-      card.appendChild(renderInstructionPicker(step, catalogs.instructions));
+      card.appendChild(renderInstructionPicker(app, step, catalogs.instructions));
     }
 
     card.appendChild(renderArgsEditor(step));
@@ -363,7 +408,7 @@ async function renderCreatePlan({ app, container }) {
     models: sortByLabel(snapshotList(registrySnapshot, 'models')),
     scripts: sortByLabel(snapshotList(registrySnapshot, 'local_scripts')),
     ragProfiles: sortByLabel(snapshotList(registrySnapshot, 'rag_profiles')),
-    instructions: sortByLabel(await feederListInstructions(controlSnapshot)),
+    instructions: sortByLabel(await feederListInstructions(app)),
   };
 
   let availablePlans = await feederListPlans(controlSnapshot);
@@ -373,7 +418,7 @@ async function renderCreatePlan({ app, container }) {
 
   container.appendChild(button('Refresh', () => renderCreatePlan({ app, container })));
   container.appendChild(el('h2', { text: 'Define Plan' }));
-  container.appendChild(el('p', { text: 'Plans and instructions are listed from `asc control snapshot`; engines, models, scripts, and RAG profiles are listed from `asc registry snapshot`. Full-plan loading and upload remain feeder stubs.' }));
+  container.appendChild(el('p', { text: 'Plans are loaded from the control snapshot. Local instruction files are assembled and synchronized before the plan is uploaded.' }));
 
   const existingSelect = el('select');
   existingSelect.style.width = '100%';
@@ -399,7 +444,7 @@ async function renderCreatePlan({ app, container }) {
   }
 
   function redrawSteps() {
-    renderStepEditor({ stepsBox, steps, catalogs });
+    renderStepEditor({ app, stepsBox, steps, catalogs });
   }
 
   function clearScreen() {
@@ -414,7 +459,7 @@ async function renderCreatePlan({ app, container }) {
 
   async function loadSelectedPlan() {
     if (!existingSelect.value) return;
-    const plan = await feederLoadPlan(existingSelect.value, availablePlans);
+    const plan = await feederLoadPlan(app, existingSelect.value);
     loadedPlan = plan;
     currentPlan.textContent = planSlug(plan);
     label.value = plan.label || '';
@@ -430,7 +475,8 @@ async function renderCreatePlan({ app, container }) {
       steps,
       force_slug: forceSlug,
     });
-    await feederUploadPlan(record);
+    const instructionSets = instructionSetsForSteps(app, steps);
+    await feederUploadPlan(app, record, instructionSets);
     availablePlans = await feederListPlans(controlSnapshot);
     loadedPlan = record;
     currentPlan.textContent = record.record_identity;

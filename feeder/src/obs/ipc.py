@@ -11,7 +11,6 @@ from . import git
 from .catalog import instruction_catalog, pipeline_snapshot
 from .downloads import writeback, writenew
 from .errors import ObsError
-from .instruction_upload import upload_instruction
 from .plans import delete_plan, list_plans, load_plan, save_plan
 from .uploads import dispatch_paths, dispatch_run
 from .vault import Vault
@@ -50,17 +49,6 @@ def _commit(repo: Path, request: dict[str, Any]) -> dict[str, Any]:
     if not message:
         raise ObsError("git.commit requires message")
     return {"commit": git.commit_files(repo, paths, message, str(request.get("body") or "")), "paths": paths}
-
-
-def _upload_instruction(repo: Path, request: dict[str, Any]) -> dict[str, Any]:
-    return upload_instruction(
-        repo,
-        source_path=str(request.get("source_path") or ""),
-        input_path=Path(str(request.get("input_path") or "")),
-        metadata_path=Path(str(request["metadata_path"])) if request.get("metadata_path") else None,
-        force=bool(request.get("force")),
-        commit=bool(request.get("commit", True)),
-    )
 
 
 def _user_commits(repo: Path, request: dict[str, Any]) -> list[dict[str, object]]:
@@ -105,7 +93,10 @@ def _plan_save(repo: Path, request: dict[str, Any]) -> dict[str, Any]:
     record = request.get("record")
     if not isinstance(record, dict):
         raise ObsError("plan.save requires record object")
-    return save_plan(record, cwd=repo)
+    instruction_sets = request.get("instruction_sets")
+    if instruction_sets is not None and not isinstance(instruction_sets, list):
+        raise ObsError("plan.save instruction_sets must be a list")
+    return save_plan(record, cwd=repo, instruction_sets=instruction_sets or [])
 
 
 def _plan_delete(repo: Path, request: dict[str, Any]) -> dict[str, Any]:
@@ -119,7 +110,6 @@ HANDLERS: dict[str, Handler] = {
     "git.commit": _commit,
     "git.user_commits": _user_commits,
     "git.commit_files": _commit_files,
-    "instruction.upload": _upload_instruction,
     "plans.list": _plans_list,
     "plan.load": _plan_load,
     "plan.save": _plan_save,

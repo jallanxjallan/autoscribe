@@ -1,0 +1,64 @@
+# Autoscribe reference paths for instruction handling
+# All paths are relative to ~/Autoscribe
+
+# Define Plan panel and UI
+client/obsidian/control/panels/Define Plan.md
+client/obsidian/control/scripts/plans/render-create-plan.js
+client/obsidian/control/scripts/plans/plan-record.js
+client/obsidian/control/scripts/lib/feeder-ipc.js
+client/obsidian/control/scripts/lib/feeder-control-loader.js
+client/obsidian/control/scripts/lib/internal-link.js
+client/obsidian/control/scripts/lib/frontmatter.js
+client/obsidian/control/scripts/lib/wikilinks.js
+
+# Feeder: plan and instruction handling
+feeder/src/obs/cli.py
+feeder/src/obs/ipc.py
+feeder/src/obs/plans.py
+feeder/src/obs/instruction_upload.py
+feeder/src/obs/catalog.py
+feeder/src/obs/markdown.py
+feeder/src/obs/pandoc.py
+feeder/src/obs/process.py
+feeder/src/obs/git.py
+feeder/src/obs/uploads.py
+feeder/src/obs/state.py
+feeder/src/obs/vault.py
+feeder/src/obs/executables.py
+feeder/src/obs/errors.py
+feeder/src/obs/manifests.py
+
+# Feeder tests and documentation
+feeder/tests/test_obs.py
+feeder/parsing_instruction_files.md
+feeder/README.md
+feeder/pyproject.toml
+
+# Pandoc instruction conversion
+extensions/pandoc/defaults/upload_control.yaml
+extensions/pandoc/templates/instructions.markdown
+extensions/pandoc/templates/instruction.md
+extensions/pandoc/filters/emit/emit_ndjson.lua
+extensions/pandoc/filters/identity/instruction_kind.lua
+extensions/pandoc/filters/identity/provenance_capture.lua
+extensions/pandoc/filters/import/drop_instruction_preamble.lua
+extensions/pandoc/filters/import/drop_source_frontmatter.lua
+extensions/pandoc/filters/import/import_source_meta.lua
+extensions/pandoc/filters/metadata/filepaths_to_meta.lua
+extensions/pandoc/filters/metadata/inputfile_to_metadata.lua
+extensions/pandoc/filters/obsidian-links.lua
+
+# Pipeline: registry snapshot, instruction upload, and plan upload
+pipeline/src/asc/cli/registry.py
+pipeline/src/asc/cli/upload.py
+pipeline/src/asc/control/snapshot.py
+pipeline/src/asc/control/list.py
+pipeline/src/asc/ingest/common.py
+pipeline/src/asc/ingest/handlers/instructions.py
+pipeline/src/asc/ingest/handlers/plan.py
+pipeline/src/asc/ingest/expiry.py
+
+# Representative vault files also needed
+# Supply one specific instruction file plus the role and context files linked
+# from its frontmatter. These live in the relevant project vault, not in
+# ~/Autoscribe, so include them separately when preparing the reference bundle.
