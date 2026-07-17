@@ -40,20 +40,30 @@ def _canonical_hash(record: dict[str, Any]) -> str:
     return hashlib.sha256(payload.encode("utf-8")).hexdigest()
 
 
-def _render_record(repo: Path, *, slug: str, paths: list[Path], source_path: str) -> tuple[dict[str, Any], str]:
+def _render_body_record(repo: Path, *, slug: str, source: Path, source_path: str) -> tuple[dict[str, Any], str]:
+    document = parse_markdown(source.read_text(encoding="utf-8"))
+    actual_slug = str(document.frontmatter.get("slug") or "").strip()
+    if actual_slug != slug:
+        raise ObsError(f"{source}: expected slug {slug}, found {actual_slug or '<empty>'}")
+    body = document.body
+    if not body.strip():
+        raise ObsError(f"{source}: instruction body is empty")
+
     metadata = {
         "slug": slug,
         "record_identity": slug,
         "record_type": "instruction",
         "source_path": source_path,
-        "source_paths": [str(path) for path in paths],
     }
-    ndjson = capture(
-        repo=repo,
-        input_paths=[str(path) for path in paths],
-        defaults=["upload_control"],
-        metadata=metadata,
-    )
+    with tempfile.TemporaryDirectory(prefix="obs-instruction-body-") as temp_dir:
+        body_path = Path(temp_dir) / source.name
+        body_path.write_text(body, encoding="utf-8")
+        ndjson = capture(
+            repo=repo,
+            input_path=str(body_path),
+            defaults=["upload_control"],
+            metadata=metadata,
+        )
     lines = [line for line in ndjson.splitlines() if line.strip()]
     if len(lines) != 1:
         raise ObsError(f"{slug}: Pandoc produced {len(lines)} instruction records; expected exactly one")
@@ -80,26 +90,16 @@ def _dirty_relpaths(repo: Path, paths: Iterable[Path]) -> list[str]:
     return result
 
 
-def sync_instruction(repo: Path, *, slug: str, paths: list[str], source_path: str,
+def sync_instruction(repo: Path, *, slug: str, path: str, source_path: str,
                      uploaded_hashes: dict[str, str]) -> dict[str, Any]:
     if not slug.startswith("ins."):
         raise ObsError(f"expected an ins.* slug, got: {slug or '<empty>'}")
-    if len(paths) != 3:
-        raise ObsError(f"{slug}: expected ordered role, context, specific paths")
+    source = Path(path).expanduser().resolve()
+    if not source.is_file():
+        raise ObsError(f"{slug}: referenced instruction file does not exist: {source}")
 
-    resolved = [Path(value).expanduser().resolve() for value in paths]
-    for path in resolved:
-        if not path.is_file():
-            raise ObsError(f"{slug}: referenced instruction file does not exist: {path}")
-
-    specific = resolved[-1]
-    document = parse_markdown(specific.read_text(encoding="utf-8"))
-    actual_slug = str(document.frontmatter.get("slug") or "").strip()
-    if actual_slug != slug:
-        raise ObsError(f"{specific}: expected slug {slug}, found {actual_slug or '<empty>'}")
-
-    record, generated_hash = _render_record(
-        repo, slug=slug, paths=resolved, source_path=source_path
+    record, generated_hash = _render_body_record(
+        repo, slug=slug, source=source, source_path=source_path or str(source)
     )
     uploaded_hash = uploaded_hashes.get(slug)
     if uploaded_hash == generated_hash:
@@ -111,15 +111,13 @@ def sync_instruction(repo: Path, *, slug: str, paths: list[str], source_path: st
             "committed": [],
         }
 
-    with tempfile.TemporaryDirectory(prefix="obs-instruction-") as temp_dir:
-        output_path = Path(temp_dir) / "instruction.ndjson"
-        output_path.write_text(json.dumps(record, ensure_ascii=False) + "\n", encoding="utf-8")
-        result = run(
-            ["/usr/bin/zsh", "-lc", f"cat {output_path.as_posix()!r} | {autoscribe_bin()!r} upload instructions"],
-            cwd=repo,
-        )
+    result = run(
+        [autoscribe_bin(), "upload", "instructions"],
+        cwd=repo,
+        input_text=json.dumps(record, ensure_ascii=False) + "\n",
+    )
 
-    dirty = _dirty_relpaths(repo, resolved)
+    dirty = _dirty_relpaths(repo, [source])
     commit_hash = None
     if dirty:
         stamp = datetime.now().astimezone().isoformat(timespec="seconds")
@@ -138,58 +136,100 @@ def sync_instruction(repo: Path, *, slug: str, paths: list[str], source_path: st
 
 
 def sync_instructions(repo: Path, instruction_sets: list[dict[str, Any]]) -> list[dict[str, Any]]:
-    hashes = _instruction_hashes(pipeline_snapshot("control"))
-    results = []
+    """Upload dirty instruction components, then commit them once.
+
+    Plan creation deliberately uses git dirtiness as its only freshness test.
+    Content-hash matching remains available elsewhere but is not consulted here.
+    """
+    unique: dict[str, dict[str, Any]] = {}
     for item in instruction_sets:
-        paths = item.get("paths")
-        if not isinstance(paths, list):
-            raise ObsError("instruction set requires paths list")
-        results.append(sync_instruction(
+        slug = str(item.get("slug") or "").strip()
+        if not slug:
+            raise ObsError("instruction component missing slug")
+        if not slug.startswith("ins."):
+            raise ObsError(f"expected an ins.* slug, got: {slug}")
+
+        raw_path = str(item.get("abspath") or item.get("path") or "").strip()
+        if not raw_path:
+            raise ObsError(f"{slug}: instruction component requires path")
+
+        source = Path(raw_path).expanduser().resolve()
+        if not source.is_file():
+            raise ObsError(f"{slug}: referenced instruction file does not exist: {source}")
+        if not _inside(repo, source):
+            raise ObsError(f"{slug}: instruction file is outside the active vault: {source}")
+
+        unique[slug] = {
+            **item,
+            "slug": slug,
+            "source": source,
+            "relpath": source.relative_to(repo.resolve()).as_posix(),
+        }
+
+    dirty = set(git.dirty_files(repo))
+    pending = [item for item in unique.values() if item["relpath"] in dirty]
+    if not pending:
+        return [
+            {"slug": item["slug"], "status": "clean", "uploaded": False}
+            for item in unique.values()
+        ]
+
+    results: list[dict[str, Any]] = []
+    for item in pending:
+        record, digest = _render_body_record(
             repo,
-            slug=str(item.get("slug") or "").strip(),
-            paths=[str(value) for value in paths],
-            source_path=str(item.get("source_path") or "").strip(),
-            uploaded_hashes=hashes,
-        ))
-    return results
+            slug=item["slug"],
+            source=item["source"],
+            source_path=str(item.get("source_path") or item["relpath"]),
+        )
+        result = run(
+            [autoscribe_bin(), "upload", "instructions"],
+            cwd=repo,
+            input_text=json.dumps(record, ensure_ascii=False) + "\n",
+        )
+        results.append({
+            "slug": item["slug"],
+            "status": "uploaded",
+            "uploaded": True,
+            "content_sha256": digest,
+            "path": item["relpath"],
+            "pipeline_output": result.stdout.strip(),
+        })
+
+    stamp = datetime.now().astimezone().isoformat(timespec="seconds")
+    commit_paths = [item["relpath"] for item in pending]
+    commit_hash = git.commit_files(
+        repo,
+        commit_paths,
+        f"UPLOAD instructions for plan: {stamp}",
+    )
+
+    for result in results:
+        result["commit"] = commit_hash
+        result["committed"] = commit_paths
+
+    clean_results = [
+        {"slug": item["slug"], "status": "clean", "uploaded": False}
+        for item in unique.values()
+        if item["relpath"] not in dirty
+    ]
+    return clean_results + results
 
 
 def upload_instruction(repo: Path, *, source_path: str, input_path: Path,
                        metadata_path: Path | None = None, force: bool = False,
                        commit: bool = True) -> dict[str, Any]:
-    """Compatibility entry point for the older preassembled-file command."""
+    """Upload one instruction component; frontmatter is never included in content."""
     source = (repo / source_path).resolve()
     if not _inside(repo, source):
         raise ObsError(f"source path escapes vault: {source_path}")
-    if not source.is_file() or not input_path.is_file():
-        raise ObsError("source instruction or resolved input file does not exist")
+    if not source.is_file():
+        raise ObsError("source instruction file does not exist")
     document = parse_markdown(source.read_text(encoding="utf-8"))
     slug = str(document.frontmatter.get("slug") or "").strip()
     if not slug.startswith("ins."):
         raise ObsError(f"{source_path}: expected an ins.* slug")
-
-    metadata: dict[str, Any] = {}
-    if metadata_path is not None:
-        import yaml
-        raw = yaml.safe_load(metadata_path.read_text(encoding="utf-8")) or {}
-        if not isinstance(raw, dict):
-            raise ObsError(f"metadata file must contain a mapping: {metadata_path}")
-        metadata.update(raw)
-    metadata.update({
-        "slug": slug,
-        "record_identity": slug,
-        "record_type": "instruction",
-        "source_path": source_path,
-    })
-    ndjson = capture(
-        repo=repo, input_path=str(input_path), defaults=["upload_control"], metadata=metadata
-    )
-    lines = [line for line in ndjson.splitlines() if line.strip()]
-    if len(lines) != 1:
-        raise ObsError(f"{slug}: Pandoc produced {len(lines)} records; expected exactly one")
-    record = json.loads(lines[0])
-    digest = _canonical_hash(record)
-    record["content_sha256"] = digest
+    record, digest = _render_body_record(repo, slug=slug, source=source, source_path=source_path)
     uploaded = _instruction_hashes(pipeline_snapshot("control")).get(slug)
     if not force and uploaded == digest:
         return {"slug": slug, "status": "current", "content_sha256": digest}

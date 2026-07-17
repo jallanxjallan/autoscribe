@@ -107,3 +107,54 @@ def test_dispatch_run_emits_nul_pandoc_arguments_and_commits(tmp_path: Path):
         ["git", "log", "-1", "--format=%s"], cwd=tmp_path, check=True, capture_output=True, text=True
     ).stdout.strip()
     assert subject.startswith("plan.test ")
+
+
+def test_save_plan_encodes_definition_object_in_record_content(tmp_path: Path, monkeypatch):
+    import json
+    from types import SimpleNamespace
+    import obs.plans as plans
+
+    captured = {}
+
+    monkeypatch.setattr(plans, "sync_instructions", lambda cwd, sets: [])
+    monkeypatch.setattr(plans, "autoscribe_bin", lambda: "/fake/asc")
+
+    def fake_run(command, *, cwd, input_text):
+        captured["command"] = command
+        captured["input_text"] = input_text
+        return SimpleNamespace(stdout="ok\n")
+
+    monkeypatch.setattr(plans, "run", fake_run)
+
+    record = {
+        "record_type": "plan",
+        "record_identity": "plan.test.abc123",
+        "record_content": "Human-readable description",
+        "label": "Test",
+        "steps": {
+            "1": {
+                "index": 1,
+                "kind": "llm",
+                "instruction_slug": "ins.task.abc123",
+                "role_slug": "ins.role.abc123",
+                "context_slugs": ["ins.context.abc123"],
+                "engine": "chatgpt",
+                "model": "gpt-5.5",
+            }
+        },
+    }
+
+    result = plans.save_plan(record, cwd=tmp_path)
+    envelope = json.loads(captured["input_text"])
+    content = json.loads(envelope["record_content"])
+
+    assert envelope == {
+        "record_type": "plan",
+        "record_identity": "plan.test.abc123",
+        "record_content": envelope["record_content"],
+    }
+    assert content["label"] == "Test"
+    assert content["description"] == "Human-readable description"
+    assert isinstance(content["steps"], list)
+    assert content["steps"][0]["role_slug"] == "ins.role.abc123"
+    assert result["pipeline_output"] == "ok"
