@@ -41,8 +41,8 @@ class Step(RedisModel):
         validation_alias=AliasChoices("engine_kind", "kind"),
     )
     label: str = ""
-    instruction_keys: list[str] = Field(default_factory=list)
-    instruction_slugs: list[str] = Field(default_factory=list, exclude=True)
+    instruction_keys: dict[str, str] = Field(default_factory=dict)
+    instruction_slugs: dict[str, str] = Field(default_factory=dict, exclude=True)
     created_at: int = Field(default_factory=timestamp)
 
     @model_validator(mode="before")
@@ -82,7 +82,7 @@ class Step(RedisModel):
         ordinal: int,
         engine: str,
         engine_kind: str,
-        instruction_keys: list[str],
+        instruction_keys: dict[str, str],
     ) -> Step:
         payload = {
             **raw_step,
@@ -143,16 +143,21 @@ class Step(RedisModel):
 
     @field_validator("instruction_keys", "instruction_slugs", mode="before")
     @classmethod
-    def deserialize_string_list(cls, value: object) -> list[str]:
+    def deserialize_instruction_map(cls, value: object) -> dict[str, str]:
         if value in (None, ""):
-            return []
+            return {}
         if isinstance(value, str):
             value = json.loads(value)
-        if not isinstance(value, list):
-            raise ValueError("step instruction references must be a list")
-        result = [str(item).strip() for item in value]
-        if any(not item for item in result):
-            raise ValueError("step instruction references must be non-empty strings")
+        if isinstance(value, list):
+            labels = ("role", "context", "instructions")
+            if len(value) > len(labels):
+                raise ValueError("legacy instruction list may contain at most three references")
+            value = {labels[index]: item for index, item in enumerate(value)}
+        if not isinstance(value, Mapping):
+            raise ValueError("step instruction references must be a labeled object")
+        result = {str(label).strip(): str(reference).strip() for label, reference in value.items()}
+        if any(not label or not reference for label, reference in result.items()):
+            raise ValueError("step instruction references must use non-empty labels and strings")
         return result
 
     def dump_json(self) -> dict[str, str]:

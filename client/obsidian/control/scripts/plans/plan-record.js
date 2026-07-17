@@ -95,14 +95,26 @@ function buildPlanRecord({ label, description, steps, force_slug = null }) {
     };
 
     if (instruction?.slug || instruction?.key) {
-      const instructionSlug = step.instruction_slug || instruction.slug || instruction.key;
-      if (!step.role_slug) throw new Error(`Step ${stepNumber}: instruction role was not resolved.`);
-      if (!Array.isArray(step.context_slugs) || !step.context_slugs.length) {
-        throw new Error(`Step ${stepNumber}: instruction context was not resolved.`);
+      const refs = step.instruction_slugs;
+      if (!refs || Array.isArray(refs) || typeof refs !== 'object') {
+        throw new Error(`Step ${stepNumber}: instruction dependencies were not resolved.`);
       }
-      out.instruction_slug = instructionSlug;
-      out.role_slug = step.role_slug;
-      out.context_slugs = [...step.context_slugs];
+
+      const roleSlug = String(refs.role || '').trim();
+      const contextSlug = String(refs.context || '').trim();
+      const instructionSlug = String(
+        refs.instructions || step.instruction_slug || instruction.slug || instruction.key || ''
+      ).trim();
+
+      if (!roleSlug) throw new Error(`Step ${stepNumber}: instruction role was not resolved.`);
+      if (!contextSlug) throw new Error(`Step ${stepNumber}: instruction context was not resolved.`);
+      if (!instructionSlug) throw new Error(`Step ${stepNumber}: instruction was not resolved.`);
+
+      out.instruction_slugs = {
+        role: roleSlug,
+        context: contextSlug,
+        instructions: instructionSlug,
+      };
     }
     if (Object.keys(args).length) out.args = args;
     if (engine?.key) out.engine = engine.key;

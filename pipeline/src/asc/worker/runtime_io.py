@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 
 from asc.models.control.instruction import Instruction
@@ -88,10 +89,19 @@ def load_source_call(data_key: str) -> CallRecord:
 
 
 def load_instructions(
-    instruction_keys: list[str],
+    instruction_keys: Mapping[str, str] | Sequence[str],
 ) -> tuple[Instruction, ...]:
-    """Hydrate the instructions referenced by a Step, preserving order."""
-    return tuple(Instruction.load(key) for key in instruction_keys)
+    """Hydrate step instructions in the fixed role/context/instructions order."""
+
+    if isinstance(instruction_keys, Mapping):
+        preferred = ("role", "context", "instructions")
+        ordered_labels = [label for label in preferred if label in instruction_keys]
+        ordered_labels.extend(label for label in instruction_keys if label not in preferred)
+        keys = [instruction_keys[label] for label in ordered_labels]
+    else:
+        keys = list(instruction_keys)
+
+    return tuple(Instruction.load(key) for key in keys)
 
 
 __all__ = [
