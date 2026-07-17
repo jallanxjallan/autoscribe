@@ -198,9 +198,19 @@ function planStepEntries(steps) {
 }
 
 function planToScreenSteps(plan, catalogs) {
-  return planStepEntries(plan.steps).map(([number, step]) => {
+  const content = (
+    plan?.record_content
+    && typeof plan.record_content === 'object'
+    && !Array.isArray(plan.record_content)
+  ) ? plan.record_content : plan;
+
+  return planStepEntries(content.steps).map(([number, step]) => {
     const kind = normalizeKind(step.kind || step.type || (step.script ? 'script' : step.rag_profile ? 'rag' : 'llm'));
-    const instructionSlug = (step.instruction_slugs || [])[0] || step.instruction_slug || step.instruction;
+    const instructionSlug = (
+      step.instruction_slugs?.instructions
+      || step.instruction_slug
+      || step.instruction
+    );
     return {
       index: number,
       kind,
@@ -261,44 +271,168 @@ function renderInstructionPicker(app, step, instructions) {
   return el('label', {}, ['Instruction', wrapper]);
 }
 
-function resolveInstructionSet(app, record) {
-  if (!record?.path || !record?.abspath) {
-    throw new Error(`Instruction ${record?.slug || '<unknown>'} has no local source file.`);
-  }
-  const specificFile = app.vault.getAbstractFileByPath(record.path);
-  if (!specificFile) throw new Error(`Instruction file not found in vault: ${record.path}`);
+function frontmatterLinks(value) {
+  const values = Array.isArray(value) ? value : [value];
+  return values
+    .map((item) => normalizeWikiTarget(item))
+    .filter(Boolean);
+}
 
-  const role = normalizeWikiTarget(getFrontmatterEntry(app, specificFile, 'role'));
-  const context = normalizeWikiTarget(getFrontmatterEntry(app, specificFile, 'context'));
-  if (!role || !context) {
-    throw new Error(`${record.path}: instruction frontmatter requires role and context wikilinks.`);
-  }
-
-  const roleFile = app.metadataCache.getFirstLinkpathDest(role, record.path);
-  const contextFile = app.metadataCache.getFirstLinkpathDest(context, record.path);
-  if (!roleFile) throw new Error(`${record.path}: unresolved role wikilink: ${role}`);
-  if (!contextFile) throw new Error(`${record.path}: unresolved context wikilink: ${context}`);
-
-  const root = vaultRoot(app);
+function instructionComponent(app, file, sourcePath) {
+  const slug = String(getFrontmatterEntry(app, file, 'slug') || '').trim();
+  if (!slug) throw new Error(`${file.path}: referenced instruction component has no slug.`);
   return {
-    slug: record.slug,
-    source_path: record.path,
-    paths: [
-      require('node:path').resolve(root, roleFile.path),
-      require('node:path').resolve(root, contextFile.path),
-      require('node:path').resolve(root, record.path),
-    ],
+    slug,
+    path: file.path,
+    source_path: file.path,
+    abspath: require('node:path').resolve(vaultRoot(app), file.path),
   };
 }
 
-function instructionSetsForSteps(app, steps) {
-  const bySlug = new Map();
-  for (const step of steps) {
-    if (!step.instruction) continue;
-    const item = resolveInstructionSet(app, step.instruction);
-    bySlug.set(item.slug, item);
+function resolveInstructionDependencies(app, record) {
+  if (!record?.path || !record?.abspath) {
+    throw new Error(`Instruction ${record?.slug || '<unknown>'} has no local source file.`);
   }
-  return [...bySlug.values()];
+  const taskFile = app.vault.getAbstractFileByPath(record.path);
+  if (!taskFile) throw new Error(`Instruction file not found in vault: ${record.path}`);
+
+  const roleTargets = frontmatterLinks(getFrontmatterEntry(app, taskFile, 'role'));
+  const contextTargets = frontmatterLinks(getFrontmatterEntry(app, taskFile, 'context'));
+  if (roleTargets.length !== 1) {
+    throw new Error(`${record.path}: instruction frontmatter requires exactly one role wikilink.`);
+  }
+  if (contextTargets.length !== 1) {
+    throw new Error(`${record.path}: instruction frontmatter requires exactly one context wikilink.`);
+  }
+
+  const roleFile = app.metadataCache.getFirstLinkpathDest(roleTargets[0], record.path);
+  if (!roleFile) throw new Error(`${record.path}: unresolved role wikilink: ${roleTargets[0]}`);
+
+  const contextFile = app.metadataCache.getFirstLinkpathDest(contextTargets[0], record.path);
+  if (!contextFile) {
+    throw new Error(`${record.path}: unresolved context wikilink: ${contextTargets[0]}`);
+  }
+
+  const task = instructionComponent(app, taskFile, record.path);
+  const role = instructionComponent(app, roleFile, record.path);
+  const context = instructionComponent(app, contextFile, record.path);
+  return { task, role, context };
+}
+
+function prepareInstructionDependencies(app, steps) {
+  const components = new Map();
+
+  for (const step of steps) {
+    delete step.instruction_slug;
+    delete step.role_slug;
+    delete step.context_slug;
+    delete step.context_slugs;
+    delete step.instruction_slugs;
+
+    if (!step.instruction) {
+      step.instruction_slugs = {};
+      continue;
+    }
+
+    const resolved = resolveInstructionDependencies(app, step.instruction);
+    step.instruction_slugs = {
+      role: resolved.role.slug,
+      context: resolved.context.slug,
+      instructions: resolved.task.slug,
+    };
+
+    for (const component of [resolved.task, resolved.role, resolved.context]) {
+      components.set(component.slug, component);
+    }
+  }
+
+  return [...components.values()];
+}
+
+
+function parseArgsJson(value, stepNumber) {
+  const source = String(value || '').trim();
+  if (!source) return {};
+
+  let parsed;
+  try {
+    parsed = JSON.parse(source);
+  } catch (error) {
+    throw new Error(`Step ${stepNumber} args are not valid JSON: ${error.message}`);
+  }
+
+  if (!parsed || Array.isArray(parsed) || typeof parsed !== 'object') {
+    throw new Error(`Step ${stepNumber} args must decode to an object.`);
+  }
+  return parsed;
+}
+
+function recordKey(value) {
+  if (typeof value === 'string') return value.trim();
+  return String(value?.key || value?.slug || value?.record_identity || '').trim();
+}
+
+function serializePlanStep(step, ordinal) {
+  const kind = normalizeKind(step.kind);
+  const record = {
+    kind,
+    label: String(step.label || `Step ${ordinal}`).trim(),
+    instruction_slugs: { ...(step.instruction_slugs || {}) },
+  };
+
+  if (kind === 'llm') {
+    const engine = recordKey(step.engine);
+    const model = recordKey(step.model);
+    if (!engine) throw new Error(`Step ${ordinal} must select an engine.`);
+    if (!model) throw new Error(`Step ${ordinal} must select a model.`);
+    record.engine = engine;
+    record.model = model;
+  } else if (kind === 'script') {
+    const script = recordKey(step.script);
+    if (!script) throw new Error(`Step ${ordinal} must select a script.`);
+    record.script = script;
+  } else if (kind === 'rag') {
+    const ragProfile = recordKey(step.rag_profile);
+    if (!ragProfile) throw new Error(`Step ${ordinal} must select a RAG profile.`);
+    record.rag_profile = ragProfile;
+  } else {
+    throw new Error(`Step ${ordinal} has unsupported kind: ${kind || '<empty>'}.`);
+  }
+
+  const args = parseArgsJson(step.argsJson, ordinal);
+  if (Object.keys(args).length) record.args = args;
+  return record;
+}
+
+function indexedPlanSteps(steps) {
+  if (!steps.length) throw new Error('Plan must contain at least one step.');
+  return Object.fromEntries(
+    steps.map((step, index) => [
+      String(index + 1),
+      serializePlanStep(step, index + 1),
+    ])
+  );
+}
+
+function buildPlanUploadRecord({ label, description, steps, forceSlug }) {
+  const base = buildPlanRecord({
+    label,
+    description,
+    steps,
+    force_slug: forceSlug,
+  });
+  const identity = planSlug(base);
+  if (!identity) throw new Error('Plan record builder returned no record_identity.');
+
+  return {
+    record_type: 'plan',
+    record_identity: identity,
+    record_content: {
+      label: String(label || '').trim(),
+      description: String(description || '').trim(),
+      steps: indexedPlanSteps(steps),
+    },
+  };
 }
 
 function renderStepEditor({ app, stepsBox, steps, catalogs }) {
@@ -418,7 +552,7 @@ async function renderCreatePlan({ app, container }) {
 
   container.appendChild(button('Refresh', () => renderCreatePlan({ app, container })));
   container.appendChild(el('h2', { text: 'Define Plan' }));
-  container.appendChild(el('p', { text: 'Plans are loaded from the control snapshot. Local instruction files are assembled and synchronized before the plan is uploaded.' }));
+  container.appendChild(el('p', { text: 'Select the target instruction. Create Plan resolves its role and context links, uploads and commits dirty instruction files, then uploads the plan.' }));
 
   const existingSelect = el('select');
   existingSelect.style.width = '100%';
@@ -462,26 +596,38 @@ async function renderCreatePlan({ app, container }) {
     const plan = await feederLoadPlan(app, existingSelect.value);
     loadedPlan = plan;
     currentPlan.textContent = planSlug(plan);
-    label.value = plan.label || '';
-    description.value = plan.description || plan.record_content || '';
-    steps.splice(0, steps.length, ...planToScreenSteps(plan, catalogs));
+    const content = (
+      plan.record_content
+      && typeof plan.record_content === 'object'
+      && !Array.isArray(plan.record_content)
+    ) ? plan.record_content : plan;
+
+    label.value = content.label || plan.label || '';
+    description.value = content.description || plan.description || '';
+    steps.splice(0, steps.length, ...planToScreenSteps(content, catalogs));
     redrawSteps();
   }
 
   async function uploadCurrentPlan(forceSlug = null) {
-    const record = buildPlanRecord({
+    const instructionSets = prepareInstructionDependencies(app, steps);
+    const record = buildPlanUploadRecord({
       label: label.value,
       description: description.value,
       steps,
-      force_slug: forceSlug,
+      forceSlug,
     });
-    const instructionSets = instructionSetsForSteps(app, steps);
+
+    console.log(JSON.stringify(record));
     await feederUploadPlan(app, record, instructionSets);
+
     availablePlans = await feederListPlans(controlSnapshot);
     loadedPlan = record;
     currentPlan.textContent = record.record_identity;
     refreshPlanSelector(record.record_identity);
-    new Notice(`${forceSlug ? 'Updated' : 'Created'} plan: ${record.label}`);
+    new Notice(
+      `${forceSlug ? 'Updated' : 'Created'} plan: `
+      + `${record.record_content.label || record.record_identity}`
+    );
   }
 
   const loadBtn = button('Load Plan', () => loadSelectedPlan().catch((error) => {

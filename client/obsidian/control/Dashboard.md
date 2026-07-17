@@ -1,151 +1,164 @@
 # Vault Dashboard
 
 > [!summary] Control surface
-> Use this page as the F3 cockpit for the current vault: query links, public content, saved selections, provisional notes, and hygiene checks.
+> Use this page as the F3 cockpit for the current vault: open queries and panels, review slug coverage, and find public files that still need slugs.
 
 ```dataviewjs
 const CONFIG = {
-  contentPrefixes: ["pss", "img", "scn"],
-  provisionalPrefix: "prv",
-
   queryFolder: "_control/queries",
   panelFolder: "_control/panels",
-
-  selectionDir: ".autoscribe/selections",
-
-  recentLimit: 20,
-  missingSlugLimit: 50
+  missingSlugLimit: 100,
+  excludedFiles: new Set(["Table of Contents.md"])
 };
 
-const nodeRequire =
-  typeof require === "function"
-    ? require
-    : window.require;
+const sourcePath = app.workspace.getActiveFile()?.path || "_control/Dashboard.md";
 
-const pathMod = nodeRequire("path");
+function folderPrefix(folder) {
+  return `${String(folder).replace(/\/+$/, "")}/`;
+}
 
-const vaultBasePath =
-  app.vault.adapter.getBasePath?.() || app.vault.adapter.basePath;
+function isInside(path, folder) {
+  return String(path).startsWith(folderPrefix(folder));
+}
 
-const activePath = app.workspace.getActiveFile()?.path || "";
-const activeSegments = activePath.split("/").filter(Boolean);
-const controlIndex = activeSegments.indexOf("_control");
+function isPrivatePath(path) {
+  return String(path)
+    .split("/")
+    .slice(0, -1)
+    .some(segment => segment.startsWith("_"));
+}
 
-const controlRootForBootstrap =
-  controlIndex >= 0
-    ? activeSegments.slice(0, controlIndex + 1).join("/")
-    : "_control";
+function displayName(file) {
+  return file.basename;
+}
 
-const fsMod = nodeRequire("fs");
-const queryPath = activePath;
-const vaultName = String(
-  app.vault.getName?.() || app.vault.name || "vault"
-).trim() || "vault";
+function slugPrefix(slug) {
+  const value = String(slug || "").trim();
+  if (!value) return null;
 
-const vaultControlRootPath = pathMod.join(
-  vaultBasePath,
-  ...controlRootForBootstrap.split("/").filter(Boolean)
-);
-const controlRootPath = fsMod.realpathSync(vaultControlRootPath);
+  const match = value.match(/^([^.:-]+)[.:-]/);
+  return match ? match[1] : value;
+}
 
-const loader = {
-  nodeRequire,
-  pathMod,
-  fsMod,
-  vaultBasePath,
-  queryPath,
-  controlRoot: controlRootForBootstrap,
-  vaultControlRootPath,
-  controlRootPath,
-  controlPath(relativePath) {
-    return [controlRootForBootstrap, relativePath]
-      .filter(Boolean)
-      .join("/");
-  },
-  nativePath(vaultRelativePath) {
-    return pathMod.join(
-      vaultBasePath,
-      ...String(vaultRelativePath).split("/").filter(Boolean)
-    );
-  },
-  requireControl(relativePath) {
-    return nodeRequire(pathMod.join(
-      controlRootPath,
-      ...String(relativePath).split(/[\\/]+/).filter(Boolean)
-    ));
-  }
-};
+function markdownFilesIn(folder) {
+  return app.vault.getMarkdownFiles()
+    .filter(file => isInside(file.path, folder))
+    .sort((a, b) => displayName(a).localeCompare(displayName(b)));
+}
 
-async function openQuery(queryLink, sourcePath = queryPath) {
-  const queryFile =
-    typeof queryLink === "string"
-      ? app.metadataCache.getFirstLinkpathDest(queryLink, sourcePath)
-      : queryLink;
+async function openControlFile(linkTarget) {
+  const file =
+    typeof linkTarget === "string"
+      ? app.metadataCache.getFirstLinkpathDest(linkTarget, sourcePath)
+      : linkTarget;
 
-  if (!queryFile?.path) {
-    throw new Error(`Query not found: ${String(queryLink)}`);
+  if (!file?.path) {
+    throw new Error(`Control file not found: ${String(linkTarget)}`);
   }
 
   const existingLeaf = app.workspace.getLeavesOfType("markdown").find(
-    leaf => leaf.view?.file?.path === queryFile.path
+    leaf => leaf.view?.file?.path === file.path
   );
 
   if (existingLeaf) {
     await app.workspace.revealLeaf(existingLeaf);
-    return existingLeaf;
+    return;
   }
 
   const leaf = app.workspace.getLeaf("tab");
-  await leaf.openFile(queryFile);
+  await leaf.openFile(file);
   await app.workspace.revealLeaf(leaf);
-  return leaf;
 }
 
-const runtime = {
-  app,
-  nodeRequire,
-  loader,
-  pathMod,
-  vaultBasePath,
-  vaultName,
-  queryPath,
-  controlRoot: controlRootForBootstrap,
-  controlLoaderPath: null,
-  openQuery
-};
+const queries = markdownFilesIn(CONFIG.queryFolder);
+const panels = markdownFilesIn(CONFIG.panelFolder);
 
-const { renderVaultDashboard } = loader.requireControl(
-  "scripts/dashboard-query.js"
+const publicFiles = app.vault.getMarkdownFiles().filter(file =>
+  !isPrivatePath(file.path) &&
+  !CONFIG.excludedFiles.has(file.name)
 );
 
-await renderVaultDashboard({
-  app,
-  dv,
-  runtime,
-  config: CONFIG
-});
+const prefixCounts = new Map();
+const missingSlugs = [];
+
+for (const file of publicFiles) {
+  const frontmatter = app.metadataCache.getFileCache(file)?.frontmatter;
+  const slug = String(frontmatter?.slug || "").trim();
+
+  if (!slug) {
+    missingSlugs.push(file);
+    continue;
+  }
+
+  const prefix = slugPrefix(slug);
+  prefixCounts.set(prefix, (prefixCounts.get(prefix) || 0) + 1);
+}
+
+missingSlugs.sort((a, b) => a.path.localeCompare(b.path));
+
+const prefixRows = [...prefixCounts.entries()]
+  .sort(([a], [b]) => a.localeCompare(b))
+  .map(([prefix, count]) => [prefix, count]);
+
+function renderLinkList(heading, files) {
+  dv.header(2, heading);
+
+  if (!files.length) {
+    dv.paragraph("_None found._");
+    return;
+  }
+
+  dv.list(files.map(file => dv.fileLink(file.path, false, displayName(file))));
+}
+
+renderLinkList("Queries", queries);
+renderLinkList("Panels", panels);
+
+dv.header(2, "Files by slug prefix");
+if (prefixRows.length) {
+  dv.table(["Prefix", "Files"], prefixRows);
+} else {
+  dv.paragraph("_No slugs found outside private folders._");
+}
+
+dv.header(2, "Files without slugs");
+if (!missingSlugs.length) {
+  dv.paragraph("All Markdown files outside `_` folders have slugs.");
+} else {
+  const shown = missingSlugs.slice(0, CONFIG.missingSlugLimit);
+  dv.paragraph(
+    `${missingSlugs.length} Markdown file${missingSlugs.length === 1 ? "" : "s"} outside \`_\` folders ${missingSlugs.length === 1 ? "has" : "have"} no slug.`
+  );
+  dv.list(shown.map(file => dv.fileLink(file.path)));
+
+  if (shown.length < missingSlugs.length) {
+    dv.paragraph(`Showing the first ${shown.length}.`);
+  }
+}
 
 const dashboardContainer = dv.container;
 
-if (!dashboardContainer.dataset.queryOpenGuard) {
-  dashboardContainer.dataset.queryOpenGuard = "true";
+if (!dashboardContainer.dataset.controlOpenGuard) {
+  dashboardContainer.dataset.controlOpenGuard = "true";
 
   dashboardContainer.addEventListener("click", async event => {
     const link = event.target.closest("a.internal-link");
     if (!link || !dashboardContainer.contains(link)) return;
 
     const linkTarget = link.dataset.href || link.getAttribute("href") || "";
-    const queryFile = app.metadataCache.getFirstLinkpathDest(
-      linkTarget,
-      queryPath
-    );
+    const file = app.metadataCache.getFirstLinkpathDest(linkTarget, sourcePath);
 
-    const queryFolderPrefix = `${CONFIG.queryFolder.replace(/\/+$/, "")}/`;
-    if (!queryFile?.path?.startsWith(queryFolderPrefix)) return;
+    if (
+      !file?.path ||
+      (!isInside(file.path, CONFIG.queryFolder) &&
+       !isInside(file.path, CONFIG.panelFolder))
+    ) {
+      return;
+    }
 
     event.preventDefault();
     event.stopPropagation();
-    await openQuery(queryFile);
+    await openControlFile(file);
   });
 }
 ```

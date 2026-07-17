@@ -13,6 +13,10 @@ function normalizeRelPath(relPath) {
 
 function normalizeWikiTarget(target) {
   return String(target || "")
+    .trim()
+    .replace(/^!/, "")
+    .replace(/^\[\[/, "")
+    .replace(/\]\]$/, "")
     .split("|")[0]
     .split("#")[0]
     .trim()

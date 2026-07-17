@@ -94,10 +94,15 @@ function buildPlanRecord({ label, description, steps, force_slug = null }) {
       label: String(step.label || `Step ${stepNumber}`).trim() || `Step ${stepNumber}`,
     };
 
-    // The current pipeline contract still accepts instruction_slugs.
-    // The UI deliberately permits only one instruction per step.
     if (instruction?.slug || instruction?.key) {
-      out.instruction_slugs = [instruction.slug || instruction.key];
+      const instructionSlug = step.instruction_slug || instruction.slug || instruction.key;
+      if (!step.role_slug) throw new Error(`Step ${stepNumber}: instruction role was not resolved.`);
+      if (!Array.isArray(step.context_slugs) || !step.context_slugs.length) {
+        throw new Error(`Step ${stepNumber}: instruction context was not resolved.`);
+      }
+      out.instruction_slug = instructionSlug;
+      out.role_slug = step.role_slug;
+      out.context_slugs = [...step.context_slugs];
     }
     if (Object.keys(args).length) out.args = args;
     if (engine?.key) out.engine = engine.key;
