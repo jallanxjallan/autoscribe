@@ -7,6 +7,7 @@ class EnqueuedCall:
     source_identity: str
     call_key: str
     runtime_keys: tuple[str, ...]
+    job_key: str
     plan_key: str
     step_count: int
 

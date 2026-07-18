@@ -1,18 +1,13 @@
-"""Materialize ephemeral call runtimes and activate completed calls."""
+"""Materialize ephemeral call-scoped runtime steps."""
 
 from __future__ import annotations
 
-import time
 from collections.abc import Mapping
 from typing import Any
 
 from asc.models.process.runtime import Runtime
-from asc.redis.key import RedisKey
-from asc.redis.primitives.zsets import zadd
 from asc.state.slugmap import SlugMap
 
-ACTIVE_CALLS_KEY = RedisKey("state:active:index")
-PARKED_CALL_SCORE = 0.0
 RUNTIME_TTL_SECONDS = 60 * 60 * 24
 INSTRUCTION_ORDER = ("role", "context", "instructions")
 
@@ -47,6 +42,7 @@ def materialize_runtimes(*, call_identity: str, plan: Any) -> tuple[Runtime, ...
                 "instruction_keys": instruction_keys,
                 "args": args,
             }
+            payload.pop("instruction", None)
             payload.pop("instruction_slugs", None)
             payload.pop("instructions", None)
 
@@ -59,12 +55,6 @@ def materialize_runtimes(*, call_identity: str, plan: Any) -> tuple[Runtime, ...
         raise
 
     return tuple(runtimes)
-
-
-def activate_call(call_key: str) -> None:
-    """Expose a fully materialized call to the orchestrator."""
-
-    zadd(ACTIVE_CALLS_KEY, {call_key: float(time.time())})
 
 
 def _step_args(step: Mapping[str, Any], *, ordinal: int) -> dict[str, Any]:
@@ -93,7 +83,10 @@ def _engine_kind(step: Mapping[str, Any], *, args: Mapping[str, Any], ordinal: i
 
 
 def _resolve_instruction_keys(step: Mapping[str, Any], *, ordinal: int) -> dict[str, str]:
-    raw = step.get("instruction_slugs", step.get("instructions", {}))
+    raw = step.get("instruction_slugs", step.get("instructions"))
+    if raw in (None, ""):
+        instruction = step.get("instruction")
+        raw = {} if instruction in (None, "") else {"instructions": instruction}
     if raw in (None, ""):
         return {}
     if isinstance(raw, list):
@@ -122,10 +115,7 @@ def _resolve_instruction_keys(step: Mapping[str, Any], *, ordinal: int) -> dict[
 
 
 __all__ = [
-    "ACTIVE_CALLS_KEY",
     "INSTRUCTION_ORDER",
-    "PARKED_CALL_SCORE",
     "RUNTIME_TTL_SECONDS",
-    "activate_call",
     "materialize_runtimes",
 ]

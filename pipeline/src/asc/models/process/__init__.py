@@ -1,5 +1,7 @@
 """Runtime process models."""
 
+from asc.models.process.job import Job
+
 from asc.models.process.call import CallRecord
 from asc.models.process.result import (
     Committed,
@@ -27,6 +29,7 @@ __all__ = [
     "ExternalFailure",
     "Failure",
     "InternalFailure",
+    "Job",
     "Outcome",
     "OutcomeStatus",
     "Response",
