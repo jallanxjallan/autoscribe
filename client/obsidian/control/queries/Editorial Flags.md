@@ -62,8 +62,11 @@ function extractHighlights(line) {
 }
 
 function tkPreview(line) {
-  if (!/\*\*TK\*\*/i.test(line)) return null;
-  return truncateAtWord(line.replace(/\*\*TK\*\*/gi, "TK"));
+  if (!/\*\*TK(?:\s+[^*]+)?\*\*/i.test(line)) return null;
+
+  return truncateAtWord(
+    line.replace(/\*\*(TK(?:\s+[^*]+)?)\*\*/gi, "$1")
+  );
 }
 
 for (const file of app.vault.getMarkdownFiles()
