@@ -11,7 +11,7 @@ from . import git
 from .errors import ObsError
 from .manifests import now_iso, read_json, rows, write_json
 from .markdown import parse_markdown, slug_prefix
-from .pandoc import capture as pandoc_capture, emit as pandoc_emit
+from .pandoc import capture as pandoc_capture
 from .state import VaultState
 from .vault import Vault
 
@@ -73,16 +73,83 @@ def upload_instructions(repo: Path, *, force: bool = False, dry_run: bool = Fals
     return items, output
 
 
+def _latest_commit_subject(repo: Path, relpath: str) -> str:
+    from .process import run
+    result = run(
+        ["git", "log", "--max-count=1", "--format=%s", "--", relpath],
+        cwd=repo,
+        check=False,
+    )
+    return result.stdout.strip() if result.returncode == 0 else ""
+
+
+def _is_inflight(repo: Path, relpath: str) -> bool:
+    return _latest_commit_subject(repo, relpath).startswith("plan.")
+
+
+def _dispatch_record(*, slug: str, plan_slug: str, content: str) -> dict[str, str]:
+    return {
+        "record_identity": slug,
+        "record_type": "content",
+        "record_plan": plan_slug,
+        "record_content": content,
+    }
+
+
+def _encode_ndjson(records: list[dict[str, str]]) -> bytes:
+    if not records:
+        return b""
+    text = "".join(
+        json.dumps(record, ensure_ascii=False, separators=(",", ":")) + "\n"
+        for record in records
+    )
+    return text.encode("utf-8")
+
+
+def _resolve_dispatch_item(repo: Path, *, relpath: str, expected_slug: str | None = None) -> dict[str, str]:
+    root = repo.resolve()
+    normalized_input = str(relpath or "").replace("\\", "/").lstrip("./")
+    if not normalized_input:
+        raise ObsError("dispatch item is missing path")
+
+    absolute = (root / normalized_input).resolve()
+    try:
+        normalized = absolute.relative_to(root).as_posix()
+    except ValueError as exc:
+        raise ObsError(f"dispatch path is outside active vault: {relpath}") from exc
+
+    if absolute.suffix.lower() != ".md":
+        raise ObsError(f"dispatch file is not Markdown: {normalized}")
+    if not absolute.is_file():
+        raise ObsError(f"dispatch file not found: {normalized}")
+
+    content = absolute.read_text(encoding="utf-8")
+    document = parse_markdown(content)
+    slug = str(document.frontmatter.get("slug") or "").strip()
+    if not slug:
+        raise ObsError(f"{normalized}: missing slug")
+    if expected_slug and slug != expected_slug:
+        raise ObsError(f"{normalized}: expected slug {expected_slug}, found {slug}")
+
+    return {
+        "path": normalized,
+        "absolute_path": str(absolute),
+        "slug": slug,
+        "record_content": content,
+    }
+
+
 def dispatch_run(
     repo: Path,
     *,
     manifest_path: Path | None = None,
     dry_run: bool = False,
 ) -> tuple[list[dict[str, Any]], bytes]:
-    """Resolve a run into NUL-delimited Pandoc argument pairs.
+    """Emit enqueue-ready NDJSON for the active run selection.
 
-    The CLI stream is consumed by ``xargs -0 -r -n 2 pandoc``. Each file adds
-    one ``record_plan`` metadata option and one absolute Markdown filename.
+    Each row contains only ``record_identity``, ``record_type``,
+    ``record_plan``, and ``record_content``. ``record_content`` is the entire
+    Markdown source file, including YAML frontmatter and body.
     """
     manifest_path = manifest_path or VaultState.for_vault(repo).current_run
     manifest = read_json(manifest_path)
@@ -90,64 +157,64 @@ def dispatch_run(
     if manifest_root and Path(manifest_root).resolve() != repo.resolve():
         raise ObsError(f"run manifest belongs to a different vault: {manifest_root}")
 
-    root = repo.resolve()
-    calls: list[dict[str, Any]] = []
+    items: list[dict[str, Any]] = []
     seen: set[str] = set()
     for index, raw in enumerate(rows(manifest), 1):
         if str(raw.get("upload_status") or "pending") != "pending":
             continue
-        plan_slug = raw.get("plan_slug") or raw.get("job_slug") or raw.get("plan") or manifest.get("plan_slug")
-        relpath = str(raw.get("path") or "").replace("\\", "/").lstrip("./")
-        prompt_slug = raw.get("prompt_slug") or raw.get("call_slug") or raw.get("record_identity") or raw.get("slug")
-        if not relpath or not plan_slug:
-            raise ObsError(f"manifest row {index}: missing path or plan_slug")
 
-        absolute = (root / relpath).resolve()
-        try:
-            normalized = absolute.relative_to(root).as_posix()
-        except ValueError as exc:
-            raise ObsError(f"manifest row {index}: path is outside active vault: {relpath}") from exc
-        if normalized in seen:
+        plan_slug = str(
+            raw.get("plan_slug")
+            or raw.get("job_slug")
+            or raw.get("plan")
+            or manifest.get("plan_slug")
+            or ""
+        ).strip()
+        if not plan_slug:
+            raise ObsError(f"manifest row {index}: missing plan_slug")
+
+        expected_slug = str(
+            raw.get("prompt_slug")
+            or raw.get("call_slug")
+            or raw.get("record_identity")
+            or raw.get("slug")
+            or ""
+        ).strip() or None
+        item = _resolve_dispatch_item(
+            repo,
+            relpath=str(raw.get("path") or ""),
+            expected_slug=expected_slug,
+        )
+        if item["path"] in seen:
             continue
-        if absolute.suffix.lower() != ".md":
-            raise ObsError(f"manifest row {index}: selected file is not Markdown: {normalized}")
-        if not absolute.is_file():
-            raise ObsError(f"manifest row {index}: selected file not found: {normalized}")
+        seen.add(item["path"])
+        item.update({"index": index, "plan_slug": plan_slug})
+        items.append(item)
 
-        seen.add(normalized)
-        calls.append({
-            "index": index,
-            "prompt_slug": str(prompt_slug or ""),
-            "plan_slug": str(plan_slug),
-            "path": normalized,
-            "absolute_path": str(absolute),
-        })
-
-    if not calls:
+    if not items:
         raise ObsError("current selection contains no dispatchable Markdown files")
 
-    plan_slugs = {call["plan_slug"] for call in calls}
+    plan_slugs = {item["plan_slug"] for item in items}
     if len(plan_slugs) != 1:
         raise ObsError("dispatch run must use exactly one plan slug")
     plan_slug = next(iter(plan_slugs))
 
-    if not dry_run:
-        stamp = datetime.now().astimezone().strftime("%Y-%m-%d %H:%M:%S %z")
-        commit = git.commit_files(
-            repo,
-            [call["path"] for call in calls],
-            f"{plan_slug} {stamp}",
-        )
-        for call in calls:
-            call["dispatch_commit"] = commit
+    if dry_run:
+        return items, b""
 
-    output = bytearray()
-    for call in calls:
-        output.extend(f"--metadata=record_plan:{plan_slug}".encode("utf-8"))
-        output.append(0)
-        output.extend(call["absolute_path"].encode("utf-8"))
-        output.append(0)
-    return calls, bytes(output)
+    stamp = datetime.now().astimezone().strftime("%Y-%m-%d %H:%M:%S %z")
+    commit = git.commit_files(repo, [item["path"] for item in items], f"{plan_slug} {stamp}")
+    records: list[dict[str, str]] = []
+    for item in items:
+        item["dispatch_commit"] = commit
+        records.append(
+            _dispatch_record(
+                slug=item["slug"],
+                plan_slug=plan_slug,
+                content=item["record_content"],
+            )
+        )
+    return items, _encode_ndjson(records)
 
 
 def dispatch_paths(
@@ -158,87 +225,94 @@ def dispatch_paths(
     dry_run: bool = False,
     defaults: list[str] | None = None,
 ) -> dict[str, Any]:
-    """Render explicit Markdown paths and enqueue them under one uploaded plan."""
+    """Commit explicit Markdown paths and send their canonical NDJSON to enqueue."""
+    del defaults
     plan_slug = str(plan_slug or "").strip()
     if not plan_slug:
         raise ObsError("dispatch requires plan_slug")
-    normalized: list[str] = []
-    seen: set[str] = set()
-    for raw in paths:
-        relpath = str(raw or "").replace("\\", "/").lstrip("./")
-        if not relpath or relpath in seen:
-            continue
-        candidate = (repo / relpath).resolve()
-        try:
-            candidate.relative_to(repo.resolve())
-        except ValueError as exc:
-            raise ObsError(f"dispatch path is outside active vault: {raw}") from exc
-        if candidate.suffix.lower() != ".md":
-            continue
-        if not candidate.is_file():
-            raise ObsError(f"dispatch file not found: {relpath}")
-        document = parse_markdown(candidate.read_text(encoding="utf-8"))
-        slug = str(document.frontmatter.get("slug") or "").strip()
-        if not slug:
-            raise ObsError(f"{relpath}: missing slug")
-        seen.add(relpath)
-        normalized.append(relpath)
-    if not normalized:
-        raise ObsError("selected commit contains no dispatchable Markdown files")
 
     items: list[dict[str, Any]] = []
-    for relpath in normalized:
-        document = parse_markdown((repo / relpath).read_text(encoding="utf-8"))
-        slug = str(document.frontmatter.get("slug") or "").strip()
-        items.append({"path": relpath, "slug": slug, "plan_slug": plan_slug})
+    failures: list[dict[str, str]] = []
+    seen: set[str] = set()
+    for raw in paths:
+        item = _resolve_dispatch_item(repo, relpath=str(raw or ""))
+        if item["path"] in seen:
+            continue
+        seen.add(item["path"])
+        if _is_inflight(repo, item["path"]):
+            failures.append({
+                "path": item["path"],
+                "slug": item["slug"],
+                "error": "file is already inflight",
+            })
+            continue
+        item["plan_slug"] = plan_slug
+        items.append(item)
 
-    pipeline_output = ""
-    if not dry_run:
-        import os
-        import subprocess
+    if not items and failures:
+        return {
+            "plan_slug": plan_slug,
+            "count": 0,
+            "failed_count": len(failures),
+            "items": [],
+            "failures": failures,
+            "pipeline_output": "",
+            "dry_run": dry_run,
+        }
+    if not items:
+        raise ObsError("selection contains no dispatchable Markdown files")
+    if dry_run:
+        return {
+            "plan_slug": plan_slug,
+            "count": len(items),
+            "items": items,
+            "failed_count": len(failures),
+            "failures": failures,
+            "pipeline_output": "",
+            "dry_run": True,
+        }
 
-        from .executables import autoscribe_bin
-
-        command = [autoscribe_bin(), "enqueue"]
-        enqueue = subprocess.Popen(
-            command,
-            cwd=repo,
-            env=os.environ.copy(),
-            stdin=subprocess.PIPE,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
-            text=True,
+    stamp = datetime.now().astimezone().strftime("%Y-%m-%d %H:%M:%S %z")
+    commit = git.commit_files(repo, [item["path"] for item in items], f"{plan_slug} {stamp}")
+    records = []
+    for item in items:
+        item["dispatch_commit"] = commit
+        records.append(
+            _dispatch_record(
+                slug=item["slug"],
+                plan_slug=plan_slug,
+                content=item["record_content"],
+            )
         )
-        assert enqueue.stdin is not None
-        assert enqueue.stdout is not None
-        assert enqueue.stderr is not None
-        try:
-            for item in items:
-                pandoc_emit(
-                    repo=repo,
-                    input_path=item["path"],
-                    defaults=defaults or ["upload_prompt"],
-                    metadata={"record_plan": plan_slug},
-                    stdout=enqueue.stdin,
-                )
-            enqueue.stdin.close()
-            pipeline_stdout = enqueue.stdout.read()
-            pipeline_stderr = enqueue.stderr.read()
-            returncode = enqueue.wait()
-        except Exception:
-            enqueue.kill()
-            enqueue.wait()
-            raise
-        if returncode != 0:
-            detail = (pipeline_stderr or pipeline_stdout or f"exit status {returncode}").strip()
-            raise ObsError(f"{' '.join(command)} failed: {detail}")
-        pipeline_output = pipeline_stdout.strip()
+
+    import os
+    import subprocess
+    from .executables import autoscribe_bin
+
+    command = [autoscribe_bin(), "enqueue"]
+    result = subprocess.run(
+        command,
+        cwd=repo,
+        env=os.environ.copy(),
+        input=_encode_ndjson(records),
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        check=False,
+    )
+    if result.returncode != 0:
+        detail = (result.stderr or result.stdout or f"exit status {result.returncode}".encode()).decode(
+            "utf-8", errors="replace"
+        ).strip()
+        raise ObsError(f"{' '.join(command)} failed: {detail}")
+
     return {
         "plan_slug": plan_slug,
         "count": len(items),
+        "failed_count": len(failures),
         "items": items,
-        "pipeline_output": pipeline_output,
-        "dry_run": dry_run,
+        "failures": failures,
+        "pipeline_output": result.stdout.decode("utf-8", errors="replace").strip(),
+        "dry_run": False,
     }
 
 
