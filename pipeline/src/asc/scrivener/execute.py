@@ -1,52 +1,25 @@
-"""Scrivener execution boundary."""
+"""Scrivener execution boundary for key-only inbox entries."""
 
 from __future__ import annotations
 
 from dataclasses import dataclass
 
-from asc.ledger.write import table_for_action, write_task
-from asc.models.process.task import ScrivenerTask
+from asc.ledger.write import table_for_key, write_key
 
 
 @dataclass(frozen=True, slots=True)
 class ScrivenerExecutionReport:
-    """Report for one successful scrivener task execution.
-
-    Scrivener is fire-and-forget from the orchestrator's perspective. A ledger
-    write failure is not converted into a runtime artifact; it raises at the
-    daemon boundary so the process supervisor can yell loudly.
-    """
-
-    task_key: str
-    action: str
+    artifact_key: str
+    kind: str
     table: str
-    data_key: str
 
 
 class ScrivenerExecutor:
-    def execute(self, task_key: str) -> ScrivenerExecutionReport:
-        task_key = _required_text(task_key, "scrivener task key")
-        task = ScrivenerTask.load(task_key)
-        _validate_task(task)
-        write_task(task)
-
-        return ScrivenerExecutionReport(
-            task_key=task_key,
-            action=task.action,
-            table=table_for_action(task.action),
-            data_key=task.data_key,
-        )
-
-
-def _validate_task(task: ScrivenerTask) -> None:
-    if task.package != "scrivener":
-        raise ValueError(f"scrivener executor received non-scrivener task: {task.raw_key}")
-
-    if task.expected_key != task.data_key:
-        raise ValueError(
-            "scrivener task expected_key must match data_key: "
-            f"expected_key={task.expected_key!r} data_key={task.data_key!r}"
-        )
+    def execute(self, artifact_key: str) -> ScrivenerExecutionReport:
+        key = _required_text(artifact_key, "scrivener artifact key")
+        table = table_for_key(key)
+        kind = write_key(key)
+        return ScrivenerExecutionReport(artifact_key=key, kind=kind, table=table)
 
 
 def _required_text(value: object, field: str) -> str:

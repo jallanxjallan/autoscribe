@@ -1,11 +1,10 @@
-"""Public inbox for scrivener tasks."""
+"""Scrivener inbox containing durable artifact keys only."""
 
 from asc.redis.key import RedisKey
 from asc.state.queue import RedisQueue
 
 
 SCRIVENER_INBOX_KEY = "control:scrivener:inbox"
-
 scrivener_inbox = RedisQueue(SCRIVENER_INBOX_KEY)
 
 
@@ -18,17 +17,15 @@ def _message_key(claimed: object) -> str | None:
 def post(key: str | RedisKey) -> str:
     raw = str(key).strip()
     if not raw:
-        raise ValueError("scrivener inbox expected a non-empty task key")
+        raise ValueError("scrivener inbox expected a non-empty artifact key")
+    RedisKey(raw)  # validate full key shape before queueing
     scrivener_inbox.insert(raw)
     return raw
 
 
 def daemon_claim(*, timeout: int = 0, empty_limit: int | None = None) -> str | None:
     return _message_key(
-        scrivener_inbox.daemon_claim(
-            timeout=timeout,
-            empty_limit=empty_limit,
-        )
+        scrivener_inbox.daemon_claim(timeout=timeout, empty_limit=empty_limit)
     )
 
 

@@ -123,7 +123,7 @@ def table_columns(conn: LedgerConnection, table_name: str) -> set[str]:
 
 def require_ledger_columns(conn: LedgerConnection) -> None:
     required = {
-        "calls": {"identity", "source_identity", "source_json", "created_at"},
+        "calls": {"identity", "source_identity", "plan_key", "content", "created_at", "blob_json"},
         "responses": {
             "identity",
             "final_step",
@@ -160,8 +160,10 @@ def require_ledger_columns(conn: LedgerConnection) -> None:
 CALLS: ColumnSpec = {
     "identity": "TEXT PRIMARY KEY NOT NULL UNIQUE CHECK (length(identity) = 26)",
     "source_identity": "TEXT NOT NULL",
-    "source_json": "TEXT NOT NULL",
+    "plan_key": "TEXT NOT NULL",
+    "content": "TEXT NOT NULL",
     "created_at": "INTEGER NOT NULL",
+    "blob_json": "TEXT NOT NULL",
 }
 
 

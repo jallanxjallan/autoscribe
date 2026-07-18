@@ -4,7 +4,9 @@ from asc.ledger.util import insert_sql
 CALL_COLUMNS = (
     "identity",
     "source_identity",
-    "source_json",
+    "plan_key",
+    "content",
+    "blob_json",
     "created_at",
 )
 
@@ -145,7 +147,9 @@ SELECT_EXTRACT_RESULT_BY_CALL_IDENTITY_SQL = """
     SELECT
         c.identity AS identity,
         c.source_identity AS source_identity,
-        c.source_json AS source_json,
+        c.plan_key AS plan_key,
+        c.content AS source_content,
+        c.blob_json AS blob_json,
         c.created_at AS call_created_at,
         r.final_step AS step_number,
         r.result_key AS result_key,
