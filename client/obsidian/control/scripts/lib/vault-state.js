@@ -50,13 +50,16 @@ function git(args, cwd) {
 function gitFileState(root, abspath) {
   const rel = relpath(root, abspath);
   const statusText = git(['status', '--porcelain', '--', rel], root);
-  const commit = git(['log', '-n', '1', '--format=%H', '--', rel], root) || null;
-  const short_commit = commit ? commit.slice(0, 12) : null;
+  const conflicted = statusText.split('\n').some((line) => /^(DD|AU|UD|UA|DU|AA|UU)/.test(line));
+  const logText = git(['log', '-n', '1', '--format=%H%x1f%h%x1f%s%x1f%ct', '--', rel], root);
+  const [commit = '', shortCommit = '', subject = '', timestamp = ''] = logText ? logText.split('\x1f') : [];
   return {
-    repo_state: statusText ? 'dirty' : 'clean',
+    repo_state: conflicted ? 'conflicted' : (statusText ? 'dirty' : 'clean'),
     git_status: statusText || '',
-    git_commit: commit,
-    short_commit,
+    git_commit: commit || null,
+    short_commit: shortCommit || (commit ? commit.slice(0, 12) : null),
+    git_subject: subject || null,
+    git_timestamp: timestamp ? Number(timestamp) : null,
     has_prior_commit: Boolean(commit),
   };
 }

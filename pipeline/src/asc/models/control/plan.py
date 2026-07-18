@@ -28,6 +28,39 @@ def _json_list(value: object, *, field_name: str) -> list[Any]:
     return value
 
 
+def _indexed_object(value: object, *, field_name: str) -> dict[int, dict[str, Any]]:
+    """Normalize a 1-based indexed object, accepting legacy lists at intake."""
+
+    if value is None:
+        return {}
+    if isinstance(value, str):
+        value = json.loads(value or "{}")
+
+    if isinstance(value, list):
+        value = {index: item for index, item in enumerate(value, start=1)}
+
+    if not isinstance(value, Mapping):
+        raise ValueError(f"plan {field_name} must be an indexed object")
+
+    result: dict[int, dict[str, Any]] = {}
+    for raw_index, raw_item in value.items():
+        if isinstance(raw_index, bool):
+            raise ValueError(f"plan {field_name} key must be a positive integer")
+        try:
+            index = int(raw_index)
+        except (TypeError, ValueError) as exc:
+            raise ValueError(f"plan {field_name} key must be a positive integer: {raw_index!r}") from exc
+        if index < 1:
+            raise ValueError(f"plan {field_name} key must be positive: {index}")
+        if index in result:
+            raise ValueError(f"plan {field_name} contains duplicate index: {index}")
+        if not isinstance(raw_item, Mapping):
+            raise ValueError(f"plan {field_name}[{index}] must be an object")
+        result[index] = dict(raw_item)
+
+    return dict(sorted(result.items()))
+
+
 class Plan(RedisModel):
     """Uploaded reusable plan control asset."""
 
@@ -45,7 +78,7 @@ class Plan(RedisModel):
 
     metadata_json: str = "{}"
 
-    steps: list[dict[str, Any]] = Field(default_factory=list, exclude=True)
+    steps: dict[int, dict[str, Any]] = Field(default_factory=dict, exclude=True)
     steps_json: str = ""
 
     @model_validator(mode="before")
@@ -129,14 +162,8 @@ class Plan(RedisModel):
 
     @field_validator("steps", mode="before")
     @classmethod
-    def validate_steps(cls, value: object) -> list[dict[str, Any]]:
-        raw_steps = _json_list(value, field_name="steps")
-        steps: list[dict[str, Any]] = []
-        for index, item in enumerate(raw_steps, start=1):
-            if not isinstance(item, Mapping):
-                raise ValueError(f"plan steps[{index}] must be an object")
-            steps.append(dict(item))
-        return steps
+    def validate_steps(cls, value: object) -> dict[int, dict[str, Any]]:
+        return _indexed_object(value, field_name="steps")
 
     @field_validator("steps_json", mode="before")
     @classmethod
@@ -180,8 +207,8 @@ class Plan(RedisModel):
         if step_number < 1:
             raise IndexError(f"step_number must be >= 1, got {step_number}")
         try:
-            return dict(self.steps[step_number - 1])
-        except IndexError as exc:
+            return dict(self.steps[step_number])
+        except KeyError as exc:
             raise IndexError(f"plan {self.slug} has no step {step_number}; total_steps={self.total_steps}") from exc
 
     def step_args(self, step_number: int) -> dict[str, Any]:
@@ -209,7 +236,7 @@ class Plan(RedisModel):
         data["record_identity"] = self.slug
         data["record_content"] = self.content
         data["instructions"] = list(self.instructions)
-        data["steps"] = list(self.steps)
+        data["steps"] = {str(index): dict(step) for index, step in self.steps.items()}
 
         metadata = json.loads(self.metadata_json or "{}")
         if isinstance(metadata, dict):

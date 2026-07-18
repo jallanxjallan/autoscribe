@@ -1,50 +1,17 @@
 # obs feeder
 
-Python feeder for scanning the active Obsidian vault and moving records to and
-from the AutoScribe pipeline.
+Python service boundary between the Obsidian client and AutoScribe.
 
-The repository mirrors the pipeline layout:
+The client owns rendering, workspace behavior, and Obsidian-specific reference
+resolution. Feeder owns filesystem scans, Git state and commits, Pandoc calls,
+pipeline uploads, pipeline plan persistence, dispatch, and writeback.
 
-```text
-~/AutoScribe/
-  pipeline/src/asc/
-  feeder/src/obs/
-```
-
-Install from the feeder project root:
+Install:
 
 ```bash
 cd ~/AutoScribe/feeder
 pip install -e .
 ```
-
-## Active vault and state
-
-`obs` resolves the active vault from the current working directory's git root.
-The vault contains Markdown content only. Generated JSON state is stored outside
-the repository at:
-
-```text
-${AUTOSCRIBE_HOME:-${XDG_DATA_HOME:-~/.local/share}/autoscribe}/obsidian/vaults/<vault-name>-<root-hash>/
-```
-
-For example, running inside `~/Studio/Articles` uses:
-
-```text
-~/.local/share/autoscribe/obsidian/vaults/articles-<root-hash>/
-```
-
-The state tree is:
-
-```text
-selections/<operation>.json
-workflow/plans/*.json
-workflow/runs/current-run.json
-writing/writeback-results.json
-writing/writenew-results.json
-```
-
-Use `obs state` to print the active vault and resolved state directory.
 
 ## Commands
 
@@ -52,11 +19,19 @@ Use `obs state` to print the active vault and resolved state directory.
 obs state
 obs scan [--public]
 obs upload-instructions [--dry-run] [--force]
-obs upload-plans [--dry-run] [--force]
+obs upload-instruction SOURCE --input RESOLVED.md [--metadata META.yaml]
 obs dispatch-run [--dry-run] [--manifest PATH]
 obs writeback [--dry-run] [--limit N]
 obs writenew [TARGET_DIR] [--dry-run] [--limit N]
 ```
 
-`--vault PATH` remains available for explicit targeting, but normal operation is
-pwd-driven.
+Obsidian panels use the synchronous JSON IPC boundary:
+
+```bash
+printf '%s' '{"operation":"vault.state","vault":"/path/to/vault"}' \
+  | obs --vault /path/to/vault ipc
+```
+
+Plans have no client-side manifest. `plans.list`, `plan.load`, and `plan.save`
+operate through the pipeline. Instruction catalog calls merge pipeline records
+with active-vault and configured Library-vault Markdown files.

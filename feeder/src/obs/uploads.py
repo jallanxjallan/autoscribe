@@ -11,7 +11,7 @@ from . import git
 from .errors import ObsError
 from .manifests import now_iso, read_json, rows, write_json
 from .markdown import parse_markdown, slug_prefix
-from .pandoc import capture as pandoc_capture
+from .pandoc import capture as pandoc_capture, emit as pandoc_emit
 from .state import VaultState
 from .vault import Vault
 
@@ -73,102 +73,173 @@ def upload_instructions(repo: Path, *, force: bool = False, dry_run: bool = Fals
     return items, output
 
 
-def upload_plans(repo: Path, *, force: bool = False, dry_run: bool = False) -> tuple[list[dict[str, Any]], str]:
-    Vault(repo)
-    directory = VaultState.for_vault(repo).plans
-    items: list[dict[str, Any]] = []
-    for path in sorted(directory.glob("*.json")) if directory.exists() else []:
-        record = read_json(path)
-        identity = str(record.get("record_identity") or "").strip()
-        if record.get("record_type") != "plan" or not identity:
-            continue
-        if not force and record.get("pending_upload") is not True:
-            continue
-        items.append({"slug": identity, "path": path, "record": record})
-    _assert_unique(items, "plan")
-    if dry_run or not items:
-        return items, ""
-    uploaded_at = now_iso()
-    output_lines: list[str] = []
-    for item in items:
-        record = item["record"]
-        raw_steps = record.get("steps")
-        if isinstance(raw_steps, dict):
-            sequence = [raw_steps[key] for key in sorted(raw_steps, key=lambda value: int(value))]
-        elif isinstance(raw_steps, list):
-            sequence = raw_steps
-        else:
-            sequence = []
-        steps = []
-        for index, step in enumerate(sequence, 1):
-            if not isinstance(step, dict):
-                raise ObsError(f"{item['path']}: step {index} must be an object")
-            normalized = dict(step)
-            number = normalized.get("index", normalized.get("number", index))
-            normalized["index"] = number if isinstance(number, int) and number > 0 else index
-            steps.append(normalized)
-        if not steps:
-            raise ObsError(f"plan has no executable steps: {item['slug']}")
-        content = {
-            "version": int(record.get("version") or 1),
-            "label": str(record.get("label") or item["slug"]),
-            "slug": item["slug"], "description": str(record.get("description") or ""),
-            "step_count": len(steps),
-            "preflight": record.get("preflight") if isinstance(record.get("preflight"), dict)
-                         else {"clean": True, "warnings": []},
-            "steps": steps,
-            "source": {"origin": "obsidian.upload-plans", "path": str(item["path"]),
-                       "uploaded_at": uploaded_at,
-                       "source_sha256": _sha256(json.dumps(record, sort_keys=True))},
-        }
-        output_lines.append(json.dumps({"record_type": "plan", "record_identity": item["slug"],
-                                        "record_content": content}, ensure_ascii=False))
-        record["pending_upload"] = False
-        record["uploaded_at"] = uploaded_at
-        item["path"].write_text(json.dumps(record, indent=2, ensure_ascii=False) + "\n", encoding="utf-8")
-    return items, "\n".join(output_lines) + "\n"
+def dispatch_run(
+    repo: Path,
+    *,
+    manifest_path: Path | None = None,
+    dry_run: bool = False,
+) -> tuple[list[dict[str, Any]], bytes]:
+    """Resolve a run into NUL-delimited Pandoc argument pairs.
 
-
-def dispatch_run(repo: Path, *, manifest_path: Path | None = None, dry_run: bool = False,
-                 defaults: list[str] | None = None) -> tuple[list[dict[str, Any]], str]:
-    vault = Vault(repo)
+    The CLI stream is consumed by ``xargs -0 -r -n 2 pandoc``. Each file adds
+    one ``record_plan`` metadata option and one absolute Markdown filename.
+    """
     manifest_path = manifest_path or VaultState.for_vault(repo).current_run
     manifest = read_json(manifest_path)
     manifest_root = manifest.get("vault_root") or (manifest.get("vault") or {}).get("root")
     if manifest_root and Path(manifest_root).resolve() != repo.resolve():
         raise ObsError(f"run manifest belongs to a different vault: {manifest_root}")
-    slug_map = vault.slug_map()
+
+    root = repo.resolve()
     calls: list[dict[str, Any]] = []
+    seen: set[str] = set()
     for index, raw in enumerate(rows(manifest), 1):
         if str(raw.get("upload_status") or "pending") != "pending":
             continue
-        prompt_slug = raw.get("prompt_slug") or raw.get("call_slug") or raw.get("record_identity") or raw.get("slug")
         plan_slug = raw.get("plan_slug") or raw.get("job_slug") or raw.get("plan") or manifest.get("plan_slug")
-        if not prompt_slug or not plan_slug:
-            raise ObsError(f"manifest row {index}: missing prompt_slug or plan_slug")
-        record = slug_map.get(str(prompt_slug))
-        if not record:
-            raise ObsError(f"{prompt_slug}: prompt slug not found in active vault")
-        calls.append({"index": index, "raw": raw, "prompt_slug": str(prompt_slug),
-                      "call_slug": str(raw.get("call_slug") or prompt_slug),
-                      "plan_slug": str(plan_slug), "path": record.path})
-    if dry_run or not calls:
-        return calls, ""
-    uploaded_at = now_iso()
-    output = ""
-    manifest_rows = rows(manifest)
-    for call in calls:
+        relpath = str(raw.get("path") or "").replace("\\", "/").lstrip("./")
+        prompt_slug = raw.get("prompt_slug") or raw.get("call_slug") or raw.get("record_identity") or raw.get("slug")
+        if not relpath or not plan_slug:
+            raise ObsError(f"manifest row {index}: missing path or plan_slug")
+
+        absolute = (root / relpath).resolve()
         try:
-            output += _emit_pandoc(repo, call["path"], defaults or ["upload_prompt"],
-                                   {"record_plan": call["plan_slug"]})
-            manifest_rows[call["index"] - 1].update({"upload_status": "uploaded", "uploaded_at": uploaded_at,
-                                                       "upload_error": ""})
-        except Exception as exc:
-            manifest_rows[call["index"] - 1].update({"upload_status": "error", "upload_error": str(exc)})
-            write_json(manifest_path, manifest)
+            normalized = absolute.relative_to(root).as_posix()
+        except ValueError as exc:
+            raise ObsError(f"manifest row {index}: path is outside active vault: {relpath}") from exc
+        if normalized in seen:
+            continue
+        if absolute.suffix.lower() != ".md":
+            raise ObsError(f"manifest row {index}: selected file is not Markdown: {normalized}")
+        if not absolute.is_file():
+            raise ObsError(f"manifest row {index}: selected file not found: {normalized}")
+
+        seen.add(normalized)
+        calls.append({
+            "index": index,
+            "prompt_slug": str(prompt_slug or ""),
+            "plan_slug": str(plan_slug),
+            "path": normalized,
+            "absolute_path": str(absolute),
+        })
+
+    if not calls:
+        raise ObsError("current selection contains no dispatchable Markdown files")
+
+    plan_slugs = {call["plan_slug"] for call in calls}
+    if len(plan_slugs) != 1:
+        raise ObsError("dispatch run must use exactly one plan slug")
+    plan_slug = next(iter(plan_slugs))
+
+    if not dry_run:
+        stamp = datetime.now().astimezone().strftime("%Y-%m-%d %H:%M:%S %z")
+        commit = git.commit_files(
+            repo,
+            [call["path"] for call in calls],
+            f"{plan_slug} {stamp}",
+        )
+        for call in calls:
+            call["dispatch_commit"] = commit
+
+    output = bytearray()
+    for call in calls:
+        output.extend(f"--metadata=record_plan:{plan_slug}".encode("utf-8"))
+        output.append(0)
+        output.extend(call["absolute_path"].encode("utf-8"))
+        output.append(0)
+    return calls, bytes(output)
+
+
+def dispatch_paths(
+    repo: Path,
+    *,
+    paths: list[str],
+    plan_slug: str,
+    dry_run: bool = False,
+    defaults: list[str] | None = None,
+) -> dict[str, Any]:
+    """Render explicit Markdown paths and enqueue them under one uploaded plan."""
+    plan_slug = str(plan_slug or "").strip()
+    if not plan_slug:
+        raise ObsError("dispatch requires plan_slug")
+    normalized: list[str] = []
+    seen: set[str] = set()
+    for raw in paths:
+        relpath = str(raw or "").replace("\\", "/").lstrip("./")
+        if not relpath or relpath in seen:
+            continue
+        candidate = (repo / relpath).resolve()
+        try:
+            candidate.relative_to(repo.resolve())
+        except ValueError as exc:
+            raise ObsError(f"dispatch path is outside active vault: {raw}") from exc
+        if candidate.suffix.lower() != ".md":
+            continue
+        if not candidate.is_file():
+            raise ObsError(f"dispatch file not found: {relpath}")
+        document = parse_markdown(candidate.read_text(encoding="utf-8"))
+        slug = str(document.frontmatter.get("slug") or "").strip()
+        if not slug:
+            raise ObsError(f"{relpath}: missing slug")
+        seen.add(relpath)
+        normalized.append(relpath)
+    if not normalized:
+        raise ObsError("selected commit contains no dispatchable Markdown files")
+
+    items: list[dict[str, Any]] = []
+    for relpath in normalized:
+        document = parse_markdown((repo / relpath).read_text(encoding="utf-8"))
+        slug = str(document.frontmatter.get("slug") or "").strip()
+        items.append({"path": relpath, "slug": slug, "plan_slug": plan_slug})
+
+    pipeline_output = ""
+    if not dry_run:
+        import os
+        import subprocess
+
+        from .executables import autoscribe_bin
+
+        command = [autoscribe_bin(), "enqueue"]
+        enqueue = subprocess.Popen(
+            command,
+            cwd=repo,
+            env=os.environ.copy(),
+            stdin=subprocess.PIPE,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+        )
+        assert enqueue.stdin is not None
+        assert enqueue.stdout is not None
+        assert enqueue.stderr is not None
+        try:
+            for item in items:
+                pandoc_emit(
+                    repo=repo,
+                    input_path=item["path"],
+                    defaults=defaults or ["upload_prompt"],
+                    metadata={"record_plan": plan_slug},
+                    stdout=enqueue.stdin,
+                )
+            enqueue.stdin.close()
+            pipeline_stdout = enqueue.stdout.read()
+            pipeline_stderr = enqueue.stderr.read()
+            returncode = enqueue.wait()
+        except Exception:
+            enqueue.kill()
+            enqueue.wait()
             raise
-    write_json(manifest_path, manifest)
-    return calls, output
+        if returncode != 0:
+            detail = (pipeline_stderr or pipeline_stdout or f"exit status {returncode}").strip()
+            raise ObsError(f"{' '.join(command)} failed: {detail}")
+        pipeline_output = pipeline_stdout.strip()
+    return {
+        "plan_slug": plan_slug,
+        "count": len(items),
+        "items": items,
+        "pipeline_output": pipeline_output,
+        "dry_run": dry_run,
+    }
 
 
 def _assert_unique(items: list[dict[str, Any]], label: str) -> None:

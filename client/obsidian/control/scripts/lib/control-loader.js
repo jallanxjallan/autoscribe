@@ -209,13 +209,24 @@ function loadAscSnapshot({ args, expectedType, label }) {
   }
 
   try {
-    const data = JSON.parse(stdout);
-    if (!data || data.type !== expectedType || !data.registries) {
+    let records;
+    try {
+      const parsed = JSON.parse(stdout);
+      records = Array.isArray(parsed) ? parsed : [parsed];
+    } catch {
+      records = stdout
+        .split(/\r?\n/)
+        .map((line) => line.trim())
+        .filter(Boolean)
+        .map((line) => JSON.parse(line));
+    }
+    const data = records.find((record) => record?.type === expectedType);
+    if (!data || !data.registries) {
       return {
         data: null,
         command,
         args,
-        error: `asc ${args.join(' ')} did not return a ${expectedType} payload.`,
+        error: `asc ${args.join(' ')} did not return a ${expectedType} NDJSON record.`,
         stderr,
         stdout,
       };
@@ -226,7 +237,7 @@ function loadAscSnapshot({ args, expectedType, label }) {
       data: null,
       command,
       args,
-      error: `Could not parse ${label} JSON: ${err.message}`,
+      error: `Could not parse ${label} NDJSON: ${err.message}`,
       stderr,
       stdout,
     };

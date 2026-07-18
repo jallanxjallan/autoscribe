@@ -14,9 +14,7 @@ def create_call_from_manifest_record(
 ) -> CallRecord:
     """Create and persist the CallRecord carried by one dispatch NDJSON row."""
 
-    call = CallRecord(**_call_payload(record, plan_key=plan_key))
-    call.save()
-    return call
+    return CallRecord(**_call_payload(record, plan_key=plan_key))
 
 
 def _call_payload(record: Mapping[str, Any], *, plan_key: str) -> dict[str, Any]:

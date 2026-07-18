@@ -822,21 +822,19 @@ def _follow_human_log(path: Path) -> None:
 
 @app.command("loop")
 def run_loop() -> None:
-    """Start or confirm all runtime daemons and keep them running."""
+    """Refuse managed daemon startup; daemons are started manually."""
 
-    _reset_daemon_log()
-    pids = _read_pids()
-
-    for daemon in DAEMONS:
-        _start_daemon(daemon, pids)
-
-    _write_pids(pids)
-    typer.echo(f"log={LOG_FILE}")
+    typer.echo("Managed daemon startup is disabled.", err=True)
+    typer.echo("Start daemons manually:", err=True)
+    typer.echo("  python -m asc.orchestrator.daemon", err=True)
+    typer.echo("  python -m asc.worker.daemon", err=True)
+    typer.echo("  python -m asc.scrivener.daemon", err=True)
+    raise typer.Exit(code=1)
 
 
 @app.command("start", hidden=True)
 def run_start_alias() -> None:
-    """Deprecated alias for `asc run loop`."""
+    """Deprecated alias; managed daemon startup remains disabled."""
 
     run_loop()
 

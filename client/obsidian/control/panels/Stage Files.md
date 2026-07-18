@@ -3,6 +3,7 @@
 ```dataviewjs
 const { spawnSync } = require("child_process");
 const vaultRoot = app.vault.adapter.basePath;
+const { readCurrentSelection } = require(`${vaultRoot}/_control/scripts/selections/current-selection.js`);
 const root = dv.container;
 const state = {
   files: [],
@@ -10,6 +11,7 @@ const state = {
   stage: "",
   status: "",
   sort: "title_asc",
+  refresh: null,
 };
 
 function ipc(request) {
@@ -91,7 +93,7 @@ function render() {
       state.status = status.value.trim();
       state.sort = sort.value;
       const response = ipc({
-        action: "stage_files.refresh",
+        operation: "stage_files.refresh",
         filters: {
           stage: state.stage ? [state.stage] : [],
           status: state.status ? [state.status] : [],
@@ -106,12 +108,14 @@ function render() {
         throw new Error("Stage Files returned no file list");
       }
       state.files = response.files;
-      state.selected.clear();
+      const current = readCurrentSelection(app);
+      state.selected = new Set((current?.items || []).map((item) => item.path).filter(Boolean));
       render();
     } catch (error) {
       new Notice(error.message, 10000);
     }
   };
+  state.refresh = refresh.onclick;
   controls.append(stage, status, sort, refresh);
   root.append(controls);
 
@@ -159,7 +163,7 @@ function render() {
   commit.onclick = () => {
     try {
       const paths = [...state.selected];
-      const response = ipc({ action: "stage_files.commit", paths, message: message.value, amend: amend.checked });
+      const response = ipc({ operation: "stage_files.commit", paths, message: message.value, amend: amend.checked });
       if (!response || response.ok !== true) {
         throw new Error(response?.error || "Stage Files commit failed");
       }
@@ -177,4 +181,5 @@ function render() {
 }
 
 render();
+state.refresh();
 ```

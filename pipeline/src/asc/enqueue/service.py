@@ -4,7 +4,7 @@ from typing import TextIO
 
 from asc.enqueue.reader import EnqueueRecord, iter_enqueue_records
 from asc.enqueue.report import EnqueuedCall, EnqueueReport
-from asc.enqueue.runtime import activate_call, create_call_index
+from asc.enqueue.runtime import activate_call, materialize_runtimes
 
 
 def enqueue_from_stream(stream: TextIO) -> EnqueueReport:
@@ -28,27 +28,28 @@ def enqueue_records(records: Iterable[EnqueueRecord]) -> EnqueueReport:
 def enqueue_record(record: EnqueueRecord) -> EnqueuedCall:
     call = record.call
     call_key = str(call.redis_key)
-    call_index_key = create_call_index(
-        call_identity=call.redis_key.identity,
-        call_key=call_key,
-        plan_index=record.plan.plan_index,
-    )
-    activate_call(call_key)
+    runtime_keys: tuple[str, ...] = ()
+
+    try:
+        call.save()
+        runtimes = materialize_runtimes(call_identity=call.identity, plan=record.plan.plan)
+        runtime_keys = tuple(runtime.raw_key for runtime in runtimes)
+        activate_call(call_key)
+    except Exception:
+        for runtime_key in runtime_keys:
+            from asc.redis.key import RedisKey
+            RedisKey(runtime_key).delete()
+        call.delete()
+        raise
 
     return EnqueuedCall(
         call=call.redis_key.identity,
         source_identity=record.source_identity,
         call_key=call_key,
-        call_index_key=call_index_key,
+        runtime_keys=runtime_keys,
         plan_key=record.plan.plan_key,
         step_count=record.plan.step_count,
     )
 
 
-__all__ = [
-    "EnqueueReport",
-    "EnqueuedCall",
-    "enqueue_from_stream",
-    "enqueue_record",
-    "enqueue_records",
-]
+__all__ = ["EnqueueReport", "EnqueuedCall", "enqueue_from_stream", "enqueue_record", "enqueue_records"]

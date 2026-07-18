@@ -11,7 +11,8 @@ from .downloads import writeback, writenew
 from .errors import ObsError
 from .ipc import handle as handle_ipc
 from .state import VaultState
-from .uploads import dispatch_run, upload_instructions, upload_plans
+from .uploads import dispatch_run, upload_instructions
+from .instruction_upload import upload_instruction
 from .vault import Vault
 
 
@@ -23,10 +24,17 @@ def parser() -> argparse.ArgumentParser:
     sub.add_parser("ipc")
     scan = sub.add_parser("scan")
     scan.add_argument("--public", action="store_true")
-    for name in ("upload-instructions", "upload-plans"):
+    for name in ("upload-instructions",):
         command = sub.add_parser(name)
         command.add_argument("-n", "--dry-run", action="store_true")
         command.add_argument("-f", "--force", action="store_true")
+    one = sub.add_parser("upload-instruction")
+    one.add_argument("source_path")
+    one.add_argument("--input", required=True, type=Path)
+    one.add_argument("--metadata", type=Path)
+    one.add_argument("--force", action="store_true")
+    one.add_argument("--no-commit", action="store_true")
+    sub.add_parser("ipc")
     dispatch = sub.add_parser("dispatch-run")
     dispatch.add_argument("-n", "--dry-run", action="store_true")
     dispatch.add_argument("--manifest", type=Path)
@@ -58,16 +66,18 @@ def main(argv: list[str] | None = None) -> int:
             _report(args.command, items, args.dry_run)
             if output:
                 sys.stdout.write(output)
-        elif args.command == "upload-plans":
-            items, output = upload_plans(repo, force=args.force, dry_run=args.dry_run)
-            _report(args.command, items, args.dry_run)
-            if output:
-                sys.stdout.write(output)
+        elif args.command == "upload-instruction":
+            result = upload_instruction(repo, source_path=args.source_path, input_path=args.input, metadata_path=args.metadata, force=args.force, commit=not args.no_commit)
+            print(json.dumps(result, indent=2, ensure_ascii=False))
+        elif args.command == "ipc":
+            from .ipc import main as ipc_main
+            return ipc_main()
         elif args.command == "dispatch-run":
             items, output = dispatch_run(repo, manifest_path=args.manifest, dry_run=args.dry_run)
             _report(args.command, items, args.dry_run)
             if output:
-                sys.stdout.write(output)
+                sys.stdout.buffer.write(output)
+                sys.stdout.buffer.flush()
         elif args.command == "writeback":
             items = writeback(repo, dry_run=args.dry_run, limit=args.limit)
             _report(args.command, items, args.dry_run)

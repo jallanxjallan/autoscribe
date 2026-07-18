@@ -5,6 +5,7 @@ const { forceCurrentLeafPresentation } = require("./workspace");
 const { createSelectionModel } = require("./selection-model");
 const { createStateStore } = require("../selections/selection-state");
 const { writeManifest } = require("./operation-manifest");
+const { readCurrentSelection, writeCurrentSelection } = require("../selections/current-selection");
 
 function defaultSerializeRow(row, index) {
   return {
@@ -208,6 +209,7 @@ async function renderSelectionQuery(rawOptions) {
   }
 
   const expandedFilterGroups = new Set();
+  let showSelectedOnly = false;
 
   function filterChoiceLimit() {
     const limit = Number(options.maxFilterChoices ?? 0);
@@ -231,6 +233,8 @@ async function renderSelectionQuery(rawOptions) {
         return saveDataviewSelection(getApi(), config);
       },
       reloadSavedState,
+      loadCurrentSelection,
+      saveCurrentSelection,
       clearSavedState,
       render,
       notify,
@@ -293,6 +297,7 @@ async function renderSelectionQuery(rawOptions) {
 
       sortMode: model.getSortMode(),
       filters,
+      showSelectedOnly,
 
       selectionKind: options.selectionKind,
       selectionKey: options.selectionKey,
@@ -330,6 +335,8 @@ async function renderSelectionQuery(rawOptions) {
         }
       }
     }
+
+    showSelectedOnly = state.showSelectedOnly === true;
 
     model.selectedKeys.clear();
 
@@ -388,10 +395,71 @@ async function renderSelectionQuery(rawOptions) {
     return true;
   }
 
+  function applyCurrentSelection(selection) {
+    if (!selection || !Array.isArray(selection.items)) return false;
+
+    const pathKeys = new Set(selection.items.map(item => item.path).filter(Boolean));
+    const slugKeys = new Set(selection.items.map(item => item.slug).filter(Boolean));
+    const validKeys = model.getValidSelectionKeys();
+    model.selectedKeys.clear();
+
+    for (const row of rows) {
+      const key = model.getRowKey(row);
+      const matches =
+        (typeof row.path === "string" && pathKeys.has(row.path)) ||
+        (typeof row.slug === "string" && slugKeys.has(row.slug)) ||
+        validKeys.has(key) && (pathKeys.has(key) || slugKeys.has(key));
+      if (matches) model.selectedKeys.add(key);
+    }
+    return true;
+  }
+
+  async function loadCurrentSelection({ quiet = false } = {}) {
+    try {
+      const selection = readCurrentSelection(app);
+      if (!selection) {
+        if (!quiet) notify("No current selection exists for this vault session.");
+        return false;
+      }
+      applyCurrentSelection(selection);
+      await saveCurrentState({ quiet: true, action: "load-current-selection" });
+      if (!quiet) notify(`Loaded ${model.selectedKeys.size} current item(s) into ${options.title ?? options.namespace}.`);
+      render();
+      return true;
+    } catch (error) {
+      console.error(error);
+      if (!quiet) notify("Could not load the current selection.");
+      return false;
+    }
+  }
+
+  async function saveCurrentSelection({ quiet = false } = {}) {
+    try {
+      const serializeRow = options.serializeRow ?? defaultSerializeRow;
+      const items = model.getSelectedRows().map((row, index) => serializeRow(row, index));
+      const result = writeCurrentSelection(app, {
+        items,
+        source: {
+          namespace: options.namespace,
+          queryPath: options.queryPath,
+          title: options.title ?? options.namespace,
+        },
+        action: "save",
+      });
+      if (!quiet) notify(`Saved ${result.selection.count} item(s) as the current selection.`);
+      return result.selection;
+    } catch (error) {
+      console.error(error);
+      if (!quiet) notify("Could not save the current selection.");
+      return null;
+    }
+  }
+
   async function clearSavedState() {
     try {
       await stateStore.remove();
       model.reset();
+      showSelectedOnly = false;
       notify(`${options.title ?? options.namespace} state cleared.`);
       render();
     } catch (error) {
@@ -480,12 +548,31 @@ async function renderSelectionQuery(rawOptions) {
     buttonRow.style.alignItems = "center";
     buttonRow.style.gap = "0.5em";
 
-    const reloadButton = buttonRow.createEl("button", { text: "Reload state" });
+    const loadCurrentButton = buttonRow.createEl("button", { text: "Load current selection" });
+    loadCurrentButton.onclick = async () => {
+      await loadCurrentSelection();
+    };
+
+    const saveCurrentButton = buttonRow.createEl("button", { text: "Save current selection" });
+    saveCurrentButton.onclick = async () => {
+      await saveCurrentSelection();
+    };
+
+    const showSelectedButton = buttonRow.createEl("button", {
+      text: showSelectedOnly ? "Show all" : "Show selected"
+    });
+    showSelectedButton.onclick = async () => {
+      showSelectedOnly = !showSelectedOnly;
+      await saveCurrentState({ quiet: true, action: "display-mode" });
+      render();
+    };
+
+    const reloadButton = buttonRow.createEl("button", { text: "Reload query state" });
     reloadButton.onclick = async () => {
       await reloadSavedState();
     };
 
-    const clearStateButton = buttonRow.createEl("button", { text: "Clear state" });
+    const clearStateButton = buttonRow.createEl("button", { text: "Clear query state" });
     clearStateButton.onclick = async () => {
       await clearSavedState();
     };
@@ -709,7 +796,10 @@ async function renderSelectionQuery(rawOptions) {
     const root = dv.container;
     root.innerHTML = "";
 
-    const displayedRows = model.getDisplayedRows();
+    const filteredRows = model.getDisplayedRows();
+    const displayedRows = showSelectedOnly
+      ? filteredRows.filter(row => model.selectedKeys.has(model.getRowKey(row)))
+      : filteredRows;
     const selectedDisplayedCount = model.getSelectedDisplayedCount(displayedRows);
     const selectedRows = model.getSelectedRows();
 

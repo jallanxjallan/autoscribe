@@ -33,6 +33,16 @@ function candidateItems(data) {
     if (Array.isArray(value)) return value;
   }
 
+  const paths = Array.isArray(data?.paths) ? data.paths : [];
+  const slugs = Array.isArray(data?.slugs) ? data.slugs : [];
+  const count = Math.max(paths.length, slugs.length);
+  if (count) {
+    return Array.from({ length: count }, (_unused, index) => ({
+      path: paths[index] || '',
+      slug: slugs[index] || '',
+    }));
+  }
+
   return [];
 }
 
@@ -96,6 +106,27 @@ function selectionSummary(app, selectionFile) {
   };
 }
 
+function currentSelectionSummary(app, data, selectionFile = '') {
+  const rawItems = candidateItems(data);
+  const items = rawItems.map((item, index) => normalizeItem(app, item, index));
+  const warnings = [];
+  const missing = items.filter((item) => !item.exists).length;
+  if (missing) warnings.push(`${missing} missing file${missing === 1 ? '' : 's'}`);
+  const dirty = items.filter((item) => item.repo_state === 'dirty').length;
+  if (dirty) warnings.push(`${dirty} dirty file${dirty === 1 ? '' : 's'}`);
+  return {
+    selection_file: selectionFile,
+    selection_name: 'current-selection',
+    selection_mtime: data?.updated_at || null,
+    raw_type: data?.type || data?.recordType || null,
+    vaultKey: data?.vault_key || path.basename(vaultRoot(app)),
+    count: items.length,
+    warnings,
+    items,
+    raw: data,
+  };
+}
+
 function listSelections(app) {
   const dir = selectionsDir(app);
   if (!fs.existsSync(dir)) return [];
@@ -119,4 +150,4 @@ function listSelections(app) {
     .sort((a, b) => b.mtime_ms - a.mtime_ms);
 }
 
-module.exports = { listSelections, selectionSummary };
+module.exports = { currentSelectionSummary, listSelections, selectionSummary };
