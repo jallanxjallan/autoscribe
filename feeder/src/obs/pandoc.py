@@ -16,7 +16,19 @@ def _pandoc_bin() -> str:
     """Resolve Pandoc without depending on Obsidian's stripped desktop PATH."""
     explicit = os.environ.get("OBSIDIAN_PANDOC_BIN") or os.environ.get("PANDOC_BIN")
     if explicit:
-        path = Path(explicit).expanduser()
+        configured = str(explicit).strip()
+        if not configured:
+            raise ObsError("configured Pandoc executable is blank")
+
+        # A bare command name such as ``pandoc`` must be resolved through PATH.
+        # Only values containing a path separator are treated as filesystem paths.
+        if os.path.sep not in configured and (os.path.altsep is None or os.path.altsep not in configured):
+            discovered = shutil.which(configured)
+            if discovered:
+                return discovered
+            raise ObsError(f"configured Pandoc command was not found on PATH: {configured}")
+
+        path = Path(configured).expanduser()
         if not path.is_file():
             raise ObsError(f"configured Pandoc executable does not exist: {path}")
         if not os.access(path, os.X_OK):

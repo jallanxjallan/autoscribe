@@ -86,15 +86,7 @@ function materializePlan(record) {
     throw new Error('Feeder returned an invalid plan record.');
   }
 
-  let content = record.record_content;
-  if (typeof content === 'string') {
-    try {
-      content = JSON.parse(content);
-    } catch (error) {
-      throw new Error(`${planSlug(record) || 'Plan'} has invalid record_content JSON: ${error.message}`);
-    }
-  }
-
+  const content = record.payload;
   if (content && typeof content === 'object' && !Array.isArray(content)) {
     return { ...record, ...content };
   }
@@ -220,12 +212,7 @@ function planStepEntries(steps) {
 function planToScreenSteps(plan, catalogs) {
   return planStepEntries(plan.steps).map(([number, step]) => {
     const kind = normalizeKind(step.kind || step.type || (step.script ? 'script' : step.rag_profile ? 'rag' : 'llm'));
-    const instructionRefs = step.instruction_slugs || {};
-    const instructionSlug = step.instruction_slug
-      || instructionRefs.instructions
-      || instructionRefs.instruction
-      || (Array.isArray(instructionRefs) ? instructionRefs[0] : null)
-      || step.instruction;
+    const instructionSlug = step.instruction;
     return {
       index: number,
       kind,
@@ -337,16 +324,9 @@ function resolveInstructionDependencies(app, record) {
 function prepareInstructionDependencies(app, steps) {
   const components = new Map();
   for (const step of steps) {
-    delete step.instruction_slug;
-    delete step.role_slug;
-    delete step.context_slugs;
     if (!step.instruction) continue;
 
     const resolved = resolveInstructionDependencies(app, step.instruction);
-    step.instruction_slug = resolved.task.slug;
-    step.role_slug = resolved.role.slug;
-    step.context_slugs = resolved.contexts.map((item) => item.slug);
-
     for (const component of [resolved.task, resolved.role, ...resolved.contexts]) {
       components.set(component.slug, component);
     }
@@ -516,7 +496,7 @@ async function renderCreatePlan({ app, container }) {
     loadedPlan = plan;
     currentPlan.textContent = planSlug(plan);
     label.value = plan.label || '';
-    description.value = plan.description || plan.record_content || '';
+    description.value = plan.description || '';
     steps.splice(0, steps.length, ...planToScreenSteps(plan, catalogs));
     redrawSteps();
   }
@@ -530,11 +510,16 @@ async function renderCreatePlan({ app, container }) {
       force_slug: forceSlug,
     });
     await feederUploadPlan(app, record, instructionSets);
+
+    const savedPlan = materializePlan(record);
+    const savedSlug = planSlug(savedPlan);
+    sessionPlanStore.set(savedSlug, savedPlan);
+
     availablePlans = await feederListPlans(controlSnapshot);
-    loadedPlan = record;
-    currentPlan.textContent = record.record_identity;
-    refreshPlanSelector(record.record_identity);
-    new Notice(`${forceSlug ? 'Updated' : 'Created'} plan: ${record.label}`);
+    loadedPlan = savedPlan;
+    currentPlan.textContent = savedSlug;
+    refreshPlanSelector(savedSlug);
+    new Notice(`${forceSlug ? 'Updated' : 'Created'} plan: ${savedPlan.label}`);
   }
 
   const loadBtn = button('Load Plan', () => loadSelectedPlan().catch((error) => {

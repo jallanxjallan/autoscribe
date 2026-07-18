@@ -1,11 +1,5 @@
 'use strict';
 
-const INSTRUCTION_LABELS = Object.freeze([
-  'role',
-  'context',
-  'instructions',
-]);
-
 function scalarId(value, ...fields) {
   if (typeof value === 'string') return value.trim();
 
@@ -39,40 +33,6 @@ function parseArgsJson(value, stepNumber) {
   return parsed;
 }
 
-function instructionSlug(value) {
-  return scalarId(value, 'slug', 'record_identity', 'key');
-}
-
-function normalizeInstructionSlugs(step, stepNumber) {
-  const source = step.instruction_slugs || step.instructions || {};
-  const result = {};
-
-  /*
-   * Temporary fixed engine contract:
-   *   role -> context -> instructions
-   *
-   * The object labels, rather than JavaScript property order, are authoritative.
-   * Engines currently stack populated values in INSTRUCTION_LABELS order.
-   */
-  for (const label of INSTRUCTION_LABELS) {
-    const slug = instructionSlug(source[label]);
-    if (slug) result[label] = slug;
-  }
-
-  /*
-   * Fail loudly if the old generic list reaches the uploader. It cannot be
-   * converted safely because its members have no semantic labels.
-   */
-  if (Array.isArray(source) && source.length) {
-    throw new Error(
-      `Step ${stepNumber} still contains an unlabeled instruction list; ` +
-      'select Role, Context, and Instructions explicitly'
-    );
-  }
-
-  return result;
-}
-
 function normalizeStep(step, ordinal) {
   if (!step || typeof step !== 'object' || Array.isArray(step)) {
     throw new Error(`Step ${ordinal} must be an object`);
@@ -92,8 +52,10 @@ function normalizeStep(step, ordinal) {
     kind,
     label: String(step.label || `Step ${ordinal}`).trim(),
     engine,
-    instruction_slugs: normalizeInstructionSlugs(step, ordinal),
   };
+
+  const instruction = scalarId(step.instruction, 'slug', 'record_identity', 'key');
+  if (instruction) definition.instruction = instruction;
 
   if (kind === 'llm') {
     const model = scalarId(step.model, 'key', 'slug');
@@ -155,7 +117,7 @@ function buildPlanUploadRecord({
   return {
     record_type: 'plan',
     record_identity: recordIdentity,
-    record_content: {
+    payload: {
       label: String(label || baseRecord.label || '').trim(),
       description: String(description || baseRecord.description || '').trim(),
       steps: indexedSteps(steps),
@@ -163,7 +125,4 @@ function buildPlanUploadRecord({
   };
 }
 
-module.exports = {
-  INSTRUCTION_LABELS,
-  buildPlanUploadRecord,
-};
+module.exports = { buildPlanUploadRecord };

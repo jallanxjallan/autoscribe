@@ -38,7 +38,12 @@ def _instruction_hashes(snapshot: dict[str, Any]) -> dict[str, str]:
 
 
 def _upload_envelope(record: dict[str, Any]) -> dict[str, Any]:
-    """Separate ingest routing fields from the instruction artifact payload."""
+    """Return the strict Instruction upload envelope.
+
+    Pandoc may emit source metadata for feeder-side diagnostics, but the
+    persisted Instruction model owns only its content. The ingest handler
+    derives ``slug`` from ``record_identity``.
+    """
     record_type = str(record.get("record_type") or "instruction").strip()
     record_identity = str(record.get("record_identity") or record.get("slug") or "").strip()
     if record_type != "instruction":
@@ -46,15 +51,18 @@ def _upload_envelope(record: dict[str, Any]) -> dict[str, Any]:
     if not record_identity:
         raise ObsError("instruction record missing record_identity")
 
-    payload = {
-        key: value
-        for key, value in record.items()
-        if key not in {"record_type", "record_identity", "record_plan"}
-    }
+    raw_payload = record.get("payload")
+    if not isinstance(raw_payload, dict):
+        raise ObsError(f"{record_identity}: Pandoc instruction payload must be an object")
+
+    content = raw_payload.get("content")
+    if not isinstance(content, str) or not content.strip():
+        raise ObsError(f"{record_identity}: Pandoc instruction payload requires non-empty content")
+
     return {
         "record_type": "instruction",
         "record_identity": record_identity,
-        "payload": payload,
+        "payload": {"content": content},
     }
 
 def _canonical_hash(record: dict[str, Any]) -> str:

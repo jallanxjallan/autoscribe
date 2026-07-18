@@ -95,26 +95,7 @@ function buildPlanRecord({ label, description, steps, force_slug = null }) {
     };
 
     if (instruction?.slug || instruction?.key) {
-      const refs = step.instruction_slugs;
-      if (!refs || Array.isArray(refs) || typeof refs !== 'object') {
-        throw new Error(`Step ${stepNumber}: instruction dependencies were not resolved.`);
-      }
-
-      const roleSlug = String(refs.role || '').trim();
-      const contextSlug = String(refs.context || '').trim();
-      const instructionSlug = String(
-        refs.instructions || step.instruction_slug || instruction.slug || instruction.key || ''
-      ).trim();
-
-      if (!roleSlug) throw new Error(`Step ${stepNumber}: instruction role was not resolved.`);
-      if (!contextSlug) throw new Error(`Step ${stepNumber}: instruction context was not resolved.`);
-      if (!instructionSlug) throw new Error(`Step ${stepNumber}: instruction was not resolved.`);
-
-      out.instruction_slugs = {
-        role: roleSlug,
-        context: contextSlug,
-        instructions: instructionSlug,
-      };
+      out.instruction = String(instruction.slug || instruction.key).trim();
     }
     if (Object.keys(args).length) out.args = args;
     if (engine?.key) out.engine = engine.key;
@@ -129,10 +110,11 @@ function buildPlanRecord({ label, description, steps, force_slug = null }) {
   return {
     record_type: 'plan',
     record_identity: recordIdentity,
-    record_content: cleanDescription,
-    label: cleanLabel,
-    description: cleanDescription,
-    steps: planSteps,
+    payload: {
+      label: cleanLabel,
+      description: cleanDescription,
+      steps: planSteps,
+    },
   };
 }
 
