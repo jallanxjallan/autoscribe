@@ -24,7 +24,8 @@ def _plan_values(snapshot: dict[str, Any]) -> list[dict[str, Any]]:
                 values.extend(current)
     if not values and isinstance(snapshot.get("plans"), list):
         values.extend(snapshot["plans"])
-    records = []
+
+    records: list[dict[str, Any]] = []
     for value in values:
         if not isinstance(value, dict):
             continue
@@ -40,11 +41,72 @@ def list_plans() -> list[dict[str, Any]]:
     return sorted(records, key=lambda item: str(item.get("label") or item["slug"]).lower())
 
 
+def _decode_object(value: Any, *, slug: str, field: str) -> dict[str, Any]:
+    if isinstance(value, str):
+        try:
+            value = json.loads(value)
+        except json.JSONDecodeError as exc:
+            raise ObsError(f"{slug}: stored {field} is not valid JSON: {exc}") from exc
+    if not isinstance(value, dict):
+        raise ObsError(f"{slug}: stored {field} must decode to an object")
+    return value
+
+
+def _materialize_plan(record: dict[str, Any]) -> dict[str, Any]:
+    """Expose a stored plan definition in the shape used by Define Plan.
+
+    The upload envelope is not persisted. A full plan read must therefore
+    return artifact fields such as ``metadata_json`` and ``steps_json`` (or an
+    already materialized ``payload`` object). Catalog-only records cannot be
+    used to edit an existing plan.
+    """
+    slug = str(record.get("slug") or record.get("record_identity") or "<unknown>")
+
+    raw_payload = record.get("payload")
+    if raw_payload is not None:
+        payload = _decode_object(raw_payload, slug=slug, field="payload")
+        return {**record, **payload}
+
+    if "steps" in record and isinstance(record.get("steps"), dict):
+        return dict(record)
+
+    if "steps_json" not in record:
+        raise ObsError(
+            f"{slug}: control returned catalog metadata only; "
+            "a full plan-read operation must return metadata_json and steps_json"
+        )
+
+    steps = _decode_object(record.get("steps_json"), slug=slug, field="steps_json")
+    metadata = _decode_object(record.get("metadata_json", "{}"), slug=slug, field="metadata_json")
+
+    result = {
+        **record,
+        **metadata,
+        "record_type": "plan",
+        "record_identity": slug,
+        "slug": slug,
+        "steps": steps,
+    }
+    result.pop("metadata_json", None)
+    result.pop("steps_json", None)
+    return result
+
+
 def load_plan(slug: str) -> dict[str, Any]:
+    slug = slug.strip()
+    if not slug:
+        raise ObsError("plan.load requires slug")
     for record in list_plans():
         if record["slug"] == slug:
-            return record
+            return _materialize_plan(record)
     raise ObsError(f"plan not found in pipeline: {slug}")
+
+
+def _plan_payload(record: dict[str, Any], *, slug: str) -> dict[str, Any]:
+    payload = record.get("payload")
+    if not isinstance(payload, dict):
+        raise ObsError(f"{slug}: plan.save requires payload object")
+    return dict(payload)
 
 
 def save_plan(
@@ -58,18 +120,7 @@ def save_plan(
     if not slug:
         raise ObsError("plan record missing record_identity")
 
-    raw_content = record.get("record_content")
-    if isinstance(raw_content, str):
-        try:
-            content = json.loads(raw_content)
-        except json.JSONDecodeError as exc:
-            raise ObsError(f"{slug}: record_content is not valid JSON: {exc}") from exc
-    else:
-        content = raw_content
-
-    if not isinstance(content, dict):
-        raise ObsError(f"{slug}: plan record_content must be an object")
-
+    content = _plan_payload(record, slug=slug)
     raw_steps = content.get("steps")
     if not isinstance(raw_steps, dict) or not raw_steps:
         raise ObsError(f"{slug}: plan steps must be a non-empty indexed object")
@@ -85,9 +136,7 @@ def save_plan(
     expected = list(range(1, len(ordered) + 1))
     actual = [int(str(key)) for key, _ in ordered]
     if actual != expected:
-        raise ObsError(
-            f"{slug}: plan step indexes must be contiguous from 1; got {actual}"
-        )
+        raise ObsError(f"{slug}: plan step indexes must be contiguous from 1; got {actual}")
 
     for ordinal, (_, step) in enumerate(ordered, 1):
         if not isinstance(step, dict):
@@ -104,22 +153,21 @@ def save_plan(
                     f"{slug}: step {ordinal} instruction_slugs.{label} must be a slug string"
                 )
 
-    # This transaction must complete before the plan becomes visible.
     instruction_results = sync_instructions(cwd, instruction_sets or [])
 
-    payload = {
+    envelope = {
         "record_type": "plan",
         "record_identity": slug,
-        "record_content": json.dumps(content, ensure_ascii=False),
+        "payload": content,
     }
-    line = json.dumps(payload, ensure_ascii=False) + "\n"
+    line = json.dumps(envelope, ensure_ascii=False) + "\n"
     result = run(
         [autoscribe_bin(), "upload", "plans"],
         cwd=cwd,
         input_text=line,
     )
     return {
-        "record": payload,
+        "record": envelope,
         "instructions": instruction_results,
         "pipeline_output": result.stdout.strip(),
     }

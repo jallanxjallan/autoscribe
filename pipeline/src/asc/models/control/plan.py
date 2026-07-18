@@ -5,7 +5,7 @@ from typing import Any, ClassVar
 from pydantic import ConfigDict, Field, field_serializer, field_validator, model_validator
 
 from asc.core.identity import generate_identity
-from asc.models.helpers.upload import OptionalRecordContent, RecordIdentity, RedisIdentity
+from asc.models.helpers.upload import RecordIdentity, RedisIdentity
 from asc.redis.key import RedisKey
 from asc.redis.model_base import RedisModel
 
@@ -71,8 +71,6 @@ class Plan(RedisModel):
 
     identity: RedisIdentity = Field(default_factory=generate_identity)
     slug: RecordIdentity
-    content: OptionalRecordContent = ""
-
     instructions: list[Any] = Field(default_factory=list, exclude=True)
     instructions_json: str = ""
 
@@ -81,35 +79,24 @@ class Plan(RedisModel):
     steps: dict[int, dict[str, Any]] = Field(default_factory=dict, exclude=True)
     steps_json: str = ""
 
+    @classmethod
+    def from_payload(cls, payload: Mapping[str, Any], *, slug: str) -> "Plan":
+        data = dict(payload)
+        data.pop("identity", None)
+        data["slug"] = slug
+        return cls.model_validate(data)
+
     @model_validator(mode="before")
     @classmethod
-    def normalize_plan_payload(cls, value: object) -> object:
+    def normalize_payload(cls, value: object) -> object:
         if not isinstance(value, Mapping):
             return value
 
         data = dict(value)
-
-        if "record_content" in data:
-            raw_content = data.get("record_content")
-            payload = json.loads(raw_content) if isinstance(raw_content, str) and raw_content.strip() else raw_content
-            if not isinstance(payload, Mapping):
-                raise ValueError("plan record_content must decode to an object")
-
-            payload_data = dict(payload)
-            if "record_identity" in data:
-                payload_data["slug"] = data["record_identity"]
-            payload_data["content"] = raw_content if isinstance(raw_content, str) else _json_text(raw_content, default="{}")
-            payload_data.pop("identity", None)
-            data = payload_data
-
-        if "record_identity" in data and "slug" not in data:
-            data["slug"] = data["record_identity"]
-
         declared = {
             "type",
             "identity",
             "slug",
-            "content",
             "instructions",
             "instructions_json",
             "metadata_json",
@@ -119,22 +106,18 @@ class Plan(RedisModel):
 
         if "instructions" in data and "instructions_json" not in data:
             data["instructions_json"] = data["instructions"]
-
         if "steps" in data and "steps_json" not in data:
             data["steps_json"] = data["steps"]
-
         if "steps" not in data and "steps_json" in data:
             data["steps"] = data["steps_json"]
 
         metadata: dict[str, Any] = {}
         existing_metadata = data.get("metadata_json")
         if isinstance(existing_metadata, str) and existing_metadata.strip():
-            try:
-                parsed = json.loads(existing_metadata)
-                if isinstance(parsed, dict):
-                    metadata.update(parsed)
-            except json.JSONDecodeError:
-                metadata["_metadata_json_raw"] = existing_metadata
+            parsed = json.loads(existing_metadata)
+            if not isinstance(parsed, dict):
+                raise ValueError("plan metadata_json must decode to an object")
+            metadata.update(parsed)
         elif isinstance(existing_metadata, Mapping):
             metadata.update(dict(existing_metadata))
 
@@ -192,14 +175,6 @@ class Plan(RedisModel):
         return f"plan:{self.identity}:index"
 
     @property
-    def record_identity(self) -> str:
-        return self.slug
-
-    @property
-    def record_content(self) -> str:
-        return self.content
-
-    @property
     def total_steps(self) -> int:
         return len(self.steps)
 
@@ -231,12 +206,11 @@ class Plan(RedisModel):
         return engine.strip()
 
     def plan_dict(self) -> dict[str, Any]:
-        data = self.model_dump(mode="json")
-        data["record_type"] = self.kind
-        data["record_identity"] = self.slug
-        data["record_content"] = self.content
-        data["instructions"] = list(self.instructions)
-        data["steps"] = {str(index): dict(step) for index, step in self.steps.items()}
+        data: dict[str, Any] = {
+            "slug": self.slug,
+            "instructions": list(self.instructions),
+            "steps": {str(index): dict(step) for index, step in self.steps.items()},
+        }
 
         metadata = json.loads(self.metadata_json or "{}")
         if isinstance(metadata, dict):
@@ -248,7 +222,6 @@ class Plan(RedisModel):
             "type": self.kind,
             "identity": self.identity,
             "slug": self.slug,
-            "content": self.content,
             "instructions_json": self.instructions_json,
             "metadata_json": self.metadata_json,
             "steps_json": self.steps_json,

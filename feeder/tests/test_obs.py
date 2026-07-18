@@ -109,13 +109,12 @@ def test_dispatch_run_emits_nul_pandoc_arguments_and_commits(tmp_path: Path):
     assert subject.startswith("plan.test ")
 
 
-def test_save_plan_encodes_definition_object_in_record_content(tmp_path: Path, monkeypatch):
+def test_save_plan_emits_payload_object(tmp_path: Path, monkeypatch):
     import json
     from types import SimpleNamespace
     import obs.plans as plans
 
     captured = {}
-
     monkeypatch.setattr(plans, "sync_instructions", lambda cwd, sets: [])
     monkeypatch.setattr(plans, "autoscribe_bin", lambda: "/fake/asc")
 
@@ -129,32 +128,57 @@ def test_save_plan_encodes_definition_object_in_record_content(tmp_path: Path, m
     record = {
         "record_type": "plan",
         "record_identity": "plan.test.abc123",
-        "record_content": "Human-readable description",
-        "label": "Test",
-        "steps": {
-            "1": {
-                "index": 1,
-                "kind": "llm",
-                "instruction_slug": "ins.task.abc123",
-                "role_slug": "ins.role.abc123",
-                "context_slugs": ["ins.context.abc123"],
-                "engine": "chatgpt",
-                "model": "gpt-5.5",
-            }
+        "payload": {
+            "label": "Test",
+            "description": "Human-readable description",
+            "steps": {
+                "1": {
+                    "engine": "chatgpt",
+                    "instruction_slugs": {
+                        "role": "ins.role.abc123",
+                        "context": "ins.context.abc123",
+                        "instructions": "ins.task.abc123",
+                    },
+                }
+            },
         },
     }
 
     result = plans.save_plan(record, cwd=tmp_path)
     envelope = json.loads(captured["input_text"])
-    content = json.loads(envelope["record_content"])
 
-    assert envelope == {
+    assert envelope == record
+    assert isinstance(envelope["payload"], dict)
+    assert result["pipeline_output"] == "ok"
+
+
+def test_load_plan_materializes_persisted_fields(monkeypatch):
+    import json
+    import obs.plans as plans
+
+    stored = {
         "record_type": "plan",
         "record_identity": "plan.test.abc123",
-        "record_content": envelope["record_content"],
+        "slug": "plan.test.abc123",
+        "ttl": 3600,
+        "metadata_json": json.dumps({
+            "label": "Test plan",
+            "description": "Loaded from Redis",
+        }),
+        "steps_json": json.dumps({
+            "1": {
+                "engine": "chatgpt",
+                "instruction_slugs": {"instructions": "ins.task.abc123"},
+            }
+        }),
     }
-    assert content["label"] == "Test"
-    assert content["description"] == "Human-readable description"
-    assert isinstance(content["steps"], list)
-    assert content["steps"][0]["role_slug"] == "ins.role.abc123"
-    assert result["pipeline_output"] == "ok"
+    monkeypatch.setattr(plans, "list_plans", lambda: [stored])
+
+    loaded = plans.load_plan("plan.test.abc123")
+
+    assert loaded["record_identity"] == "plan.test.abc123"
+    assert loaded["ttl"] == 3600
+    assert loaded["label"] == "Test plan"
+    assert loaded["description"] == "Loaded from Redis"
+    assert loaded["steps"]["1"]["engine"] == "chatgpt"
+

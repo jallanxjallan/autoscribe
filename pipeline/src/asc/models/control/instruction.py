@@ -2,8 +2,7 @@
 
 from __future__ import annotations
 
-from collections.abc import Mapping
-from typing import Any, ClassVar
+from typing import ClassVar
 
 from pydantic import ConfigDict, Field
 
@@ -33,36 +32,7 @@ class Instruction(RedisModel):
     slug: RecordIdentity
     content: RequiredRecordContent
 
-    @classmethod
-    def from_ndjson(
-        cls,
-        record: Mapping[str, Any],
-        *,
-        identity: str | None = None,
-    ) -> "Instruction":
-        """Validate an instruction upload envelope and build its stored model."""
 
-        record_type = record.get("record_type")
-        if record_type != "instruction":
-            raise ValueError(
-                f"record_type must be 'instruction', got {record_type!r}"
-            )
-
-        try:
-            slug = record["record_identity"]
-            content = record["record_content"]
-        except KeyError as exc:
-            raise ValueError(
-                f"instruction upload missing required field: {exc.args[0]}"
-            ) from exc
-
-        return cls.model_validate(
-            {
-                "identity": identity or generate_identity(),
-                "slug": slug,
-                "content": content,
-            }
-        )
 
 
 __all__ = ["Instruction"]

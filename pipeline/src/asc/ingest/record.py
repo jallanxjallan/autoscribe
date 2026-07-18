@@ -5,7 +5,7 @@ from asc.ingest.common import IngestedItem, IngestInputError
 from asc.ingest.handlers import HANDLERS
 from asc.ingest.record_types import canonical_record_type, canonical_target
 
-MANDATORY_FIELDS = ("record_type", "record_identity", "record_content")
+MANDATORY_FIELDS = ("record_type", "record_identity", "payload")
 SERVER_IDENTITY_FIELDS = ("identity",)
 
 
@@ -23,6 +23,7 @@ def ingest_record(raw_record: object, *, target: str = "all") -> IngestedItem:
 
     record["record_type"] = record_type
     record["record_identity"] = required_string(record["record_identity"], "record_identity")
+    record["payload"] = required_payload(record["payload"])
 
     for field_name in SERVER_IDENTITY_FIELDS:
         record.pop(field_name, None)
@@ -48,6 +49,12 @@ def required_string(value: object, field: str) -> str:
     return value.strip()
 
 
+def required_payload(value: object) -> dict[str, Any]:
+    if not isinstance(value, Mapping):
+        raise IngestInputError("payload must be an object")
+    return dict(value)
+
+
 def record_identifier(record: object, *, fallback: str) -> str:
     if isinstance(record, Mapping):
         value = record.get("record_identity")
@@ -56,4 +63,9 @@ def record_identifier(record: object, *, fallback: str) -> str:
     return fallback
 
 
-__all__ = ["MANDATORY_FIELDS", "SERVER_IDENTITY_FIELDS", "ingest_record", "record_identifier"]
+__all__ = [
+    "MANDATORY_FIELDS",
+    "SERVER_IDENTITY_FIELDS",
+    "ingest_record",
+    "record_identifier",
+]

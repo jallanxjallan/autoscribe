@@ -35,6 +35,28 @@ def _instruction_hashes(snapshot: dict[str, Any]) -> dict[str, str]:
     return result
 
 
+
+
+def _upload_envelope(record: dict[str, Any]) -> dict[str, Any]:
+    """Separate ingest routing fields from the instruction artifact payload."""
+    record_type = str(record.get("record_type") or "instruction").strip()
+    record_identity = str(record.get("record_identity") or record.get("slug") or "").strip()
+    if record_type != "instruction":
+        raise ObsError(f"expected instruction record_type, got: {record_type or '<empty>'}")
+    if not record_identity:
+        raise ObsError("instruction record missing record_identity")
+
+    payload = {
+        key: value
+        for key, value in record.items()
+        if key not in {"record_type", "record_identity", "record_plan"}
+    }
+    return {
+        "record_type": "instruction",
+        "record_identity": record_identity,
+        "payload": payload,
+    }
+
 def _canonical_hash(record: dict[str, Any]) -> str:
     payload = json.dumps(record, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
     return hashlib.sha256(payload.encode("utf-8")).hexdigest()
@@ -114,7 +136,7 @@ def sync_instruction(repo: Path, *, slug: str, path: str, source_path: str,
     result = run(
         [autoscribe_bin(), "upload", "instructions"],
         cwd=repo,
-        input_text=json.dumps(record, ensure_ascii=False) + "\n",
+        input_text=json.dumps(_upload_envelope(record), ensure_ascii=False) + "\n",
     )
 
     dirty = _dirty_relpaths(repo, [source])
@@ -185,7 +207,7 @@ def sync_instructions(repo: Path, instruction_sets: list[dict[str, Any]]) -> lis
         result = run(
             [autoscribe_bin(), "upload", "instructions"],
             cwd=repo,
-            input_text=json.dumps(record, ensure_ascii=False) + "\n",
+            input_text=json.dumps(_upload_envelope(record), ensure_ascii=False) + "\n",
         )
         results.append({
             "slug": item["slug"],
@@ -236,7 +258,7 @@ def upload_instruction(repo: Path, *, source_path: str, input_path: Path,
     result = run(
         [autoscribe_bin(), "upload", "instructions"],
         cwd=repo,
-        input_text=json.dumps(record, ensure_ascii=False) + "\n",
+        input_text=json.dumps(_upload_envelope(record), ensure_ascii=False) + "\n",
     )
     committed: list[str] = []
     commit_hash = None

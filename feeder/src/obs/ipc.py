@@ -120,12 +120,12 @@ HANDLERS: dict[str, Handler] = {
 }
 
 
-def handle(request: dict[str, Any]) -> dict[str, Any]:
+def handle(request: dict[str, Any], *, repo: Path | None = None) -> dict[str, Any]:
     operation = str(request.get("operation") or "").strip()
     if operation not in HANDLERS:
         raise ObsError(f"unknown IPC operation: {operation or '<empty>'}")
-    repo = _repo(request)
-    result = HANDLERS[operation](repo, request)
+    resolved_repo = repo if repo is not None else _repo(request)
+    result = HANDLERS[operation](resolved_repo, request)
     return {"ok": True, "operation": operation, "result": result}
 
 

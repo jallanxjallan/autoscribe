@@ -34,7 +34,6 @@ def parser() -> argparse.ArgumentParser:
     one.add_argument("--metadata", type=Path)
     one.add_argument("--force", action="store_true")
     one.add_argument("--no-commit", action="store_true")
-    sub.add_parser("ipc")
     dispatch = sub.add_parser("dispatch-run")
     dispatch.add_argument("-n", "--dry-run", action="store_true")
     dispatch.add_argument("--manifest", type=Path)
@@ -54,7 +53,7 @@ def main(argv: list[str] | None = None) -> int:
         repo = args.vault.resolve() if args.vault else git.root(Path.cwd())
         if args.command == "ipc":
             request = json.load(sys.stdin)
-            print(json.dumps(handle_ipc(repo, request), ensure_ascii=False))
+            print(json.dumps(handle_ipc(request, repo=repo), ensure_ascii=False))
         elif args.command == "state":
             current = VaultState.for_vault(repo)
             print(json.dumps({"vault_root": str(repo), "state_root": str(current.root)}, indent=2))
@@ -69,9 +68,6 @@ def main(argv: list[str] | None = None) -> int:
         elif args.command == "upload-instruction":
             result = upload_instruction(repo, source_path=args.source_path, input_path=args.input, metadata_path=args.metadata, force=args.force, commit=not args.no_commit)
             print(json.dumps(result, indent=2, ensure_ascii=False))
-        elif args.command == "ipc":
-            from .ipc import main as ipc_main
-            return ipc_main()
         elif args.command == "dispatch-run":
             items, output = dispatch_run(repo, manifest_path=args.manifest, dry_run=args.dry_run)
             _report(args.command, items, args.dry_run)

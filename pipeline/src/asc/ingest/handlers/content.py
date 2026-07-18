@@ -12,14 +12,25 @@ from asc.ingest.expiry import expire_old_key
 
 def ingest_content(record: Mapping[str, Any]) -> IngestedItem:
     slug = str(record["record_identity"]).strip()
-    data = dict(record)
-    data.pop("identity", None)
+    payload = dict(record["payload"])
+    payload.pop("identity", None)
+
+    plan_slug = record.get("record_plan")
+    if not isinstance(plan_slug, str) or not plan_slug.strip():
+        raise IngestInputError("content record_plan must be a non-empty string")
+
+    plan_key = SlugMap().get(plan_slug.strip())
+    if not plan_key:
+        raise IngestInputError(f"unknown record_plan: {plan_slug!r}")
+
+    payload.update(
+        identity=generate_identity(),
+        source_identity=slug,
+        plan_key=plan_key,
+    )
 
     try:
-        if hasattr(CallRecord, "from_ndjson"):
-            content = CallRecord.from_ndjson(data, identity=generate_identity())
-        else:
-            content = CallRecord.model_validate(data)
+        content = CallRecord.model_validate(payload)
     except ValidationError as exc:
         raise IngestInputError(f"validation failed: {exc}") from exc
 

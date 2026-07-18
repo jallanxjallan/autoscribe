@@ -12,14 +12,19 @@ PLAN_TTL_SECONDS = 60 * 60 * 24 * 30
 
 
 def ingest_plan(record: Mapping[str, Any]) -> IngestedItem:
-    """Validate and save one reusable plan record.
+    """Validate and save one reusable plan payload.
 
-    Plan upload persists only ``plan:<identity>:record``. Step records and
-    indexes are runtime artifacts and must not be materialized during upload.
+    Upload-envelope fields route the record. Only ``payload`` is used as plan
+    data; ``record_identity`` is translated to the stored plan's ``slug``.
     """
 
+    slug = str(record["record_identity"]).strip()
+    payload = dict(record["payload"])
+    payload.pop("identity", None)
+    payload["slug"] = slug
+
     try:
-        plan = Plan.model_validate(record)
+        plan = Plan.model_validate(payload)
     except ValidationError as exc:
         raise IngestInputError(f"validation failed: {exc}") from exc
 
@@ -36,7 +41,4 @@ def ingest_plan(record: Mapping[str, Any]) -> IngestedItem:
     return IngestedItem(record_type="plan", slug=plan.slug, key=new_key)
 
 
-__all__ = [
-    "PLAN_TTL_SECONDS",
-    "ingest_plan",
-]
+__all__ = ["PLAN_TTL_SECONDS", "ingest_plan"]

@@ -12,9 +12,13 @@ from asc.ingest.expiry import expire_old_key
 
 def ingest_instruction(record: Mapping[str, Any]) -> IngestedItem:
     slug = str(record["record_identity"]).strip()
+    payload = dict(record["payload"])
+    payload.pop("identity", None)
+    payload["identity"] = generate_identity()
+    payload["slug"] = slug
 
     try:
-        instruction = Instruction.from_ndjson(record, identity=generate_identity())
+        instruction = Instruction.model_validate(payload)
     except ValidationError as exc:
         raise IngestInputError(f"validation failed: {exc}") from exc
 
