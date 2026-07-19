@@ -18,7 +18,9 @@ def post(key: str | RedisKey) -> str:
     raw = str(key).strip()
     if not raw:
         raise ValueError("scrivener inbox expected a non-empty artifact key")
-    RedisKey(raw)  # validate full key shape before queueing
+    parsed = RedisKey(raw)
+    if parsed.kind not in {"call", "response"}:
+        raise ValueError(f"scrivener inbox accepts only call/response keys: {raw}")
     scrivener_inbox.insert(raw)
     return raw
 

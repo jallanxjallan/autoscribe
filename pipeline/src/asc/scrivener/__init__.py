@@ -1,7 +1,2 @@
-"""Scrivener daemon package.
-
-Scrivener owns the Redis inbox and single-writer daemon loop. It does not own
-SQL, schema, views, or row construction.
-"""
-
+"""Single-writer ledger daemon."""
 __all__: list[str] = []

@@ -2,9 +2,9 @@
 
 from __future__ import annotations
 
-from typing import ClassVar, Literal
+from typing import ClassVar, Literal, Self
 
-from pydantic import ConfigDict, Field, field_serializer, field_validator
+from pydantic import ConfigDict, Field, field_serializer, field_validator, model_validator
 
 from asc.core.timestamp import timestamp
 from asc.models.helpers.plain import redis_key_segment_text
@@ -20,7 +20,13 @@ class Job(RedisModel):
 
     Runtime records are addressed separately as
     ``runtime:<call_identity>:<ordinal>``. The active-jobs sorted set contains
-    this job key; its score is orchestration state rather than job data.
+    this job key and is the only scheduling index.
+
+    The mutable ``*_hint`` fields are lookup accelerators only. They may be
+    stale after a crash and must never be treated as orchestration state. The
+    authoritative history is the set of task, response, and failure artifacts
+    for the call identity. The orchestrator starts from these hints, verifies
+    the artifacts, derives the real state, and then refreshes the hints.
     """
 
     model_config = ConfigDict(extra="forbid")
@@ -31,6 +37,9 @@ class Job(RedisModel):
     identity: str
     plan_identity: str
     total_steps: int
+    response_ordinal_hint: int = 0
+    task_ordinal_hint: int = 0
+    task_created_at_hint: int = 0
     created_at: int = Field(default_factory=timestamp)
 
     @property
@@ -50,7 +59,34 @@ class Job(RedisModel):
             raise ValueError("job total_steps must be positive")
         return total_steps
 
-    @field_serializer("created_at", "total_steps")
+    @field_validator(
+        "response_ordinal_hint",
+        "task_ordinal_hint",
+        "task_created_at_hint",
+        mode="before",
+    )
+    @classmethod
+    def validate_nonnegative_hint(cls, value: object) -> int:
+        hint = int(value)
+        if hint < 0:
+            raise ValueError("job hints must not be negative")
+        return hint
+
+    @model_validator(mode="after")
+    def validate_ordinal_hints(self) -> Self:
+        if self.response_ordinal_hint > self.total_steps:
+            raise ValueError("job response_ordinal_hint exceeds total_steps")
+        if self.task_ordinal_hint > self.total_steps:
+            raise ValueError("job task_ordinal_hint exceeds total_steps")
+        return self
+
+    @field_serializer(
+        "created_at",
+        "total_steps",
+        "response_ordinal_hint",
+        "task_ordinal_hint",
+        "task_created_at_hint",
+    )
     def serialize_int(self, value: int) -> str:
         return str(value)
 
