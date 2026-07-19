@@ -47,18 +47,20 @@ def init_command() -> None:
 
 @app.command("reset")
 def reset_command(
-    yes: bool = typer.Option(False, "--yes", help="Actually reset the ledger."),
+    yes: bool = typer.Option(False, "--yes", help="Reset without prompting."),
 ) -> None:
-    """Drop and recreate all ledger objects.
+    """Drop and recreate all ledger objects."""
 
-    Without --yes this is a dry run, so accidental resets are noisy and safe.
-    """
+    ledger_path = active_ledger_path()
+    if not yes:
+        confirmed = typer.confirm(
+            f"Reset the ledger and permanently delete all rows from {ledger_path}?"
+        )
+        if not confirmed:
+            typer.echo("reset cancelled")
+            raise typer.Exit()
 
-    report = reset_ledger(apply=yes)
-    if not report.applied:
-        typer.echo(f"ledger reset would clear all rows from: {report.ledger_path}")
-        typer.echo("run again with --yes to apply")
-        return
+    report = reset_ledger(apply=True)
     typer.echo(f"reset: {report.ledger_path}")
 
 
