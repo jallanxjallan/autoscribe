@@ -1,7 +1,29 @@
 ```dataviewjs
-const rows = [];
-const MISSING = "—";
 const PREVIEW_LIMIT = 60;
+
+const nodeRequire = typeof require === "function" ? require : window.require;
+const pathMod = nodeRequire("path");
+const vaultBasePath = app.vault.adapter.getBasePath?.() || app.vault.adapter.basePath;
+const queryPathForBootstrap = app.workspace.getActiveFile().path;
+const markerIndexForBootstrap = queryPathForBootstrap.indexOf("/queries/");
+
+if (markerIndexForBootstrap === -1) {
+  throw new Error(`Query is not inside a queries folder: ${queryPathForBootstrap}`);
+}
+
+const controlRootForBootstrap = queryPathForBootstrap.slice(0, markerIndexForBootstrap);
+const runtimePath = pathMod.join(
+  vaultBasePath,
+  ...controlRootForBootstrap.split("/").filter(Boolean),
+  "scripts",
+  "lib",
+  "query-runtime.js"
+);
+
+const { createQueryRuntime } = nodeRequire(runtimePath);
+const runtime = createQueryRuntime({ app, queryTitle: "Editorial Flags query" });
+const { loader, queryPath, vaultName } = runtime;
+const { renderSelectionQuery } = loader.requireControl("scripts/lib/selection-query.js");
 
 function isExcludedFolder(path) {
   return path
@@ -10,34 +32,19 @@ function isExcludedFolder(path) {
     .some(part => part.startsWith("_"));
 }
 
-function normalizeMetaValues(value) {
-  if (value == null) return [MISSING];
-
-  if (Array.isArray(value)) {
-    const values = value
-      .flatMap(normalizeMetaValues)
-      .map(value => String(value).trim())
-      .filter(Boolean);
-
-    return values.length ? [...new Set(values)] : [MISSING];
-  }
-
-  const text = String(value).trim();
-  return text ? [text] : [MISSING];
+function asText(value, fallback = "") {
+  if (value == null) return fallback;
+  if (Array.isArray(value)) return value.map(item => String(item)).join(", ");
+  return String(value).trim() || fallback;
 }
 
 function truncateAtWord(text, limit = PREVIEW_LIMIT) {
-  const normalized = text.replace(/\s+/g, " ").trim();
+  const normalized = String(text || "").replace(/\s+/g, " ").trim();
   if (normalized.length <= limit) return normalized;
 
   const slice = normalized.slice(0, limit);
   const lastSpace = slice.lastIndexOf(" ");
-
-  if (lastSpace > 0) {
-    return slice.slice(0, lastSpace).trimEnd() + "…";
-  }
-
-  return normalized.slice(0, limit - 1).trimEnd() + "…";
+  return (lastSpace > 0 ? slice.slice(0, lastSpace) : normalized.slice(0, limit - 1)).trimEnd() + "…";
 }
 
 function extractCalloutFirstLine(line) {
@@ -62,186 +69,175 @@ function extractHighlights(line) {
 }
 
 function tkPreview(line) {
-  if (!/\*\*TK(?:\s+[^*]+)?\*\*/i.test(line)) return null;
-
-  return truncateAtWord(
-    line.replace(/\*\*(TK(?:\s+[^*]+)?)\*\*/gi, "$1")
-  );
+  // Capture everything between '**TK' and '**'
+  const match = /\*\*TK([\s\S]*?)\*\*/i.exec(line);
+  
+  // If a match is found, return the captured text (trimmed of extra spaces)
+  return match ? match[1].trim() : null;
 }
 
-for (const file of app.vault.getMarkdownFiles()
-  .filter(file => !isExcludedFolder(file.path))
-  .sort((a, b) => a.path.localeCompare(b.path))) {
-
-  const cache = app.metadataCache.getFileCache(file);
-  const frontmatter = cache?.frontmatter ?? {};
-  const stageValues = normalizeMetaValues(frontmatter.stage);
-  const statusValues = normalizeMetaValues(frontmatter.status);
-
-  const text = await app.vault.cachedRead(file);
-  const lines = text.split(/\r?\n/);
-
-  let inFrontmatter = lines[0]?.trim() === "---";
-  let inFence = false;
-
-  for (let index = 0; index < lines.length; index++) {
-    const line = lines[index];
-    const trimmed = line.trim();
-
-    if (inFrontmatter) {
-      if (index > 0 && trimmed === "---") inFrontmatter = false;
-      continue;
-    }
-
-    if (/^(```|~~~)/.test(trimmed)) {
-      inFence = !inFence;
-      continue;
-    }
-
-    if (inFence) continue;
-
-    const base = {
-      path: file.path,
-      line: index + 1,
-      stageValues,
-      statusValues
-    };
-
-    const callout = extractCalloutFirstLine(line);
-    if (callout) {
-      rows.push({ ...base, type: "Callout", text: callout });
-    }
-
-    const tk = tkPreview(line);
-    if (tk) {
-      rows.push({ ...base, type: "TK", text: tk });
-    }
-
-    for (const highlight of extractHighlights(line)) {
-      rows.push({ ...base, type: "Highlight", text: highlight });
-    }
-  }
+function titleForFile(file, frontmatter) {
+  return asText(frontmatter.title, file.basename);
 }
 
-if (rows.length === 0) {
-  dv.paragraph("No editorial flags found.");
-  return;
-}
+async function buildRows() {
+  const rows = [];
 
-const allStages = [...new Set(rows.flatMap(row => row.stageValues))].sort((a, b) =>
-  a.localeCompare(b, undefined, { sensitivity: "base" })
-);
+  for (const file of app.vault.getMarkdownFiles()
+    .filter(file => !isExcludedFolder(file.path))
+    .sort((a, b) => a.path.localeCompare(b.path))) {
 
-const allStatuses = [...new Set(rows.flatMap(row => row.statusValues))].sort((a, b) =>
-  a.localeCompare(b, undefined, { sensitivity: "base" })
-);
+    const cache = app.metadataCache.getFileCache(file);
+    const frontmatter = cache?.frontmatter ?? {};
+    const slug = asText(frontmatter.slug);
+    if (!slug) continue;
 
-const allTypes = [...new Set(rows.map(row => row.type))].sort((a, b) =>
-  a.localeCompare(b, undefined, { sensitivity: "base" })
-);
+    const text = await app.vault.cachedRead(file);
+    const lines = text.split(/\r?\n/);
+    const flags = [];
 
-const selectedStages = new Set(allStages);
-const selectedStatuses = new Set(allStatuses);
-const selectedTypes = new Set(allTypes);
+    let inFrontmatter = lines[0]?.trim() === "---";
+    let inFence = false;
 
-function matchesAny(values, selected) {
-  return values.some(value => selected.has(value));
-}
+    for (let index = 0; index < lines.length; index++) {
+      const line = lines[index];
+      const trimmed = line.trim();
 
-function renderChecklist(container, title, values, selected) {
-  const section = container.createDiv();
-  section.style.marginTop = "0.75em";
-
-  section.createEl("strong", { text: title });
-
-  const buttons = section.createDiv();
-  buttons.style.marginTop = "0.4em";
-  buttons.style.marginBottom = "0.4em";
-
-  const selectAllBtn = buttons.createEl("button", { text: "Select all" });
-  selectAllBtn.style.marginRight = "0.5em";
-  selectAllBtn.onclick = () => {
-    selected.clear();
-    values.forEach(value => selected.add(value));
-    render();
-  };
-
-  const clearAllBtn = buttons.createEl("button", { text: "Clear all" });
-  clearAllBtn.onclick = () => {
-    selected.clear();
-    render();
-  };
-
-  section.createEl("div", {
-    text: `${selected.size} of ${values.length} selected`
-  });
-
-  const checklist = section.createDiv();
-  checklist.style.marginTop = "0.5em";
-
-  for (const value of values) {
-    const label = checklist.createEl("label");
-    label.style.display = "block";
-    label.style.marginBottom = "0.25em";
-
-    const checkbox = label.createEl("input", { type: "checkbox" });
-    checkbox.checked = selected.has(value);
-    checkbox.style.marginRight = "0.5em";
-
-    checkbox.onchange = () => {
-      if (checkbox.checked) {
-        selected.add(value);
-      } else {
-        selected.delete(value);
+      if (inFrontmatter) {
+        if (index > 0 && trimmed === "---") inFrontmatter = false;
+        continue;
       }
-      render();
+
+      if (/^(```|~~~)/.test(trimmed)) {
+        inFence = !inFence;
+        continue;
+      }
+
+      if (inFence) continue;
+
+      const callout = extractCalloutFirstLine(line);
+      if (callout) flags.push({ line: index + 1, type: "Callout", text: callout });
+
+      const tk = tkPreview(line);
+      if (tk) flags.push({ line: index + 1, type: "TK", text: tk });
+
+      for (const highlight of extractHighlights(line)) {
+        flags.push({ line: index + 1, type: "Highlight", text: highlight });
+      }
+    }
+
+    if (!flags.length) continue;
+
+    rows.push({
+      id: slug,
+      selection_key: slug,
+      slug,
+      path: file.path,
+      title: titleForFile(file, frontmatter),
+      type: [...new Set(flags.map(flag => flag.type))],
+      flags,
+    });
+  }
+
+  return rows;
+}
+
+function alphaCompare(a, b) {
+  return String(a.title || a.path).localeCompare(
+    String(b.title || b.path),
+    undefined,
+    { sensitivity: "base" }
+  );
+}
+
+function renderResults(parent, displayedRows, api) {
+  const rows = [...displayedRows].sort(alphaCompare);
+  const table = parent.createEl("table");
+  const head = table.createEl("thead").createEl("tr");
+
+  for (const title of ["", "Note", "Type", "Text"]) {
+    head.createEl("th", { text: title });
+  }
+
+  const body = table.createEl("tbody");
+
+  for (const row of rows) {
+    row.flags.forEach((flag, index) => {
+      const tr = body.createEl("tr");
+
+      if (index === 0) {
+        const selectCell = tr.createEl("td");
+        selectCell.rowSpan = row.flags.length;
+
+        const checkbox = selectCell.createEl("input", { type: "checkbox" });
+        checkbox.checked = api.model.selectedKeys.has(row.slug);
+        checkbox.onchange = async () => {
+          if (checkbox.checked) api.model.selectedKeys.add(row.slug);
+          else api.model.selectedKeys.delete(row.slug);
+          await api.saveCurrentState({ quiet: true, action: "selection" });
+          api.render();
+        };
+
+        const noteCell = tr.createEl("td");
+        noteCell.rowSpan = row.flags.length;
+        api.createInternalLink(noteCell, row.path, row.title);
+      }
+
+      tr.createEl("td", { text: flag.type });
+      tr.createEl("td", { text: flag.text });
+    });
+  }
+}
+
+const rows = await buildRows();
+
+await renderSelectionQuery({
+  app,
+  dv,
+  nodeRequire: runtime.nodeRequire,
+
+  title: "Editorial Flags",
+  namespace: "editorial-flags",
+  bridgeName: "__editorialFlagsSelection",
+
+  vaultName,
+  queryPath,
+  stateVersion: 1,
+
+  rows,
+  columns: [],
+
+  filterFields: [
+    { key: "type", title: "Type" },
+  ],
+
+  sortModes: [
+    ["title-asc", "Title A–Z"],
+    ["title-desc", "Title Z–A"],
+  ],
+  defaultSortMode: "title-asc",
+  sortRows(items, mode) {
+    return [...items].sort(mode === "title-desc" ? (a, b) => alphaCompare(b, a) : alphaCompare);
+  },
+
+  selectionKind: "slug",
+  selectionKey: "slug",
+  serializeRow(row) {
+    return {
+      selection_key: row.slug,
+      slug: row.slug,
+      title: row.title,
+      path: row.path,
     };
+  },
 
-    label.appendText(value);
-  }
-}
+  emptyMessage: "No editorial flags found.",
+  noMatchesMessage: "No matching editorial flags.",
+  summaryText({ displayedRows, selectedRows }) {
+    const flagCount = displayedRows.reduce((total, row) => total + row.flags.length, 0);
+    return `${flagCount} editorial flag${flagCount === 1 ? "" : "s"} in ${displayedRows.length} file(s) · ${selectedRows.length} checked`;
+  },
 
-function render() {
-  const root = dv.container;
-  root.innerHTML = "";
-
-  const controls = root.createDiv();
-  controls.style.marginBottom = "1em";
-
-  renderChecklist(controls, "Type", allTypes, selectedTypes);
-  renderChecklist(controls, "Stage", allStages, selectedStages);
-  renderChecklist(controls, "Status", allStatuses, selectedStatuses);
-
-  const filtered = rows.filter(row =>
-    selectedTypes.has(row.type) &&
-    matchesAny(row.stageValues, selectedStages) &&
-    matchesAny(row.statusValues, selectedStatuses)
-  );
-
-  root.createEl("p", {
-    text: `${filtered.length} matching editorial flag${filtered.length === 1 ? "" : "s"}`
-  });
-
-  if (filtered.length === 0) {
-    root.createEl("p", { text: "No matching editorial flags." });
-    return;
-  }
-
-  const sortedFiltered = [...filtered].sort((a, b) =>
-    a.path.localeCompare(b.path, undefined, { sensitivity: "base" }) ||
-    a.line - b.line ||
-    a.type.localeCompare(b.type, undefined, { sensitivity: "base" })
-  );
-
-  dv.table(
-    ["Note", "Type", "Text"],
-    sortedFiltered.map(row => [
-      dv.fileLink(row.path),
-      row.type,
-      row.text
-    ])
-  );
-}
-
-render();
+  renderResults,
+});
 ```

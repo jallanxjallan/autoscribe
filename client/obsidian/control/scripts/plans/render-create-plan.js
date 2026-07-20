@@ -102,6 +102,36 @@ async function feederUploadPlan(app, record, instructionSets) {
   return callFeeder(app, 'plan.save', { record, instruction_sets: instructionSets });
 }
 
+function serializeInstructionSets(components) {
+  const bySlug = new Map();
+  for (const component of components) {
+    const slug = String(component?.slug || '').trim();
+    if (!slug) throw new Error('Resolved instruction component has no slug.');
+    const prior = bySlug.get(slug);
+    if (prior && prior.path !== component.path) {
+      throw new Error(`Instruction slug ${slug} resolves to both ${prior.path} and ${component.path}.`);
+    }
+    bySlug.set(slug, component);
+  }
+  return [...bySlug.values()];
+}
+
+function assertInstructionSetCoverage(steps, knownInstructionSlugs) {
+  const expected = new Set();
+  for (const step of steps) {
+    const resolved = step._resolved_instruction_dependencies;
+    if (!resolved) continue;
+    for (const component of [resolved.task, resolved.role, ...resolved.contexts]) {
+      expected.add(component.slug);
+    }
+  }
+  const missing = [...expected].filter((slug) => !knownInstructionSlugs.has(slug));
+  if (missing.length) {
+    throw new Error(`Instruction upload payload is missing: ${missing.join(', ')}`);
+  }
+}
+
+
 async function feederListInstructions(app) {
   return callFeeder(app, 'instructions.catalog', { include_pipeline: true });
 }
@@ -321,17 +351,54 @@ function resolveInstructionDependencies(app, record) {
   return { task, role, contexts };
 }
 
-function prepareInstructionDependencies(app, steps) {
+function instructionSnapshotBySlug(controlSnapshot) {
+  const records = snapshotList(controlSnapshot, 'instructions');
+  const bySlug = new Map();
+  for (const record of records) {
+    const slug = String(record?.record_identity || record?.slug || '').trim();
+    if (slug) bySlug.set(slug, record);
+  }
+  return bySlug;
+}
+
+function instructionShaMatchesSnapshot(component, snapshotRecord) {
+  // TODO: Compare the local instruction component SHA with the snapshot SHA.
+  // Until the snapshot and local component expose a stable common hash field,
+  // existence alone is sufficient and existing records are treated as current.
+  void component;
+  void snapshotRecord;
+  return true;
+}
+
+function instructionRequiresUpload(component, snapshotBySlug) {
+  const snapshotRecord = snapshotBySlug.get(component.slug);
+  if (!snapshotRecord) return true;
+  return !instructionShaMatchesSnapshot(component, snapshotRecord);
+}
+
+function prepareInstructionDependencies(app, steps, controlSnapshot) {
   const components = new Map();
   for (const step of steps) {
     if (!step.instruction) continue;
 
     const resolved = resolveInstructionDependencies(app, step.instruction);
+    step._resolved_instruction_dependencies = resolved;
     for (const component of [resolved.task, resolved.role, ...resolved.contexts]) {
+      const prior = components.get(component.slug);
+      if (prior && prior.path !== component.path) {
+        throw new Error(
+          `Instruction slug ${component.slug} resolves to both ${prior.path} and ${component.path}.`
+        );
+      }
       components.set(component.slug, component);
     }
   }
-  return [...components.values()];
+
+  const snapshotBySlug = instructionSnapshotBySlug(controlSnapshot);
+  const uploads = [...components.values()].filter((component) => (
+    instructionRequiresUpload(component, snapshotBySlug)
+  ));
+  return serializeInstructionSets(uploads);
 }
 
 function renderStepEditor({ app, stepsBox, steps, catalogs }) {
@@ -502,7 +569,17 @@ async function renderCreatePlan({ app, container }) {
   }
 
   async function uploadCurrentPlan(forceSlug = null) {
-    const instructionSets = prepareInstructionDependencies(app, steps);
+    const instructionSets = prepareInstructionDependencies(app, steps, controlSnapshot);
+    const knownInstructionSlugs = new Set(
+      snapshotList(controlSnapshot, 'instructions')
+        .map((item) => String(item?.record_identity || item?.slug || '').trim())
+        .filter(Boolean)
+    );
+    for (const item of instructionSets) knownInstructionSlugs.add(item.slug);
+    assertInstructionSetCoverage(
+      steps.filter((step) => step._resolved_instruction_dependencies),
+      knownInstructionSlugs
+    );
     const record = buildPlanRecord({
       label: label.value,
       description: description.value,

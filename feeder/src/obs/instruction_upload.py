@@ -166,10 +166,12 @@ def sync_instruction(repo: Path, *, slug: str, path: str, source_path: str,
 
 
 def sync_instructions(repo: Path, instruction_sets: list[dict[str, Any]]) -> list[dict[str, Any]]:
-    """Upload dirty instruction components, then commit them once.
+    """Upload every instruction component explicitly requested by the client.
 
-    Plan creation deliberately uses git dirtiness as its only freshness test.
-    Content-hash matching remains available elsewhere but is not consulted here.
+    The client has already compared referenced slugs with the downloaded control
+    snapshot, so presence in ``instruction_sets`` means the Redis record must be
+    created or refreshed even when the source file is clean. Git dirtiness is
+    used only to decide which source files need committing after upload.
     """
     unique: dict[str, dict[str, Any]] = {}
     for item in instruction_sets:
@@ -189,23 +191,22 @@ def sync_instructions(repo: Path, instruction_sets: list[dict[str, Any]]) -> lis
         if not _inside(repo, source):
             raise ObsError(f"{slug}: instruction file is outside the active vault: {source}")
 
+        relpath = source.relative_to(repo.resolve()).as_posix()
+        prior = unique.get(slug)
+        if prior and prior["relpath"] != relpath:
+            raise ObsError(
+                f"instruction slug {slug} resolves to both "
+                f"{prior['relpath']} and {relpath}"
+            )
         unique[slug] = {
             **item,
             "slug": slug,
             "source": source,
-            "relpath": source.relative_to(repo.resolve()).as_posix(),
+            "relpath": relpath,
         }
 
-    dirty = set(git.dirty_files(repo))
-    pending = [item for item in unique.values() if item["relpath"] in dirty]
-    if not pending:
-        return [
-            {"slug": item["slug"], "status": "clean", "uploaded": False}
-            for item in unique.values()
-        ]
-
     results: list[dict[str, Any]] = []
-    for item in pending:
+    for item in unique.values():
         record, digest = _render_body_record(
             repo,
             slug=item["slug"],
@@ -226,25 +227,22 @@ def sync_instructions(repo: Path, instruction_sets: list[dict[str, Any]]) -> lis
             "pipeline_output": result.stdout.strip(),
         })
 
-    stamp = datetime.now().astimezone().isoformat(timespec="seconds")
-    commit_paths = [item["relpath"] for item in pending]
-    commit_hash = git.commit_files(
-        repo,
-        commit_paths,
-        f"UPLOAD instructions for plan: {stamp}",
-    )
+    dirty = set(git.dirty_files(repo))
+    commit_paths = [
+        item["relpath"] for item in unique.values() if item["relpath"] in dirty
+    ]
+    commit_hash = None
+    if commit_paths:
+        stamp = datetime.now().astimezone().isoformat(timespec="seconds")
+        commit_hash = git.commit_files(
+            repo, commit_paths, f"UPLOAD instructions for plan: {stamp}"
+        )
 
     for result in results:
-        result["commit"] = commit_hash
-        result["committed"] = commit_paths
-
-    clean_results = [
-        {"slug": item["slug"], "status": "clean", "uploaded": False}
-        for item in unique.values()
-        if item["relpath"] not in dirty
-    ]
-    return clean_results + results
-
+        result["committed"] = result["path"] in commit_paths
+        if commit_hash:
+            result["commit"] = commit_hash
+    return results
 
 def upload_instruction(repo: Path, *, source_path: str, input_path: Path,
                        metadata_path: Path | None = None, force: bool = False,
