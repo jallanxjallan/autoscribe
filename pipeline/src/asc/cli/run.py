@@ -1,15 +1,16 @@
 """User-facing run commands.
 
-The run surface manages the three production runtime daemons:
+The run surface manages the five production runtime daemons:
 
-    asc run loop    # start or confirm orchestrator + worker + scrivener daemons
+    asc run start   # start or confirm initiate + inflight + failure + worker + scrivener
     asc run stop    # stop all daemons, confirming if runtime work is present
     asc run status  # show daemons, active calls, and inbox contents/counts
     asc run reset   # stop daemons and clear runtime queues/state
     asc run log     # show the shared daemon operation log
 
-The orchestrator owns active-call progression. The worker owns engine execution.
-The scrivener owns ledger writes. Daemons run until stopped with ``asc run stop``.
+The initiate, inflight, and failure daemons own active-call progression.
+The worker owns engine execution. The scrivener owns ledger writes.
+Daemons run until stopped with ``asc run stop``.
 """
 
 from __future__ import annotations
@@ -48,7 +49,9 @@ class ManagedDaemon:
 
 
 DAEMONS: tuple[ManagedDaemon, ...] = (
-    ManagedDaemon(name="orchestrator", module="asc.orchestrator.daemon"),
+    ManagedDaemon(name="initiate", module="asc.orchestrator.initiate"),
+    ManagedDaemon(name="inflight", module="asc.orchestrator.process"),
+    ManagedDaemon(name="failure", module="asc.orchestrator.evaluate"),
     ManagedDaemon(name="worker", module="asc.worker.daemon"),
     ManagedDaemon(name="scrivener", module="asc.scrivener.daemon"),
 )
@@ -531,6 +534,15 @@ def _human_log_line(line: str) -> str | None:
         return f"{prefix}Runtime idle"
 
     if "daemon start name=" in text:
+        if "name=initiate" in text:
+            return f"{prefix}Initiate daemon started"
+
+        if "name=inflight" in text:
+            return f"{prefix}Inflight daemon started"
+
+        if "name=failure" in text:
+            return f"{prefix}Failure daemon started"
+
         if "name=orchestrator" in text:
             return f"{prefix}Orchestrator started"
 
@@ -820,23 +832,41 @@ def _follow_human_log(path: Path) -> None:
 # commands
 
 
-@app.command("loop")
-def run_loop() -> None:
-    """Refuse managed daemon startup; daemons are started manually."""
+def _start_managed_daemons() -> None:
+    """Start every configured runtime daemon and persist their PIDs."""
 
-    typer.echo("Managed daemon startup is disabled.", err=True)
-    typer.echo("Start daemons manually:", err=True)
-    typer.echo("  python -m asc.orchestrator.daemon", err=True)
-    typer.echo("  python -m asc.worker.daemon", err=True)
-    typer.echo("  python -m asc.scrivener.daemon", err=True)
-    raise typer.Exit(code=1)
+    pids = _read_pids()
+    any_running = any(
+        _pid_alive(pid)
+        for pid in pids.values()
+    )
+
+    if not any_running:
+        _reset_daemon_log()
+
+    try:
+        for daemon in DAEMONS:
+            _start_daemon(daemon, pids)
+    finally:
+        # Persist successful starts even if a later daemon fails to launch.
+        _write_pids(pids)
+
+    typer.echo(f"log={LOG_FILE}")
 
 
-@app.command("start", hidden=True)
-def run_start_alias() -> None:
-    """Deprecated alias; managed daemon startup remains disabled."""
+@app.command("start")
+def run_start() -> None:
+    """Start or confirm all runtime daemons."""
 
-    run_loop()
+    _start_managed_daemons()
+
+
+@app.command("loop", hidden=True)
+def run_loop_alias() -> None:
+    """Deprecated alias for ``asc run start``."""
+
+    typer.echo("asc run loop is deprecated; use asc run start.", err=True)
+    _start_managed_daemons()
 
 
 @app.command("stop")
