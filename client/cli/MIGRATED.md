@@ -1,19 +1,19 @@
 # Migration boundary
 
-Moved to feeder:
+## Moved to feeder
 
-- Git status, selective commits and repository state
+- repository status and selective content commits
 - Markdown/frontmatter scanning and slug indexing
-- instruction catalog merging active-vault, Library-vault and pipeline records
-- single-instruction Pandoc upload
-- registry/control snapshots
-- pipeline-only plan list/load/save/delete requests
-- dispatch and result writeback workflows
+- current-selection and run-state management
+- instruction and plan upload
+- Pandoc processing and dispatch
+- pending-response discovery and guarded response writeback
+- all generated AutoScribe manifests and operational state
 
-Retained in Obsidian:
+## Retained in this package
 
-- Dataview rendering and DOM code
-- workspace/tab behavior
-- Obsidian wikilink and `obsidian://` resolution
-- creation of resolved temporary Markdown and metadata files
-- synchronous calls through `control/scripts/lib/feeder-ipc.js`
+- managed-vault creation
+- opening vaults in Obsidian
+- pushing committed vault changes to their configured upstream
+- synchronizing whitelisted core assets into a managed vault
+- synchronizing whitelisted managed-vault assets back into core

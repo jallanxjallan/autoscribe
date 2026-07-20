@@ -1,21 +1,18 @@
 # cli/zsh/frontend.zsh
-# Future frontend / Electron command surface.
+# Retained vault-lifecycle command surface.
 #
-# Source this from ~/.zshrc for operations that should eventually become
-# Electron UI actions. These functions are thin dispatchers into cli/scripts.
+# Source this from ~/.zshrc when the compact `cli <command>` dispatcher is
+# preferred. Direct functions are also available from vault.zsh.
 
 _OBSIDIAN_FRONTEND_SURFACE_DIR="${${(%):-%x}:A:h}"
 source "$_OBSIDIAN_FRONTEND_SURFACE_DIR/common.zsh" || return $?
 
 _OBSIDIAN_FRONTEND_COMMANDS=(
   'create-vault:vault/create-vault'
-  'upload-instructions:uploading/upload-instructions'
-  'upload-plans:uploading/upload-plans'
-  'upload-prompts:uploading/upload-prompts'
-  'dispatch-run:uploading/dispatch-run'
-
-  'writeback:writing/writeback'
-  'writenew:writing/writenew'
+  'open-vault:obsidian/open-vault'
+  'push-vault:git/push-vault'
+  'update-vault:vault/update-vault'
+  'update-core:vault/update-core'
 )
 
 _obsidian_define_node_functions "${_OBSIDIAN_FRONTEND_COMMANDS[@]}" || return $?
@@ -34,7 +31,7 @@ cli() {
   shift
 
   case "$command_name" in
-    create-vault|upload-instructions|upload-plans|upload-prompts|dispatch-run|writeback|writenew)
+    create-vault|open-vault|push-vault|update-vault|update-core)
       "$command_name" "$@"
       ;;
     config)
@@ -57,29 +54,22 @@ cli() {
 frontend-help() {
   emulate -L zsh
   cat <<'HELP'
-Frontend / future Electron command surface
+Obsidian vault command surface
 
-Vault creation:
-  create-vault <path>             Create a managed vault from the control/template assets
-
-AutoScribe upload/enqueue:
-  upload-instructions             Upload dirty ins/gbl/cxt/spc files as NDJSON
-  upload-plans                    Upload dirty plan.* files as NDJSON
-  upload-prompts                  Emit selected run-manifest prompt records as NDJSON
-  dispatch-run                    Emit prompt/plan slug pairs for asc enqueue
-
-AutoScribe result writing:
-  writeback                       Replace bodies of matching existing vault files
-  writenew [target-dir]           Write provisional results as new Markdown files
+Vault lifecycle:
+  create-vault <path>             Create and initialize a managed vault
+  open-vault [path]               Open a vault in Obsidian
+  push-vault [path]               Push committed vault changes upstream
+  update-vault [options] [path]   Copy managed core assets into a vault
+  update-core [options] [path]    Copy managed vault assets back into core
 
 Diagnostics:
   obsidian-cli-version            Print CLI surface version
-  obsidian-cli-config             Print active launcher env values
-  cli <command> [args...]         Dispatch frontend commands without hitting /usr/bin/cli
+  obsidian-cli-config             Print active launcher environment values
+  cli <command> [args...]         Dispatch one of the retained commands
   frontend-help                   Show this help
 
-Notes:
-  Command paths and roots are declared in cli/zsh/config.zsh. No fallback paths
-  or compatibility aliases are provided.
+AutoScribe upload, dispatch, scanning, selection and response-writeback
+operations are provided by the Python feeder through `obs` and Obsidian IPC.
 HELP
 }
