@@ -1,3 +1,4 @@
+import json
 import sys
 
 import click
@@ -12,6 +13,7 @@ from asc.exporter.export_result import (
     write_extracted_result_record,
     write_pending_result_records,
     write_result_record_by_slug,
+    write_result_records_by_slugs,
 )
 from asc.exporter.pending_exports import pending_export_records
 from asc.ledger.connect import connect
@@ -66,6 +68,27 @@ def _write_source_identity_stream(
         print(_text(row.get("source_identity") or row.get("record_identity")), file=sink)
 
 
+
+def _write_pending_exports_ndjson(
+    *,
+    rows: list[dict[str, object]],
+    sink: TextIO,
+) -> None:
+    """Emit lightweight pending-export metadata as one JSON object per line."""
+
+    for row in rows:
+        payload = {
+            "slug": row.get("slug"),
+            "source_identity": row.get("source_identity") or row.get("record_identity"),
+            "record_identity": row.get("record_identity") or row.get("source_identity"),
+            "call_identity": row.get("call_identity"),
+            "final_step": row.get("final_step"),
+            "result_key": row.get("result_key"),
+            "result_identity": row.get("result_identity") or row.get("call_identity"),
+        }
+        print(json.dumps(payload, ensure_ascii=False, sort_keys=True), file=sink)
+
+
 @app.command("list-pending")
 def list_pending(
     source_identity: str | None = typer.Argument(
@@ -74,6 +97,12 @@ def list_pending(
             "Optional source/record identity. With no argument, print a table. "
             "With an identity, emit matching pending source identities for writeback."
         ),
+    ),
+    ndjson: bool = typer.Option(
+        False,
+        "--ndjson",
+        "--json",
+        help="Emit pending-export metadata as NDJSON instead of a display table.",
     ),
 ) -> None:
     """List pending export/writeback rows by slug and identity."""
@@ -87,10 +116,45 @@ def list_pending(
     with connect() as conn:
         rows = pending_export_records(conn=conn, source_identity=source_identity)
 
-    if source_identity is None:
+    if ndjson:
+        _write_pending_exports_ndjson(rows=rows, sink=sys.stdout)
+    elif source_identity is None:
         _write_pending_exports_table(rows=rows, sink=sys.stdout)
     else:
         _write_source_identity_stream(rows=rows, sink=sys.stdout)
+
+
+@app.command("extract-selected")
+def extract_selected(
+    slugs: list[str] = typer.Argument(
+        ...,
+        help="Source slugs selected for writeback.",
+    ),
+    export_message: str = typer.Option(
+        "writeback",
+        "--export-message",
+        "--message",
+        help="Message to store in each export receipt.",
+    ),
+) -> None:
+    """Emit selected pending responses as NDJSON and create export receipts."""
+
+    cleaned = [slug.strip() for slug in slugs if slug.strip()]
+    if not cleaned:
+        typer.echo("ERROR: at least one source slug is required", err=True)
+        raise typer.Exit(code=1)
+
+    try:
+        with connect() as conn:
+            write_result_records_by_slugs(
+                slugs=cleaned,
+                conn=conn,
+                sink=sys.stdout,
+                export_message=export_message,
+            )
+    except ValueError as exc:
+        typer.echo(f"ERROR: {exc}", err=True)
+        raise typer.Exit(code=1) from exc
 
 
 @app.command("extract-result")

@@ -77,6 +77,67 @@ def write_pending_result_records(
             _write_ndjson(extracted, sink=sink)
 
 
+def write_result_records_by_slugs(
+    *,
+    slugs: list[str],
+    conn: LedgerConnection,
+    sink: TextIO,
+    export_message: str = "writeback",
+) -> None:
+    """Emit selected pending responses and create export receipts as one batch.
+
+    Every supplied slug must resolve to exactly one currently pending successful
+    response. Validation is completed before any NDJSON is emitted or export
+    receipt is inserted.
+    """
+
+    ensure_ledger_schema(conn)
+    cleaned = [slug.strip() for slug in slugs if slug.strip()]
+    if not cleaned:
+        raise ValueError("at least one slug is required")
+    if len(cleaned) != len(set(cleaned)):
+        raise ValueError("duplicate slugs are not allowed")
+
+    pending_rows = read_pending_result_export_records_with_connection(conn=conn)
+    by_slug: dict[str, list[dict[str, Any]]] = {}
+    for pending in pending_rows:
+        slug = str(pending.get("source_identity") or pending.get("record_identity") or "").strip()
+        if slug:
+            by_slug.setdefault(slug, []).append(pending)
+
+    selected: list[dict[str, Any]] = []
+    for slug in cleaned:
+        matches = by_slug.get(slug, [])
+        if not matches:
+            raise ValueError(f"no pending response found for source slug: {slug}")
+        if len(matches) != 1:
+            raise ValueError(f"multiple pending responses found for source slug: {slug}")
+
+        extracted = read_extract_result_record_by_call_identity_with_connection(
+            conn=conn,
+            call_identity=str(matches[0]["call_identity"]),
+        )
+        if extracted is None:
+            raise ValueError(f"terminal response disappeared for source slug: {slug}")
+        selected.append(extracted)
+
+    try:
+        for row in selected:
+            insert_export_record_with_connection(
+                conn=conn,
+                result_identity=str(row["identity"]),
+                export_message=export_message,
+                export_mode="writeback",
+            )
+        conn.commit()
+    except Exception:
+        conn.rollback()
+        raise
+
+    for row in selected:
+        _write_ndjson(row, sink=sink)
+
+
 def write_result_record_by_slug(
     *,
     slug: str,
@@ -223,4 +284,5 @@ __all__ = [
     "write_extracted_result_record",
     "write_pending_result_records",
     "write_result_record_by_slug",
+    "write_result_records_by_slugs",
 ]

@@ -9,7 +9,7 @@ from typing import Any, Callable
 
 from . import git
 from .catalog import instruction_catalog, pipeline_snapshot
-from .downloads import writeback, writenew
+from .downloads import pending_responses, write_responses, writeback, writenew
 from .errors import ObsError
 from .plans import delete_plan, list_plans, load_plan, save_plan
 from .uploads import dispatch_paths, dispatch_run
@@ -71,6 +71,23 @@ def _dispatch(repo: Path, request: dict[str, Any]) -> dict[str, Any]:
     )
 
 
+
+def _responses_pending(repo: Path, request: dict[str, Any]) -> list[dict[str, Any]]:
+    return pending_responses(repo)
+
+
+def _responses_write(repo: Path, request: dict[str, Any]) -> list[dict[str, Any]]:
+    items = request.get("items")
+    if not isinstance(items, list):
+        raise ObsError("responses.write requires items list")
+    return write_responses(
+        repo,
+        items,
+        allow_dirty=bool(request.get("allow_dirty")),
+        dry_run=bool(request.get("dry_run")),
+    )
+
+
 def _writeback(repo: Path, request: dict[str, Any]) -> list[dict[str, Any]]:
     return writeback(repo, dry_run=bool(request.get("dry_run")), limit=request.get("limit"))
 
@@ -115,6 +132,8 @@ HANDLERS: dict[str, Handler] = {
     "plan.save": _plan_save,
     "plan.delete": _plan_delete,
     "dispatch.run": _dispatch,
+    "responses.pending": _responses_pending,
+    "responses.write": _responses_write,
     "writeback": _writeback,
     "writenew": _writenew,
 }
