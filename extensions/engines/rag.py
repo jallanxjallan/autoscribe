@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-from asc.models.control.step import RAGStep
 from asc.models.process.result import Retrieval
 from asc.worker.runtime_io import EngineInput
 
@@ -20,16 +19,21 @@ def make_call(data: EngineInput) -> Retrieval:
     registered, but it obeys the worker's EngineInput/Result contract.
     """
 
-    if not isinstance(data.step, RAGStep):
-        raise TypeError(f"{ENGINE} requires RAGStep, got {type(data.step).__name__}")
+    runtime = data.runtime
+    if runtime.engine_kind != "rag":
+        raise TypeError(
+            f"{ENGINE} requires a rag runtime, got {runtime.engine_kind!r}"
+        )
+    if not runtime.rag_profile:
+        raise ValueError(f"{ENGINE} runtime requires rag_profile")
 
     return Retrieval(
         identity=data.call.identity,
-        ordinal=data.step.ordinal,
+        ordinal=runtime.ordinal,
         content=data.content,
         raw_json={
             "engine": ENGINE,
-            "rag_profile": data.step.rag_profile,
+            "rag_profile": runtime.rag_profile,
         },
     )
 

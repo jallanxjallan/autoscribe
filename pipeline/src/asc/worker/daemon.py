@@ -19,36 +19,36 @@ WORKER_THREADS = 4
 @dataclass(frozen=True, slots=True)
 class WorkerRunReport:
     claimed: bool
-    task_key: str | None = None
+    runtime_key: str | None = None
     artifact_key: str | None = None
     failure_key: str | None = None
     action: str | None = None
 
 
 def process_next(*, timeout: int = 0) -> WorkerRunReport:
-    """Claim and execute the next worker task."""
+    """Claim and execute the next worker runtime."""
 
     claimed = worker_inbox.daemon_claim(timeout=timeout, empty_limit=None)
     if claimed is None:
         return WorkerRunReport(claimed=False)
 
-    task_key = claimed.strip()
-    if not task_key:
-        raise ValueError("worker claimed an empty task key")
+    runtime_key = claimed.strip()
+    if not runtime_key:
+        raise ValueError("worker claimed an empty runtime key")
 
-    LOG.info("worker operation=claimed task_key=%s", task_key)
-    result = WorkerExecutor().execute(task_key)
+    LOG.info("worker operation=claimed runtime_key=%s", runtime_key)
+    result = WorkerExecutor().execute(runtime_key)
 
     report = WorkerRunReport(
         claimed=True,
-        task_key=result.task_key,
+        runtime_key=result.runtime_key,
         artifact_key=result.artifact_key,
         failure_key=result.failure_key,
         action=result.action,
     )
     LOG.info(
-        "worker operation=executed task_key=%s action=%s artifact_key=%s failure_key=%s",
-        report.task_key,
+        "worker operation=executed runtime_key=%s action=%s artifact_key=%s failure_key=%s",
+        report.runtime_key,
         report.action,
         report.artifact_key,
         report.failure_key,
@@ -69,10 +69,10 @@ def _run_thread(
         while not stop_event.is_set():
             report = process_next(timeout=timeout)
             LOG.info(
-                "worker thread report number=%s claimed=%s task_key=%s action=%s",
+                "worker thread report number=%s claimed=%s runtime_key=%s action=%s",
                 thread_number,
                 report.claimed,
-                report.task_key,
+                report.runtime_key,
                 report.action,
             )
     except Exception:

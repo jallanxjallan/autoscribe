@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-from asc.models.control.step import ScriptStep
 from asc.models.process.result import Transform
 from asc.registries.extensions import load_transform
 from asc.worker.runtime_io import EngineInput
@@ -17,21 +16,24 @@ ENGINE_COMPONENT = {
 def make_call(data: EngineInput) -> Transform:
     """Run one validated local script transform."""
 
-    if not isinstance(data.step, ScriptStep):
+    runtime = data.runtime
+    if runtime.engine_kind != "script":
         raise TypeError(
-            f"{ENGINE} requires ScriptStep, got {type(data.step).__name__}"
+            f"{ENGINE} requires a script runtime, got {runtime.engine_kind!r}"
         )
+    if not runtime.script:
+        raise ValueError(f"{ENGINE} runtime requires script")
 
-    transform = load_transform(data.step.script)
+    transform = load_transform(runtime.script)
     output = transform(data.content)
 
     return Transform(
         identity=data.call.identity,
-        ordinal=data.step.ordinal,
+        ordinal=runtime.ordinal,
         content=output,
         raw_json={
             "engine": ENGINE,
-            "script": data.step.script,
+            "script": runtime.script,
         },
     )
 

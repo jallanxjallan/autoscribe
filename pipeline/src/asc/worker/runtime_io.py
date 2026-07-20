@@ -1,114 +1,81 @@
-"""Build the fully hydrated input for one engine call."""
+"""Hydrate one canonical runtime record for engine execution."""
 
 from __future__ import annotations
 
-from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 
 from asc.models.control.instruction import Instruction
-from asc.models.control.step import Step
 from asc.models.process.call import CallRecord
-from asc.models.process.result import Response, Retrieval, Transform
+from asc.models.process.result import Response
+from asc.models.process.runtime import Runtime
 from asc.redis.key import RedisKey
 
 
-ContentSource = CallRecord | Response | Transform | Retrieval
-
-_SOURCE_MODELS: dict[str, type[ContentSource]] = {
-    "call": CallRecord,
-    "response": Response,
-    "transform": Transform,
-    "retrieval": Retrieval,
-}
+ContentSource = CallRecord | Response
 
 
 @dataclass(frozen=True, slots=True)
 class EngineInput:
-    """Validated, fully hydrated context passed across the engine boundary."""
+    """Persisted runtime plus the content and instructions it addresses."""
 
+    runtime: Runtime
     call: CallRecord
     source: ContentSource
-    step: Step
     instructions: tuple[Instruction, ...]
     content: str
 
 
-def build_engine_input(
-    *,
-    data_key: str,
-    step: Step,
-) -> EngineInput:
-    """Load all persisted models needed to execute one step."""
-    source = load_content_source(data_key)
-    call = load_source_call(data_key)
-    instructions = load_instructions(step.instruction_keys)
-
-    if source.identity != call.identity:
-        raise ValueError(
-            "runtime source identity does not match call identity: "
-            f"source={source.identity!r} call={call.identity!r}"
-        )
+def build_engine_input(runtime: Runtime) -> EngineInput:
+    """Hydrate the records referenced by one validated Runtime."""
+    call = _load_call(runtime)
+    source = _load_source(runtime=runtime, call=call)
+    instructions = load_instructions(runtime.instruction_keys)
 
     return EngineInput(
+        runtime=runtime,
         call=call,
         source=source,
-        step=step,
         instructions=instructions,
         content=source.content,
     )
 
 
-def load_content_source(key: str) -> ContentSource:
-    """Load the canonical content-bearing model addressed by key."""
-    if not isinstance(key, str) or not key.strip():
-        raise ValueError("worker data key must be non-empty")
-
-    redis_key = RedisKey(key.strip())
-
-    try:
-        model = _SOURCE_MODELS[redis_key.kind]
-    except KeyError as exc:
-        supported = ", ".join(sorted(_SOURCE_MODELS))
-        raise ValueError(
-            f"unsupported worker data kind {redis_key.kind!r}: "
-            f"{redis_key.raw_key!r}; expected one of {supported}"
-        ) from exc
-
-    return model.load(redis_key)
-
-
-def load_source_call(data_key: str) -> CallRecord:
-    """Load the original call sharing the runtime source identity."""
-    source_key = RedisKey(data_key)
-    call_key = RedisKey(
-        kind="call",
-        identity=source_key.identity,
-        suffix="record",
-    )
+def _load_call(runtime: Runtime) -> CallRecord:
+    call_key = RedisKey(kind="call", identity=runtime.identity, suffix="record")
     return CallRecord.load(call_key)
 
 
-def load_instructions(
-    instruction_keys: Mapping[str, str] | Sequence[str],
-) -> tuple[Instruction, ...]:
-    """Hydrate step instructions in the fixed role/context/instructions order."""
+def _load_source(*, runtime: Runtime, call: CallRecord) -> ContentSource:
+    if runtime.ordinal == 1:
+        return call
 
-    if isinstance(instruction_keys, Mapping):
-        preferred = ("role", "context", "instructions")
-        ordered_labels = [label for label in preferred if label in instruction_keys]
-        ordered_labels.extend(label for label in instruction_keys if label not in preferred)
-        keys = [instruction_keys[label] for label in ordered_labels]
-    else:
-        keys = list(instruction_keys)
+    response_key = RedisKey(
+        kind="response",
+        identity=runtime.identity,
+        suffix=str(runtime.ordinal - 1),
+    )
+    response = Response.load(response_key)
+    if response.identity != runtime.identity:
+        raise ValueError(
+            "runtime source response identity does not match runtime identity: "
+            f"response={response.identity!r} runtime={runtime.identity!r}"
+        )
+    return response
 
-    return tuple(Instruction.load(key) for key in keys)
+
+def load_instructions(instruction_keys: dict[str, str]) -> tuple[Instruction, ...]:
+    """Hydrate instructions in their canonical labeled order."""
+    preferred = ("role", "context", "instructions")
+    ordered_labels = [label for label in preferred if label in instruction_keys]
+    ordered_labels.extend(
+        label for label in instruction_keys if label not in preferred
+    )
+    return tuple(Instruction.load(instruction_keys[label]) for label in ordered_labels)
 
 
 __all__ = [
     "ContentSource",
     "EngineInput",
     "build_engine_input",
-    "load_content_source",
     "load_instructions",
-    "load_source_call",
 ]

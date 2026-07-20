@@ -3,7 +3,6 @@ from __future__ import annotations
 from openai import OpenAI
 
 from asc.core.config import config
-from asc.models.control.step import LLMStep
 from asc.models.process.result import ExternalFailure, Response
 from asc.worker.runtime_io import EngineInput
 
@@ -36,15 +35,20 @@ ENGINE_COMPONENT = {
 def make_call(data: EngineInput) -> Response | ExternalFailure:
     """Run one ChatGPT Responses API call from a hydrated EngineInput."""
 
-    step = data.step
-    if not isinstance(step, LLMStep):
+    runtime = data.runtime
+    if runtime.engine_kind != "llm":
         raise TypeError(
-            f"{ENGINE} requires LLMStep, got {type(step).__name__}"
+            f"{ENGINE} requires an llm runtime, got {runtime.engine_kind!r}"
         )
+    if not runtime.model:
+        raise ValueError(f"{ENGINE} runtime requires model")
+
     try:
-        model = MODEL_LABELS[step.model]
+        model = MODEL_LABELS[runtime.model]
     except KeyError as exc:
-        raise ValueError(f"unknown ChatGPT model label: {step.model!r}") from exc
+        raise ValueError(
+            f"unknown ChatGPT model label: {runtime.model!r}"
+        ) from exc
 
     request: dict[str, object] = {
         "model": model,
@@ -55,25 +59,23 @@ def make_call(data: EngineInput) -> Response | ExternalFailure:
     if instructions:
         request["instructions"] = instructions
 
-    temperature = getattr(step, "temperature", None)
-    if temperature is not None:
-        request["temperature"] = temperature
+    if runtime.temperature is not None:
+        request["temperature"] = runtime.temperature
 
-    max_output_tokens = getattr(step, "max_output_tokens", None)
-    if max_output_tokens is not None:
-        request["max_output_tokens"] = max_output_tokens
+    if runtime.max_output_tokens is not None:
+        request["max_output_tokens"] = runtime.max_output_tokens
 
     try:
         result = OpenAI(api_key=config.open_ai_key).responses.create(**request)
     except Exception as exc:
         return ExternalFailure(
             identity=data.call.identity,
-            ordinal=step.ordinal,
+            ordinal=runtime.ordinal,
             content=str(exc),
             failure_reason=type(exc).__name__,
             raw_json={
                 "engine": ENGINE,
-                "model_label": step.model,
+                "model_label": runtime.model,
                 "model": model,
                 "error": str(exc),
                 "error_type": type(exc).__name__,
@@ -83,11 +85,11 @@ def make_call(data: EngineInput) -> Response | ExternalFailure:
 
     return Response(
         identity=data.call.identity,
-        ordinal=step.ordinal,
+        ordinal=runtime.ordinal,
         content=result.output_text,
         raw_json={
             "engine": ENGINE,
-            "model_label": step.model,
+            "model_label": runtime.model,
             "model": model,
             "provider": result.model_dump(mode="json"),
         },
