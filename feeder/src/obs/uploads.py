@@ -73,19 +73,6 @@ def upload_instructions(repo: Path, *, force: bool = False, dry_run: bool = Fals
     return items, output
 
 
-def _latest_commit_subject(repo: Path, relpath: str) -> str:
-    from .process import run
-    result = run(
-        ["git", "log", "--max-count=1", "--format=%s", "--", relpath],
-        cwd=repo,
-        check=False,
-    )
-    return result.stdout.strip() if result.returncode == 0 else ""
-
-
-def _is_inflight(repo: Path, relpath: str) -> bool:
-    return _latest_commit_subject(repo, relpath).startswith("plan.")
-
 
 def _dispatch_record(*, slug: str, plan_slug: str, content: str) -> dict[str, str]:
     return {
@@ -239,13 +226,6 @@ def dispatch_paths(
         if item["path"] in seen:
             continue
         seen.add(item["path"])
-        if _is_inflight(repo, item["path"]):
-            failures.append({
-                "path": item["path"],
-                "slug": item["slug"],
-                "error": "file is already inflight",
-            })
-            continue
         item["plan_slug"] = plan_slug
         items.append(item)
 

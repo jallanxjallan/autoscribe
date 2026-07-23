@@ -5,15 +5,26 @@ from __future__ import annotations
 from collections.abc import Mapping
 from typing import Any
 
+from asc.models.control.instruction import Instruction
 from asc.models.process.runtime import Runtime
 from asc.state.slugmap import SlugMap
 
 RUNTIME_TTL_SECONDS = 60 * 60 * 24
-INSTRUCTION_ORDER = ("role", "context", "instructions")
+DIRECTIVE_TTL_SECONDS = 60 * 60
+INSTRUCTION_ORDER = ("role", "context", "instructions", "directive")
 
 
-def materialize_runtimes(*, call_identity: str, plan: Any) -> tuple[Runtime, ...]:
+def materialize_runtimes(
+    *,
+    call_identity: str,
+    plan: Any,
+    directive: str | None = None,
+) -> tuple[Runtime, ...]:
     """Compile and save every embedded plan step for one call.
+
+    A leading file directive, when present, is persisted as a short-lived
+    instruction and attached only to runtime step 1 under the ``directive``
+    instruction label.
 
     All runtime records are written before the caller exposes the call through
     the active zset. No runtime index is created; keys are deterministic from
@@ -21,14 +32,23 @@ def materialize_runtimes(*, call_identity: str, plan: Any) -> tuple[Runtime, ...
     """
 
     runtimes: list[Runtime] = []
+    directive_instruction: Instruction | None = None
     total_steps = plan.total_steps
     try:
+        if directive:
+            directive_instruction = _save_directive_instruction(
+                call_identity=call_identity,
+                content=directive,
+            )
+
         for ordinal in range(1, total_steps + 1):
             step = plan.step_definition(ordinal)
             args = _step_args(step, ordinal=ordinal)
             engine = _engine(step, args=args, ordinal=ordinal)
             engine_kind = _engine_kind(step, args=args, ordinal=ordinal)
             instruction_keys = _resolve_instruction_keys(step, ordinal=ordinal)
+            if ordinal == 1 and directive_instruction is not None:
+                instruction_keys["directive"] = directive_instruction.raw_key
 
             payload: dict[str, Any] = {
                 **step,
@@ -52,9 +72,30 @@ def materialize_runtimes(*, call_identity: str, plan: Any) -> tuple[Runtime, ...
     except Exception:
         for runtime in runtimes:
             runtime.delete()
+        if directive_instruction is not None:
+            directive_instruction.delete()
         raise
 
     return tuple(runtimes)
+
+
+def delete_ephemeral_instructions(runtimes: tuple[Runtime, ...]) -> None:
+    """Delete call-scoped directive instructions during enqueue rollback."""
+
+    if not runtimes:
+        return
+    key = runtimes[0].instruction_keys.get("directive")
+    if not key:
+        return
+    Instruction.load(key).delete()
+
+
+def _save_directive_instruction(*, call_identity: str, content: str) -> Instruction:
+    """Persist the call-scoped directive using the call identity."""
+
+    instruction = Instruction(identity=call_identity, content=content)
+    instruction.save(ttl=DIRECTIVE_TTL_SECONDS)
+    return instruction
 
 
 def _step_args(step: Mapping[str, Any], *, ordinal: int) -> dict[str, Any]:
@@ -90,15 +131,16 @@ def _resolve_instruction_keys(step: Mapping[str, Any], *, ordinal: int) -> dict[
     if raw in (None, ""):
         return {}
     if isinstance(raw, list):
-        if len(raw) > len(INSTRUCTION_ORDER):
+        legacy_order = INSTRUCTION_ORDER[:-1]
+        if len(raw) > len(legacy_order):
             raise ValueError(f"plan step {ordinal} has too many legacy instruction references")
-        raw = {INSTRUCTION_ORDER[index]: value for index, value in enumerate(raw)}
+        raw = {legacy_order[index]: value for index, value in enumerate(raw)}
     if not isinstance(raw, Mapping):
         raise ValueError(f"plan step {ordinal} instruction references must be a labeled object")
 
     resolver = SlugMap()
     resolved: dict[str, str] = {}
-    for label in INSTRUCTION_ORDER:
+    for label in INSTRUCTION_ORDER[:-1]:
         reference = raw.get(label)
         if reference in (None, ""):
             continue
@@ -106,7 +148,7 @@ def _resolve_instruction_keys(step: Mapping[str, Any], *, ordinal: int) -> dict[
             raise ValueError(f"plan step {ordinal} instruction {label} must be a string")
         resolved[label] = resolver.resolve(reference.strip(), expected_kind="instruction")
 
-    unknown = set(raw) - set(INSTRUCTION_ORDER)
+    unknown = set(raw) - set(INSTRUCTION_ORDER[:-1])
     if unknown:
         raise ValueError(
             f"plan step {ordinal} has unsupported instruction labels: {', '.join(sorted(map(str, unknown)))}"
@@ -115,7 +157,9 @@ def _resolve_instruction_keys(step: Mapping[str, Any], *, ordinal: int) -> dict[
 
 
 __all__ = [
+    "DIRECTIVE_TTL_SECONDS",
     "INSTRUCTION_ORDER",
     "RUNTIME_TTL_SECONDS",
+    "delete_ephemeral_instructions",
     "materialize_runtimes",
 ]

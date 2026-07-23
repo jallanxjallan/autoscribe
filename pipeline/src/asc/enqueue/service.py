@@ -2,10 +2,11 @@ import sys
 from collections.abc import Iterable
 from typing import TextIO
 
+from asc.enqueue.custody import ensure_no_pending_export
 from asc.enqueue.job import activate_job, create_job, deactivate_job
 from asc.enqueue.reader import EnqueueRecord, iter_enqueue_records
 from asc.enqueue.report import EnqueuedCall, EnqueueReport
-from asc.enqueue.runtime import materialize_runtimes
+from asc.enqueue.runtime import delete_ephemeral_instructions, materialize_runtimes
 
 
 def enqueue_from_stream(stream: TextIO) -> EnqueueReport:
@@ -30,6 +31,7 @@ def enqueue_record(record: EnqueueRecord) -> EnqueuedCall:
     """Persist one call, compile its runtimes, and register its job."""
 
     call = record.call
+    ensure_no_pending_export(record.source_identity)
     call_key = str(call.redis_key)
     runtimes = ()
     job = None
@@ -40,6 +42,7 @@ def enqueue_record(record: EnqueueRecord) -> EnqueuedCall:
         runtimes = materialize_runtimes(
             call_identity=call.identity,
             plan=record.plan.plan,
+            directive=record.directive,
         )
         job = create_job(
             call_identity=call.identity,
@@ -54,6 +57,7 @@ def enqueue_record(record: EnqueueRecord) -> EnqueuedCall:
                 deactivate_job(job)
             else:
                 job.delete()
+        delete_ephemeral_instructions(runtimes)
         for runtime in runtimes:
             runtime.delete()
         call.delete()

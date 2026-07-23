@@ -3,6 +3,7 @@ from dataclasses import dataclass
 from typing import Any, TextIO
 
 from asc.enqueue.call import create_call_from_manifest_record
+from asc.enqueue.directive import extract_leading_directive
 from asc.enqueue.plan import LoadedPlan, load_plan_from_manifest_record
 from asc.models.process.call import CallRecord
 from asc.streams.ndjson import iter_ndjson_records
@@ -23,6 +24,7 @@ class EnqueueRecord:
     plan: LoadedPlan
     call: CallRecord
     raw_record: Mapping[str, Any]
+    directive: str | None = None
 
     @property
     def source_identity(self) -> str:
@@ -52,7 +54,10 @@ def iter_enqueue_records(stream: TextIO) -> Iterator[EnqueueRecord]:
             ) from exc
 
         plan = load_plan_from_manifest_record(raw)
-        call = create_call_from_manifest_record(raw, plan_key=plan.raw_key)
+        prepared = dict(raw)
+        extracted = extract_leading_directive(str(prepared.get("record_content", "")))
+        prepared["record_content"] = extracted.content
+        call = create_call_from_manifest_record(prepared, plan_key=plan.raw_key)
 
         yield EnqueueRecord(
             record_type=record_type,
@@ -60,6 +65,7 @@ def iter_enqueue_records(stream: TextIO) -> Iterator[EnqueueRecord]:
             plan=plan,
             call=call,
             raw_record=raw,
+            directive=extracted.directive,
         )
 
 

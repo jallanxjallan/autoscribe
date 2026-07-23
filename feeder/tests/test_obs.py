@@ -98,11 +98,13 @@ def test_dispatch_run_emits_nul_pandoc_arguments_and_commits(tmp_path: Path):
 
     items, output = dispatch_run(tmp_path, manifest_path=manifest)
     assert items[0]["absolute_path"] == str(source.resolve())
-    assert output.split(b"\0") == [
-        b"--metadata=record_plan:plan.test",
-        str(source.resolve()).encode(),
-        b"",
-    ]
+    records = [json.loads(line) for line in output.decode().splitlines()]
+    assert records == [{
+        "record_identity": "cnt.one",
+        "record_type": "content",
+        "record_plan": "plan.test",
+        "record_content": "---\nslug: cnt.one\n---\nText\n",
+    }]
     subject = subprocess.run(
         ["git", "log", "-1", "--format=%s"], cwd=tmp_path, check=True, capture_output=True, text=True
     ).stdout.strip()
@@ -182,3 +184,58 @@ def test_load_plan_materializes_persisted_fields(monkeypatch):
     assert loaded["description"] == "Loaded from Redis"
     assert loaded["steps"]["1"]["engine"] == "chatgpt"
 
+
+
+def test_dispatch_paths_does_not_infer_inflight_from_shared_plan_commit(tmp_path: Path, monkeypatch):
+    import json
+    import subprocess
+    from types import SimpleNamespace
+    from obs import uploads
+    from obs import executables
+
+    subprocess.run(["git", "init"], cwd=tmp_path, check=True, capture_output=True)
+    subprocess.run(["git", "config", "user.email", "test@example.com"], cwd=tmp_path, check=True)
+    subprocess.run(["git", "config", "user.name", "Test"], cwd=tmp_path, check=True)
+
+    paths = []
+    for ordinal in range(1, 4):
+        relpath = f"File {ordinal}.md"
+        paths.append(relpath)
+        (tmp_path / relpath).write_text(
+            f"---\nslug: cnt.file-{ordinal}\n---\nText {ordinal}\n",
+            encoding="utf-8",
+        )
+
+    subprocess.run(["git", "add", "--", *paths], cwd=tmp_path, check=True)
+    subprocess.run(
+        ["git", "commit", "-m", "plan.shared 2026-07-22 12:00:00 +0700"],
+        cwd=tmp_path,
+        check=True,
+        capture_output=True,
+    )
+
+    captured = {}
+    monkeypatch.setattr(uploads.git, "commit_files", lambda repo, selected, message: "dispatch-commit")
+    monkeypatch.setattr(executables, "autoscribe_bin", lambda: "/fake/asc")
+
+    def fake_run(command, **kwargs):
+        captured["command"] = command
+        captured["input"] = kwargs["input"]
+        return SimpleNamespace(returncode=0, stdout=b"queued 3\n", stderr=b"")
+
+    monkeypatch.setattr(subprocess, "run", fake_run)
+
+    result = uploads.dispatch_paths(
+        tmp_path,
+        paths=paths,
+        plan_slug="plan.shared",
+    )
+
+    records = [json.loads(line) for line in captured["input"].decode().splitlines()]
+    assert result["count"] == 3
+    assert result["failed_count"] == 0
+    assert [record["record_identity"] for record in records] == [
+        "cnt.file-1",
+        "cnt.file-2",
+        "cnt.file-3",
+    ]
