@@ -1,7 +1,7 @@
 ---
-slug: <% tp.user.make_slug(tp, "rol") %>
+slug: <% tp.user.make_slug(tp, "ref") %>
 type: instruction
-class: role
+class: reference
 scope:
 dependencies: {}
 tags: []
