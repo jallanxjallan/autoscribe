@@ -1,8 +1,6 @@
 "use strict";
 
-const { spawnSync } = require("node:child_process");
-const { callFeeder, vaultRoot } = require("../lib/feeder-ipc");
-const { buildSlugPathMap } = require("../lib/rg");
+const { callFeeder } = require("../lib/feeder-ipc");
 const { createInternalLink } = require("../lib/internal-link");
 
 function el(tag, attrs = {}, text = null) {
@@ -19,265 +17,140 @@ function el(tag, attrs = {}, text = null) {
   return node;
 }
 
-function gitStates(root) {
-  const result = spawnSync("git", ["status", "--porcelain=v1", "-z", "--untracked-files=all"], {
-    cwd: root,
-    encoding: "utf8",
-    shell: false,
-    maxBuffer: 16 * 1024 * 1024,
-  });
-  if (result.error) throw result.error;
-  if (result.status !== 0) {
-    throw new Error(String(result.stderr || result.stdout || `git exited ${result.status}`).trim());
-  }
-
-  const states = new Map();
-  const entries = String(result.stdout || "").split("\0").filter(Boolean);
-  for (let index = 0; index < entries.length; index += 1) {
-    const entry = entries[index];
-    const status = entry.slice(0, 2);
-    const path = entry.slice(3).trim().replaceAll("\\", "/");
-    if (path) states.set(path, status);
-    if (status.includes("R") || status.includes("C")) index += 1;
-  }
-  return states;
-}
-
-function shortIdentity(value) {
-  const text = String(value || "");
-  return text.length <= 18 ? text : `${text.slice(0, 8)}…${text.slice(-7)}`;
-}
-
-function candidateRows({ responses, bySlug, duplicates, states }) {
-  const matched = [];
-  const unmatched = [];
-  const duplicate = [];
-
-  for (const response of responses) {
-    const slug = String(response.prompt_slug || "").trim();
-    if (duplicates.has(slug)) {
-      duplicate.push(response);
-      continue;
-    }
-    const target = bySlug.get(slug);
-    if (!target) {
-      unmatched.push(response);
-      continue;
-    }
-    const gitStatus = states.get(target.path) || "";
-    matched.push({
-      ...response,
-      path: target.path,
-      line_number: target.lineNumber,
-      git_status: gitStatus,
-      dirty: Boolean(gitStatus),
-    });
-  }
-
-  matched.sort((a, b) => a.path.localeCompare(b.path));
-  unmatched.sort((a, b) => a.prompt_slug.localeCompare(b.prompt_slug));
-  duplicate.sort((a, b) => a.prompt_slug.localeCompare(b.prompt_slug));
-  return { matched, unmatched, duplicate };
-}
-
-function renderTable({ app, parent, title, items, selected, defaultChecked = false }) {
-  parent.appendChild(el("h2", {}, title));
-  if (!items.length) {
-    parent.appendChild(el("p", {}, "None."));
-    return [];
-  }
-
-  const toolbar = el("div", { style: "display:flex;gap:.5rem;align-items:center;margin:.5rem 0;flex-wrap:wrap;" });
-  const selectAll = el("button", {}, "Select all");
-  const clearAll = el("button", {}, "Clear all");
-  const count = el("span", {}, "");
-  toolbar.append(selectAll, clearAll, count);
-  parent.appendChild(toolbar);
-
-  const table = el("table", { style: "width:100%;" });
-  const head = el("tr");
-  for (const label of ["", "File", "Slug", "Git", "Call", "Response"]) {
-    head.appendChild(el("th", {}, label));
-  }
-  table.appendChild(head);
-
-  const rows = items.map((item) => {
-    const tr = el("tr");
-    const checkbox = el("input", { type: "checkbox", checked: defaultChecked });
-    if (defaultChecked) selected.add(item.result_identity);
-    const checkCell = el("td");
-    checkCell.appendChild(checkbox);
-    const fileCell = el("td");
-    createInternalLink(fileCell, app, item.path, item.path);
-    tr.append(
-      checkCell,
-      fileCell,
-      el("td", {}, item.prompt_slug),
-      el("td", {}, item.git_status || "clean"),
-      el("td", {}, shortIdentity(item.call_identity)),
-      el("td", {}, shortIdentity(item.result_identity)),
-    );
-    table.appendChild(tr);
-    checkbox.addEventListener("change", () => {
-      if (checkbox.checked) selected.add(item.result_identity);
-      else selected.delete(item.result_identity);
-      updateCount();
-    });
-    return { item, checkbox };
-  });
-
-  function updateCount() {
-    count.textContent = `${rows.filter((row) => row.checkbox.checked).length} of ${rows.length} selected`;
-  }
-  selectAll.onclick = () => {
-    for (const row of rows) {
-      row.checkbox.checked = true;
-      selected.add(row.item.result_identity);
-    }
-    updateCount();
-  };
-  clearAll.onclick = () => {
-    for (const row of rows) {
-      row.checkbox.checked = false;
-      selected.delete(row.item.result_identity);
-    }
-    updateCount();
-  };
-  updateCount();
-  parent.appendChild(table);
-  return rows;
+function formatDate(timestamp) {
+  if (!timestamp) return "";
+  return new Date(Number(timestamp) * 1000).toLocaleString();
 }
 
 async function renderWriteResponses({ app, container }) {
-  const root = vaultRoot(app);
-  const state = {
-    cleanSelected: new Set(),
-    dirtySelected: new Set(),
-    candidates: null,
-  };
+  const state = { candidates: [], selectedHash: "", busy: false, result: null };
 
   async function refresh() {
-    container.replaceChildren(el("p", {}, "Loading pending responses…"));
+    state.busy = true;
+    state.result = null;
+    render();
     try {
-      const responses = callFeeder(app, "responses.pending");
-      if (!Array.isArray(responses)) throw new Error("responses.pending returned no response list");
-
-      const { bySlug, duplicates } = buildSlugPathMap({ root });
-      const states = gitStates(root);
-      const candidates = candidateRows({ responses, bySlug, duplicates, states });
+      const candidates = callFeeder(app, "writeback.candidates", { limit: 200 });
+      if (!Array.isArray(candidates)) throw new Error("writeback.candidates returned no list");
       state.candidates = candidates;
-      state.cleanSelected.clear();
-      state.dirtySelected.clear();
-      render();
+      if (!candidates.some((item) => item.hash === state.selectedHash)) {
+        state.selectedHash = candidates[0]?.hash || "";
+      }
     } catch (error) {
       console.error(error);
-      container.replaceChildren(el("p", {}, `Write Responses failed: ${error.message}`));
+      state.candidates = [];
       new Notice(`Write Responses failed: ${error.message}`, 10000);
+    } finally {
+      state.busy = false;
+      render();
     }
   }
 
-  function chosen(items, selected) {
-    return items.filter((item) => selected.has(item.result_identity));
+  function selected() {
+    return state.candidates.find((item) => item.hash === state.selectedHash) || null;
   }
 
-  function write(items, allowDirty) {
-    if (!items.length) {
-      new Notice("No responses selected.");
-      return;
-    }
-    if (allowDirty) {
-      const paths = items.map((item) => `• ${item.path}`).join("\n");
-      const accepted = window.confirm(
-        `These files already contain uncommitted changes. Writeback will replace their bodies and may discard those edits.\n\n${paths}\n\nAre you sure?`,
-      );
-      if (!accepted) return;
-    }
-
+  async function writeResponses() {
+    const item = selected();
+    if (!item || item.blocked || state.busy) return;
+    state.busy = true;
+    state.result = null;
+    render();
     try {
-      const result = callFeeder(app, "responses.write", {
-        items,
-        allow_dirty: allowDirty,
-      });
-      const changed = result.filter((item) => item.changed).length;
-      new Notice(`Wrote ${result.length} response(s); ${changed} file(s) changed.`);
-      refresh();
+      const result = callFeeder(app, "writeback.commit", { commit: item.hash });
+      state.result = result;
+      const count = Array.isArray(result.written) ? result.written.length : 0;
+      new Notice(`Wrote and committed ${count} response file(s).`);
+      const candidates = callFeeder(app, "writeback.candidates", { limit: 200 });
+      state.candidates = Array.isArray(candidates) ? candidates : [];
+      state.selectedHash = state.candidates[0]?.hash || "";
     } catch (error) {
       console.error(error);
       new Notice(`Writeback failed: ${error.message}`, 10000);
+    } finally {
+      state.busy = false;
+      render();
     }
   }
 
-  function renderExceptions(parent, title, items, reason) {
-    if (!items.length) return;
-    parent.appendChild(el("h2", {}, title));
-    parent.appendChild(el("p", {}, reason));
-    const table = el("table");
+  function renderMembers(parent, item) {
+    parent.appendChild(el("h2", {}, "Commit files"));
+    const table = el("table", { style: "width:100%;" });
     const head = el("tr");
-    head.append(el("th", {}, "Slug"), el("th", {}, "Call"), el("th", {}, "Response"));
+    for (const label of ["File", "Slug", "State"]) head.appendChild(el("th", {}, label));
     table.appendChild(head);
-    for (const item of items) {
+
+    for (const member of item.members || []) {
       const row = el("tr");
-      row.append(
-        el("td", {}, item.prompt_slug),
-        el("td", {}, shortIdentity(item.call_identity)),
-        el("td", {}, shortIdentity(item.result_identity)),
-      );
+      const fileCell = el("td");
+      const path = member.path || member.source_path;
+      if (member.path) createInternalLink(fileCell, app, member.path, member.path);
+      else fileCell.textContent = member.source_path;
+      const stateText = member.error || member.git_status || member.state || "clean";
+      row.append(fileCell, el("td", {}, member.slug || ""), el("td", {}, stateText));
       table.appendChild(row);
     }
     parent.appendChild(table);
+
+    const blocked = (item.members || []).filter((member) => member.dirty || member.error);
+    if (blocked.length) {
+      const warning = el("div", { style: "margin-top:1rem;padding:.75rem;border:1px solid var(--background-modifier-error);" });
+      warning.appendChild(el("strong", {}, "Writeback aborted."));
+      warning.appendChild(el("p", {}, "One or more selected files are dirty or cannot be resolved. Open the linked files, resolve the problem, commit or discard the changes, then refresh."));
+      parent.appendChild(warning);
+    }
+  }
+
+  function renderResult(parent) {
+    if (!state.result?.written?.length) return;
+    parent.appendChild(el("h2", {}, "Written files"));
+    const list = el("ul");
+    for (const item of state.result.written) {
+      const li = el("li");
+      createInternalLink(li, app, item.path, `[[${item.path.replace(/\.md$/i, "")}]]`);
+      list.appendChild(li);
+    }
+    parent.appendChild(list);
+    parent.appendChild(el("p", {}, `Writeback commit: ${String(state.result.writeback_commit || "").slice(0, 8)}`));
   }
 
   function render() {
-    const { matched, unmatched, duplicate } = state.candidates;
-    const clean = matched.filter((item) => !item.dirty);
-    const dirty = matched.filter((item) => item.dirty);
-
     container.replaceChildren();
-    const header = el("div", { style: "display:flex;gap:.75rem;align-items:center;flex-wrap:wrap;" });
-    header.append(
-      el("button", { onclick: refresh }, "Refresh"),
-      el("span", {}, `${matched.length} matching response(s); ${unmatched.length} unmatched; ${duplicate.length} duplicate-slug response(s)`),
-    );
-    container.appendChild(header);
+    const toolbar = el("div", { style: "display:flex;gap:.75rem;align-items:center;flex-wrap:wrap;" });
+    const refreshButton = el("button", { onclick: refresh }, "Refresh");
+    refreshButton.disabled = state.busy;
+    toolbar.appendChild(refreshButton);
+    toolbar.appendChild(el("span", {}, state.busy ? "Loading…" : `${state.candidates.length} pending dispatch commit(s)`));
+    container.appendChild(toolbar);
 
-    renderTable({
-      app,
-      parent: container,
-      title: "Clean files",
-      items: clean,
-      selected: state.cleanSelected,
-      defaultChecked: true,
-    });
-    const cleanButton = el("button", {
-      onclick: () => write(chosen(clean, state.cleanSelected), false),
-      style: "margin-top:.75rem;",
-    }, "Write selected clean responses");
-    cleanButton.disabled = clean.length === 0;
-    container.appendChild(cleanButton);
-
-    renderTable({
-      app,
-      parent: container,
-      title: "Dirty files",
-      items: dirty,
-      selected: state.dirtySelected,
-      defaultChecked: false,
-    });
-    if (dirty.length) {
-      container.appendChild(el("p", {}, "Dirty files are never selected automatically. Writing them requires a separate confirmation."));
+    if (!state.candidates.length) {
+      container.appendChild(el("p", {}, state.busy ? "Loading inflight commits…" : "No inflight commits are awaiting writeback."));
+      renderResult(container);
+      return;
     }
-    const dirtyButton = el("button", {
-      onclick: () => write(chosen(dirty, state.dirtySelected), true),
-      style: "margin-top:.75rem;",
-    }, "Write selected dirty responses…");
-    dirtyButton.disabled = dirty.length === 0;
-    container.appendChild(dirtyButton);
 
-    renderExceptions(container, "Unmatched response slugs", unmatched, "No Markdown file in the active vault has these slugs.");
-    renderExceptions(container, "Duplicate vault slugs", duplicate, "Writeback is disabled because each slug must resolve to exactly one file.");
+    const label = el("label", { style: "display:block;margin-top:1rem;" }, "Dispatch commit");
+    const select = el("select", { style: "display:block;width:100%;margin-top:.35rem;" });
+    for (const item of state.candidates) {
+      const text = `${item.short_hash} — ${item.subject} — ${item.plan_slug} — ${formatDate(item.tag_timestamp)}`;
+      select.appendChild(el("option", { value: item.hash, selected: item.hash === state.selectedHash }, text));
+    }
+    select.onchange = () => { state.selectedHash = select.value; state.result = null; render(); };
+    label.appendChild(select);
+    container.appendChild(label);
+
+    const item = selected();
+    if (!item) return;
+    container.appendChild(el("p", {}, `Plan: ${item.plan_slug} · Inflight tag: ${item.inflight_tag}`));
+    renderMembers(container, item);
+
+    const button = el("button", { onclick: writeResponses, style: "margin-top:1rem;" }, state.busy ? "Writing…" : "Write Responses");
+    button.disabled = state.busy || item.blocked;
+    container.appendChild(button);
+    renderResult(container);
   }
 
   await refresh();
 }
 
-module.exports = { renderWriteResponses, candidateRows, gitStates };
+module.exports = { renderWriteResponses };

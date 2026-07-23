@@ -307,3 +307,92 @@ def _assert_unique(items: list[dict[str, Any]], label: str) -> None:
             lines.append(f"  {slug}")
             lines.extend(f"    - {path}" for path in paths)
         raise ObsError("\n".join(lines))
+
+
+def dispatch_commit(
+    repo: Path,
+    *,
+    commit_hash: str,
+    plan_slug: str,
+    dry_run: bool = False,
+) -> dict[str, Any]:
+    """Dispatch the Markdown members of an existing user commit.
+
+    Content is read from the selected commit, not from the working tree. The
+    commit receives an annotated inflight tag only after enqueue succeeds.
+    """
+    commit = str(commit_hash or "").strip()
+    plan = str(plan_slug or "").strip()
+    if not commit:
+        raise ObsError("dispatch requires commit_hash")
+    if not plan:
+        raise ObsError("dispatch requires plan_slug")
+    if git.is_inflight(repo, commit):
+        raise ObsError(f"commit is already tagged inflight: {commit[:8]}")
+
+    paths = git.files_in_commit(repo, commit)
+    markdown_paths = [path for path in paths if Path(path).suffix.lower() == ".md"]
+    if not markdown_paths:
+        raise ObsError("selected commit contains no Markdown files")
+
+    items: list[dict[str, Any]] = []
+    records: list[dict[str, str]] = []
+    for path in markdown_paths:
+        content = git.show_file(repo, commit, path)
+        document = parse_markdown(content)
+        slug = str(document.frontmatter.get("slug") or "").strip()
+        if not slug:
+            raise ObsError(f"{path}: missing slug in selected commit")
+        item = {
+            "path": path,
+            "slug": slug,
+            "record_content": content,
+            "dispatch_commit": commit,
+            "plan_slug": plan,
+        }
+        items.append(item)
+        records.append(_dispatch_record(slug=slug, plan_slug=plan, content=content))
+
+    _assert_unique(items, "dispatch")
+    if dry_run:
+        return {
+            "commit": commit,
+            "plan_slug": plan,
+            "count": len(items),
+            "items": items,
+            "pipeline_output": "",
+            "tag": None,
+            "dry_run": True,
+        }
+
+    import os
+    import subprocess
+    from .executables import autoscribe_bin
+
+    command = [autoscribe_bin(), "enqueue"]
+    result = subprocess.run(
+        command,
+        cwd=repo,
+        env=os.environ.copy(),
+        input=_encode_ndjson(records),
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        check=False,
+    )
+    if result.returncode != 0:
+        detail = (result.stderr or result.stdout or f"exit status {result.returncode}".encode()).decode(
+            "utf-8", errors="replace"
+        ).strip()
+        raise ObsError(f"{' '.join(command)} failed: {detail}")
+
+    stamp = datetime.now().astimezone().strftime("%Y-%m-%d %H:%M:%S %z")
+    tag = git.tag_inflight(repo, commit, plan, stamp)
+    return {
+        "commit": commit,
+        "plan_slug": plan,
+        "count": len(items),
+        "items": items,
+        "pipeline_output": result.stdout.decode("utf-8", errors="replace").strip(),
+        "tag": {"name": tag, "plan_slug": plan, "timestamp": stamp},
+        "dry_run": False,
+    }

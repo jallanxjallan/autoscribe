@@ -347,3 +347,123 @@ def _write_manifest(repo: Path, mode: str, items: list[dict[str, Any]], target_d
              "items": [{key: item[key] for key in ("prompt_slug", "call_identity", "result_identity", "path")}
                        for item in items]}
     write_json(path, value)
+
+
+def _commit_member_targets(repo: Path, commit_hash: str) -> list[dict[str, Any]]:
+    """Resolve the Markdown members of a dispatch commit to current files by slug."""
+    commit = str(commit_hash or "").strip()
+    if not commit:
+        raise ObsError("commit hash is required")
+    current = Vault(repo).slug_map(public_only=True)
+    items: list[dict[str, Any]] = []
+    seen_slugs: set[str] = set()
+    for source_path in git.files_in_commit(repo, commit):
+        if Path(source_path).suffix.lower() != ".md":
+            continue
+        document = parse_markdown(git.show_file(repo, commit, source_path))
+        slug = str(document.frontmatter.get("slug") or "").strip()
+        if not slug:
+            raise ObsError(f"{source_path}: missing slug in dispatch commit")
+        if slug in seen_slugs:
+            raise ObsError(f"dispatch commit contains duplicate slug: {slug}")
+        seen_slugs.add(slug)
+        target = current.get(slug)
+        if target is None:
+            items.append({
+                "source_path": source_path, "slug": slug, "path": None,
+                "state": "unresolved", "git_status": "", "dirty": False,
+                "error": "slug does not resolve to a current file",
+            })
+            continue
+        state = git.file_state(repo, target.path)
+        dirty = bool(state["git_status"])
+        items.append({
+            "source_path": source_path, "slug": slug, "path": target.path,
+            "state": state["repo_state"], "git_status": state["git_status"],
+            "dirty": dirty, "error": None,
+        })
+    if not items:
+        raise ObsError("selected dispatch commit contains no Markdown files")
+    return items
+
+
+def writeback_candidates(repo: Path, *, limit: int = 100) -> list[dict[str, Any]]:
+    records = []
+    for commit in git.inflight_commit_records(repo, limit=limit):
+        members = _commit_member_targets(repo, str(commit["hash"]))
+        records.append({**commit, "members": members,
+                        "blocked": any(item["dirty"] or item["error"] for item in members)})
+    return records
+
+
+def writeback_commit_selection(repo: Path, *, commit_hash: str, dry_run: bool = False) -> dict[str, Any]:
+    commit = str(commit_hash or "").strip()
+    candidates = {str(item["hash"]): item for item in git.inflight_commit_records(repo, limit=500)}
+    selected = candidates.get(commit)
+    if selected is None:
+        raise ObsError("selected commit is not an available inflight dispatch")
+
+    members = _commit_member_targets(repo, commit)
+    blocked = [item for item in members if item["dirty"] or item["error"]]
+    if blocked:
+        details = "; ".join(
+            f"{item.get('path') or item['source_path']}: {item.get('error') or item['git_status'] or 'dirty'}"
+            for item in blocked
+        )
+        raise ObsError(f"writeback aborted because selected files are not clean: {details}")
+
+    items = []
+    for member in members:
+        path = str(member["path"])
+        document = parse_markdown((repo / path).read_text(encoding="utf-8"))
+        if not document.has_frontmatter:
+            raise ObsError(f"{path}: target file has no frontmatter to preserve")
+        items.append({"prompt_slug": member["slug"], "path": path,
+                      "frontmatter": dict(document.frontmatter)})
+
+    if dry_run:
+        return {"commit": commit, "plan_slug": selected["plan_slug"],
+                "inflight_tag": selected["inflight_tag"], "members": members,
+                "written": [], "writeback_commit": None, "dry_run": True}
+
+    extracted = extract_results(repo, [item["prompt_slug"] for item in items])
+    by_slug = {item["prompt_slug"]: item for item in extracted}
+    originals = {item["path"]: (repo / item["path"]).read_text(encoding="utf-8") for item in items}
+    written: list[dict[str, Any]] = []
+    try:
+        for item in items:
+            response = by_slug[item["prompt_slug"]]
+            body = strip_frontmatter(response["content"]).lstrip("\n")
+            if not body.strip():
+                raise ObsError(f"{item['path']}: response body is empty")
+            frontmatter = dict(item["frontmatter"])
+            frontmatter["status"] = "ai-generated"
+            rendered = render_markdown(frontmatter, body)
+            path = repo / item["path"]
+            changed = originals[item["path"]] != rendered
+            if changed:
+                path.write_text(rendered, encoding="utf-8")
+            written.append({
+                "path": item["path"], "prompt_slug": item["prompt_slug"],
+                "changed": changed, "result_identity": response["result_identity"],
+                "call_identity": response["call_identity"],
+            })
+        changed_paths = [item["path"] for item in written if item["changed"]]
+        if not changed_paths:
+            raise ObsError("writeback produced no file changes")
+        wb_commit = git.writeback_commit(
+            repo, changed_paths, source_commit=commit,
+            inflight_tag=str(selected["inflight_tag"]),
+            plan_slug=str(selected["plan_slug"]),
+        )
+    except Exception:
+        for path, content in originals.items():
+            (repo / path).write_text(content, encoding="utf-8")
+        raise
+
+    _write_manifest(repo, "writeback", written)
+    return {
+        "commit": commit, "plan_slug": selected["plan_slug"],
+        "inflight_tag": selected["inflight_tag"], "members": members,
+        "written": written, "writeback_commit": wb_commit, "dry_run": False,
+    }

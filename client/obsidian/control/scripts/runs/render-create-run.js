@@ -2,13 +2,10 @@ const path = require('path');
 const { spawnSync } = require('child_process');
 const { el, clear, button } = require('../lib/dom.js');
 const { vaultRoot } = require('../lib/vault-state.js');
-const { currentSelectionSummary } = require('../lib/selection-loader.js');
-const { currentSelectionPath, readCurrentSelection } = require('../selections/current-selection.js');
 const { loadControlSnapshot, snapshotList } = require('../lib/control-loader.js');
 
 const PYTHON_EXECUTABLE = '/home/jeremy/Python3.13Env/bin/python';
 const DISPATCH_HELPER = path.join(__dirname, 'dispatch_run.py');
-const LIVE_SELECTION_INTERVAL_MS = 1000;
 
 function helperRequest(root, request) {
   const result = spawnSync(PYTHON_EXECUTABLE, [DISPATCH_HELPER], {
@@ -53,134 +50,156 @@ function planOptionText(plan) {
   return `${plan.label} — ${plan.slug} (${ttl})`;
 }
 
-function selectionSignature(selection) {
-  if (!selection?.items) return '';
-  return selection.items.map((item) => `${item.path || ''}\0${item.slug || ''}`).join('\1');
+function commitOptionText(commit) {
+  const date = new Date(Number(commit.timestamp || 0) * 1000).toLocaleString();
+  return `${commit.short_hash} — ${commit.subject} (${commit.count} file${commit.count === 1 ? '' : 's'}, ${date})`;
 }
 
-function renderFileTable(container, items) {
+function renderCommitFiles(container, state) {
+  container.innerHTML = '';
+  const files = state?.files || [];
+  if (!files.length) {
+    container.appendChild(el('p', { text: 'The selected commit contains no dispatchable files.' }));
+    return;
+  }
   const table = el('table');
   table.style.width = '100%';
-  table.appendChild(el('tr', {}, ['#', 'Filename', 'Slug'].map((heading) => el('th', { text: heading }))));
-  for (const item of items) {
+  table.appendChild(el('tr', {}, ['#', 'File', 'State', 'Current version'].map((heading) => el('th', { text: heading }))));
+  files.forEach((item, index) => {
+    const version = item.at_selected_commit ? 'selected commit' : 'changed later';
     table.appendChild(el('tr', {}, [
-      el('td', { text: item.index }),
-      el('td', { text: item.path ? path.basename(item.path) : item.label }),
-      el('td', { text: item.slug || '—' }),
+      el('td', { text: index + 1 }),
+      el('td', { text: item.path }),
+      el('td', { text: item.git_status || item.repo_state || 'unknown' }),
+      el('td', { text: version }),
     ]));
-  }
+  });
   container.appendChild(table);
+  container.appendChild(el('p', {
+    text: 'Dispatch uses the file contents stored in the selected commit, regardless of current working-tree state.',
+  }));
 }
 
 function readableMessage(response) {
   const result = response?.result || {};
   const lines = [];
   if (response?.message) lines.push(String(response.message));
-  for (const failure of result.failures || []) {
-    lines.push(`FAILED  ${failure.slug || failure.path}: ${failure.error}`);
-  }
+  if (result.tag?.name) lines.push(`Inflight tag: ${result.tag.name}`);
   if (result.pipeline_output) lines.push(String(result.pipeline_output));
   return lines.join('\n') || JSON.stringify(response, null, 2);
 }
 
 async function renderCreateRun({ app, container }) {
-  if (container.__dispatchSelectionTimer) clearInterval(container.__dispatchSelectionTimer);
   clear(container);
-
   const root = vaultRoot(app);
   let plans = loadPlans();
-  let loadedSelection = null;
-  let lastSelectionSignature = null;
+  let commits = [];
+  let selectedState = null;
 
-  container.appendChild(el('h2', { text: 'Dispatch Run' }));
+  container.appendChild(el('h2', { text: 'Dispatch Files' }));
 
-  const selectionControls = el('div');
-  selectionControls.style.display = 'flex';
-  selectionControls.style.gap = '0.5rem';
-  selectionControls.style.alignItems = 'center';
+  const planSelect = el('select');
+  planSelect.style.flex = '1';
+  const commitSelect = el('select');
+  commitSelect.style.flex = '1';
+  const filesBox = el('div');
+  const output = el('pre', { text: '' });
+  output.style.whiteSpace = 'pre-wrap';
 
-  const loadSelectionBtn = button('Load saved selection', () => loadSelection(true));
-  const selectionSummary = el('span', { text: 'No saved selection loaded.' });
-  selectionControls.append(loadSelectionBtn, selectionSummary);
-  container.appendChild(selectionControls);
+  function fillPlans(preferred = '') {
+    planSelect.innerHTML = '';
+    for (const plan of plans) planSelect.appendChild(el('option', { value: plan.slug, text: planOptionText(plan) }));
+    planSelect.disabled = !plans.length;
+    if (!plans.length) planSelect.appendChild(el('option', { text: 'No uploaded plans found.' }));
+    if (preferred && plans.some((plan) => plan.slug === preferred)) planSelect.value = preferred;
+  }
+
+  function fillCommits(preferred = '') {
+    commitSelect.innerHTML = '';
+    for (const commit of commits) commitSelect.appendChild(el('option', { value: commit.hash, text: commitOptionText(commit) }));
+    commitSelect.disabled = !commits.length;
+    if (!commits.length) commitSelect.appendChild(el('option', { text: 'No untagged user commits found.' }));
+    if (preferred && commits.some((commit) => commit.hash === preferred)) commitSelect.value = preferred;
+  }
+
+  function loadCommitState() {
+    const commit = commitSelect.value;
+    selectedState = null;
+    filesBox.innerHTML = '';
+    if (!commit) return;
+    const response = helperRequest(root, { operation: 'commit_state', commit });
+    selectedState = response.result;
+    renderCommitFiles(filesBox, selectedState);
+  }
+
+  function refreshAll() {
+    const previousPlan = planSelect.value;
+    const previousCommit = commitSelect.value;
+    plans = loadPlans();
+    commits = helperRequest(root, { operation: 'list_commits', limit: 100 }).result || [];
+    fillPlans(previousPlan);
+    fillCommits(previousCommit);
+    loadCommitState();
+  }
+
+  const planRefresh = button('Refresh plans', () => {
+    try {
+      const selected = planSelect.value;
+      plans = loadPlans();
+      fillPlans(selected);
+    } catch (error) {
+      output.textContent = error.message;
+      new Notice(`Plan refresh failed: ${error.message}`, 10000);
+    }
+  });
+  const commitRefresh = button('Refresh commits', () => {
+    try {
+      const selected = commitSelect.value;
+      commits = helperRequest(root, { operation: 'list_commits', limit: 100 }).result || [];
+      fillCommits(selected);
+      loadCommitState();
+    } catch (error) {
+      output.textContent = error.message;
+      new Notice(`Commit refresh failed: ${error.message}`, 10000);
+    }
+  });
 
   const planRow = el('div');
   planRow.style.display = 'flex';
   planRow.style.gap = '0.5rem';
   planRow.style.alignItems = 'center';
+  planRow.append(el('label', {}, ['Plan ', planSelect]), planRefresh);
 
-  const planSelect = el('select');
-  planSelect.style.flex = '1';
+  const commitRow = el('div');
+  commitRow.style.display = 'flex';
+  commitRow.style.gap = '0.5rem';
+  commitRow.style.alignItems = 'center';
+  commitRow.append(el('label', {}, ['Commit ', commitSelect]), commitRefresh);
 
-  function fillPlans(preferredSlug = '') {
-    planSelect.innerHTML = '';
-    if (!plans.length) {
-      planSelect.appendChild(el('option', { text: 'No uploaded plans found.' }));
-      planSelect.disabled = true;
-      return;
+  commitSelect.addEventListener('change', () => {
+    try {
+      loadCommitState();
+      output.textContent = '';
+    } catch (error) {
+      output.textContent = error.message;
+      new Notice(`Could not load commit: ${error.message}`, 10000);
     }
-    planSelect.disabled = false;
-    for (const plan of plans) {
-      planSelect.appendChild(el('option', { value: plan.slug, text: planOptionText(plan) }));
-    }
-    if (preferredSlug && plans.some((plan) => plan.slug === preferredSlug)) {
-      planSelect.value = preferredSlug;
-    }
-  }
-
-  const refreshPlansBtn = button('Refresh', () => {
-    const selected = planSelect.value;
-    plans = loadPlans();
-    fillPlans(selected);
   });
-
-  fillPlans();
-  planRow.append(el('label', {}, ['Uploaded plan ', planSelect]), refreshPlansBtn);
-  container.appendChild(planRow);
-
-  const filesBox = el('div');
-  const output = el('pre', { text: '' });
-  output.style.whiteSpace = 'pre-wrap';
-
-  function loadSelection(forceRender = false) {
-    const current = readCurrentSelection(app);
-    const next = current
-      ? currentSelectionSummary(app, current, currentSelectionPath(app))
-      : null;
-    const signature = selectionSignature(next);
-    if (!forceRender && signature === lastSelectionSignature) return;
-
-    loadedSelection = next;
-    lastSelectionSignature = signature;
-    filesBox.innerHTML = '';
-
-    if (!loadedSelection?.items?.length) {
-      selectionSummary.textContent = 'No usable files in the saved selection.';
-      filesBox.appendChild(el('p', { text: 'Save a selection from a query.' }));
-      return;
-    }
-
-    selectionSummary.textContent = `${loadedSelection.count} file(s) loaded.`;
-    renderFileTable(filesBox, loadedSelection.items);
-  }
 
   const dispatchBtn = button('Dispatch Run', () => {
     try {
-      loadSelection(true);
       const planSlug = planSelect.value;
-      if (!loadedSelection?.items?.length) throw new Error('The saved selection contains no usable files.');
+      const commit = commitSelect.value;
       if (!planSlug) throw new Error('Select an uploaded plan.');
+      if (!commit) throw new Error('Select a commit.');
+      if (!selectedState?.files?.length) throw new Error('The selected commit contains no files.');
 
       dispatchBtn.disabled = true;
       output.textContent = 'Dispatching…';
-      const response = helperRequest(root, {
-        operation: 'dispatch',
-        plan_slug: planSlug,
-        items: loadedSelection.items.map((item) => ({ path: item.path, slug: item.slug })),
-      });
+      const response = helperRequest(root, { operation: 'dispatch', plan_slug: planSlug, commit });
       output.textContent = readableMessage(response);
       new Notice('Dispatch complete.');
-      loadSelection(true);
+      refreshAll();
     } catch (error) {
       output.textContent = error.message;
       new Notice(`Dispatch failed: ${error.message}`, 10000);
@@ -190,9 +209,13 @@ async function renderCreateRun({ app, container }) {
     }
   });
 
-  container.append(filesBox, dispatchBtn, output);
-  loadSelection(true);
-  container.__dispatchSelectionTimer = setInterval(() => loadSelection(false), LIVE_SELECTION_INTERVAL_MS);
+  container.append(planRow, commitRow, filesBox, dispatchBtn, output);
+  try {
+    refreshAll();
+  } catch (error) {
+    output.textContent = error.message;
+    new Notice(`Dispatch panel failed: ${error.message}`, 10000);
+  }
 }
 
 module.exports = { renderCreateRun };

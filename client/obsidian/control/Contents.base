@@ -73,7 +73,6 @@ views:
       - selected
       - file.name
       - origin
-      - file.mtime
       - file.tags
     sort:
       - property: selected
@@ -86,6 +85,8 @@ views:
         direction: ASC
       - property: file.mtime
         direction: ASC
+    columnSize:
+      note.origin: 184
   - type: table
     name: Instructions
     filters:
@@ -112,3 +113,22 @@ views:
       - stage
       - status
       - file.mtime
+      - action
+    sort:
+      - property: status
+        direction: ASC
+  - type: table
+    name: Final
+    filters:
+      and:
+        - file.folder == "contents"
+        - stage == "final"
+    groupBy:
+      property: status
+      direction: ASC
+    order:
+      - file.name
+      - action
+    sort:
+      - property: action
+        direction: ASC
