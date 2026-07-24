@@ -264,78 +264,88 @@ def commit_file_states(repo: Path, commit_hash: str) -> list[dict[str, object]]:
 
 _WRITEBACK_SOURCE_TRAILER = "AutoScribe-Source-Commit"
 _WRITEBACK_TAG_TRAILER = "AutoScribe-Inflight-Tag"
+_WRITEBACK_SLUG_TRAILER = "AutoScribe-Source-Slug"
 
 
-def inflight_commit_records(repo: Path, *, limit: int = 100) -> list[dict[str, object]]:
-    """Return inflight-tagged commits that do not yet have a writeback commit."""
-    if limit < 1:
-        raise ObsError("commit list limit must be positive")
-    output = run(
-        ["git", "for-each-ref", "--sort=-creatordate",
-         "--format=%(refname:short)\x1f%(*objectname)\x1f%(creatordate:unix)",
-         "refs/tags/inflight/"],
-        cwd=repo,
-    ).stdout
-    records: list[dict[str, object]] = []
-    seen: set[str] = set()
-    for raw in output.splitlines():
-        parts = raw.split("\x1f")
-        if len(parts) != 3:
-            continue
-        tag_name, commit_hash, tag_timestamp = parts
-        if commit_hash in seen or has_writeback_commit(repo, commit_hash):
-            continue
-        seen.add(commit_hash)
-        plan_slug = _plan_from_inflight_tag(tag_name)
-        subject = run(["git", "show", "-s", "--format=%s", commit_hash], cwd=repo).stdout.strip()
-        timestamp = run(["git", "show", "-s", "--format=%ct", commit_hash], cwd=repo).stdout.strip()
-        files = files_in_commit(repo, commit_hash)
-        records.append({
-            "hash": commit_hash,
-            "short_hash": commit_hash[:8],
-            "subject": subject,
-            "timestamp": int(timestamp or 0),
-            "tag_timestamp": int(tag_timestamp or 0),
-            "plan_slug": plan_slug,
-            "inflight_tag": tag_name,
-            "files": files,
-            "count": len(files),
-        })
-        if len(records) >= limit:
-            break
-    return records
-
-
-def _plan_from_inflight_tag(tag_name: str) -> str:
-    value = str(tag_name or "")
-    if not value.startswith(_INFLIGHT_TAG_PREFIX):
-        return ""
-    remainder = value[len(_INFLIGHT_TAG_PREFIX):]
-    return remainder.rsplit("/", 1)[0] if "/" in remainder else remainder
-
-
-def has_writeback_commit(repo: Path, source_commit: str) -> bool:
+def has_writeback_slug(repo: Path, source_commit: str, slug: str) -> bool:
     source = str(source_commit or "").strip()
-    if not source:
-        raise ObsError("source commit is required")
+    value = str(slug or "").strip()
+    if not source or not value:
+        raise ObsError("source commit and slug are required")
     result = run(
-        ["git", "log", "HEAD", "--format=%B%x1e", "--grep",
-         f"^{_WRITEBACK_SOURCE_TRAILER}: {source}$"],
+        [
+            "git", "log", "HEAD", "--format=%B%x1e", "--all-match",
+            "--grep", f"^{_WRITEBACK_SOURCE_TRAILER}: {source}$",
+            "--grep", f"^{_WRITEBACK_SLUG_TRAILER}: {value}$",
+        ],
         cwd=repo,
         check=False,
     )
     return bool(result.stdout.strip()) if result.returncode == 0 else False
 
 
+def has_writeback_commit(repo: Path, source_commit: str) -> bool:
+    source = str(source_commit or "").strip()
+    if not source:
+        raise ObsError("source commit is required")
+    slugs: list[str] = []
+    for path in files_in_commit(repo, source):
+        if Path(path).suffix.lower() != ".md":
+            continue
+        try:
+            text = show_file(repo, source, path)
+        except ObsError:
+            continue
+        for line in text.splitlines():
+            if line.startswith("slug:"):
+                slug = line.partition(":")[2].strip()
+                if slug:
+                    slugs.append(slug)
+                break
+    return bool(slugs) and all(has_writeback_slug(repo, source, slug) for slug in slugs)
+
+
 def writeback_commit(repo: Path, paths: list[str], *, source_commit: str,
-                     inflight_tag: str, plan_slug: str) -> str:
+                     inflight_tag: str, plan_slug: str, slugs: list[str]) -> str:
     source = str(source_commit or "").strip()
     tag = str(inflight_tag or "").strip()
     plan = str(plan_slug or "").strip()
-    if not source or not tag or not plan:
-        raise ObsError("writeback commit requires source commit, inflight tag, and plan slug")
-    if has_writeback_commit(repo, source):
-        raise ObsError(f"dispatch commit already has a writeback commit: {source[:8]}")
+    clean_slugs = [str(slug).strip() for slug in slugs if str(slug).strip()]
+    if not source or not tag or not plan or not clean_slugs:
+        raise ObsError("writeback commit requires source commit, inflight tag, plan slug, and slugs")
     message = f"WRITEBACK {source[:8]}: {plan}"
-    body = f"{_WRITEBACK_SOURCE_TRAILER}: {source}\n{_WRITEBACK_TAG_TRAILER}: {tag}"
-    return commit_files(repo, paths, message, body)
+    trailers = [
+        f"{_WRITEBACK_SOURCE_TRAILER}: {source}",
+        f"{_WRITEBACK_TAG_TRAILER}: {tag}",
+        *[f"{_WRITEBACK_SLUG_TRAILER}: {slug}" for slug in clean_slugs],
+    ]
+    return commit_files(repo, paths, message, "\n".join(trailers))
+
+
+def commit_inflight_modifications(repo: Path, paths: list[str]) -> str:
+    clean = sorted({str(path).strip() for path in paths if str(path).strip()})
+    if not clean:
+        raise ObsError("inflight modification commit requires paths")
+    return commit_files(
+        repo, clean,
+        "AUTOSCRIBE: preserve edits made while inflight",
+        "AutoScribe-Recovery: edited-while-inflight",
+    )
+
+
+def tag_inflight_modifications(repo: Path, commit_hash: str) -> str:
+    from datetime import datetime, timezone
+
+    commit = str(commit_hash or "").strip()
+    if not commit:
+        raise ObsError("inflight modification tag requires commit")
+    stamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
+    base = f"inflight-modified/{stamp}"
+    tag = base
+    counter = 2
+    while run(["git", "rev-parse", "-q", "--verify", f"refs/tags/{tag}"], cwd=repo, check=False).returncode == 0:
+        tag = f"{base}-{counter}"
+        counter += 1
+    run(["git", "tag", "-a", tag, commit, "-m", "Edits preserved before AutoScribe writeback"], cwd=repo)
+    return tag
+

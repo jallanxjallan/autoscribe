@@ -10,7 +10,7 @@ from typing import Any, Callable
 from . import git
 from .catalog import instruction_catalog, pipeline_snapshot
 from .downloads import (pending_responses, write_responses, writeback, writenew,
-                        writeback_candidates, writeback_commit_selection)
+                        writeback_candidates, writeback_commit_selection, writeback_all_inflight)
 from .errors import ObsError
 from .git_selection import commit_selection, resolve_selection
 from .plans import delete_plan, list_plans, load_plan, save_plan
@@ -136,6 +136,10 @@ def _writeback_commit_selection(repo: Path, request: dict[str, Any]) -> dict[str
         dry_run=bool(request.get("dry_run")),
     )
 
+
+def _writeback_all_inflight(repo: Path, request: dict[str, Any]) -> dict[str, Any]:
+    return writeback_all_inflight(repo, dry_run=bool(request.get("dry_run")))
+
 def _writeback(repo: Path, request: dict[str, Any]) -> list[dict[str, Any]]:
     return writeback(repo, dry_run=bool(request.get("dry_run")), limit=request.get("limit"))
 
@@ -188,6 +192,7 @@ HANDLERS: dict[str, Handler] = {
     "responses.write": _responses_write,
     "writeback.candidates": _writeback_candidates,
     "writeback.commit": _writeback_commit_selection,
+    "writeback.run": _writeback_all_inflight,
     "writeback": _writeback,
     "writenew": _writenew,
 }
