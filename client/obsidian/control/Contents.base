@@ -42,25 +42,23 @@ views:
       - file.name
       - slug
   - type: table
-    name: Review
+    name: State
     filters:
       and:
         - file.folder == "contents"
-        - status == "review"
-        - or:
-            - "!stage.isEmpty()"
     groupBy:
-      property: stage
+      property: state
       direction: ASC
     order:
-      - file.name
       - selected
+      - file.name
       - stage
       - status
-      - tags
     sort:
       - property: stage
         direction: DESC
+      - property: status
+        direction: ASC
   - type: table
     name: Contents
     filters:
@@ -97,10 +95,9 @@ views:
       - context
       - file.mtime
   - type: table
-    name: Drafts
+    name: Stage
     filters:
       and:
-        - stage != "final"
         - and:
             - file.folder == "contents"
     groupBy:
@@ -109,6 +106,34 @@ views:
     order:
       - selected
       - file.name
+      - status
+      - state
+  - type: table
+    name: Action
+    filters:
+      and:
+        - file.folder == "contents"
+    groupBy:
+      property: action
+      direction: ASC
+    order:
+      - selected
+      - file.name
       - stage
       - status
-      - file.mtime
+    sort:
+      - property: status
+        direction: ASC
+  - type: table
+    name: Status
+    filters:
+      and:
+        - file.folder == "contents"
+    groupBy:
+      property: status
+      direction: ASC
+    order:
+      - selected
+      - file.name
+      - stage
+      - state
