@@ -54,6 +54,31 @@ def last_commit(repo: Path, relpath: str) -> str:
     return result.stdout.strip() if result.returncode == 0 else ""
 
 
+
+def last_commit_record(repo: Path, relpath: str) -> dict[str, object] | None:
+    separator = "\x1f"
+    result = run(
+        [
+            "git", "log", "--max-count=1",
+            f"--format=%H{separator}%s{separator}%ct", "--", relpath,
+        ],
+        cwd=repo,
+        check=False,
+    )
+    value = result.stdout.strip()
+    if result.returncode != 0 or not value:
+        return None
+    parts = value.split(separator, 2)
+    if len(parts) != 3:
+        return None
+    commit_hash, subject, timestamp = parts
+    return {
+        "hash": commit_hash,
+        "short_hash": commit_hash[:8],
+        "subject": subject,
+        "timestamp": int(timestamp),
+    }
+
 def commit_files(repo: Path, paths: list[str], message: str, body: str = "") -> str:
     if not paths:
         raise ObsError("cannot commit an empty file list")
@@ -140,6 +165,9 @@ def user_commits(repo: Path, *, limit: int = 100) -> list[dict[str, object]]:
         files = files_in_commit(repo, commit_hash)
         if not files:
             continue
+        tags = inflight_tags(repo, commit_hash)
+        if tags:
+            continue
         commits.append({
             "hash": commit_hash,
             "short_hash": short_hash,
@@ -147,6 +175,8 @@ def user_commits(repo: Path, *, limit: int = 100) -> list[dict[str, object]]:
             "timestamp": int(timestamp),
             "files": files,
             "count": len(files),
+            "inflight": False,
+            "inflight_tags": [],
         })
     return commits
 
@@ -164,3 +194,158 @@ def files_in_commit(repo: Path, commit_hash: str) -> list[str]:
         cwd=repo,
     ).stdout
     return sorted({line.strip() for line in output.splitlines() if line.strip()})
+
+_INFLIGHT_TAG_PREFIX = "inflight/"
+
+
+def inflight_tags(repo: Path, commit_hash: str) -> list[str]:
+    value = str(commit_hash or "").strip()
+    if not value:
+        raise ObsError("commit hash is required")
+    output = run(["git", "tag", "--points-at", value], cwd=repo).stdout
+    return sorted(
+        line.strip() for line in output.splitlines()
+        if line.strip().startswith(_INFLIGHT_TAG_PREFIX)
+    )
+
+
+def is_inflight(repo: Path, commit_hash: str) -> bool:
+    return bool(inflight_tags(repo, commit_hash))
+
+
+def tag_inflight(repo: Path, commit_hash: str, plan_slug: str, timestamp: str) -> str:
+    commit = str(commit_hash or "").strip()
+    plan = str(plan_slug or "").strip()
+    stamp = str(timestamp or "").strip()
+    if not commit:
+        raise ObsError("commit hash is required")
+    if not plan:
+        raise ObsError("plan slug is required")
+    if not stamp:
+        raise ObsError("inflight timestamp is required")
+    if is_inflight(repo, commit):
+        raise ObsError(f"commit is already tagged inflight: {commit[:8]}")
+
+    safe_stamp = f"{stamp[:10].replace('-', '')}T{stamp[11:19].replace(':', '')}{stamp[20:]}"
+    tag_name = f"{_INFLIGHT_TAG_PREFIX}{plan}/{safe_stamp}"
+    message = f"plan={plan}\ndispatched_at={stamp}\ncommit={commit}"
+    run(["git", "tag", "-a", tag_name, commit, "-m", message], cwd=repo)
+    return tag_name
+
+
+def show_file(repo: Path, commit_hash: str, relpath: str) -> str:
+    value = str(commit_hash or "").strip()
+    path = str(relpath or "").strip()
+    if not value or not path:
+        raise ObsError("commit hash and path are required")
+    result = run(["git", "show", f"{value}:{path}"], cwd=repo, check=False)
+    if result.returncode != 0:
+        raise ObsError(f"file is not available in commit {value[:8]}: {path}")
+    return result.stdout
+
+
+def commit_file_states(repo: Path, commit_hash: str) -> list[dict[str, object]]:
+    files = files_in_commit(repo, commit_hash)
+    head_hash = head(repo)
+    states: list[dict[str, object]] = []
+    for path in files:
+        state = file_state(repo, path)
+        latest = last_commit(repo, path)
+        states.append({
+            "path": path,
+            "repo_state": state["repo_state"],
+            "git_status": state["git_status"],
+            "latest_commit": latest or None,
+            "at_selected_commit": latest == commit_hash,
+            "selected_commit": commit_hash,
+            "head": head_hash,
+        })
+    return states
+
+_WRITEBACK_SOURCE_TRAILER = "AutoScribe-Source-Commit"
+_WRITEBACK_TAG_TRAILER = "AutoScribe-Inflight-Tag"
+_WRITEBACK_SLUG_TRAILER = "AutoScribe-Source-Slug"
+
+
+def has_writeback_slug(repo: Path, source_commit: str, slug: str) -> bool:
+    source = str(source_commit or "").strip()
+    value = str(slug or "").strip()
+    if not source or not value:
+        raise ObsError("source commit and slug are required")
+    result = run(
+        [
+            "git", "log", "HEAD", "--format=%B%x1e", "--all-match",
+            "--grep", f"^{_WRITEBACK_SOURCE_TRAILER}: {source}$",
+            "--grep", f"^{_WRITEBACK_SLUG_TRAILER}: {value}$",
+        ],
+        cwd=repo,
+        check=False,
+    )
+    return bool(result.stdout.strip()) if result.returncode == 0 else False
+
+
+def has_writeback_commit(repo: Path, source_commit: str) -> bool:
+    source = str(source_commit or "").strip()
+    if not source:
+        raise ObsError("source commit is required")
+    slugs: list[str] = []
+    for path in files_in_commit(repo, source):
+        if Path(path).suffix.lower() != ".md":
+            continue
+        try:
+            text = show_file(repo, source, path)
+        except ObsError:
+            continue
+        for line in text.splitlines():
+            if line.startswith("slug:"):
+                slug = line.partition(":")[2].strip()
+                if slug:
+                    slugs.append(slug)
+                break
+    return bool(slugs) and all(has_writeback_slug(repo, source, slug) for slug in slugs)
+
+
+def writeback_commit(repo: Path, paths: list[str], *, source_commit: str,
+                     inflight_tag: str, plan_slug: str, slugs: list[str]) -> str:
+    source = str(source_commit or "").strip()
+    tag = str(inflight_tag or "").strip()
+    plan = str(plan_slug or "").strip()
+    clean_slugs = [str(slug).strip() for slug in slugs if str(slug).strip()]
+    if not source or not tag or not plan or not clean_slugs:
+        raise ObsError("writeback commit requires source commit, inflight tag, plan slug, and slugs")
+    message = f"WRITEBACK {source[:8]}: {plan}"
+    trailers = [
+        f"{_WRITEBACK_SOURCE_TRAILER}: {source}",
+        f"{_WRITEBACK_TAG_TRAILER}: {tag}",
+        *[f"{_WRITEBACK_SLUG_TRAILER}: {slug}" for slug in clean_slugs],
+    ]
+    return commit_files(repo, paths, message, "\n".join(trailers))
+
+
+def commit_inflight_modifications(repo: Path, paths: list[str]) -> str:
+    clean = sorted({str(path).strip() for path in paths if str(path).strip()})
+    if not clean:
+        raise ObsError("inflight modification commit requires paths")
+    return commit_files(
+        repo, clean,
+        "AUTOSCRIBE: preserve edits made while inflight",
+        "AutoScribe-Recovery: edited-while-inflight",
+    )
+
+
+def tag_inflight_modifications(repo: Path, commit_hash: str) -> str:
+    from datetime import datetime, timezone
+
+    commit = str(commit_hash or "").strip()
+    if not commit:
+        raise ObsError("inflight modification tag requires commit")
+    stamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
+    base = f"inflight-modified/{stamp}"
+    tag = base
+    counter = 2
+    while run(["git", "rev-parse", "-q", "--verify", f"refs/tags/{tag}"], cwd=repo, check=False).returncode == 0:
+        tag = f"{base}-{counter}"
+        counter += 1
+    run(["git", "tag", "-a", tag, commit, "-m", "Edits preserved before AutoScribe writeback"], cwd=repo)
+    return tag
+

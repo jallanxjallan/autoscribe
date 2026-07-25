@@ -1,15 +1,12 @@
 "use strict";
 
-const { spawnSync } = require("node:child_process");
-const { callFeeder, vaultRoot } = require("../lib/feeder-ipc");
-const { buildSlugPathMap } = require("../lib/rg");
+const { callFeeder } = require("../lib/feeder-ipc");
 const { createInternalLink } = require("../lib/internal-link");
 
 function el(tag, attrs = {}, text = null) {
   const node = document.createElement(tag);
   for (const [key, value] of Object.entries(attrs)) {
-    if (key === "className") node.className = value;
-    else if (key === "style") node.setAttribute("style", value);
+    if (key === "style") node.setAttribute("style", value);
     else if (key.startsWith("on") && typeof value === "function") {
       node.addEventListener(key.slice(2).toLowerCase(), value);
     } else if (key in node) node[key] = value;
@@ -19,265 +16,111 @@ function el(tag, attrs = {}, text = null) {
   return node;
 }
 
-function gitStates(root) {
-  const result = spawnSync("git", ["status", "--porcelain=v1", "-z", "--untracked-files=all"], {
-    cwd: root,
-    encoding: "utf8",
-    shell: false,
-    maxBuffer: 16 * 1024 * 1024,
-  });
-  if (result.error) throw result.error;
-  if (result.status !== 0) {
-    throw new Error(String(result.stderr || result.stdout || `git exited ${result.status}`).trim());
-  }
-
-  const states = new Map();
-  const entries = String(result.stdout || "").split("\0").filter(Boolean);
-  for (let index = 0; index < entries.length; index += 1) {
-    const entry = entries[index];
-    const status = entry.slice(0, 2);
-    const path = entry.slice(3).trim().replaceAll("\\", "/");
-    if (path) states.set(path, status);
-    if (status.includes("R") || status.includes("C")) index += 1;
-  }
-  return states;
+function wikilinkLabel(path) {
+  return `[[${String(path || "").replace(/\.md$/i, "")}]]`;
 }
 
-function shortIdentity(value) {
-  const text = String(value || "");
-  return text.length <= 18 ? text : `${text.slice(0, 8)}…${text.slice(-7)}`;
-}
-
-function candidateRows({ responses, bySlug, duplicates, states }) {
-  const matched = [];
-  const unmatched = [];
-  const duplicate = [];
-
-  for (const response of responses) {
-    const slug = String(response.prompt_slug || "").trim();
-    if (duplicates.has(slug)) {
-      duplicate.push(response);
-      continue;
-    }
-    const target = bySlug.get(slug);
-    if (!target) {
-      unmatched.push(response);
-      continue;
-    }
-    const gitStatus = states.get(target.path) || "";
-    matched.push({
-      ...response,
-      path: target.path,
-      line_number: target.lineNumber,
-      git_status: gitStatus,
-      dirty: Boolean(gitStatus),
-    });
-  }
-
-  matched.sort((a, b) => a.path.localeCompare(b.path));
-  unmatched.sort((a, b) => a.prompt_slug.localeCompare(b.prompt_slug));
-  duplicate.sort((a, b) => a.prompt_slug.localeCompare(b.prompt_slug));
-  return { matched, unmatched, duplicate };
-}
-
-function renderTable({ app, parent, title, items, selected, defaultChecked = false }) {
+function renderFileList(parent, app, title, items, note = "") {
+  if (!Array.isArray(items) || !items.length) return;
   parent.appendChild(el("h2", {}, title));
-  if (!items.length) {
-    parent.appendChild(el("p", {}, "None."));
-    return [];
-  }
-
-  const toolbar = el("div", { style: "display:flex;gap:.5rem;align-items:center;margin:.5rem 0;flex-wrap:wrap;" });
-  const selectAll = el("button", {}, "Select all");
-  const clearAll = el("button", {}, "Clear all");
-  const count = el("span", {}, "");
-  toolbar.append(selectAll, clearAll, count);
-  parent.appendChild(toolbar);
-
-  const table = el("table", { style: "width:100%;" });
-  const head = el("tr");
-  for (const label of ["", "File", "Slug", "Git", "Call", "Response"]) {
-    head.appendChild(el("th", {}, label));
-  }
-  table.appendChild(head);
-
-  const rows = items.map((item) => {
-    const tr = el("tr");
-    const checkbox = el("input", { type: "checkbox", checked: defaultChecked });
-    if (defaultChecked) selected.add(item.result_identity);
-    const checkCell = el("td");
-    checkCell.appendChild(checkbox);
-    const fileCell = el("td");
-    createInternalLink(fileCell, app, item.path, item.path);
-    tr.append(
-      checkCell,
-      fileCell,
-      el("td", {}, item.prompt_slug),
-      el("td", {}, item.git_status || "clean"),
-      el("td", {}, shortIdentity(item.call_identity)),
-      el("td", {}, shortIdentity(item.result_identity)),
-    );
-    table.appendChild(tr);
-    checkbox.addEventListener("change", () => {
-      if (checkbox.checked) selected.add(item.result_identity);
-      else selected.delete(item.result_identity);
-      updateCount();
-    });
-    return { item, checkbox };
-  });
-
-  function updateCount() {
-    count.textContent = `${rows.filter((row) => row.checkbox.checked).length} of ${rows.length} selected`;
-  }
-  selectAll.onclick = () => {
-    for (const row of rows) {
-      row.checkbox.checked = true;
-      selected.add(row.item.result_identity);
+  if (note) parent.appendChild(el("p", {}, note));
+  const list = el("ul");
+  for (const item of items) {
+    const li = el("li");
+    const path = item.path || item.source_path;
+    if (item.path) createInternalLink(li, app, item.path, wikilinkLabel(item.path));
+    else li.textContent = wikilinkLabel(path);
+    if (item.short_source_commit) {
+      li.appendChild(document.createTextNode(` — source ${item.short_source_commit}`));
     }
-    updateCount();
-  };
-  clearAll.onclick = () => {
-    for (const row of rows) {
-      row.checkbox.checked = false;
-      selected.delete(row.item.result_identity);
+    if (item.error) {
+      li.appendChild(document.createTextNode(` — ${item.error}`));
     }
-    updateCount();
-  };
-  updateCount();
-  parent.appendChild(table);
-  return rows;
+    list.appendChild(li);
+  }
+  parent.appendChild(list);
 }
 
 async function renderWriteResponses({ app, container }) {
-  const root = vaultRoot(app);
-  const state = {
-    cleanSelected: new Set(),
-    dirtySelected: new Set(),
-    candidates: null,
-  };
+  const state = { busy: false, result: null };
 
-  async function refresh() {
-    container.replaceChildren(el("p", {}, "Loading pending responses…"));
+  async function runWriteback() {
+    if (state.busy) return;
+    state.busy = true;
+    state.result = null;
+    render();
     try {
-      const responses = callFeeder(app, "responses.pending");
-      if (!Array.isArray(responses)) throw new Error("responses.pending returned no response list");
-
-      const { bySlug, duplicates } = buildSlugPathMap({ root });
-      const states = gitStates(root);
-      const candidates = candidateRows({ responses, bySlug, duplicates, states });
-      state.candidates = candidates;
-      state.cleanSelected.clear();
-      state.dirtySelected.clear();
-      render();
-    } catch (error) {
-      console.error(error);
-      container.replaceChildren(el("p", {}, `Write Responses failed: ${error.message}`));
-      new Notice(`Write Responses failed: ${error.message}`, 10000);
-    }
-  }
-
-  function chosen(items, selected) {
-    return items.filter((item) => selected.has(item.result_identity));
-  }
-
-  function write(items, allowDirty) {
-    if (!items.length) {
-      new Notice("No responses selected.");
-      return;
-    }
-    if (allowDirty) {
-      const paths = items.map((item) => `• ${item.path}`).join("\n");
-      const accepted = window.confirm(
-        `These files already contain uncommitted changes. Writeback will replace their bodies and may discard those edits.\n\n${paths}\n\nAre you sure?`,
-      );
-      if (!accepted) return;
-    }
-
-    try {
-      const result = callFeeder(app, "responses.write", {
-        items,
-        allow_dirty: allowDirty,
-      });
-      const changed = result.filter((item) => item.changed).length;
-      new Notice(`Wrote ${result.length} response(s); ${changed} file(s) changed.`);
-      refresh();
+      state.result = callFeeder(app, "writeback.run", {});
+      const written = Array.isArray(state.result?.written) ? state.result.written.length : 0;
+      const waiting = Array.isArray(state.result?.not_available) ? state.result.not_available.length : 0;
+      new Notice(`Wrote ${written} response file(s); ${waiting} inflight file(s) still waiting.`);
     } catch (error) {
       console.error(error);
       new Notice(`Writeback failed: ${error.message}`, 10000);
+    } finally {
+      state.busy = false;
+      render();
     }
   }
 
-  function renderExceptions(parent, title, items, reason) {
-    if (!items.length) return;
-    parent.appendChild(el("h2", {}, title));
-    parent.appendChild(el("p", {}, reason));
-    const table = el("table");
-    const head = el("tr");
-    head.append(el("th", {}, "Slug"), el("th", {}, "Call"), el("th", {}, "Response"));
-    table.appendChild(head);
-    for (const item of items) {
-      const row = el("tr");
-      row.append(
-        el("td", {}, item.prompt_slug),
-        el("td", {}, shortIdentity(item.call_identity)),
-        el("td", {}, shortIdentity(item.result_identity)),
-      );
-      table.appendChild(row);
+  function renderResult(parent) {
+    const result = state.result;
+    if (!result) return;
+
+    renderFileList(parent, app, "Downloaded files", result.written);
+    renderFileList(
+      parent,
+      app,
+      "Edited while inflight",
+      result.modified_while_inflight,
+      "These files were committed and tagged before the AI response overwrote them. Their state is set to ‘edited while inflight’; inspect the Git diff carefully.",
+    );
+    renderFileList(
+      parent,
+      app,
+      "Not yet available from AutoScribe",
+      result.not_available,
+      "These files remain inflight, but asc has not yet exposed a response for download.",
+    );
+    renderFileList(
+      parent,
+      app,
+      "Unresolved inflight files",
+      result.unresolved,
+      "These inflight source files could not be resolved safely to a current vault file.",
+    );
+
+    if (result.preservation_commit) {
+      const tag = result.preservation_tag ? ` · tag ${result.preservation_tag}` : "";
+      parent.appendChild(el(
+        "p",
+        {},
+        `Preserved inflight edits in commit ${String(result.preservation_commit).slice(0, 8)}${tag}.`,
+      ));
     }
-    parent.appendChild(table);
+
+    if (!(result.written || []).length && !(result.not_available || []).length && !(result.unresolved || []).length) {
+      parent.appendChild(el("p", {}, "No unfinished inflight files were found."));
+    }
   }
 
   function render() {
-    const { matched, unmatched, duplicate } = state.candidates;
-    const clean = matched.filter((item) => !item.dirty);
-    const dirty = matched.filter((item) => item.dirty);
-
     container.replaceChildren();
-    const header = el("div", { style: "display:flex;gap:.75rem;align-items:center;flex-wrap:wrap;" });
-    header.append(
-      el("button", { onclick: refresh }, "Refresh"),
-      el("span", {}, `${matched.length} matching response(s); ${unmatched.length} unmatched; ${duplicate.length} duplicate-slug response(s)`),
+    container.appendChild(el(
+      "p",
+      {},
+      "Write every response currently available for all inflight files in this repository.",
+    ));
+    const button = el(
+      "button",
+      { onclick: runWriteback, disabled: state.busy },
+      state.busy ? "Writing Responses…" : "Write Responses",
     );
-    container.appendChild(header);
-
-    renderTable({
-      app,
-      parent: container,
-      title: "Clean files",
-      items: clean,
-      selected: state.cleanSelected,
-      defaultChecked: true,
-    });
-    const cleanButton = el("button", {
-      onclick: () => write(chosen(clean, state.cleanSelected), false),
-      style: "margin-top:.75rem;",
-    }, "Write selected clean responses");
-    cleanButton.disabled = clean.length === 0;
-    container.appendChild(cleanButton);
-
-    renderTable({
-      app,
-      parent: container,
-      title: "Dirty files",
-      items: dirty,
-      selected: state.dirtySelected,
-      defaultChecked: false,
-    });
-    if (dirty.length) {
-      container.appendChild(el("p", {}, "Dirty files are never selected automatically. Writing them requires a separate confirmation."));
-    }
-    const dirtyButton = el("button", {
-      onclick: () => write(chosen(dirty, state.dirtySelected), true),
-      style: "margin-top:.75rem;",
-    }, "Write selected dirty responses…");
-    dirtyButton.disabled = dirty.length === 0;
-    container.appendChild(dirtyButton);
-
-    renderExceptions(container, "Unmatched response slugs", unmatched, "No Markdown file in the active vault has these slugs.");
-    renderExceptions(container, "Duplicate vault slugs", duplicate, "Writeback is disabled because each slug must resolve to exactly one file.");
+    container.appendChild(button);
+    renderResult(container);
   }
 
-  await refresh();
+  render();
 }
 
-module.exports = { renderWriteResponses, candidateRows, gitStates };
+module.exports = { renderWriteResponses };

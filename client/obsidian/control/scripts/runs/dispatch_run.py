@@ -16,6 +16,27 @@ def _request() -> dict[str, Any]:
     return value
 
 
+def _ipc(root: Path, payload: dict[str, Any]) -> Any:
+    result = subprocess.run(
+        [OBS_BIN, "--vault", str(root), "ipc"],
+        cwd=root,
+        input=json.dumps(payload, ensure_ascii=False),
+        text=True,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        check=False,
+    )
+    try:
+        response = json.loads(result.stdout or "{}")
+    except json.JSONDecodeError as exc:
+        detail = (result.stderr or result.stdout or f"exit status {result.returncode}").strip()
+        raise RuntimeError(f"obs ipc returned invalid JSON: {detail}") from exc
+    if result.returncode != 0 or response.get("ok") is False:
+        detail = response.get("error") or result.stderr or result.stdout or f"exit status {result.returncode}"
+        raise RuntimeError(str(detail).strip())
+    return response.get("result")
+
+
 def main() -> int:
     try:
         request = _request()
@@ -23,57 +44,33 @@ def main() -> int:
         if not root.is_dir():
             raise ValueError(f"invalid vault root: {root}")
 
-        items = request.get("items")
-        if not isinstance(items, list):
-            raise ValueError("dispatch request requires items list")
-        paths = []
-        for item in items:
-            if not isinstance(item, dict):
-                raise ValueError("dispatch item must be an object")
-            path = str(item.get("path") or "").strip()
-            if not path:
-                raise ValueError("dispatch item is missing path")
-            paths.append(path)
+        operation = str(request.get("operation") or "").strip()
+        if operation == "list_commits":
+            result = _ipc(root, {"operation": "git.user_commits", "limit": int(request.get("limit") or 100)})
+            message = f"Loaded {len(result or [])} dispatchable commit(s)."
+        elif operation == "commit_state":
+            commit = str(request.get("commit") or "").strip()
+            if not commit:
+                raise ValueError("commit_state requires commit")
+            result = _ipc(root, {"operation": "git.commit_state", "commit": commit})
+            message = f"Loaded {len((result or {}).get('files') or [])} commit member(s)."
+        elif operation == "dispatch":
+            commit = str(request.get("commit") or "").strip()
+            plan_slug = str(request.get("plan_slug") or "").strip()
+            if not commit:
+                raise ValueError("dispatch requires commit")
+            if not plan_slug:
+                raise ValueError("dispatch requires plan_slug")
+            result = _ipc(root, {
+                "operation": "dispatch.commit",
+                "commit": commit,
+                "plan_slug": plan_slug,
+            })
+            message = f"Dispatched {int((result or {}).get('count') or 0)} record(s) from {commit[:8]} with {plan_slug}."
+        else:
+            raise ValueError(f"unknown helper operation: {operation or '<empty>'}")
 
-        plan_slug = str(request.get("plan_slug") or "").strip()
-        if not plan_slug:
-            raise ValueError("dispatch request requires plan_slug")
-
-        ipc_request = {
-            "operation": "dispatch.run",
-            "paths": paths,
-            "plan_slug": plan_slug,
-        }
-        result = subprocess.run(
-            [OBS_BIN, "--vault", str(root), "ipc"],
-            cwd=root,
-            input=json.dumps(ipc_request, ensure_ascii=False),
-            text=True,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
-            check=False,
-        )
-        try:
-            response = json.loads(result.stdout or "{}")
-        except json.JSONDecodeError as exc:
-            detail = (result.stderr or result.stdout or f"exit status {result.returncode}").strip()
-            raise RuntimeError(f"obs ipc returned invalid JSON: {detail}") from exc
-
-        if result.returncode != 0 or response.get("ok") is False:
-            detail = response.get("error") or result.stderr or result.stdout or f"exit status {result.returncode}"
-            raise RuntimeError(str(detail).strip())
-
-        dispatch = response.get("result") or {}
-        dispatched = int(dispatch.get("count", 0))
-        failed = int(dispatch.get("failed_count", len(dispatch.get("failures") or [])))
-        message = f"Dispatched {dispatched} record(s) with {plan_slug}."
-        if failed:
-            message += f" {failed} file(s) failed."
-        print(json.dumps({
-            "ok": True,
-            "message": message,
-            "result": dispatch,
-        }, ensure_ascii=False))
+        print(json.dumps({"ok": True, "message": message, "result": result}, ensure_ascii=False))
         return 0
     except Exception as exc:
         print(json.dumps({"ok": False, "error": str(exc)}, ensure_ascii=False))
