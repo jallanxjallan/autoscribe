@@ -14,7 +14,7 @@ from .downloads import (pending_responses, write_responses, writeback, writenew,
 from .errors import ObsError
 from .git_selection import commit_selection, resolve_selection
 from .plans import delete_plan, list_plans, load_plan, save_plan
-from .uploads import dispatch_commit, dispatch_paths, dispatch_run
+from .uploads import dispatch_paths, dispatch_run
 from .vault import Vault
 
 Handler = Callable[[Path, dict[str, Any]], Any]
@@ -67,35 +67,6 @@ def _commit_selection(repo: Path, request: dict[str, Any]) -> dict[str, Any]:
         raise ObsError("git.commit_selection requires items list")
     return commit_selection(repo, items, str(request.get("message") or ""))
 
-def _user_commits(repo: Path, request: dict[str, Any]) -> list[dict[str, object]]:
-    return git.user_commits(repo, limit=int(request.get("limit") or 100))
-
-
-def _commit_files(repo: Path, request: dict[str, Any]) -> list[str]:
-    return git.files_in_commit(repo, str(request.get("commit") or ""))
-
-
-
-def _commit_state(repo: Path, request: dict[str, Any]) -> dict[str, Any]:
-    commit = str(request.get("commit") or "").strip()
-    if not commit:
-        raise ObsError("git.commit_state requires commit")
-    return {
-        "commit": commit,
-        "files": git.commit_file_states(repo, commit),
-        "inflight": git.is_inflight(repo, commit),
-        "inflight_tags": git.inflight_tags(repo, commit),
-    }
-
-
-def _dispatch_commit(repo: Path, request: dict[str, Any]) -> dict[str, Any]:
-    return dispatch_commit(
-        repo,
-        commit_hash=str(request.get("commit") or ""),
-        plan_slug=str(request.get("plan_slug") or ""),
-        dry_run=bool(request.get("dry_run")),
-    )
-
 def _dispatch(repo: Path, request: dict[str, Any]) -> dict[str, Any]:
     paths = request.get("paths")
     if not isinstance(paths, list):
@@ -104,6 +75,7 @@ def _dispatch(repo: Path, request: dict[str, Any]) -> dict[str, Any]:
         repo,
         paths=[str(path) for path in paths],
         plan_slug=str(request.get("plan_slug") or ""),
+        message=str(request.get("message") or ""),
         dry_run=bool(request.get("dry_run")),
     )
 
@@ -179,15 +151,11 @@ HANDLERS: dict[str, Handler] = {
     "git.commit": _commit,
     "git.resolve_selection": _resolve_selection,
     "git.commit_selection": _commit_selection,
-    "git.user_commits": _user_commits,
-    "git.commit_files": _commit_files,
-    "git.commit_state": _commit_state,
     "plans.list": _plans_list,
     "plan.load": _plan_load,
     "plan.save": _plan_save,
     "plan.delete": _plan_delete,
     "dispatch.run": _dispatch,
-    "dispatch.commit": _dispatch_commit,
     "responses.pending": _responses_pending,
     "responses.write": _responses_write,
     "writeback.candidates": _writeback_candidates,

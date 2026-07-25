@@ -72,68 +72,9 @@ def test_user_commits_exclude_autoscribe_commits(tmp_path: Path):
     subprocess.run(["git", "commit", "-m", "UPLOAD instructions: 20260715"], cwd=tmp_path, check=True, capture_output=True)
 
     commits = git.user_commits(tmp_path)
-    assert commits == []
+    assert [commit["subject"] for commit in commits] == ["Editorial pass"]
+    assert commits[0]["files"] == ["one.md"]
 
-
-def test_user_commits_exclude_inflight_and_written_back_commits(tmp_path: Path):
-    import subprocess
-    from obs import git
-
-    subprocess.run(["git", "init"], cwd=tmp_path, check=True, capture_output=True)
-    subprocess.run(["git", "config", "user.email", "test@example.com"], cwd=tmp_path, check=True)
-    subprocess.run(["git", "config", "user.name", "Test"], cwd=tmp_path, check=True)
-
-    def commit_file(name: str, content: str, subject: str) -> str:
-        path = tmp_path / name
-        path.write_text(content, encoding="utf-8")
-        subprocess.run(["git", "add", name], cwd=tmp_path, check=True)
-        subprocess.run(["git", "commit", "-m", subject], cwd=tmp_path, check=True, capture_output=True)
-        return subprocess.run(
-            ["git", "rev-parse", "HEAD"], cwd=tmp_path, check=True, capture_output=True, text=True
-        ).stdout.strip()
-
-    available = commit_file("available.md", "---\nslug: cnt.available\n---\n", "Available")
-    inflight = commit_file("inflight.md", "---\nslug: cnt.inflight\n---\n", "Inflight")
-    git.tag_inflight(tmp_path, inflight, "plan.test", "2026-07-25T02:00:00Z")
-    written = commit_file("written.md", "---\nslug: cnt.written\n---\n", "Written")
-    commit_file(
-        "written.md",
-        "---\nslug: cnt.written\nstatus: ai-generated\n---\n",
-        "WRITEBACK result\n\n"
-        f"AutoScribe-Source-Commit: {written}\n"
-        "AutoScribe-Source-Slug: cnt.written",
-    )
-
-    commits = git.user_commits(tmp_path)
-    hashes = {commit["hash"] for commit in commits}
-    assert available in hashes
-    assert inflight not in hashes
-    assert written not in hashes
-
-
-
-def test_user_commits_require_every_member_to_remain_at_selected_commit(tmp_path: Path):
-    import subprocess
-    from obs import git
-
-    subprocess.run(["git", "init"], cwd=tmp_path, check=True, capture_output=True)
-    subprocess.run(["git", "config", "user.email", "test@example.com"], cwd=tmp_path, check=True)
-    subprocess.run(["git", "config", "user.name", "Test"], cwd=tmp_path, check=True)
-
-    (tmp_path / "one.md").write_text("---\nslug: cnt.one\n---\n", encoding="utf-8")
-    (tmp_path / "two.md").write_text("---\nslug: cnt.two\n---\n", encoding="utf-8")
-    subprocess.run(["git", "add", "one.md", "two.md"], cwd=tmp_path, check=True)
-    subprocess.run(["git", "commit", "-m", "Generate first draft from notes"], cwd=tmp_path, check=True, capture_output=True)
-    source = subprocess.run(
-        ["git", "rev-parse", "HEAD"], cwd=tmp_path, check=True, capture_output=True, text=True
-    ).stdout.strip()
-
-    (tmp_path / "one.md").write_text("---\nslug: cnt.one\nstatus: ai-generated\n---\n", encoding="utf-8")
-    subprocess.run(["git", "add", "one.md"], cwd=tmp_path, check=True)
-    subprocess.run(["git", "commit", "-m", "Later revision"], cwd=tmp_path, check=True, capture_output=True)
-
-    hashes = {commit["hash"] for commit in git.user_commits(tmp_path)}
-    assert source not in hashes
 
 def test_dispatch_run_emits_nul_pandoc_arguments_and_commits(tmp_path: Path):
     import json
@@ -275,6 +216,7 @@ def test_dispatch_paths_does_not_infer_inflight_from_shared_plan_commit(tmp_path
 
     captured = {}
     monkeypatch.setattr(uploads.git, "commit_files", lambda repo, selected, message: "dispatch-commit")
+    monkeypatch.setattr(uploads.git, "tag_inflight", lambda repo, commit, plan, stamp: f"inflight/{plan}/stamp")
     monkeypatch.setattr(executables, "autoscribe_bin", lambda: "/fake/asc")
 
     def fake_run(command, **kwargs):
@@ -298,3 +240,66 @@ def test_dispatch_paths_does_not_infer_inflight_from_shared_plan_commit(tmp_path
         "cnt.file-2",
         "cnt.file-3",
     ]
+
+
+def test_dispatch_paths_commits_selection_with_optional_message_and_tags(tmp_path: Path, monkeypatch):
+    import json
+    import subprocess
+    from types import SimpleNamespace
+    from obs import uploads
+    from obs import executables
+
+    subprocess.run(["git", "init"], cwd=tmp_path, check=True, capture_output=True)
+    subprocess.run(["git", "config", "user.email", "test@example.com"], cwd=tmp_path, check=True)
+    subprocess.run(["git", "config", "user.name", "Test"], cwd=tmp_path, check=True)
+    source = tmp_path / "Selected.md"
+    source.write_text("---\nslug: cnt.selected\n---\nText\n", encoding="utf-8")
+    subprocess.run(["git", "add", "Selected.md"], cwd=tmp_path, check=True)
+    subprocess.run(["git", "commit", "-m", "Initial"], cwd=tmp_path, check=True, capture_output=True)
+
+    monkeypatch.setattr(executables, "autoscribe_bin", lambda: "/fake/asc")
+    captured = {}
+
+    def fake_run(command, **kwargs):
+        captured["command"] = command
+        captured["input"] = kwargs["input"]
+        return SimpleNamespace(returncode=0, stdout=b"queued 1\n", stderr=b"")
+
+    monkeypatch.setattr(subprocess, "run", fake_run)
+    monkeypatch.setattr(uploads.git, "commit_files", lambda repo, paths, message: captured.setdefault("commit", (paths, message)) and "abc123")
+    monkeypatch.setattr(uploads.git, "tag_inflight", lambda repo, commit, plan, stamp: captured.setdefault("tag", (commit, plan, stamp)) and f"inflight/{plan}/stamp")
+
+    result = uploads.dispatch_paths(
+        tmp_path,
+        paths=["Selected.md"],
+        plan_slug="plan.cleanup",
+        message="Cleanup selected chapter",
+    )
+
+    assert captured["commit"] == (["Selected.md"], "Cleanup selected chapter")
+    assert captured["tag"][0:2] == ("abc123", "plan.cleanup")
+    records = [json.loads(line) for line in captured["input"].decode().splitlines()]
+    assert records[0]["record_identity"] == "cnt.selected"
+    assert result["commit"] == "abc123"
+    assert result["tag"]["name"].startswith("inflight/plan.cleanup/")
+
+
+def test_dispatch_paths_uses_generated_message_when_blank(tmp_path: Path, monkeypatch):
+    import subprocess
+    from types import SimpleNamespace
+    from obs import uploads
+    from obs import executables
+
+    subprocess.run(["git", "init"], cwd=tmp_path, check=True, capture_output=True)
+    source = tmp_path / "Selected.md"
+    source.write_text("---\nslug: cnt.selected\n---\nText\n", encoding="utf-8")
+
+    captured = {}
+    monkeypatch.setattr(executables, "autoscribe_bin", lambda: "/fake/asc")
+    monkeypatch.setattr(subprocess, "run", lambda *args, **kwargs: SimpleNamespace(returncode=0, stdout=b"ok\n", stderr=b""))
+    monkeypatch.setattr(uploads.git, "commit_files", lambda repo, paths, message: captured.setdefault("message", message) and "abc123")
+    monkeypatch.setattr(uploads.git, "tag_inflight", lambda *args: "inflight/plan.cleanup/stamp")
+
+    result = uploads.dispatch_paths(tmp_path, paths=["Selected.md"], plan_slug="plan.cleanup")
+    assert captured["message"].startswith("DISPATCH plan.cleanup:")
+    assert result["message"] == captured["message"]

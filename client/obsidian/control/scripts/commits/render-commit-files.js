@@ -180,7 +180,7 @@ async function renderCommitFiles({ app, container }) {
     updateControls();
 
     try {
-      const parsed = await readClipboardSelection();
+      const parsed = await readClipboardSelection(app);
       const result = callFeeder(app, "git.resolve_selection", { items: parsed });
       const normalized = normalizedResponse(result, parsed);
       state.parsed = parsed;

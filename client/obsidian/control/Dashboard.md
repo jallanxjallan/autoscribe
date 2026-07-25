@@ -37,7 +37,7 @@ function mainWindowLink(label, path) {
   const link = row.createEl("a", {
     text: label,
     href: "#",
-    title: `Open ${label} in the main window`
+    title: `Open ${label} in reading view in the main window`
   });
 
   link.addEventListener("click", async (event) => {
@@ -47,7 +47,7 @@ function mainWindowLink(label, path) {
 }
 
 function linkSection(title, items) {
-  dv.header(2, title);
+  if (title) dv.header(2, title);
 
   for (const [label, path] of items) {
     if (app.vault.getAbstractFileByPath(path)) {
@@ -58,19 +58,10 @@ function linkSection(title, items) {
   }
 }
 
-const tocPath = "Table of Contents.md";
-if (app.vault.getAbstractFileByPath(tocPath)) {
-  mainWindowLink("Table of Contents", tocPath);
-} else {
-  dv.paragraph("*No Table of Contents in this vault.*");
-}
-
-const contentsPath = "_control/bases/Contents.base";
-if (app.vault.getAbstractFileByPath(contentsPath)) {
-  mainWindowLink("Contents", contentsPath);
-} else {
-  dv.paragraph("*Contents base not found.*");
-}
+linkSection("", [
+  ["Table of Contents", "Table of Contents.md"],
+  ["Contents", "_control/bases/Contents.base"]
+]);
 
 linkSection("Workflow", [
   ["Stage Files", "_control/panels/Stage Files.md"],

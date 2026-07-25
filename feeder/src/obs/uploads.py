@@ -209,58 +209,63 @@ def dispatch_paths(
     *,
     paths: list[str],
     plan_slug: str,
+    message: str = "",
     dry_run: bool = False,
     defaults: list[str] | None = None,
 ) -> dict[str, Any]:
-    """Commit explicit Markdown paths and send their canonical NDJSON to enqueue."""
+    """Commit and dispatch the current explicit Markdown selection.
+
+    The selection is committed even when the selected files have no changes.
+    After enqueue succeeds, the new commit receives an annotated inflight tag
+    containing the selected plan slug.
+    """
     del defaults
-    plan_slug = str(plan_slug or "").strip()
-    if not plan_slug:
+    plan = str(plan_slug or "").strip()
+    if not plan:
         raise ObsError("dispatch requires plan_slug")
 
     items: list[dict[str, Any]] = []
-    failures: list[dict[str, str]] = []
     seen: set[str] = set()
     for raw in paths:
         item = _resolve_dispatch_item(repo, relpath=str(raw or ""))
         if item["path"] in seen:
             continue
         seen.add(item["path"])
-        item["plan_slug"] = plan_slug
+        item["plan_slug"] = plan
         items.append(item)
 
-    if not items and failures:
-        return {
-            "plan_slug": plan_slug,
-            "count": 0,
-            "failed_count": len(failures),
-            "items": [],
-            "failures": failures,
-            "pipeline_output": "",
-            "dry_run": dry_run,
-        }
     if not items:
         raise ObsError("selection contains no dispatchable Markdown files")
+    _assert_unique(items, "dispatch")
+
+    stamp = datetime.now().astimezone().strftime("%Y-%m-%d %H:%M:%S %z")
+    user_message = str(message or "").strip()
+    subject = user_message or f"DISPATCH {plan}: {stamp}"
+
     if dry_run:
         return {
-            "plan_slug": plan_slug,
+            "plan_slug": plan,
+            "message": subject,
             "count": len(items),
+            "failed_count": 0,
             "items": items,
-            "failed_count": len(failures),
-            "failures": failures,
+            "failures": [],
             "pipeline_output": "",
+            "commit": None,
+            "tag": None,
             "dry_run": True,
         }
 
-    stamp = datetime.now().astimezone().strftime("%Y-%m-%d %H:%M:%S %z")
-    commit = git.commit_files(repo, [item["path"] for item in items], f"{plan_slug} {stamp}")
-    records = []
+    # commit_files uses --allow-empty and --only, so an unchanged selection
+    # still gets a distinct source commit without including unrelated changes.
+    commit = git.commit_files(repo, [item["path"] for item in items], subject)
+    records: list[dict[str, str]] = []
     for item in items:
         item["dispatch_commit"] = commit
         records.append(
             _dispatch_record(
                 slug=item["slug"],
-                plan_slug=plan_slug,
+                plan_slug=plan,
                 content=item["record_content"],
             )
         )
@@ -285,13 +290,17 @@ def dispatch_paths(
         ).strip()
         raise ObsError(f"{' '.join(command)} failed: {detail}")
 
+    tag_name = git.tag_inflight(repo, commit, plan, stamp)
     return {
-        "plan_slug": plan_slug,
+        "commit": commit,
+        "plan_slug": plan,
+        "message": subject,
         "count": len(items),
-        "failed_count": len(failures),
+        "failed_count": 0,
         "items": items,
-        "failures": failures,
+        "failures": [],
         "pipeline_output": result.stdout.decode("utf-8", errors="replace").strip(),
+        "tag": {"name": tag_name, "plan_slug": plan, "timestamp": stamp},
         "dry_run": False,
     }
 
