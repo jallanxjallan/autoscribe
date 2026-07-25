@@ -213,6 +213,81 @@ def is_inflight(repo: Path, commit_hash: str) -> bool:
     return bool(inflight_tags(repo, commit_hash))
 
 
+def inflight_commit_records(
+    repo: Path, *, limit: int = 100, include_completed: bool = False
+) -> list[dict[str, object]]:
+    """Return source commits marked by AutoScribe inflight tags.
+
+    One record is returned for each ``inflight/<plan>/<timestamp>`` tag, newest
+    first. Completed dispatches are omitted unless ``include_completed`` is true.
+    """
+    if limit < 1:
+        raise ObsError("commit list limit must be positive")
+
+    output = run(
+        [
+            "git", "tag", "--list", f"{_INFLIGHT_TAG_PREFIX}*",
+            "--sort=-creatordate",
+        ],
+        cwd=repo,
+    ).stdout
+
+    records: list[dict[str, object]] = []
+    seen_commits: set[str] = set()
+    separator = "\x1f"
+    for raw_tag in output.splitlines():
+        tag = raw_tag.strip()
+        if not tag:
+            continue
+
+        commit = run(["git", "rev-list", "-n", "1", tag], cwd=repo).stdout.strip()
+        if not commit or commit in seen_commits:
+            continue
+        seen_commits.add(commit)
+
+        completed = has_writeback_commit(repo, commit)
+        if completed and not include_completed:
+            continue
+
+        value = run(
+            [
+                "git", "show", "-s",
+                f"--format=%H{separator}%h{separator}%s{separator}%ct",
+                commit,
+            ],
+            cwd=repo,
+        ).stdout.strip()
+        parts = value.split(separator, 3)
+        if len(parts) != 4:
+            continue
+        commit_hash, short_hash, subject, timestamp = parts
+
+        suffix = tag[len(_INFLIGHT_TAG_PREFIX):]
+        plan_slug, marker, dispatched_at = suffix.rpartition("/")
+        if not marker or not plan_slug:
+            continue
+
+        files = files_in_commit(repo, commit_hash)
+        records.append({
+            "hash": commit_hash,
+            "short_hash": short_hash,
+            "subject": subject,
+            "timestamp": int(timestamp),
+            "files": files,
+            "count": len(files),
+            "inflight": True,
+            "inflight_tags": [tag],
+            "inflight_tag": tag,
+            "plan_slug": plan_slug,
+            "dispatched_at": dispatched_at,
+            "completed": completed,
+        })
+        if len(records) >= limit:
+            break
+
+    return records
+
+
 def tag_inflight(repo: Path, commit_hash: str, plan_slug: str, timestamp: str) -> str:
     commit = str(commit_hash or "").strip()
     plan = str(plan_slug or "").strip()
