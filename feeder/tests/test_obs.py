@@ -72,9 +72,68 @@ def test_user_commits_exclude_autoscribe_commits(tmp_path: Path):
     subprocess.run(["git", "commit", "-m", "UPLOAD instructions: 20260715"], cwd=tmp_path, check=True, capture_output=True)
 
     commits = git.user_commits(tmp_path)
-    assert [commit["subject"] for commit in commits] == ["Editorial pass"]
-    assert commits[0]["files"] == ["one.md"]
+    assert commits == []
 
+
+def test_user_commits_exclude_inflight_and_written_back_commits(tmp_path: Path):
+    import subprocess
+    from obs import git
+
+    subprocess.run(["git", "init"], cwd=tmp_path, check=True, capture_output=True)
+    subprocess.run(["git", "config", "user.email", "test@example.com"], cwd=tmp_path, check=True)
+    subprocess.run(["git", "config", "user.name", "Test"], cwd=tmp_path, check=True)
+
+    def commit_file(name: str, content: str, subject: str) -> str:
+        path = tmp_path / name
+        path.write_text(content, encoding="utf-8")
+        subprocess.run(["git", "add", name], cwd=tmp_path, check=True)
+        subprocess.run(["git", "commit", "-m", subject], cwd=tmp_path, check=True, capture_output=True)
+        return subprocess.run(
+            ["git", "rev-parse", "HEAD"], cwd=tmp_path, check=True, capture_output=True, text=True
+        ).stdout.strip()
+
+    available = commit_file("available.md", "---\nslug: cnt.available\n---\n", "Available")
+    inflight = commit_file("inflight.md", "---\nslug: cnt.inflight\n---\n", "Inflight")
+    git.tag_inflight(tmp_path, inflight, "plan.test", "2026-07-25T02:00:00Z")
+    written = commit_file("written.md", "---\nslug: cnt.written\n---\n", "Written")
+    commit_file(
+        "written.md",
+        "---\nslug: cnt.written\nstatus: ai-generated\n---\n",
+        "WRITEBACK result\n\n"
+        f"AutoScribe-Source-Commit: {written}\n"
+        "AutoScribe-Source-Slug: cnt.written",
+    )
+
+    commits = git.user_commits(tmp_path)
+    hashes = {commit["hash"] for commit in commits}
+    assert available in hashes
+    assert inflight not in hashes
+    assert written not in hashes
+
+
+
+def test_user_commits_require_every_member_to_remain_at_selected_commit(tmp_path: Path):
+    import subprocess
+    from obs import git
+
+    subprocess.run(["git", "init"], cwd=tmp_path, check=True, capture_output=True)
+    subprocess.run(["git", "config", "user.email", "test@example.com"], cwd=tmp_path, check=True)
+    subprocess.run(["git", "config", "user.name", "Test"], cwd=tmp_path, check=True)
+
+    (tmp_path / "one.md").write_text("---\nslug: cnt.one\n---\n", encoding="utf-8")
+    (tmp_path / "two.md").write_text("---\nslug: cnt.two\n---\n", encoding="utf-8")
+    subprocess.run(["git", "add", "one.md", "two.md"], cwd=tmp_path, check=True)
+    subprocess.run(["git", "commit", "-m", "Generate first draft from notes"], cwd=tmp_path, check=True, capture_output=True)
+    source = subprocess.run(
+        ["git", "rev-parse", "HEAD"], cwd=tmp_path, check=True, capture_output=True, text=True
+    ).stdout.strip()
+
+    (tmp_path / "one.md").write_text("---\nslug: cnt.one\nstatus: ai-generated\n---\n", encoding="utf-8")
+    subprocess.run(["git", "add", "one.md"], cwd=tmp_path, check=True)
+    subprocess.run(["git", "commit", "-m", "Later revision"], cwd=tmp_path, check=True, capture_output=True)
+
+    hashes = {commit["hash"] for commit in git.user_commits(tmp_path)}
+    assert source not in hashes
 
 def test_dispatch_run_emits_nul_pandoc_arguments_and_commits(tmp_path: Path):
     import json

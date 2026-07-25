@@ -139,35 +139,51 @@ _AUTOSCRIBE_SUBJECT_PREFIXES = (
 
 
 def user_commits(repo: Path, *, limit: int = 100) -> list[dict[str, object]]:
-    """Return recent commits that were not created by AutoScribe operations."""
+    """Return recent user commits without per-commit Git subprocesses."""
     if limit < 1:
         raise ObsError("commit list limit must be positive")
+
     separator = "\x1f"
     record_separator = "\x1e"
     output = run(
         [
-            "git", "log", f"--max-count={limit}",
-            f"--format=%H{separator}%h{separator}%s{separator}%ct{record_separator}",
+            "git", "log", f"--max-count={limit}", "--name-only",
+            f"--format={record_separator}%H{separator}%h{separator}%s{separator}%ct",
         ],
         cwd=repo,
     ).stdout
+
+    inflight_output = run(
+        ["git", "rev-list", "--no-walk", "--tags=inflight/*"],
+        cwd=repo,
+        check=False,
+    ).stdout
+    inflight_commits = {
+        line.strip() for line in inflight_output.splitlines() if line.strip()
+    }
+
+    prefixes = tuple(prefix.upper() for prefix in _AUTOSCRIBE_SUBJECT_PREFIXES)
     commits: list[dict[str, object]] = []
+
     for raw in output.split(record_separator):
         raw = raw.strip()
         if not raw:
             continue
-        parts = raw.split(separator)
+        lines = raw.splitlines()
+        parts = lines[0].split(separator)
         if len(parts) != 4:
             continue
+
         commit_hash, short_hash, subject, timestamp = parts
-        if subject.upper().startswith(tuple(prefix.upper() for prefix in _AUTOSCRIBE_SUBJECT_PREFIXES)):
+        if subject.upper().startswith(prefixes):
             continue
-        files = files_in_commit(repo, commit_hash)
+        if commit_hash in inflight_commits:
+            continue
+
+        files = sorted({line.strip() for line in lines[1:] if line.strip()})
         if not files:
             continue
-        tags = inflight_tags(repo, commit_hash)
-        if tags:
-            continue
+
         commits.append({
             "hash": commit_hash,
             "short_hash": short_hash,
@@ -178,6 +194,7 @@ def user_commits(repo: Path, *, limit: int = 100) -> list[dict[str, object]]:
             "inflight": False,
             "inflight_tags": [],
         })
+
     return commits
 
 

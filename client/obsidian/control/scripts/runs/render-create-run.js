@@ -95,6 +95,7 @@ async function renderCreateRun({ app, container }) {
   let plans = loadPlans();
   let commits = [];
   let selectedState = null;
+  let dispatchBtn = null;
 
   container.appendChild(el('h2', { text: 'Dispatch Files' }));
 
@@ -110,7 +111,7 @@ async function renderCreateRun({ app, container }) {
     planSelect.innerHTML = '';
     for (const plan of plans) planSelect.appendChild(el('option', { value: plan.slug, text: planOptionText(plan) }));
     planSelect.disabled = !plans.length;
-    if (!plans.length) planSelect.appendChild(el('option', { text: 'No uploaded plans found.' }));
+    if (!plans.length) planSelect.appendChild(el('option', { value: '', text: 'No uploaded plans found.', disabled: true }));
     if (preferred && plans.some((plan) => plan.slug === preferred)) planSelect.value = preferred;
   }
 
@@ -118,18 +119,28 @@ async function renderCreateRun({ app, container }) {
     commitSelect.innerHTML = '';
     for (const commit of commits) commitSelect.appendChild(el('option', { value: commit.hash, text: commitOptionText(commit) }));
     commitSelect.disabled = !commits.length;
-    if (!commits.length) commitSelect.appendChild(el('option', { text: 'No untagged user commits found.' }));
+    if (!commits.length) commitSelect.appendChild(el('option', { value: '', text: 'No dispatchable user commits found.', disabled: true }));
     if (preferred && commits.some((commit) => commit.hash === preferred)) commitSelect.value = preferred;
+    updateDispatchAvailability();
+  }
+
+  function updateDispatchAvailability() {
+    if (!dispatchBtn) return;
+    dispatchBtn.disabled = !planSelect.value || !commitSelect.value || !selectedState?.files?.length;
   }
 
   function loadCommitState() {
     const commit = commitSelect.value;
     selectedState = null;
     filesBox.innerHTML = '';
-    if (!commit) return;
+    if (!commit) {
+      updateDispatchAvailability();
+      return;
+    }
     const response = helperRequest(root, { operation: 'commit_state', commit });
     selectedState = response.result;
     renderCommitFiles(filesBox, selectedState);
+    updateDispatchAvailability();
   }
 
   function refreshAll() {
@@ -186,7 +197,7 @@ async function renderCreateRun({ app, container }) {
     }
   });
 
-  const dispatchBtn = button('Dispatch Run', () => {
+  dispatchBtn = button('Dispatch Run', () => {
     try {
       const planSlug = planSelect.value;
       const commit = commitSelect.value;
@@ -205,9 +216,11 @@ async function renderCreateRun({ app, container }) {
       new Notice(`Dispatch failed: ${error.message}`, 10000);
       console.error(error);
     } finally {
-      dispatchBtn.disabled = false;
+      updateDispatchAvailability();
     }
   });
+
+  planSelect.addEventListener('change', updateDispatchAvailability);
 
   container.append(planRow, commitRow, filesBox, dispatchBtn, output);
   try {
