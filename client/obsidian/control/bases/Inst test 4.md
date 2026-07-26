@@ -1,5 +1,5 @@
 ---
-slug: <% tp.user.make_slug(tp, "ins") %>
+slug: ins.inst-test-4.svz0pl
 type: instruction
 kind: instruction
 scope:
@@ -8,3 +8,5 @@ dependencies:
   context:
 tags: []
 ---
+
+

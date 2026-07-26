@@ -1,5 +1,5 @@
 ---
-slug: <% tp.user.make_slug(tp, "ins") %>
+slug: ins.inst-from-materials.1l7sjs
 type: instruction
 kind: instruction
 scope:
@@ -8,3 +8,5 @@ dependencies:
   context:
 tags: []
 ---
+
+
