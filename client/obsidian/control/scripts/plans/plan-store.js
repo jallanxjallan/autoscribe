@@ -207,8 +207,6 @@ function buildPlanRecord({
     description: cleanDescription,
     created: existing?.created || now,
     modified: now,
-    pending_upload: true,
-    uploaded_at: existing?.uploaded_at || null,
     vault: {
       name: path.basename(root),
       root,
@@ -229,24 +227,36 @@ function localAutoscribeDir(app) {
   return path.join(vaultRoot(app), '.autoscribe');
 }
 
-function workflowDir(app, name) {
-  return path.join(localAutoscribeDir(app), 'workflow', name);
+function planDatabaseFile(app) {
+  return path.join(localAutoscribeDir(app), 'plans.json');
 }
 
-function planDir(app) {
-  return workflowDir(app, 'plans');
+function readPlanDatabase(app) {
+  const file = planDatabaseFile(app);
+  if (!fs.existsSync(file)) return { schema_version: 1, plans: {} };
+  const value = readJsonFile(file);
+  if (!value || typeof value !== 'object' || Array.isArray(value)) {
+    throw new Error(`${file}: plan database must be an object.`);
+  }
+  if (!value.plans || typeof value.plans !== 'object' || Array.isArray(value.plans)) {
+    value.plans = {};
+  }
+  value.schema_version = Number(value.schema_version || 1);
+  return value;
 }
 
-function planFileFor(app, slug) {
-  return path.join(planDir(app), `${slug}.json`);
+function savePlanDatabase(app, database) {
+  writeJson(planDatabaseFile(app), database);
+  return planDatabaseFile(app);
 }
 
 function savePlanRecord(app, record) {
   const slug = planSlug(record);
   if (!slug) throw new Error('Plan record missing record_identity.');
-  const file = planFileFor(app, slug);
-  writeJson(file, record);
-  return file;
+  const database = readPlanDatabase(app);
+  database.plans[slug] = { ...record, record_identity: slug, slug };
+  savePlanDatabase(app, database);
+  return planDatabaseFile(app);
 }
 
 function readJsonFile(file) {
@@ -255,87 +265,43 @@ function readJsonFile(file) {
 }
 
 function isPlanRecord(record) {
-  return record && record.record_type === 'plan' && Boolean(record.record_identity);
+  return record && record.record_type === 'plan' && Boolean(record.record_identity || record.slug);
 }
 
 function listPlanRecords(app) {
-  const dir = planDir(app);
-  let entries = [];
-  try { entries = fs.readdirSync(dir, { withFileTypes: true }); } catch { return []; }
-
-  const records = [];
-  for (const entry of entries) {
-    if (!entry.isFile() || !entry.name.endsWith('.json')) continue;
-
-    const file = path.join(dir, entry.name);
-    try {
-      const record = readJsonFile(file);
-      if (!isPlanRecord(record)) continue;
-
-      const stat = fs.statSync(file);
-      records.push({
-        ...record,
-        slug: record.record_identity,
-        file,
-        file_mtime: stat.mtime.toISOString(),
-      });
-    } catch (err) {
-      const fallbackSlug = path.basename(entry.name, '.json');
-      records.push({
-        record_type: 'plan',
-        record_identity: fallbackSlug,
-        slug: fallbackSlug,
-        label: fallbackSlug,
-        file,
-        read_error: err.message,
-      });
-    }
-  }
-
-  records.sort((a, b) => {
-    const am = String(a.modified || a.file_mtime || a.created || '');
-    const bm = String(b.modified || b.file_mtime || b.created || '');
-    const cmp = bm.localeCompare(am);
-    if (cmp) return cmp;
-    return String(a.label || a.record_identity || a.slug).localeCompare(
-      String(b.label || b.record_identity || b.slug)
-    );
-  });
-
-  return records;
+  const database = readPlanDatabase(app);
+  return Object.entries(database.plans)
+    .map(([slug, record]) => ({ ...record, record_identity: slug, slug }))
+    .filter(isPlanRecord)
+    .sort((a, b) => {
+      const am = String(a.modified || a.created || '');
+      const bm = String(b.modified || b.created || '');
+      return bm.localeCompare(am) || String(a.label || a.slug).localeCompare(String(b.label || b.slug));
+    });
 }
 
 function loadPlanRecord(app, slug) {
-  const found = listPlanRecords(app).find((record) => planSlug(record) === slug);
-  if (!found) throw new Error(`Plan not found: ${slug}`);
-  if (found.read_error) throw new Error(`Could not read ${found.file}: ${found.read_error}`);
-  return found;
-}
-
-function listPendingPlanRecords(app) {
-  return listPlanRecords(app).filter((record) => record.pending_upload === true);
-}
-
-function markPlanRecordUploaded(app, slug, uploadedAt = new Date().toISOString()) {
-  const record = loadPlanRecord(app, slug);
-  record.pending_upload = false;
-  record.uploaded_at = uploadedAt;
-  savePlanRecord(app, record);
-  return record;
+  const database = readPlanDatabase(app);
+  const record = database.plans[String(slug || '').trim()];
+  if (!record) throw new Error(`Plan not found: ${slug}`);
+  return { ...record, record_identity: slug, slug };
 }
 
 function deletePlanRecord(app, slug) {
-  const record = loadPlanRecord(app, slug);
-  fs.unlinkSync(record.file || planFileFor(app, slug));
-  return record.file || planFileFor(app, slug);
+  const database = readPlanDatabase(app);
+  if (!database.plans[slug]) throw new Error(`Plan not found: ${slug}`);
+  delete database.plans[slug];
+  savePlanDatabase(app, database);
+  return planDatabaseFile(app);
 }
 
 module.exports = {
   buildPlanRecord,
+  planDatabaseFile,
+  readPlanDatabase,
+  savePlanDatabase,
   savePlanRecord,
   listPlanRecords,
   loadPlanRecord,
-  listPendingPlanRecords,
-  markPlanRecordUploaded,
   deletePlanRecord,
 };

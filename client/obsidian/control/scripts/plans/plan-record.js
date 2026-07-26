@@ -73,6 +73,7 @@ function buildPlanRecord({ label, description, steps, force_slug = null }) {
     const ragProfile = compactRegistryRecord(step.rag_profile);
     const model = compactRegistryRecord(step.model);
     const instruction = compactRegistryRecord(step.instruction);
+    const instructionSlugs = step.instruction_slugs;
     const args = compactStepArgs(parseArgsJson(step.argsJson, stepNumber));
 
     if (kind === 'script' && !script?.key) {
@@ -94,7 +95,14 @@ function buildPlanRecord({ label, description, steps, force_slug = null }) {
       label: String(step.label || `Step ${stepNumber}`).trim() || `Step ${stepNumber}`,
     };
 
-    if (instruction?.slug || instruction?.key) {
+    if (instructionSlugs && typeof instructionSlugs === 'object' && !Array.isArray(instructionSlugs)) {
+      out.instruction_slugs = {
+        role: Array.isArray(instructionSlugs.role) ? [...instructionSlugs.role] : [],
+        context: Array.isArray(instructionSlugs.context) ? [...instructionSlugs.context] : [],
+        specifics: Array.isArray(instructionSlugs.specifics) ? [...instructionSlugs.specifics] : [],
+        instructions: Array.isArray(instructionSlugs.instructions) ? [...instructionSlugs.instructions] : [],
+      };
+    } else if (instruction?.slug || instruction?.key) {
       out.instruction = String(instruction.slug || instruction.key).trim();
     }
     if (Object.keys(args).length) out.args = args;

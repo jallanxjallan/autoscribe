@@ -1,0 +1,20 @@
+views:
+  - type: table
+    name: Table
+    filters:
+      and:
+        - file.folder == "materials"
+    order:
+      - selected
+      - action
+      - file.name
+      - tags
+  - type: table
+    name: Selected
+    filters:
+      and:
+        - selected == true
+        - file.folder == "materials"
+    order:
+      - file.name
+      - slug

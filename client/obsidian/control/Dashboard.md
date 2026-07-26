@@ -3,6 +3,7 @@
 ```dataviewjs
 async function openInMain(path) {
   const file = app.vault.getAbstractFileByPath(path);
+
   if (!file) {
     new Notice(`File not found: ${path}`);
     return;
@@ -16,12 +17,17 @@ async function openInMain(path) {
       state: {
         file: file.path,
         mode: "preview",
-        source: false
+        source: false,
       },
-      active: true
+      active: true,
+      pinned: true,
     });
   } else {
     await leaf.openFile(file);
+
+    const state = leaf.getViewState();
+    state.pinned = true;
+    await leaf.setViewState(state);
   }
 
   app.workspace.setActiveLeaf(leaf, { focus: true });
@@ -60,7 +66,10 @@ function linkSection(title, items) {
 
 linkSection("", [
   ["Table of Contents", "Table of Contents.md"],
-  ["Contents", "_control/bases/Contents.base"]
+  ["Contents", "_control/bases/Contents.base"],
+  ["Materials", "_control/bases/Materials.base"],
+  ["Instructions", "_control/bases/Instructions.base"],
+  ["Link Status", "_control/queries/Link Status.md"]
 ]);
 
 linkSection("Workflow", [
@@ -69,6 +78,7 @@ linkSection("Workflow", [
   ["Define Plan", "_control/panels/Define Plan.md"],
   ["Dispatch Run", "_control/panels/Dispatch Run.md"],
   ["Write Responses", "_control/panels/Write Responses.md"],
+  ["System Status", "_control/panels/System Status.md"],
   ["File State", "_control/panels/File State.md"]
 ]);
 
@@ -76,11 +86,5 @@ linkSection("Views", [
   ["Compiled Notes", "_control/queries/Compiled Notes.md"],
   ["Content Callouts", "_control/queries/Content Callouts.md"],
   ["Editorial Flags", "_control/queries/Editorial Flags.md"]
-]);
-
-linkSection("Reference", [
-  ["Materials Index", "_control/queries/Materials Index.md"],
-  ["Instructions Index", "_control/queries/Instructions Index.md"],
-  ["Tag Index", "_control/queries/Tag Index.md"]
 ]);
 ```

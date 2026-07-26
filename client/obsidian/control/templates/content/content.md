@@ -2,7 +2,7 @@
 slug: <% tp.user.make_slug(tp, "cnt") %>
 kind: prompt
 type: content
-producer: ""
+state: ""
 action: write
 selected: false
 class: ""

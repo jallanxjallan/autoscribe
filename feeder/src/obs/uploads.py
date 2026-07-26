@@ -212,6 +212,7 @@ def dispatch_paths(
     message: str = "",
     dry_run: bool = False,
     defaults: list[str] | None = None,
+    plan_record: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     """Commit and dispatch the current explicit Markdown selection.
 
@@ -223,6 +224,10 @@ def dispatch_paths(
     plan = str(plan_slug or "").strip()
     if not plan:
         raise ObsError("dispatch requires plan_slug")
+    plan_sync = None
+    if isinstance(plan_record, dict):
+        from .plans import sync_plan
+        plan_sync = sync_plan(plan_record, cwd=repo)
 
     items: list[dict[str, Any]] = []
     seen: set[str] = set()
@@ -254,6 +259,7 @@ def dispatch_paths(
             "commit": None,
             "tag": None,
             "dry_run": True,
+            "plan_sync": plan_sync,
         }
 
     # commit_files uses --allow-empty and --only, so an unchanged selection
@@ -302,6 +308,7 @@ def dispatch_paths(
         "pipeline_output": result.stdout.decode("utf-8", errors="replace").strip(),
         "tag": {"name": tag_name, "plan_slug": plan, "timestamp": stamp},
         "dry_run": False,
+        "plan_sync": plan_sync,
     }
 
 

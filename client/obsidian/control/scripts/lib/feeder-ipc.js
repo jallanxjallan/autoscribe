@@ -3,7 +3,7 @@
 const fs = require("node:fs");
 const os = require("node:os");
 const path = require("node:path");
-const { spawnSync } = require("node:child_process");
+const { spawnSync, spawn } = require("node:child_process");
 
 function vaultRoot(app) {
   const root = app?.vault?.adapter?.basePath;
@@ -54,4 +54,29 @@ function callFeeder(app, operation, payload = {}) {
   return response.result;
 }
 
-module.exports = { callFeeder, vaultRoot };
+function handoffFeeder(app, operation, payload = {}) {
+  const vault = payload.vault || vaultRoot(app);
+  const request = { ...payload, operation, vault };
+  const command = resolveCommand();
+  const statusDir = path.join(vault, ".autoscribe", "system-status");
+  fs.mkdirSync(statusDir, { recursive: true });
+  const stamp = new Date().toISOString().replace(/[:.]/g, "-");
+  const requestPath = path.join(statusDir, `${stamp}-${operation.replace(/[^a-z0-9_.-]/gi, "_")}.request.json`);
+  const stdoutPath = requestPath.replace(/\.request\.json$/, ".stdout.log");
+  const stderrPath = requestPath.replace(/\.request\.json$/, ".stderr.log");
+  fs.writeFileSync(requestPath, JSON.stringify(request, null, 2) + "\n", "utf8");
+  const input = fs.openSync(requestPath, "r");
+  const stdout = fs.openSync(stdoutPath, "a");
+  const stderr = fs.openSync(stderrPath, "a");
+  const child = spawn(command, ["--vault", vault, "ipc"], {
+    cwd: vault,
+    detached: true,
+    stdio: [input, stdout, stderr],
+    env: process.env,
+  });
+  child.unref();
+  fs.closeSync(input); fs.closeSync(stdout); fs.closeSync(stderr);
+  return { pid: child.pid, request_path: requestPath, stdout_path: stdoutPath, stderr_path: stderrPath };
+}
+
+module.exports = { callFeeder, handoffFeeder, vaultRoot };

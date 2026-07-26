@@ -122,6 +122,8 @@ views:
       - stage
       - status
     sort:
+      - property: selected
+        direction: DESC
       - property: status
         direction: ASC
   - type: table

@@ -137,9 +137,10 @@ def test_save_plan_emits_payload_object(tmp_path: Path, monkeypatch):
                 "1": {
                     "engine": "chatgpt",
                     "instruction_slugs": {
-                        "role": "ins.role.abc123",
-                        "context": "ins.context.abc123",
-                        "instructions": "ins.task.abc123",
+                        "role": ["rol.role.abc123"],
+                        "context": ["ctx.context.abc123"],
+                        "specifics": ["spc.detail.abc123"],
+                        "instructions": ["ins.task.abc123"],
                     },
                 }
             },

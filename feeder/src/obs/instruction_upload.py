@@ -120,10 +120,13 @@ def _dirty_relpaths(repo: Path, paths: Iterable[Path]) -> list[str]:
     return result
 
 
+INSTRUCTION_PREFIXES = ("ins.", "rol.", "ctx.", "spc.")
+
+
 def sync_instruction(repo: Path, *, slug: str, path: str, source_path: str,
                      uploaded_hashes: dict[str, str]) -> dict[str, Any]:
-    if not slug.startswith("ins."):
-        raise ObsError(f"expected an ins.* slug, got: {slug or '<empty>'}")
+    if not slug.startswith(INSTRUCTION_PREFIXES):
+        raise ObsError(f"expected an instruction slug prefix {INSTRUCTION_PREFIXES}, got: {slug or '<empty>'}")
     source = Path(path).expanduser().resolve()
     if not source.is_file():
         raise ObsError(f"{slug}: referenced instruction file does not exist: {source}")
@@ -166,83 +169,38 @@ def sync_instruction(repo: Path, *, slug: str, path: str, source_path: str,
 
 
 def sync_instructions(repo: Path, instruction_sets: list[dict[str, Any]]) -> list[dict[str, Any]]:
-    """Upload every instruction component explicitly requested by the client.
-
-    The client has already compared referenced slugs with the downloaded control
-    snapshot, so presence in ``instruction_sets`` means the Redis record must be
-    created or refreshed even when the source file is clean. Git dirtiness is
-    used only to decide which source files need committing after upload.
-    """
+    """Reconcile referenced instruction files against authoritative remote hashes."""
     unique: dict[str, dict[str, Any]] = {}
     for item in instruction_sets:
         slug = str(item.get("slug") or "").strip()
         if not slug:
             raise ObsError("instruction component missing slug")
-        if not slug.startswith("ins."):
-            raise ObsError(f"expected an ins.* slug, got: {slug}")
-
         raw_path = str(item.get("abspath") or item.get("path") or "").strip()
         if not raw_path:
             raise ObsError(f"{slug}: instruction component requires path")
-
         source = Path(raw_path).expanduser().resolve()
         if not source.is_file():
             raise ObsError(f"{slug}: referenced instruction file does not exist: {source}")
         if not _inside(repo, source):
             raise ObsError(f"{slug}: instruction file is outside the active vault: {source}")
-
         relpath = source.relative_to(repo.resolve()).as_posix()
         prior = unique.get(slug)
         if prior and prior["relpath"] != relpath:
-            raise ObsError(
-                f"instruction slug {slug} resolves to both "
-                f"{prior['relpath']} and {relpath}"
-            )
-        unique[slug] = {
-            **item,
-            "slug": slug,
-            "source": source,
-            "relpath": relpath,
-        }
+            raise ObsError(f"instruction slug {slug} resolves to both {prior['relpath']} and {relpath}")
+        unique[slug] = {**item, "source": source, "relpath": relpath}
 
-    results: list[dict[str, Any]] = []
-    for item in unique.values():
-        record, digest = _render_body_record(
+    uploaded_hashes = _instruction_hashes(pipeline_snapshot("control"))
+    return [
+        sync_instruction(
             repo,
-            slug=item["slug"],
-            source=item["source"],
+            slug=slug,
+            path=str(item["source"]),
             source_path=str(item.get("source_path") or item["relpath"]),
+            uploaded_hashes=uploaded_hashes,
         )
-        result = run(
-            [autoscribe_bin(), "upload", "instructions"],
-            cwd=repo,
-            input_text=json.dumps(_upload_envelope(record), ensure_ascii=False) + "\n",
-        )
-        results.append({
-            "slug": item["slug"],
-            "status": "uploaded",
-            "uploaded": True,
-            "content_sha256": digest,
-            "path": item["relpath"],
-            "pipeline_output": result.stdout.strip(),
-        })
-
-    dirty = set(git.dirty_files(repo))
-    commit_paths = [
-        item["relpath"] for item in unique.values() if item["relpath"] in dirty
+        for slug, item in unique.items()
     ]
-    commit_hash = None
-    if commit_paths:
-        stamp = datetime.now().astimezone().isoformat(timespec="seconds")
-        commit_hash = git.commit_files(
-            repo, commit_paths, f"UPLOAD instructions for plan: {stamp}"
-        )
 
-    for result in results:
-        result["committed"] = result["path"] in commit_paths
-        if commit_hash:
-            result["commit"] = commit_hash
-    return results
 
 def upload_instruction(repo: Path, *, source_path: str, input_path: Path,
                        metadata_path: Path | None = None, force: bool = False,
@@ -255,8 +213,8 @@ def upload_instruction(repo: Path, *, source_path: str, input_path: Path,
         raise ObsError("source instruction file does not exist")
     document = parse_markdown(source.read_text(encoding="utf-8"))
     slug = str(document.frontmatter.get("slug") or "").strip()
-    if not slug.startswith("ins."):
-        raise ObsError(f"{source_path}: expected an ins.* slug")
+    if not slug.startswith(INSTRUCTION_PREFIXES):
+        raise ObsError(f"{source_path}: expected an instruction slug prefix {INSTRUCTION_PREFIXES}")
     record, digest = _render_body_record(repo, slug=slug, source=source, source_path=source_path)
     uploaded = _instruction_hashes(pipeline_snapshot("control")).get(slug)
     if not force and uploaded == digest:

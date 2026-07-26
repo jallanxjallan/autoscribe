@@ -1,13 +1,7 @@
+# Dispatch Run
+
 ```dataviewjs
-const helperPath =
-  app.vault.adapter.basePath +
-  "/_control/scripts/runs/render-create-run.js";
-
-const { renderCreateRun } = require(helperPath);
-
-await renderCreateRun({
-  app,
-  dv,
-  container: this.container
-});
+const vaultRoot = app.vault.adapter.basePath;
+const { renderDispatchRun } = require(`${vaultRoot}/_control/scripts/dispatch/render-dispatch-run.js`);
+await renderDispatchRun({ app, container: this.container });
 ```

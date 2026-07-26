@@ -1,0 +1,11 @@
+views:
+  - type: table
+    name: Table
+    filters:
+      and:
+        - file.folder == "instructions"
+    order:
+      - file.name
+      - role
+      - context
+      - scope

@@ -146,11 +146,11 @@ def save_plan(
             refs = {}
         if not isinstance(refs, dict):
             raise ObsError(f"{slug}: step {ordinal} instruction_slugs must be an object")
-        for label in ("role", "context", "instructions"):
-            value = refs.get(label)
-            if value is not None and not isinstance(value, str):
+        for label in ("role", "context", "specifics", "instructions"):
+            value = refs.get(label, [])
+            if not isinstance(value, list) or any(not isinstance(item, str) for item in value):
                 raise ObsError(
-                    f"{slug}: step {ordinal} instruction_slugs.{label} must be a slug string"
+                    f"{slug}: step {ordinal} instruction_slugs.{label} must be a slug list"
                 )
 
     instruction_results = sync_instructions(cwd, instruction_sets or [])
@@ -180,3 +180,49 @@ def delete_plan(slug: str, *, cwd: Path) -> dict[str, Any]:
     args = [part.format(slug=slug) for part in command.split()]
     result = run(args, cwd=cwd)
     return {"slug": slug, "pipeline_output": result.stdout.strip()}
+
+
+def sync_plan(record: dict[str, Any], *, cwd: Path) -> dict[str, Any]:
+    """Reconcile a vault-local plan and its instruction sources with the server."""
+    slug = str(record.get("record_identity") or record.get("slug") or "").strip()
+    if not slug:
+        raise ObsError("dispatch plan record missing record_identity")
+    payload = record.get("payload")
+    if not isinstance(payload, dict):
+        raise ObsError(f"{slug}: local plan payload must be an object")
+
+    instruction_sets = ((record.get("local") or {}).get("instruction_sets") or [])
+    if not isinstance(instruction_sets, list):
+        raise ObsError(f"{slug}: local instruction_sets must be a list")
+    instruction_results = sync_instructions(cwd, instruction_sets)
+
+    local_canonical = json.dumps(payload, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+    remote_payload = None
+    for candidate in list_plans():
+        if candidate["slug"] == slug:
+            try:
+                remote_payload = _materialize_plan(candidate).get("payload")
+                if remote_payload is None:
+                    remote_payload = {
+                        "label": candidate.get("label", ""),
+                        "description": candidate.get("description", ""),
+                        "steps": candidate.get("steps", {}),
+                    }
+            except ObsError:
+                remote_payload = None
+            break
+    if isinstance(remote_payload, dict):
+        remote_canonical = json.dumps(remote_payload, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+        if remote_canonical == local_canonical:
+            return {"slug": slug, "status": "current", "uploaded": False, "instructions": instruction_results}
+
+    envelope = {"record_type": "plan", "record_identity": slug, "payload": payload}
+    result = run([autoscribe_bin(), "upload", "plans"], cwd=cwd,
+                 input_text=json.dumps(envelope, ensure_ascii=False) + "\n")
+    return {
+        "slug": slug,
+        "status": "uploaded",
+        "uploaded": True,
+        "instructions": instruction_results,
+        "pipeline_output": result.stdout.strip(),
+    }

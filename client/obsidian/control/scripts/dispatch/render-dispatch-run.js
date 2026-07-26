@@ -33,15 +33,8 @@ function parseSelection(text) {
 async function renderDispatchRun({ app, container }) {
   container.empty();
   const vaultRoot = app.vault.adapter.basePath;
-  const { callFeeder } = require(path.join(vaultRoot, "_control/scripts/lib/feeder-ipc.js"));
-
-  const call = async (operation, payload = {}) => {
-    // Current clients use the three-argument form. The fallbacks make this
-    // replacement tolerant of the two earlier feeder-ipc wrappers.
-    if (callFeeder.length >= 3) return callFeeder(vaultRoot, operation, payload);
-    if (callFeeder.length === 2) return callFeeder(operation, { vault: vaultRoot, ...payload });
-    return callFeeder({ operation, vault: vaultRoot, ...payload });
-  };
+  const { handoffFeeder } = require(path.join(vaultRoot, "_control/scripts/lib/feeder-ipc.js"));
+  const { listPlanRecords, loadPlanRecord } = require(path.join(vaultRoot, "_control/scripts/plans/plan-store.js"));
 
   const heading = container.createEl("h2", { text: "Dispatch selected files" });
   heading.style.marginTop = "0";
@@ -66,8 +59,7 @@ async function renderDispatchRun({ app, container }) {
   const list = container.createEl("ul");
   for (const selectedPath of selection) list.createEl("li", { text: selectedPath });
 
-  const plans = await call("plans.list");
-  const planRows = plans?.result || plans || [];
+  const planRows = listPlanRecords(app);
   if (!Array.isArray(planRows) || !planRows.length) {
     container.createEl("p", { text: "No plans are available." });
     return;
@@ -101,20 +93,19 @@ async function renderDispatchRun({ app, container }) {
 
   runButton.addEventListener("click", async () => {
     runButton.disabled = true;
-    result.setText("Committing, enqueueing, and tagging selection…");
+    result.setText("Handing dispatch to feeder…");
     try {
-      const response = await call("dispatch.run", {
+      const plan = loadPlanRecord(app, select.value);
+      const handoff = handoffFeeder(app, "dispatch.run", {
         paths: selection,
         plan_slug: select.value,
+        plan_record: plan,
         message: message.value.trim()
       });
-      const value = response?.result || response;
-      const commit = String(value.commit || "").slice(0, 8);
-      const tag = value.tag?.name || "";
       result.setText(
-        `Dispatched ${value.count} file${value.count === 1 ? "" : "s"}.\n` +
-        `Commit: ${commit}\nTag: ${tag}` +
-        (value.pipeline_output ? `\n\n${value.pipeline_output}` : "")
+        `Dispatch handed off to feeder.\n` +
+        `Process: ${handoff.pid}\n` +
+        `Open System Status if the expected response does not appear.`
       );
     } catch (error) {
       result.setText(`Dispatch failed: ${error.message || error}`);
