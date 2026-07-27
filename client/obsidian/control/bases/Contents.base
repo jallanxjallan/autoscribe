@@ -1,6 +1,7 @@
 filters:
   and:
     - "!slug.isEmpty()"
+    - file.folder == "Content"
 views:
   - type: table
     name: Table
@@ -43,9 +44,6 @@ views:
       - slug
   - type: table
     name: State
-    filters:
-      and:
-        - file.folder == "contents"
     groupBy:
       property: state
       direction: ASC
@@ -55,15 +53,14 @@ views:
       - stage
       - status
     sort:
+      - property: selected
+        direction: ASC
       - property: stage
         direction: DESC
       - property: status
         direction: ASC
   - type: table
     name: Contents
-    filters:
-      and:
-        - file.folder == "contents"
     groupBy:
       property: class
       direction: ASC
@@ -73,6 +70,7 @@ views:
       - origin
       - file.mtime
       - file.tags
+      - status
     sort:
       - property: selected
         direction: DESC
@@ -84,22 +82,10 @@ views:
         direction: ASC
       - property: file.mtime
         direction: ASC
-  - type: table
-    name: Instructions
-    filters:
-      and:
-        - file.folder == "instructions"
-    order:
-      - file.name
-      - role
-      - context
-      - file.mtime
+    columnSize:
+      note.origin: 135
   - type: table
     name: Stage
-    filters:
-      and:
-        - and:
-            - file.folder == "contents"
     groupBy:
       property: stage
       direction: ASC
@@ -108,11 +94,12 @@ views:
       - file.name
       - status
       - state
+      - action
+      - stage
+    columnSize:
+      note.status: 179
   - type: table
     name: Action
-    filters:
-      and:
-        - file.folder == "contents"
     groupBy:
       property: action
       direction: ASC
@@ -122,15 +109,12 @@ views:
       - stage
       - status
     sort:
-      - property: selected
-        direction: DESC
+      - property: stage
+        direction: ASC
       - property: status
         direction: ASC
   - type: table
     name: Status
-    filters:
-      and:
-        - file.folder == "contents"
     groupBy:
       property: status
       direction: ASC

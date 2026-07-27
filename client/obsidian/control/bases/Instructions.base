@@ -1,11 +1,14 @@
+filters:
+  and:
+    - file.folder == "Instructions"
 views:
   - type: table
     name: Table
-    filters:
-      and:
-        - file.folder == "instructions"
     order:
       - file.name
       - role
       - context
       - scope
+    sort:
+      - property: scope
+        direction: ASC

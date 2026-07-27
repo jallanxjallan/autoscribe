@@ -1,10 +1,195 @@
 "use strict";
 
+const fs = require("fs");
+const path = require("path");
+
 const { el, clear, button } = require("../lib/dom.js");
 const { callFeeder } = require("../lib/feeder-ipc.js");
 const { readClipboardSelection } = require("../lib/clipboard-selection.js");
 const { loadControlSnapshot, snapshotList } = require("../lib/control-loader.js");
 const { listPlanRecords } = require("../plans/plan-store.js");
+
+
+const SYSTEM_TMP_ROOT = "/tmp";
+const TRANSCLUSION_RE = /!\[\[([^\]]+)\]\]/g;
+
+function splitFrontmatter(text) {
+  const match = String(text).match(/^(---\r?\n[\s\S]*?\r?\n---\r?\n?)([\s\S]*)$/);
+  return match
+    ? { frontmatter: match[1], body: match[2] }
+    : { frontmatter: "", body: String(text) };
+}
+
+function vaultRelativePath(vaultRoot, filePath) {
+  const raw = String(filePath || "").trim();
+  if (!raw) throw new Error("Selected file has no path.");
+
+  const absolute = path.isAbsolute(raw)
+    ? path.normalize(raw)
+    : path.resolve(vaultRoot, raw);
+  const relative = path.relative(vaultRoot, absolute);
+
+  if (relative.startsWith("..") || path.isAbsolute(relative)) {
+    throw new Error(`Selected file is outside the vault: ${raw}`);
+  }
+
+  return relative.split(path.sep).join("/");
+}
+
+function parseTransclusion(rawTarget) {
+  const target = String(rawTarget || "").split("|")[0].trim();
+  const hashAt = target.indexOf("#");
+
+  if (hashAt < 0) {
+    return { linkpath: target, fragment: "" };
+  }
+
+  return {
+    linkpath: target.slice(0, hashAt).trim(),
+    fragment: target.slice(hashAt + 1).trim(),
+  };
+}
+
+function extractHeadingSection(body, heading) {
+  const wanted = heading.trim().toLowerCase();
+  const lines = body.split(/\r?\n/);
+  let start = -1;
+  let level = 0;
+
+  for (let index = 0; index < lines.length; index += 1) {
+    const match = lines[index].match(/^(#{1,6})\s+(.+?)\s*#*\s*$/);
+    if (match && match[2].trim().toLowerCase() === wanted) {
+      start = index;
+      level = match[1].length;
+      break;
+    }
+  }
+
+  if (start < 0) {
+    throw new Error(`Transcluded heading not found: ${heading}`);
+  }
+
+  let end = lines.length;
+  for (let index = start + 1; index < lines.length; index += 1) {
+    const match = lines[index].match(/^(#{1,6})\s+/);
+    if (match && match[1].length <= level) {
+      end = index;
+      break;
+    }
+  }
+
+  return lines.slice(start, end).join("\n");
+}
+
+function extractBlock(body, blockId) {
+  const escaped = String(blockId).replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+  const marker = new RegExp(`\\s*\\^${escaped}\\s*$`);
+  const lines = body.split(/\r?\n/);
+  const index = lines.findIndex((line) => marker.test(line));
+
+  if (index < 0) {
+    throw new Error(`Transcluded block not found: ^${blockId}`);
+  }
+
+  let start = index;
+  while (start > 0 && lines[start - 1].trim() !== "") start -= 1;
+
+  let end = index + 1;
+  while (end < lines.length && lines[end].trim() !== "") end += 1;
+
+  const selected = lines.slice(start, end);
+  selected[selected.length - 1] = selected[selected.length - 1].replace(marker, "");
+  return selected.join("\n").trimEnd();
+}
+
+function selectFragment(body, fragment) {
+  if (!fragment) return body;
+  if (fragment.startsWith("^")) return extractBlock(body, fragment.slice(1));
+  return extractHeadingSection(body, fragment);
+}
+
+async function resolveBodyTransclusions(app, body, sourcePath, stack = []) {
+  const matches = [...String(body).matchAll(TRANSCLUSION_RE)];
+  if (!matches.length) return String(body);
+
+  let output = "";
+  let cursor = 0;
+
+  for (const match of matches) {
+    output += body.slice(cursor, match.index);
+    cursor = match.index + match[0].length;
+
+    const { linkpath, fragment } = parseTransclusion(match[1]);
+    if (!linkpath) {
+      throw new Error(`Empty transclusion in ${sourcePath}: ${match[0]}`);
+    }
+
+    const target = app.metadataCache.getFirstLinkpathDest(linkpath, sourcePath);
+    if (!target) {
+      throw new Error(`Could not resolve transclusion ${match[0]} in ${sourcePath}`);
+    }
+    if (target.extension !== "md") {
+      throw new Error(`Transclusion is not a Markdown note: ${match[0]} in ${sourcePath}`);
+    }
+    if (stack.includes(target.path)) {
+      const chain = [...stack, target.path].join(" -> ");
+      throw new Error(`Circular transclusion detected: ${chain}`);
+    }
+
+    const embeddedText = await app.vault.read(target);
+    const embeddedBody = splitFrontmatter(embeddedText).body;
+    const selected = selectFragment(embeddedBody, fragment);
+    const resolved = await resolveBodyTransclusions(
+      app,
+      selected,
+      target.path,
+      [...stack, target.path]
+    );
+
+    output += resolved;
+  }
+
+  output += body.slice(cursor);
+  return output;
+}
+
+async function stageDispatchFiles(app, items) {
+  const vaultRoot = app.vault.adapter.basePath;
+  const stagingRoot = fs.mkdtempSync(
+    path.join(SYSTEM_TMP_ROOT, "autoscribe-dispatch-")
+  );
+  const stagedPaths = [];
+
+  try {
+    for (const item of items) {
+      const relativePath = vaultRelativePath(vaultRoot, item.path);
+      const source = app.vault.getAbstractFileByPath(relativePath);
+
+      if (!source || source.extension !== "md") {
+        throw new Error(`Selected Markdown file was not found: ${item.path}`);
+      }
+
+      const original = await app.vault.read(source);
+      const { frontmatter, body } = splitFrontmatter(original);
+      const resolvedBody = await resolveBodyTransclusions(
+        app,
+        body,
+        source.path,
+        [source.path]
+      );
+
+      const stagedPath = path.join(stagingRoot, ...relativePath.split("/"));
+      fs.mkdirSync(path.dirname(stagedPath), { recursive: true });
+      fs.writeFileSync(stagedPath, frontmatter + resolvedBody, "utf8");
+      stagedPaths.push(stagedPath);
+    }
+  } catch (error) {
+    fs.rmSync(stagingRoot, { recursive: true, force: true });
+    throw error;
+  }
+
+  return { stagingRoot, stagedPaths };
+}
 
 function normalizePlan(record) {
   if (!record) return null;
@@ -302,15 +487,21 @@ async function renderCreateRun({ app, container }) {
         dispatching = true;
         updateAvailability();
 
-        output.textContent = "Dispatching…";
+        output.textContent =
+          "Resolving transclusions into system /tmp…";
+
+        const { stagedPaths } = await stageDispatchFiles(
+          app,
+          dispatchedItems
+        );
+
+        output.textContent = "Dispatching staged files…";
 
         const result = callFeeder(
           app,
           "dispatch.run",
           {
-            paths: dispatchedItems.map(
-              (item) => item.path
-            ),
+            paths: stagedPaths,
             plan_slug: planSlug,
           }
         );

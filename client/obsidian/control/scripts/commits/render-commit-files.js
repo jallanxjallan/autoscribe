@@ -82,6 +82,7 @@ async function renderCommitFiles({ app, container }) {
     items: [],
     summary: {},
     error: "",
+    commitType: "version",
   };
 
   const toolbar = element("div", { className: "commit-files-toolbar" });
@@ -97,17 +98,52 @@ async function renderCommitFiles({ app, container }) {
   const tableHost = element("div", { className: "commit-files-table-host" });
   const commitBox = element("div", { className: "commit-files-commit-box" });
   commitBox.style.display = "grid";
-  commitBox.style.gap = "0.5rem";
+  commitBox.style.gap = "0.75rem";
   commitBox.style.marginTop = "1rem";
 
   const description = element("textarea", {
     placeholder: "Describe this commit",
-    rows: 3,
+    rows: 4,
   });
   description.style.width = "100%";
 
-  const commitButton = element("button", {}, "Commit files");
-  commitBox.append(description, commitButton);
+  const typeBox = element("div", { className: "commit-files-types" });
+  typeBox.style.display = "grid";
+  typeBox.style.gridTemplateColumns = "repeat(2, minmax(0, 1fr))";
+  typeBox.style.gap = "0.75rem";
+
+  for (const [value, label, detail] of [
+    ["version", "Version", 'Tag commit as version; set file state to "versioned"'],
+    ["lock", "Lock", 'Tag commit as lock; set file state to "locked"'],
+  ]) {
+    const choice = element("label", { className: "commit-files-type" });
+    choice.style.display = "flex";
+    choice.style.gap = "0.65rem";
+    choice.style.padding = "0.75rem";
+    choice.style.border = "1px solid var(--background-modifier-border)";
+    choice.style.borderRadius = "var(--radius-m)";
+    choice.style.cursor = "pointer";
+
+    const radio = element("input", {
+      type: "radio",
+      name: "commit-files-type",
+      value,
+      checked: state.commitType === value,
+    });
+    radio.onchange = () => {
+      if (radio.checked) state.commitType = value;
+    };
+
+    const copy = element("span");
+    copy.style.display = "grid";
+    copy.style.gap = "0.2rem";
+    copy.append(element("strong", {}, label), element("small", {}, detail));
+    choice.append(radio, copy);
+    typeBox.append(choice);
+  }
+
+  const commitButton = element("button", { className: "mod-cta" }, "Commit files");
+  commitBox.append(description, typeBox, commitButton);
   container.append(toolbar, tableHost, commitBox);
 
   function updateControls() {
@@ -116,14 +152,15 @@ async function renderCommitFiles({ app, container }) {
     refreshButton.disabled = state.loading || state.committing;
     commitButton.disabled = state.loading || state.committing || !valid.length || blocked > 0;
     description.disabled = state.loading || state.committing;
+    for (const radio of typeBox.querySelectorAll('input[type="radio"]')) {
+      radio.disabled = state.loading || state.committing;
+    }
 
     if (state.loading) status.textContent = "Loading clipboard selection…";
     else if (state.committing) status.textContent = "Committing files…";
     else if (state.error) status.textContent = state.error;
     else if (!state.items.length) status.textContent = "No selection loaded.";
-    else {
-      status.textContent = `${state.items.length} row(s), ${valid.length} committable${blocked ? `, ${blocked} blocked` : ""}.`;
-    }
+    else status.textContent = `${state.items.length} row(s), ${valid.length} committable${blocked ? `, ${blocked} blocked` : ""}.`;
   }
 
   function openFile(item) {
@@ -138,7 +175,7 @@ async function renderCommitFiles({ app, container }) {
     const table = element("table", { className: "commit-files-table" });
     table.style.width = "100%";
     const head = element("tr");
-    for (const label of ["#", "File", "Path", "Slug", "Git state", "Latest commit", "Problem"]) {
+    for (const label of ["#", "File", "Path", "Slug", "State", "Git state", "Latest commit", "Problem"]) {
       head.append(element("th", {}, label));
     }
     table.append(head);
@@ -155,15 +192,14 @@ async function renderCommitFiles({ app, container }) {
           openFile(item);
         };
         titleCell.append(link);
-      } else {
-        titleCell.textContent = displayTitle(item);
-      }
+      } else titleCell.textContent = displayTitle(item);
 
       row.append(
         element("td", {}, String(item.index || "")),
         titleCell,
         element("td", {}, text(item.path)),
         element("td", {}, text(item.slug)),
+        element("td", {}, text(item.state)),
         element("td", {}, itemState(item)),
         element("td", {}, shortCommit(item.latest_commit || item.user_commit || item.commit)),
         element("td", {}, text(itemProblem(item))),
@@ -206,6 +242,8 @@ async function renderCommitFiles({ app, container }) {
     const message = description.value.trim();
     const items = state.items;
     const blocked = items.filter((item) => !isCommittable(item));
+    const commitType = state.commitType;
+    const fileState = commitType === "lock" ? "locked" : "versioned";
 
     try {
       if (!items.length) throw new Error("The selection is empty.");
@@ -217,6 +255,9 @@ async function renderCommitFiles({ app, container }) {
 
       const result = callFeeder(app, "git.commit_selection", {
         message,
+        commit_type: commitType,
+        tag_type: commitType,
+        state: fileState,
         items: items.map((item) => ({
           index: item.index,
           source_row: item.source_row,
@@ -228,8 +269,9 @@ async function renderCommitFiles({ app, container }) {
 
       const hash = String(result?.commit?.hash || result?.commit || "").slice(0, 8) || "unknown";
       const count = Number(result?.count || result?.files?.length || items.length);
+      const tag = String(result?.tag || result?.commit_tag || "").trim();
       description.value = "";
-      new Notice(`Committed ${count} file(s): ${hash}`);
+      new Notice(`Committed ${count} file(s) as ${commitType}: ${hash}${tag ? ` · ${tag}` : ""}`);
       refreshSelection();
     } catch (error) {
       console.error("Commit Files commit failed:", error);

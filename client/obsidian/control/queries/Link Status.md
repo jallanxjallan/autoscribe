@@ -1,5 +1,5 @@
 ```dataviewjs
-const CONTENT_FOLDER = "Contents";
+const CONTENT_FOLDER = "Content";
 const TOC_PATH = "Table of Contents.md";
 
 const normalizePath = (path) =>

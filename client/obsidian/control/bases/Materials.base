@@ -1,9 +1,9 @@
+filters:
+  and:
+    - file.folder == "Materials"
 views:
   - type: table
     name: Table
-    filters:
-      and:
-        - file.folder == "materials"
     order:
       - selected
       - action

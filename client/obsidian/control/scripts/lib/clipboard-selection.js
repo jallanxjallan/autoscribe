@@ -48,7 +48,6 @@ function isHeaderRow(cells) {
 function parseTabDelimitedSelection(text) {
   const source = String(text ?? "").replace(/\r\n?/g, "\n").trim();
   if (!source) throw new Error("The clipboard is empty.");
-  if (!source.includes("\t")) throw new Error("The clipboard does not contain a tab-delimited list.");
 
   const rows = [];
   const sourceRows = source.split("\n");
