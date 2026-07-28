@@ -11,7 +11,7 @@ from asc.state.slugmap import SlugMap
 
 RUNTIME_TTL_SECONDS = 60 * 60 * 24
 DIRECTIVE_TTL_SECONDS = 60 * 60
-INSTRUCTION_ORDER = ("role", "context", "instructions", "directive")
+INSTRUCTION_ORDER = ("role", "context", "specifics", "instructions", "directive")
 
 
 def materialize_runtimes(
@@ -123,7 +123,11 @@ def _engine_kind(step: Mapping[str, Any], *, args: Mapping[str, Any], ordinal: i
     return value.strip()
 
 
-def _resolve_instruction_keys(step: Mapping[str, Any], *, ordinal: int) -> dict[str, str]:
+def _resolve_instruction_keys(
+    step: Mapping[str, Any],
+    *,
+    ordinal: int,
+) -> dict[str, str | list[str]]:
     raw = step.get("instruction_slugs", step.get("instructions"))
     if raw in (None, ""):
         instruction = step.get("instruction")
@@ -139,14 +143,38 @@ def _resolve_instruction_keys(step: Mapping[str, Any], *, ordinal: int) -> dict[
         raise ValueError(f"plan step {ordinal} instruction references must be a labeled object")
 
     resolver = SlugMap()
-    resolved: dict[str, str] = {}
+    resolved: dict[str, str | list[str]] = {}
     for label in INSTRUCTION_ORDER[:-1]:
         reference = raw.get(label)
-        if reference in (None, ""):
+        if reference in (None, "", []):
             continue
-        if not isinstance(reference, str):
-            raise ValueError(f"plan step {ordinal} instruction {label} must be a string")
-        resolved[label] = resolver.resolve(reference.strip(), expected_kind="instruction")
+
+        references: list[str]
+        was_list = isinstance(reference, list)
+        if isinstance(reference, str):
+            references = [reference]
+        elif was_list and all(isinstance(item, str) for item in reference):
+            references = reference
+        else:
+            raise ValueError(
+                f"plan step {ordinal} instruction {label} must be a string "
+                "or a list of strings"
+            )
+
+        clean = [item.strip() for item in references]
+        if any(not item for item in clean):
+            raise ValueError(
+                f"plan step {ordinal} instruction {label} contains an empty slug"
+            )
+
+        keys = [
+            resolver.resolve(item, expected_kind="instruction")
+            for item in clean
+        ]
+        # Preserve the representation supplied by the plan. Older plans and
+        # consumers continue to receive one key as a string; current plans can
+        # carry an ordered list of keys under any instruction label.
+        resolved[label] = keys if was_list else keys[0]
 
     unknown = set(raw) - set(INSTRUCTION_ORDER[:-1])
     if unknown:

@@ -191,6 +191,60 @@ async function stageDispatchFiles(app, items) {
   return { stagingRoot, stagedPaths };
 }
 
+async function prepareDispatchPaths(app, paths) {
+  const vaultRoot = app.vault.adapter.basePath;
+  const stagingRoot = fs.mkdtempSync(
+    path.join(SYSTEM_TMP_ROOT, "autoscribe-dispatch-")
+  );
+  const preparedPaths = [];
+  let stagedCount = 0;
+
+  try {
+    for (const inputPath of paths) {
+      const relativePath = vaultRelativePath(vaultRoot, inputPath);
+      const source = app.vault.getAbstractFileByPath(relativePath);
+
+      if (!source || source.extension !== "md") {
+        throw new Error(`Selected Markdown file was not found: ${inputPath}`);
+      }
+
+      const original = await app.vault.read(source);
+      const { frontmatter, body } = splitFrontmatter(original);
+
+      TRANSCLUSION_RE.lastIndex = 0;
+      const hasTransclusions = TRANSCLUSION_RE.test(body);
+      TRANSCLUSION_RE.lastIndex = 0;
+
+      if (!hasTransclusions) {
+        preparedPaths.push(relativePath);
+        continue;
+      }
+
+      const resolvedBody = await resolveBodyTransclusions(
+        app,
+        body,
+        source.path,
+        [source.path]
+      );
+      const stagedPath = path.join(stagingRoot, ...relativePath.split("/"));
+      fs.mkdirSync(path.dirname(stagedPath), { recursive: true });
+      fs.writeFileSync(stagedPath, frontmatter + resolvedBody, "utf8");
+      preparedPaths.push(stagedPath);
+      stagedCount += 1;
+    }
+  } catch (error) {
+    fs.rmSync(stagingRoot, { recursive: true, force: true });
+    throw error;
+  }
+
+  if (!stagedCount) {
+    fs.rmSync(stagingRoot, { recursive: true, force: true });
+    return { stagingRoot: null, paths: preparedPaths, stagedCount: 0 };
+  }
+
+  return { stagingRoot, paths: preparedPaths, stagedCount };
+}
+
 function normalizePlan(record) {
   if (!record) return null;
 
@@ -629,4 +683,4 @@ async function renderCreateRun({ app, container }) {
   }
 }
 
-module.exports = { renderCreateRun };
+module.exports = { prepareDispatchPaths, renderCreateRun };

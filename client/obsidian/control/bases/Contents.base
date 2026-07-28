@@ -2,9 +2,14 @@ filters:
   and:
     - "!slug.isEmpty()"
     - file.folder == "Content"
+formulas:
+  Untitled: ""
 views:
   - type: table
     name: Status
+    filters:
+      and:
+        - action != "defer"
     groupBy:
       property: stage
       direction: ASC
@@ -12,24 +17,30 @@ views:
       - file.name
       - action
       - state
+      - file.mtime
+    sort:
+      - property: file.mtime
+        direction: DESC
   - type: table
     name: Order
     filters:
       and:
-        - section == 1
-        - component == "narrative"
+        - action == "process"
+    groupBy:
+      property: section
+      direction: ASC
     order:
       - file.name
-      - section
       - position
       - component
       - group
-      - stage
-      - action
+      - tags
     sort:
       - property: section
         direction: ASC
       - property: position
         direction: ASC
     columnSize:
+      file.name: 248
       note.position: 92
+      note.group: 158

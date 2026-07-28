@@ -14,3 +14,8 @@ obs = "obs.cli:main"
 
 [tool.setuptools.packages.find]
 where = ["src"]
+
+[tool.pytest.ini_options]
+markers = [
+  "live_upload: performs a real AutoScribe enqueue and mutates the selected Git vault",
+]

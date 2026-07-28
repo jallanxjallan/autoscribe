@@ -182,39 +182,137 @@ def delete_plan(slug: str, *, cwd: Path) -> dict[str, Any]:
     return {"slug": slug, "pipeline_output": result.stdout.strip()}
 
 
+
+
+
+def _plan_path(cwd: Path, slug: str) -> Path:
+    plan_slug = str(slug or "").strip()
+    if not plan_slug:
+        raise ObsError("dispatch requires plan_slug")
+    if not plan_slug.startswith("plan.") or any(ch in plan_slug for ch in "/\\"):
+        raise ObsError(f"invalid plan slug: {plan_slug}")
+    path = (cwd / "_plans" / f"{plan_slug}.json").resolve()
+    try:
+        path.relative_to(cwd.resolve())
+    except ValueError as exc:
+        raise ObsError(f"plan path escaped active vault: {path}") from exc
+    return path
+
+
+def _rg_slug_paths(cwd: Path, slug: str) -> list[Path]:
+    """Find Markdown instruction files whose frontmatter contains the exact slug."""
+    result = run(
+        ["rg", "-l", "--glob", "*.md", "--", rf"^slug:\s*{slug.replace('.', r'\.') }\s*$", "."],
+        cwd=cwd,
+        check=False,
+    )
+    if result.returncode not in (0, 1):
+        raise ObsError(f"rg failed while resolving {slug}: {result.stderr.strip()}")
+    return [(cwd / line.strip()).resolve() for line in result.stdout.splitlines() if line.strip()]
+
+
+def _single_slug_path(cwd: Path, slug: str, *, label: str) -> Path:
+    matches = _rg_slug_paths(cwd, slug)
+    if not matches:
+        raise ObsError(f"{label} slug not found in vault: {slug}")
+    if len(matches) > 1:
+        rendered = ", ".join(path.relative_to(cwd.resolve()).as_posix() for path in matches)
+        raise ObsError(f"duplicate {label} slug {slug}: {rendered}")
+    return matches[0]
+
+
+def load_local_plan(cwd: Path, slug: str) -> dict[str, Any]:
+    """Load _plans/<slug>.json directly; plans do not require ripgrep."""
+    plan_slug = str(slug or "").strip()
+    path = _plan_path(cwd, plan_slug)
+    if not path.is_file():
+        raise ObsError(f"plan not found: {path.relative_to(cwd.resolve()).as_posix()}")
+    try:
+        record = json.loads(path.read_text(encoding="utf-8"))
+    except json.JSONDecodeError as exc:
+        raise ObsError(f"{path}: invalid JSON plan: {exc}") from exc
+    if not isinstance(record, dict):
+        raise ObsError(f"{path}: plan JSON must be an object")
+    actual = str(record.get("record_identity") or record.get("slug") or "").strip()
+    if actual != plan_slug:
+        raise ObsError(f"{path}: expected plan slug {plan_slug}, found {actual or '<empty>'}")
+    return {
+        **record,
+        "record_type": "plan",
+        "record_identity": plan_slug,
+        "slug": plan_slug,
+        "path": path.relative_to(cwd.resolve()).as_posix(),
+    }
+
+
+def _sync_payload(record: dict[str, Any], *, slug: str) -> dict[str, Any]:
+    payload = record.get("payload")
+    if not isinstance(payload, dict):
+        raise ObsError(f"{slug}: local plan must contain payload")
+    steps = payload.get("steps")
+    if not isinstance(steps, dict) or not steps:
+        raise ObsError(f"{slug}: local plan payload must contain non-empty steps")
+    return dict(payload)
+
+
+def _instruction_slugs(payload: dict[str, Any], *, plan_slug: str) -> list[str]:
+    found: list[str] = []
+    seen: set[str] = set()
+    steps = payload.get("steps") or {}
+    for step_number, step in steps.items():
+        if not isinstance(step, dict):
+            raise ObsError(f"{plan_slug}: step {step_number} must be an object")
+        refs = step.get("instruction_slugs") or {}
+        if not isinstance(refs, dict):
+            raise ObsError(f"{plan_slug}: step {step_number} instruction_slugs must be an object")
+        for label in ("role", "context", "specifics", "instructions"):
+            values = refs.get(label, [])
+            if isinstance(values, str):
+                values = [values]
+            if not isinstance(values, list) or any(not isinstance(value, str) for value in values):
+                raise ObsError(f"{plan_slug}: step {step_number} instruction_slugs.{label} must be strings")
+            for value in values:
+                value = value.strip()
+                if value and value not in seen:
+                    seen.add(value)
+                    found.append(value)
+    return found
+
+
+def _git_dirty(cwd: Path, relpath: str) -> bool:
+    return relpath in set(__import__("obs.git", fromlist=["dirty_files"]).dirty_files(cwd))
+
+
 def sync_plan(record: dict[str, Any], *, cwd: Path) -> dict[str, Any]:
-    """Reconcile a vault-local plan and its instruction sources with the server."""
+    """Upload missing or Git-dirty plan/instruction records; never hash them."""
+    from .instruction_upload import sync_instruction
+
     slug = str(record.get("record_identity") or record.get("slug") or "").strip()
     if not slug:
         raise ObsError("dispatch plan record missing record_identity")
-    payload = record.get("payload")
-    if not isinstance(payload, dict):
-        raise ObsError(f"{slug}: local plan payload must be an object")
+    payload = _sync_payload(record, slug=slug)
 
-    instruction_sets = ((record.get("local") or {}).get("instruction_sets") or [])
-    if not isinstance(instruction_sets, list):
-        raise ObsError(f"{slug}: local instruction_sets must be a list")
-    instruction_results = sync_instructions(cwd, instruction_sets)
+    snapshot = pipeline_snapshot("control")
+    instruction_registry = snapshot.get("registries", {}).get("instructions", {})
+    remote_instruction_slugs = set(instruction_registry) if isinstance(instruction_registry, dict) else set()
+    instruction_results: list[dict[str, Any]] = []
+    for instruction_slug in _instruction_slugs(payload, plan_slug=slug):
+        source = _single_slug_path(cwd, instruction_slug, label="instruction")
+        relpath = source.relative_to(cwd.resolve()).as_posix()
+        instruction_results.append(sync_instruction(
+            cwd,
+            slug=instruction_slug,
+            path=str(source),
+            source_path=relpath,
+            remote_present=instruction_slug in remote_instruction_slugs,
+            local_dirty=_git_dirty(cwd, relpath),
+        ))
 
-    local_canonical = json.dumps(payload, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
-    remote_payload = None
-    for candidate in list_plans():
-        if candidate["slug"] == slug:
-            try:
-                remote_payload = _materialize_plan(candidate).get("payload")
-                if remote_payload is None:
-                    remote_payload = {
-                        "label": candidate.get("label", ""),
-                        "description": candidate.get("description", ""),
-                        "steps": candidate.get("steps", {}),
-                    }
-            except ObsError:
-                remote_payload = None
-            break
-    if isinstance(remote_payload, dict):
-        remote_canonical = json.dumps(remote_payload, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
-        if remote_canonical == local_canonical:
-            return {"slug": slug, "status": "current", "uploaded": False, "instructions": instruction_results}
+    plan_relpath = str(record.get("path") or "").strip()
+    remote_plan_slugs = {item["slug"] for item in list_plans()}
+    should_upload = slug not in remote_plan_slugs or (plan_relpath and _git_dirty(cwd, plan_relpath))
+    if not should_upload:
+        return {"slug": slug, "status": "current", "uploaded": False, "instructions": instruction_results}
 
     envelope = {"record_type": "plan", "record_identity": slug, "payload": payload}
     result = run([autoscribe_bin(), "upload", "plans"], cwd=cwd,

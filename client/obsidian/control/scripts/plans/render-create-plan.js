@@ -11,6 +11,7 @@ const { resolveInstructionStack } = require("./instruction-resolver.js");
 
 const ZSH = "/usr/bin/zsh";
 const STEP_KINDS = ["llm", "script", "rag"];
+const STATUS_KEY = "autoscribe.define-plan.status";
 
 function el(tag, attrs = {}, children = []) {
   const node = document.createElement(tag);
@@ -63,18 +64,41 @@ async function renderCreatePlan({ app, container }) {
   };
   let plans = listPlanRecords(app), loaded = null, steps = [];
 
-  container.appendChild(el("h2", { text: "Plans" }));
-  container.appendChild(el("p", { text: "Vault-local plans are edited here. Plans and referenced instructions are reconciled with the server only when a run is dispatched." }));
+  container.appendChild(el("h2", { text: "Define Plan" }));
+  container.appendChild(el("p", { text: "Create a new vault plan or load an existing plan for modification. Plans are stored under _plans/ and versioned in Git." }));
 
+  const planLabel = el("label", { text: "Existing plan" });
   const planSelect = el("select"); planSelect.style.width = "100%";
+  const loadButton = el("button", { text: "Load Plan" });
+  const newButton = el("button", { text: "New Plan" });
+  const nameLabel = el("label", { text: "Plan label" });
   const name = el("input", { type: "text", placeholder: "Plan label" }); name.style.width = "100%";
+  const descriptionLabel = el("label", { text: "Description" });
   const description = el("textarea", { placeholder: "Optional description" }); description.style.width = "100%";
   const stepsBox = el("div");
-  const status = el("pre"); status.style.whiteSpace = "pre-wrap";
+  const status = el("pre"); status.style.cssText = "white-space:pre-wrap;margin-top:.75rem";
+
+  function setStatus(message) {
+    status.textContent = message || "";
+    try {
+      if (message) sessionStorage.setItem(STATUS_KEY, message);
+      else sessionStorage.removeItem(STATUS_KEY);
+    } catch {}
+  }
+
+  function clearForm() {
+    loaded = null;
+    name.value = "";
+    description.value = "";
+    steps = [];
+    redraw();
+  }
 
   function refreshSelect(slug = "") {
-    planSelect.innerHTML = ""; planSelect.appendChild(el("option", { value: "", text: "New plan" }));
-    plans.forEach((plan) => option(planSelect, { ...plan, key: planSlug(plan) })); planSelect.value = slug;
+    planSelect.innerHTML = "";
+    planSelect.appendChild(el("option", { value: "", text: plans.length ? "Select a plan…" : "No saved plans" }));
+    plans.forEach((plan) => option(planSelect, { ...plan, key: planSlug(plan) }));
+    planSelect.value = slug;
   }
 
   function choice(records, value, onChange, placeholder) {
@@ -104,16 +128,35 @@ async function renderCreatePlan({ app, container }) {
     });
   }
 
-  planSelect.addEventListener("change", () => {
-    if (!planSelect.value) { loaded = null; name.value = ""; description.value = ""; steps = []; redraw(); return; }
-    loaded = loadPlanRecord(app, planSelect.value); name.value = loaded.payload?.label || loaded.label || "";
-    description.value = loaded.payload?.description || loaded.description || ""; steps = screenSteps(loaded, catalogs); redraw();
+  function loadSelectedPlan() {
+    if (!planSelect.value) {
+      setStatus(plans.length ? "Select a saved plan, then click Load Plan." : "No saved plans were found under _plans/." );
+      return;
+    }
+    try {
+      loaded = loadPlanRecord(app, planSelect.value);
+      name.value = loaded.payload?.label || loaded.label || "";
+      description.value = loaded.payload?.description || loaded.description || "";
+      steps = screenSteps(loaded, catalogs);
+      redraw();
+      setStatus(`Loaded ${planSlug(loaded)} from ${loaded.path}`);
+    } catch (error) {
+      setStatus(`Load failed: ${error.message || error}`);
+    }
+  }
+
+  loadButton.addEventListener("click", loadSelectedPlan);
+  planSelect.addEventListener("dblclick", loadSelectedPlan);
+  newButton.addEventListener("click", () => {
+    planSelect.value = "";
+    clearForm();
+    setStatus("New plan form ready.");
+    name.focus();
   });
 
   const add = el("button", { text: "Add Step" }); add.addEventListener("click", () => { steps.push({ kind: "llm", label: `Step ${steps.length + 1}`, argsJson: "{}" }); redraw(); });
   const save = el("button", { text: "Save Plan", class: "mod-cta" }); save.addEventListener("click", () => {
     try {
-      const instructionSets = new Map();
       for (const step of steps) {
         if (!step.instruction) {
           delete step.instruction_slugs;
@@ -121,20 +164,29 @@ async function renderCreatePlan({ app, container }) {
         }
         const resolved = resolveInstructionStack(app, step.instruction);
         step.instruction_slugs = resolved.instruction_slugs;
-        for (const item of resolved.components) instructionSets.set(item.slug, item);
       }
       const record = buildPlanRecord({ label: name.value, description: description.value, steps, force_slug: planSlug(loaded) || null });
-      record.local = { instruction_sets: [...instructionSets.values()] };
       record.created = loaded?.created || new Date().toISOString(); record.modified = new Date().toISOString();
-      savePlanRecord(app, record); loaded = record; plans = listPlanRecords(app); refreshSelect(planSlug(record));
-      status.textContent = `Saved ${planSlug(record)} locally.`;
-    } catch (error) { status.textContent = `Save failed: ${error.message || error}`; }
+      const savedPath = savePlanRecord(app, record); loaded = { ...record, path: savedPath }; plans = listPlanRecords(app); refreshSelect(planSlug(record));
+      setStatus(`Saved ${planSlug(record)} to ${savedPath}`);
+    } catch (error) { setStatus(`Save failed: ${error.message || error}`); }
   });
   const del = el("button", { text: "Delete Plan" }); del.addEventListener("click", () => {
-    if (!loaded) return; deletePlanRecord(app, planSlug(loaded)); loaded = null; plans = listPlanRecords(app); refreshSelect(); name.value = ""; description.value = ""; steps = []; redraw();
+    if (!loaded) { setStatus("Load a plan before deleting it."); return; }
+    try {
+      const deletedPath = deletePlanRecord(app, planSlug(loaded));
+      plans = listPlanRecords(app); refreshSelect(); clearForm();
+      setStatus(`Deleted ${deletedPath}`);
+    } catch (error) { setStatus(`Delete failed: ${error.message || error}`); }
   });
 
-  refreshSelect(); container.append(planSelect, name, description, stepsBox, add, save, del, status); redraw();
+  const pickerButtons = el("div"); pickerButtons.style.cssText = "display:flex;gap:.5rem;margin:.4rem 0 1rem"; pickerButtons.append(loadButton, newButton);
+  const actionButtons = el("div"); actionButtons.style.cssText = "display:flex;gap:.5rem;margin-top:.75rem"; actionButtons.append(add, save, del);
+
+  refreshSelect();
+  container.append(planLabel, planSelect, pickerButtons, nameLabel, name, descriptionLabel, description, stepsBox, actionButtons, status);
+  redraw();
+  try { status.textContent = sessionStorage.getItem(STATUS_KEY) || ""; } catch {}
 }
 
 module.exports = { renderCreatePlan };

@@ -74,9 +74,9 @@ def upload_instructions(repo: Path, *, force: bool = False, dry_run: bool = Fals
 
 
 
-def _dispatch_record(*, slug: str, plan_slug: str, content: str) -> dict[str, str]:
+def _dispatch_record(*, record_identity: str, plan_slug: str, content: str) -> dict[str, str]:
     return {
-        "record_identity": slug,
+        "record_identity": record_identity,
         "record_type": "content",
         "record_plan": plan_slug,
         "record_content": content,
@@ -94,12 +94,20 @@ def _encode_ndjson(records: list[dict[str, str]]) -> bytes:
 
 
 def _resolve_dispatch_item(repo: Path, *, relpath: str, expected_slug: str | None = None) -> dict[str, str]:
+    """Resolve an in-vault Markdown file for dispatch.
+
+    The UI mutates transclusions in place and hands feeder the original vault
+    path. Files may live anywhere inside the vault; ``Contents`` is not a
+    dispatch boundary. Absolute paths are accepted only when they still resolve
+    inside the active vault.
+    """
     root = repo.resolve()
-    normalized_input = str(relpath or "").replace("\\", "/").lstrip("./")
-    if not normalized_input:
+    raw_path = str(relpath or "").strip()
+    if not raw_path:
         raise ObsError("dispatch item is missing path")
 
-    absolute = (root / normalized_input).resolve()
+    candidate = Path(raw_path).expanduser()
+    absolute = candidate.resolve() if candidate.is_absolute() else (root / candidate).resolve()
     try:
         normalized = absolute.relative_to(root).as_posix()
     except ValueError as exc:
@@ -114,14 +122,17 @@ def _resolve_dispatch_item(repo: Path, *, relpath: str, expected_slug: str | Non
     document = parse_markdown(content)
     slug = str(document.frontmatter.get("slug") or "").strip()
     if not slug:
-        raise ObsError(f"{normalized}: missing slug")
+        raise ObsError(f"{normalized}: dispatch file is missing slug")
     if expected_slug and slug != expected_slug:
-        raise ObsError(f"{normalized}: expected slug {expected_slug}, found {slug}")
+        raise ObsError(
+            f"{normalized}: expected record identity {expected_slug}, found {slug}"
+        )
 
     return {
         "path": normalized,
         "absolute_path": str(absolute),
         "slug": slug,
+        "record_identity": slug,
         "record_content": content,
     }
 
@@ -196,7 +207,7 @@ def dispatch_run(
         item["dispatch_commit"] = commit
         records.append(
             _dispatch_record(
-                slug=item["slug"],
+                record_identity=item["record_identity"],
                 plan_slug=plan_slug,
                 content=item["record_content"],
             )
@@ -225,9 +236,6 @@ def dispatch_paths(
     if not plan:
         raise ObsError("dispatch requires plan_slug")
     plan_sync = None
-    if isinstance(plan_record, dict):
-        from .plans import sync_plan
-        plan_sync = sync_plan(plan_record, cwd=repo)
 
     items: list[dict[str, Any]] = []
     seen: set[str] = set()
@@ -242,6 +250,10 @@ def dispatch_paths(
     if not items:
         raise ObsError("selection contains no dispatchable Markdown files")
     _assert_unique(items, "dispatch")
+
+    from .plans import load_local_plan, sync_plan
+    del plan_record
+    effective_plan_record = load_local_plan(repo, plan)
 
     stamp = datetime.now().astimezone().strftime("%Y-%m-%d %H:%M:%S %z")
     user_message = str(message or "").strip()
@@ -262,6 +274,8 @@ def dispatch_paths(
             "plan_sync": plan_sync,
         }
 
+    plan_sync = sync_plan(effective_plan_record, cwd=repo)
+
     # commit_files uses --allow-empty and --only, so an unchanged selection
     # still gets a distinct source commit without including unrelated changes.
     commit = git.commit_files(repo, [item["path"] for item in items], subject)
@@ -270,7 +284,7 @@ def dispatch_paths(
         item["dispatch_commit"] = commit
         records.append(
             _dispatch_record(
-                slug=item["slug"],
+                record_identity=item["record_identity"],
                 plan_slug=plan,
                 content=item["record_content"],
             )
@@ -315,12 +329,13 @@ def dispatch_paths(
 def _assert_unique(items: list[dict[str, Any]], label: str) -> None:
     grouped: dict[str, list[str]] = {}
     for item in items:
-        grouped.setdefault(item["slug"], []).append(str(item["path"]))
-    duplicates = {slug: paths for slug, paths in grouped.items() if len(paths) > 1}
+        identity = str(item.get("record_identity") or item.get("slug") or "").strip()
+        grouped.setdefault(identity, []).append(str(item["path"]))
+    duplicates = {identity: paths for identity, paths in grouped.items() if identity and len(paths) > 1}
     if duplicates:
-        lines = [f"duplicate {label} slugs:"]
-        for slug, paths in duplicates.items():
-            lines.append(f"  {slug}")
+        lines = [f"duplicate {label} record identities:"]
+        for identity, paths in duplicates.items():
+            lines.append(f"  {identity}")
             lines.extend(f"    - {path}" for path in paths)
         raise ObsError("\n".join(lines))
 
@@ -358,16 +373,18 @@ def dispatch_commit(
         document = parse_markdown(content)
         slug = str(document.frontmatter.get("slug") or "").strip()
         if not slug:
-            raise ObsError(f"{path}: missing slug in selected commit")
+            raise ObsError(f"{path}: dispatch file is missing slug")
+        record_identity = slug
         item = {
             "path": path,
             "slug": slug,
+            "record_identity": record_identity,
             "record_content": content,
             "dispatch_commit": commit,
             "plan_slug": plan,
         }
         items.append(item)
-        records.append(_dispatch_record(slug=slug, plan_slug=plan, content=content))
+        records.append(_dispatch_record(record_identity=record_identity, plan_slug=plan, content=content))
 
     _assert_unique(items, "dispatch")
     if dry_run:
