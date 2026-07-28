@@ -6,9 +6,9 @@
  * Workflow:
  *   1. Run the script from a QuickAdd Macro.
  *   2. Enter a title.
- *   3. Choose a class under a folding storage heading.
+ *   3. Choose a record/component under a folding storage heading.
  *   4. The script normalizes the filename to Title Case, creates a
- *      class-prefixed kebab-case slug, writes frontmatter, and opens the note.
+ *      type-prefixed kebab-case slug, writes frontmatter, and opens the note.
  *
  * Edit NOTE_GROUPS below to match each vault.
  */
@@ -32,47 +32,61 @@ const NOTE_GROUPS = [
         initiallyOpen: true,
         classes: [
             {
-                label: "Passage",
-                class: "passage",
-                prefix: "psg",
-                properties: {
-                    status: null,
-                    stage: null,
-                    origin: "human",
-                    producer: "human",
-                },
-            },
-            {
-                label: "Caption",
-                class: "caption",
-                prefix: "cap",
-                properties: {
-                    status: null,
-                    stage: null,
+                label: "Narrative",
+                prefix: "cnt",
+                frontmatter: {
+                    record: "passage",
+                    section: null,
+                    position: null,
+                    component: "narrative",
+                    stage: "new",
+                    action: "write",
                     origin: "human",
                     producer: "human",
                 },
             },
             {
                 label: "Sidebar",
-                class: "sidebar",
-                prefix: "sdb",
-                properties: {
-                    status: null,
-                    stage: null,
+                prefix: "cnt",
+                frontmatter: {
+                    record: "passage",
+                    section: null,
+                    position: null,
+                    component: "sidebar",
+                    stage: "new",
+                    action: "write",
                     origin: "human",
                     producer: "human",
                 },
             },
             {
                 label: "Epigraph",
-                class: "epigraph",
-                prefix: "epi",
-                properties: {
-                    status: null,
-                    stage: null,
+                prefix: "cnt",
+                frontmatter: {
+                    record: "passage",
+                    section: null,
+                    position: null,
+                    component: "epigraph",
+                    stage: "new",
+                    action: "write",
                     origin: "human",
                     producer: "human",
+                    topics: [],
+                    tags: ["epigraphs"],
+                },
+            },
+            {
+                label: "Caption",
+                prefix: "cap",
+                frontmatter: {
+                    record: "caption",
+                    section: null,
+                    position: null,
+                    stage: "new",
+                    action: "write",
+                    origin: "human",
+                    producer: "human",
+                    assets: [],
                 },
             },
         ],
@@ -219,11 +233,16 @@ module.exports = async function createTypedNote(params) {
         SLUG_SUFFIX_LENGTH,
     );
 
-    const frontmatter = {
-        slug,
-        class: selection.noteClass.class,
-        ...selection.noteClass.properties,
-    };
+    const frontmatter = selection.noteClass.frontmatter
+        ? {
+              slug,
+              ...selection.noteClass.frontmatter,
+          }
+        : {
+              slug,
+              class: selection.noteClass.class,
+              ...selection.noteClass.properties,
+          };
 
     const content = `${serializeFrontmatter(frontmatter)}\n`;
     const file = await app.vault.create(filePath, content);
@@ -262,7 +281,7 @@ class TypedNoteModal extends Modal {
         this.titleEl.setText("Create Note");
 
         contentEl.createEl("p", {
-            text: "Enter a title, then choose the note class.",
+            text: "Enter a title, then choose the note type.",
             cls: "typed-note-intro",
         });
 

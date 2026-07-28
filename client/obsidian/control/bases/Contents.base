@@ -4,122 +4,32 @@ filters:
     - file.folder == "Content"
 views:
   - type: table
-    name: Table
-    filters:
-      and:
-        - selected == false
-    order:
-      - slug
-      - stage
-      - status
-    sort:
-      - property: stage
-        direction: DESC
-      - property: tags
-        direction: ASC
-      - property: status
-        direction: ASC
-      - property: formula.Untitled
-        direction: ASC
-  - type: cards
-    name: View
-    filters:
-      and:
-        - stage == "final"
-    order:
-      - file.name
-      - kind
-      - class
-      - origin
-      - stage
-      - status
-    imageAspectRatio: 1.2
-  - type: table
-    name: Selected
-    filters:
-      and:
-        - selected == true
-    order:
-      - file.name
-      - slug
-  - type: table
-    name: State
-    groupBy:
-      property: state
-      direction: ASC
-    order:
-      - selected
-      - file.name
-      - stage
-      - status
-    sort:
-      - property: selected
-        direction: ASC
-      - property: stage
-        direction: DESC
-      - property: status
-        direction: ASC
-  - type: table
-    name: Contents
-    groupBy:
-      property: class
-      direction: ASC
-    order:
-      - selected
-      - file.name
-      - origin
-      - file.mtime
-      - file.tags
-      - status
-    sort:
-      - property: selected
-        direction: DESC
-      - property: class
-        direction: ASC
-      - property: file.name
-        direction: ASC
-      - property: file.tags
-        direction: ASC
-      - property: file.mtime
-        direction: ASC
-    columnSize:
-      note.origin: 135
-  - type: table
-    name: Stage
+    name: Status
     groupBy:
       property: stage
       direction: ASC
     order:
-      - selected
       - file.name
-      - status
-      - state
       - action
-      - stage
-    columnSize:
-      note.status: 179
-  - type: table
-    name: Action
-    groupBy:
-      property: action
-      direction: ASC
-    order:
-      - selected
-      - file.name
-      - stage
-      - status
-    sort:
-      - property: stage
-        direction: ASC
-      - property: status
-        direction: ASC
-  - type: table
-    name: Status
-    groupBy:
-      property: status
-      direction: ASC
-    order:
-      - selected
-      - file.name
-      - stage
       - state
+  - type: table
+    name: Order
+    filters:
+      and:
+        - section == 1
+        - component == "narrative"
+    order:
+      - file.name
+      - section
+      - position
+      - component
+      - group
+      - stage
+      - action
+    sort:
+      - property: section
+        direction: ASC
+      - property: position
+        direction: ASC
+    columnSize:
+      note.position: 92
