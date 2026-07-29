@@ -1,4 +1,6 @@
-```dataviewjs
+# Instructions Index
+
+````dataviewjs
 const CONFIG = {
   title: "Instructions Index",
 
@@ -435,4 +437,4 @@ function render() {
 }
 
 render();
-```
+````

@@ -1,4 +1,6 @@
-```dataviewjs
+# Content Status
+
+````dataviewjs
 const CONFIG = {
   tempRoot: "",
   debug: false,
@@ -9,7 +11,7 @@ const CONFIG = {
   defaultSlugPrefix: "—",
 
   // Slug prefixes only. Filenames are irrelevant.
-  slugPrefixes: ["cnt", "img"],
+  slugPrefixes: ["psg", "img", "opn"],
 
   excludePaths: [
     ".obsidian",
@@ -42,8 +44,6 @@ const runtime = createQueryRuntime({ app, queryTitle: "Content Status query" });
 const { loader, queryPath, vaultName } = runtime;
 
 const { renderSelectionQuery } = loader.requireControl("scripts/lib/selection-query.js");
-const { makeContentStatusView } = loader.requireControl("scripts/lib/content-status-view.js");
-
 await makeContentStatusView({
   app,
   dv,
@@ -53,4 +53,4 @@ await makeContentStatusView({
   config: CONFIG,
   renderSelectionQuery,
 }).render();
-```
+````

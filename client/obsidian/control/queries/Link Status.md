@@ -1,4 +1,6 @@
-```dataviewjs
+# Link Status
+
+````dataviewjs
 const CONTENT_FOLDER = "Content";
 const TOC_PATH = "Table of Contents.md";
 
@@ -155,4 +157,4 @@ if (duplicateLinks.length) {
 } else {
   dv.paragraph("✓ No content file is linked more than once.");
 }
-```
+````

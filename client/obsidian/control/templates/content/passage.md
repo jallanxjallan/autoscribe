@@ -1,9 +1,9 @@
 ---
-slug: <% tp.user.make_slug(tp, "cnt") %>
+slug: <% tp.user.make_slug(tp, "psg") %>
 record: passage
 section:
 position:
-component: narrative
+component: body
 stage: new
 action: write
 origin: human

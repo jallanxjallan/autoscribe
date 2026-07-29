@@ -1,5 +1,6 @@
+# Content Callouts
 
-```dataviewjs
+````dataviewjs
 const rows = [];
 const MISSING = "—";
 const PREVIEW_LIMIT = 60;
@@ -197,4 +198,4 @@ dv.table(
 }
 
 render();
-```
+````

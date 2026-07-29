@@ -1,5 +1,7 @@
-```dataviewjs
-const container = this.container;
+# Compiled Notes
+
+````dataviewjs
+
 
 const nodeRequire =
     typeof require === "function"
@@ -143,13 +145,15 @@ function linkTarget(path) {
         .replace(/\.md$/i, "");
 }
 
-const controls = container.createDiv({
+const queryContainer = dv.container;
+
+const controls = queryContainer.createDiv({
     cls: "compiled-notes-controls"
 });
 const refreshButton = controls.createEl("button", {
     text: "Refresh from clipboard"
 });
-const output = container.createDiv({
+const output = queryContainer.createDiv({
     cls: "compiled-notes-output"
 });
 
@@ -198,4 +202,4 @@ async function renderClipboard() {
 
 refreshButton.addEventListener("click", renderClipboard);
 await renderClipboard();
-```
+````

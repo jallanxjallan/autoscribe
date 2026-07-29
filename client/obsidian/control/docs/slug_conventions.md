@@ -19,6 +19,6 @@
 
 ## Examples
 
-- `pss.hhp.chapter-03-opening.kmzqtxra`
+- `psg.hhp.chapter-03-opening.kmzqtxra`
 - `ins.hhp.submission-rules.abcdwxyz`
 - `pkg.hhp.story-pipeline.qrstuvwx`

@@ -1,4 +1,6 @@
-```dataviewjs
+# Content Index
+
+````dataviewjs
 const CONFIG = {
   tocPath: "",
   tempRoot: "",
@@ -117,4 +119,4 @@ await makeContentIndexView({
   config: CONFIG,
   renderSelectionQuery: renderTidySelectionQuery,
 }).render();
-```
+````

@@ -1,4 +1,6 @@
-```dataviewjs
+# Editorial Flags
+
+````dataviewjs
 const PREVIEW_LIMIT = 60;
 
 const nodeRequire = typeof require === "function" ? require : window.require;
@@ -240,4 +242,4 @@ await renderSelectionQuery({
 
   renderResults,
 });
-```
+````

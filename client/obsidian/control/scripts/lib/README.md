@@ -1,3 +1,3 @@
-# control/scripts/lib
+# Shared library
 
-Shared helpers for the control package only. This is a silo, not a bridge to `cli/lib`.
+This directory is for reusable mechanics, not workflow configuration or display implementations. Choices, labels, prompts, layout, and orchestration belong in the macro, query, or panel that users open.

@@ -1,4 +1,6 @@
-```dataviewjs
+# Materials Index
+
+````dataviewjs
 const CONFIG = {
   tempRoot: "",
   debug: false,
@@ -78,7 +80,7 @@ function slugPrefix(value) {
 
 function isContentFile(file, frontmatter) {
   const slug = frontmatter?.slug || file.basename;
-  return ["cnt", "img"].includes(slugPrefix(slug));
+  return ["psg", "img", "opn"].includes(slugPrefix(slug));
 }
 
 function collectFrontmatterLinktexts(value, output = new Set()) {
@@ -488,4 +490,4 @@ await renderSelectionQuery({
 
   debug: CONFIG.debug
 });
-```
+````

@@ -1,5 +1,9 @@
-# control/scripts
+# Control scripts
 
-Obsidian-facing query, macro, and UI implementations.
+Visible workflow files own their configuration, display code, and orchestration:
 
-Keep code here by default. Move a helper into `lib/` only when more than one control script imports it. The control package must not require from `../cli` or a top-level shared package.
+- `macros/` contains complete QuickAdd macros.
+- `queries/` contains complete DataviewJS queries.
+- `panels/` contains complete DataviewJS panels.
+
+`scripts/lib/` contains reusable mechanics shared by more than one visible workflow. Other `scripts/` subdirectories contain non-display domain and persistence support used by visible workflows. There are no shadow renderer files for panels or queries.

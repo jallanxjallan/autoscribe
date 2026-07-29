@@ -23,9 +23,6 @@ views:
         direction: DESC
   - type: table
     name: Order
-    filters:
-      and:
-        - action == "process"
     groupBy:
       property: section
       direction: ASC
