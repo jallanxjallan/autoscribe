@@ -11,10 +11,10 @@
         "id": "318c776d-ffb1-4954-89d2-d2c5e2c6837c",
         "commands": [
           {
-            "name": "apply_templates",
+            "name": "apply-template",
             "type": "UserScript",
-            "id": "4fce7a17-d9e9-4b33-b9d1-51a3da21468a",
-            "path": "_control/templater/apply_templates.js",
+            "id": "173c2fe4-cb37-4a94-a975-4cc017ce4b39",
+            "path": "_control/macros/apply-template.js",
             "settings": {}
           }
         ]
@@ -35,6 +35,26 @@
             "type": "UserScript",
             "id": "13693453-03ec-408d-95cd-f167358c6920",
             "path": "_control/scripts/queries/open_dashboard.js",
+            "settings": {}
+          }
+        ]
+      }
+    },
+    {
+      "id": "c3b22c4c-dd08-4149-988d-cb0e30418c9d",
+      "name": "Create Note",
+      "type": "Macro",
+      "command": true,
+      "runOnStartup": false,
+      "macro": {
+        "name": "Create Note",
+        "id": "d7c532d2-935a-4644-bb5a-9d25c2df1379",
+        "commands": [
+          {
+            "name": "create_typed_note",
+            "type": "UserScript",
+            "id": "2db993fe-fd41-47c2-be0e-a4eda572d3f4",
+            "path": "_control/macros/create_typed_note.js",
             "settings": {}
           }
         ]

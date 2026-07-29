@@ -67,15 +67,6 @@ function renderValue(value, context) {
   return { value, slugPrefix: String(context.slugPrefix || "").trim() };
 }
 
-function cleanCachedFrontmatter(frontmatter) {
-  const output = {};
-  for (const [key, value] of Object.entries(frontmatter || {})) {
-    if (key === "position") continue;
-    output[key] = value;
-  }
-  return output;
-}
-
 async function loadTemplate({ app, templatePath, title, slugPrefix } = {}) {
   if (!app) throw new Error("loadTemplate requires app.");
   if (!templatePath) throw new Error("loadTemplate requires templatePath.");
@@ -87,8 +78,23 @@ async function loadTemplate({ app, templatePath, title, slugPrefix } = {}) {
 
   const raw = await app.vault.cachedRead(templateFile);
   const split = splitFrontmatter(raw);
-  const cached = app.metadataCache.getFileCache(templateFile)?.frontmatter || {};
-  const parsed = cleanCachedFrontmatter(cached);
+
+  let parsed = {};
+  if (split.hasFrontmatter && split.frontmatter.trim()) {
+    try {
+      const { parseYaml } = require("obsidian");
+      parsed = parseYaml(split.frontmatter) || {};
+    } catch (error) {
+      const cached = app.metadataCache.getFileCache(templateFile)?.frontmatter;
+      if (!cached) {
+        throw new Error(
+          `Could not parse frontmatter from template ${templatePath}: ${error?.message || String(error)}`
+        );
+      }
+      parsed = { ...cached };
+    }
+  }
+
   const renderedFrontmatter = renderValue(parsed, { title, slugPrefix });
   const renderedBody = renderString(split.body, {
     title,

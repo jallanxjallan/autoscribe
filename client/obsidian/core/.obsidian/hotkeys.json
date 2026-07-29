@@ -86,12 +86,6 @@
       "key": "F3"
     }
   ],
-  "editor:toggle-fold-properties": [
-    {
-      "modifiers": [],
-      "key": "F8"
-    }
-  ],
   "app:toggle-right-sidebar": [
     {
       "modifiers": [
@@ -133,6 +127,156 @@
   "quickadd:choice:a6c33ed6-42b1-4348-98a9-d86092e73b43": [
     {
       "modifiers": [],
+      "key": "F3"
+    }
+  ],
+  "bookmarks:open": [
+    {
+      "modifiers": [
+        "Alt",
+        "Shift"
+      ],
+      "key": "B"
+    }
+  ],
+  "file-explorer:move-file": [
+    {
+      "modifiers": [
+        "Alt",
+        "Shift"
+      ],
+      "key": "M"
+    }
+  ],
+  "editor:set-heading-1": [
+    {
+      "modifiers": [
+        "Mod",
+        "Shift"
+      ],
+      "key": "1"
+    }
+  ],
+  "editor:set-heading-2": [
+    {
+      "modifiers": [
+        "Mod",
+        "Shift"
+      ],
+      "key": "2"
+    }
+  ],
+  "editor:set-heading-3": [
+    {
+      "modifiers": [
+        "Mod",
+        "Shift"
+      ],
+      "key": "3"
+    }
+  ],
+  "editor:set-heading-4": [
+    {
+      "modifiers": [
+        "Mod",
+        "Shift"
+      ],
+      "key": "4"
+    }
+  ],
+  "editor:set-heading-5": [
+    {
+      "modifiers": [
+        "Mod",
+        "Shift"
+      ],
+      "key": "5"
+    }
+  ],
+  "editor:set-heading-6": [
+    {
+      "modifiers": [
+        "Mod",
+        "Shift"
+      ],
+      "key": "6"
+    }
+  ],
+  "editor:unfold-all": [
+    {
+      "modifiers": [],
+      "key": "F7"
+    }
+  ],
+  "editor:fold-all": [
+    {
+      "modifiers": [],
+      "key": "F8"
+    }
+  ],
+  "editor:toggle-source": [
+    {
+      "modifiers": [],
+      "key": "F6"
+    },
+    {
+      "modifiers": [
+        "Alt",
+        "Shift"
+      ],
+      "key": "E"
+    }
+  ],
+  "open-with-default-app:open": [
+    {
+      "modifiers": [
+        "Alt",
+        "Meta"
+      ],
+      "key": "T"
+    }
+  ],
+  "editor:toggle-fold-properties": [
+    {
+      "modifiers": [
+        "Alt",
+        "Mod"
+      ],
+      "key": "F"
+    }
+  ],
+  "obsidian-git:open-git-view": [
+    {
+      "modifiers": [
+        "Alt",
+        "Shift"
+      ],
+      "key": "G"
+    }
+  ],
+  "quickadd:choice:e6de869d-4698-45a6-a74a-b8fd02ed7efb": [
+    {
+      "modifiers": [
+        "Mod",
+        "Meta"
+      ],
+      "key": "T"
+    }
+  ],
+  "quickadd:choice:c3b22c4c-dd08-4149-988d-cb0e30418c9d": [
+    {
+      "modifiers": [
+        "Alt",
+        "Shift"
+      ],
+      "key": "N"
+    }
+  ],
+  "file-explorer:open": [
+    {
+      "modifiers": [
+        "Shift"
+      ],
       "key": "F3"
     }
   ]

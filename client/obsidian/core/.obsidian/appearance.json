@@ -1,7 +1,7 @@
 {
   "showViewHeader": true,
   "theme": "obsidian",
-  "baseFontSize": 16,
+  "baseFontSize": 19,
   "baseFontSizeAction": true,
   "enabledCssSnippets": [
     "broken-links"

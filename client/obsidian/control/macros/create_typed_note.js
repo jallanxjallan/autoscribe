@@ -33,6 +33,7 @@ const NOTE_GROUPS = [
         prefix: "opn",
         template: "_control/templates/content/opener.md",
         level: null,
+        position: 0,
       },
     ],
   },
@@ -113,6 +114,7 @@ module.exports = async function createTypedNote(params = {}) {
           component: selection.choice.component,
           class: selection.choice.class,
           level: selection.choice.level,
+          position: selection.choice.position,
           assets: selection.choice.assets,
         }).filter(([, value]) => value !== undefined)
       ),
