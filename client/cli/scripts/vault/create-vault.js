@@ -28,7 +28,7 @@ const VAULT_REMOTE_NAME =
 
 const DROPBOX_BARE_ROOT =
   process.env._OBSIDIAN_DROPBOX_BARE_ROOT ||
-  path.join(os.homedir(), 'Dropbox', 'git', 'obsidian-vaults');
+  path.join(os.homedir(), 'Dropbox', 'Repos', 'obsidian-vaults');
 
 const VAULT_BRANCH =
   process.env._OBSIDIAN_VAULT_BRANCH ||

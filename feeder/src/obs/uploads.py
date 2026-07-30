@@ -221,20 +221,25 @@ def dispatch_paths(
     paths: list[str],
     plan_slug: str,
     message: str = "",
+    combine_basename: str = "",
     dry_run: bool = False,
     defaults: list[str] | None = None,
     plan_record: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
-    """Commit and dispatch the current explicit Markdown selection.
+    """Dispatch the current explicit Markdown selection.
 
-    The selection is committed even when the selected files have no changes.
-    After enqueue succeeds, the new commit receives an annotated inflight tag
-    containing the selected plan slug.
+    Normal dispatch commits the selected files and tags that commit inflight
+    after enqueue succeeds. Combined dispatch emits one ordered virtual record
+    and deliberately performs no Git commit or tag operation.
     """
     del defaults
     plan = str(plan_slug or "").strip()
     if not plan:
         raise ObsError("dispatch requires plan_slug")
+    combined_identity = str(combine_basename or "").strip()
+    if combined_identity:
+        if Path(combined_identity).name != combined_identity or combined_identity in {".", ".."}:
+            raise ObsError("combined record basename must not contain a directory path")
     plan_sync = None
 
     items: list[dict[str, Any]] = []
@@ -249,7 +254,8 @@ def dispatch_paths(
 
     if not items:
         raise ObsError("selection contains no dispatchable Markdown files")
-    _assert_unique(items, "dispatch")
+    if not combined_identity:
+        _assert_unique(items, "dispatch")
 
     from .plans import load_local_plan, sync_plan
     del plan_record
@@ -259,11 +265,21 @@ def dispatch_paths(
     user_message = str(message or "").strip()
     subject = user_message or f"DISPATCH {plan}: {stamp}"
 
+    if combined_identity:
+        combined_content = "\n\n".join(
+            str(item["record_content"]).rstrip("\n") for item in items
+        ) + "\n"
+    else:
+        combined_content = ""
+
     if dry_run:
         return {
             "plan_slug": plan,
             "message": subject,
-            "count": len(items),
+            "count": 1 if combined_identity else len(items),
+            "source_count": len(items),
+            "combined": bool(combined_identity),
+            "record_identity": combined_identity or None,
             "failed_count": 0,
             "items": items,
             "failures": [],
@@ -276,19 +292,31 @@ def dispatch_paths(
 
     plan_sync = sync_plan(effective_plan_record, cwd=repo)
 
-    # commit_files uses --allow-empty and --only, so an unchanged selection
-    # still gets a distinct source commit without including unrelated changes.
-    commit = git.commit_files(repo, [item["path"] for item in items], subject)
     records: list[dict[str, str]] = []
-    for item in items:
-        item["dispatch_commit"] = commit
+    if combined_identity:
+        # Combined dispatch is a virtual record. It deliberately performs no
+        # Git commit or tag operation against the source vault.
+        commit = None
         records.append(
             _dispatch_record(
-                record_identity=item["record_identity"],
+                record_identity=combined_identity,
                 plan_slug=plan,
-                content=item["record_content"],
+                content=combined_content,
             )
         )
+    else:
+        # commit_files uses --allow-empty and --only, so an unchanged selection
+        # still gets a distinct source commit without including unrelated changes.
+        commit = git.commit_files(repo, [item["path"] for item in items], subject)
+        for item in items:
+            item["dispatch_commit"] = commit
+            records.append(
+                _dispatch_record(
+                    record_identity=item["record_identity"],
+                    plan_slug=plan,
+                    content=item["record_content"],
+                )
+            )
 
     import os
     import subprocess
@@ -310,17 +338,20 @@ def dispatch_paths(
         ).strip()
         raise ObsError(f"{' '.join(command)} failed: {detail}")
 
-    tag_name = git.tag_inflight(repo, commit, plan, stamp)
+    tag_name = None if combined_identity else git.tag_inflight(repo, commit, plan, stamp)
     return {
         "commit": commit,
         "plan_slug": plan,
         "message": subject,
-        "count": len(items),
+        "count": 1 if combined_identity else len(items),
+        "source_count": len(items),
+        "combined": bool(combined_identity),
+        "record_identity": combined_identity or None,
         "failed_count": 0,
         "items": items,
         "failures": [],
         "pipeline_output": result.stdout.decode("utf-8", errors="replace").strip(),
-        "tag": {"name": tag_name, "plan_slug": plan, "timestamp": stamp},
+        "tag": ({"name": tag_name, "plan_slug": plan, "timestamp": stamp} if tag_name else None),
         "dry_run": False,
         "plan_sync": plan_sync,
     }

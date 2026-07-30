@@ -1,4 +1,4 @@
-# Dashboard
+x# Dashboard
 
 ```dataviewjs
 async function openInMain(path) {
@@ -43,7 +43,7 @@ function mainWindowLink(label, path) {
   const link = row.createEl("a", {
     text: label,
     href: "#",
-    title: `Open ${label} in reading view in the main window`
+    title: `Open ${label} in the main window`
   });
 
   link.addEventListener("click", async (event) => {
@@ -52,39 +52,53 @@ function mainWindowLink(label, path) {
   });
 }
 
-function linkSection(title, items) {
-  if (title) dv.header(2, title);
+function normalizePath(path) {
+  return path.replace(/^\/+|\/+$/g, "").toLowerCase();
+}
 
-  for (const [label, path] of items) {
-    if (app.vault.getAbstractFileByPath(path)) {
-      mainWindowLink(label, path);
-    } else {
-      dv.paragraph(`*${label} not found.*`);
-    }
+function resolveFolderPath(requestedPath) {
+  const exact = app.vault.getAbstractFileByPath(requestedPath);
+  if (exact?.children) return exact.path;
+
+  const wanted = normalizePath(requestedPath);
+  const folder = app.vault.getAllLoadedFiles().find((item) =>
+    item?.children && normalizePath(item.path) === wanted
+  );
+
+  return folder?.path ?? null;
+}
+
+function filesInFolder(folderPath) {
+  return app.vault.getFiles()
+    .filter((file) => file.parent?.path === folderPath)
+    .sort((a, b) => a.basename.localeCompare(b.basename, undefined, {
+      numeric: true,
+      sensitivity: "base"
+    }));
+}
+
+function folderSection(title, requestedPath) {
+  dv.header(2, title);
+
+  const folderPath = resolveFolderPath(requestedPath);
+  if (!folderPath) {
+    dv.paragraph(`*Folder not found: ${requestedPath}*`);
+    return;
+  }
+
+  const files = filesInFolder(folderPath);
+  if (files.length === 0) {
+    dv.paragraph("*No files found.*");
+    return;
+  }
+
+  for (const file of files) {
+    mainWindowLink(file.basename, file.path);
   }
 }
 
-linkSection("", [
-  ["Table of Contents", "Table of Contents.md"],
-  ["Contents", "_control/bases/Contents.base"],
-  ["Materials", "_control/bases/Materials.base"],
-  ["Instructions", "_control/bases/Instructions.base"],
-  ["Link Status", "_control/queries/Link Status.md"]
-]);
 
-linkSection("Workflow", [
-  ["Stage Files", "_control/panels/Stage Files.md"],
-  ["Commit Files", "_control/panels/Commit Files.md"],
-  ["Define Plan", "_control/panels/Define Plan.md"],
-  ["Dispatch Run", "_control/panels/Dispatch Run.md"],
-  ["Write Responses", "_control/panels/Write Responses.md"],
-  ["System Status", "_control/panels/System Status.md"],
-  ["File State", "_control/panels/File State.md"]
-]);
-
-linkSection("Views", [
-  ["Compiled Notes", "_control/queries/Compiled Notes.md"],
-  ["Content Callouts", "_control/queries/Content Callouts.md"],
-  ["Editorial Flags", "_control/queries/Editorial Flags.md"]
-]);
+folderSection("Queries", "_control/queries");
+folderSection("Workflow", "_control/panels");
+folderSection("Views", "views");
 ```

@@ -8,4 +8,6 @@ stage: new
 action: write
 origin: human
 producer: human
+synopsis:
+period:
 ---

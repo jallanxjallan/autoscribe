@@ -76,6 +76,7 @@ def _dispatch(repo: Path, request: dict[str, Any]) -> dict[str, Any]:
         paths=[str(path) for path in paths],
         plan_slug=str(request.get("plan_slug") or ""),
         message=str(request.get("message") or ""),
+        combine_basename=str(request.get("combine_basename") or ""),
         dry_run=bool(request.get("dry_run")),
         plan_record=request.get("plan_record"),
     )

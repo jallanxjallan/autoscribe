@@ -7,6 +7,7 @@ from asc.enqueue.job import activate_job, create_job, deactivate_job
 from asc.enqueue.reader import EnqueueRecord, iter_enqueue_records
 from asc.enqueue.report import EnqueuedCall, EnqueueReport
 from asc.enqueue.runtime import delete_ephemeral_instructions, materialize_runtimes
+from asc.models.process.result import record_failure
 
 
 def enqueue_from_stream(stream: TextIO) -> EnqueueReport:
@@ -19,7 +20,11 @@ def enqueue_from_stream(stream: TextIO) -> EnqueueReport:
     except SystemExit:
         raise
     except Exception as exc:
-        print(f"asc enqueue: record(s) failed validation: {exc}", file=sys.stderr)
+        failure_key = record_failure(stage="enqueue.stream", exc=exc)
+        print(
+            f"asc enqueue: record(s) failed validation: {exc} failure_key={failure_key}",
+            file=sys.stderr,
+        )
         sys.exit(1)
 
 
@@ -51,7 +56,7 @@ def enqueue_record(record: EnqueueRecord) -> EnqueuedCall:
         )
         activate_job(job)
         job_activated = True
-    except Exception:
+    except Exception as exc:
         if job is not None:
             if job_activated:
                 deactivate_job(job)
@@ -61,6 +66,14 @@ def enqueue_record(record: EnqueueRecord) -> EnqueuedCall:
         for runtime in runtimes:
             runtime.delete()
         call.delete()
+        record_failure(
+            stage="enqueue.record",
+            exc=exc,
+            process_identity=call.identity,
+            source_identity=record.source_identity,
+            call_key=call_key,
+            plan_key=record.plan.plan_key,
+        )
         raise
 
     return EnqueuedCall(

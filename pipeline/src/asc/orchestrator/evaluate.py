@@ -7,6 +7,8 @@ import logging
 import time
 
 from asc.state.daemon import configure_logging
+from asc.redis.key import RedisKey
+from asc.models.process.result import record_failure
 from .active import FAILURE_WINDOW_OFFSET, IDLE_SLEEP_SECONDS, claim_evaluate, schedule
 from .common import load_job, update_job
 
@@ -34,7 +36,15 @@ def run_cycle(*, wait: bool = True) -> EvaluateReport:
         score = time.time() + FAILURE_WINDOW_OFFSET
         update_job(job, evaluation_count=attempts, last_evaluated_at=time.time())
         schedule(claimed.key, score)
-    except Exception:
+    except Exception as exc:
+        failure_key = record_failure(
+            stage="orchestrator.evaluate",
+            exc=exc,
+            process_identity=RedisKey(claimed.key).identity,
+            job_key=claimed.key,
+            claimed_score=claimed.score,
+        )
+        LOG.error("orchestrator.evaluate job=%s failure_key=%s", claimed.key, failure_key)
         schedule(claimed.key, claimed.score)
         raise
     LOG.info("evaluate action=stub-park job=%s score=%s", claimed.key, score)

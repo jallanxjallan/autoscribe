@@ -4,6 +4,7 @@ from typing import Any, Iterable
 import typer
 
 from asc.ingest.common import IngestInputError
+from asc.models.process.result import record_failure
 
 
 app = typer.Typer(
@@ -32,10 +33,16 @@ def _run_ingest(target: str) -> None:
     try:
         report = _ingest_stream(target, sys.stdin)
     except NotImplementedError as exc:
-        typer.echo(f"[ingest:{target}] not implemented: {exc}", err=True)
+        failure_key = record_failure(stage=f"ingest.{target}", exc=exc, target=target)
+        typer.echo(f"[ingest:{target}] not implemented: {exc} failure_key={failure_key}", err=True)
         raise typer.Exit(code=1) from exc
     except IngestInputError as exc:
-        typer.echo(f"[ingest:{target}] error: {exc}", err=True)
+        failure_key = record_failure(stage=f"ingest.{target}", exc=exc, target=target)
+        typer.echo(f"[ingest:{target}] error: {exc} failure_key={failure_key}", err=True)
+        raise typer.Exit(code=1) from exc
+    except Exception as exc:
+        failure_key = record_failure(stage=f"ingest.{target}", exc=exc, target=target)
+        typer.echo(f"[ingest:{target}] error: {exc} failure_key={failure_key}", err=True)
         raise typer.Exit(code=1) from exc
 
     typer.echo(

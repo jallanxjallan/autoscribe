@@ -7,6 +7,7 @@ import logging
 import time
 
 from asc.redis.key import RedisKey
+from asc.models.process.result import record_failure
 from asc.scrivener.inbox import post as post_to_scrivener
 from asc.state.daemon import configure_logging
 from .active import IDLE_SLEEP_SECONDS, MAX_PROCESS_RETRIES, claim_process, park_failure, park_success, schedule, schedule_inflight
@@ -32,7 +33,15 @@ def run_cycle(*, wait: bool = True) -> ProcessReport:
         return ProcessReport(False)
     try:
         report = _process(claimed.key)
-    except Exception:
+    except Exception as exc:
+        failure_key = record_failure(
+            stage="orchestrator.process",
+            exc=exc,
+            process_identity=RedisKey(claimed.key).identity,
+            job_key=claimed.key,
+            claimed_score=claimed.score,
+        )
+        LOG.error("orchestrator.process job=%s failure_key=%s", claimed.key, failure_key)
         schedule(claimed.key, claimed.score)
         raise
     LOG.info("process action=%s job=%s step=%s artifact=%s score=%s", report.action, report.job_key, report.step, report.artifact_key, report.active_score)
@@ -48,6 +57,23 @@ def _process(job_key: str) -> ProcessReport:
         raise ValueError(f"process window job must have step >= 1: {job_key}")
 
     response_key = str(RedisKey(kind="response", identity=job.identity, suffix=str(step)))
+    failure_key = str(RedisKey(kind="failure", identity=job.identity, suffix=str(step)))
+    failure = RedisKey(failure_key).hgetall()
+    if failure:
+        message = (
+            failure.get("failure_reason")
+            or failure.get("content")
+            or "worker reported failure"
+        )
+        update_job(
+            job,
+            last_response_key=failure_key,
+            last_error=message,
+            last_checked_at=now,
+        )
+        score = park_failure(job_key, now=now)
+        return ProcessReport(True, job_key, "failure-window", step, failure_key, score)
+
     response = RedisKey(response_key).hgetall()
     if not response:
         retries = int(raw.get("retry_count", "0") or 0) + 1

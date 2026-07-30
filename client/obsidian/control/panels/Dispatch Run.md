@@ -147,15 +147,27 @@ function selectFragment(body, fragment) {
 
 async function resolveBodyTransclusions(app, body, sourcePath, stack = []) {
   const matches = [...String(body).matchAll(TRANSCLUSION_RE)];
-  if (!matches.length) return String(body);
+  if (!matches.length) return { body: String(body), wikilinks: [] };
 
   let output = "";
   let cursor = 0;
+  const wikilinks = [];
+  const seenLinks = new Set();
+
+  function remember(link) {
+    if (!seenLinks.has(link)) {
+      seenLinks.add(link);
+      wikilinks.push(link);
+    }
+  }
+
   for (const match of matches) {
     output += body.slice(cursor, match.index);
     cursor = match.index + match[0].length;
 
-    const { linkpath, fragment } = parseTransclusion(match[1]);
+    const rawTarget = String(match[1] || "").trim();
+    remember(`[[${rawTarget}]]`);
+    const { linkpath, fragment } = parseTransclusion(rawTarget);
     const target = app.metadataCache.getFirstLinkpathDest(linkpath, sourcePath);
     if (!target) throw new Error(`Could not resolve transclusion ${match[0]} in ${sourcePath}`);
     if (target.extension !== "md") throw new Error(`Transclusion is not Markdown: ${match[0]} in ${sourcePath}`);
@@ -165,9 +177,11 @@ async function resolveBodyTransclusions(app, body, sourcePath, stack = []) {
 
     const embedded = splitFrontmatter(await app.vault.read(target)).body;
     const selected = selectFragment(embedded, fragment);
-    output += await resolveBodyTransclusions(app, selected, target.path, [...stack, target.path]);
+    const nested = await resolveBodyTransclusions(app, selected, target.path, [...stack, target.path]);
+    output += nested.body;
+    for (const link of nested.wikilinks) remember(link);
   }
-  return output + body.slice(cursor);
+  return { body: output + body.slice(cursor), wikilinks };
 }
 
 async function flattenInPlace(app, selectedPaths) {
@@ -178,17 +192,16 @@ async function flattenInPlace(app, selectedPaths) {
 
     const original = await app.vault.read(file);
     const { frontmatter, body } = splitFrontmatter(original);
-    if (!TRANSCLUSION_RE.test(body)) {
-      TRANSCLUSION_RE.lastIndex = 0;
-      continue;
-    }
-    TRANSCLUSION_RE.lastIndex = 0;
-    const resolvedBody = await resolveBodyTransclusions(app, body, file.path, [file.path]);
-    const flattened = frontmatter + resolvedBody;
-    if (flattened !== original) {
-      await app.vault.modify(file, flattened);
-      changed.push(file.path);
-    }
+    const matches = [...String(body).matchAll(TRANSCLUSION_RE)];
+    if (!matches.length) continue;
+
+    const resolved = await resolveBodyTransclusions(app, body, file.path, [file.path]);
+    const flattened = frontmatter + resolved.body;
+    if (flattened !== original) await app.vault.modify(file, flattened);
+    await app.fileManager.processFrontMatter(file, (properties) => {
+      properties.transclusions = resolved.wikilinks;
+    });
+    changed.push(file.path);
   }
   return changed;
 }
@@ -241,6 +254,23 @@ async function renderDispatchRun({ app, container }) {
 
   form.createEl("label", { text: "Commit message (optional)" });
   const message = form.createEl("input", { attr: { type: "text", placeholder: "Defaults to DISPATCH <plan>: <timestamp>" } });
+
+  const combineRow = form.createEl("label");
+  combineRow.style.display = "flex";
+  combineRow.style.gap = "0.5em";
+  combineRow.style.alignItems = "center";
+  const combine = combineRow.createEl("input", { attr: { type: "checkbox" } });
+  combineRow.createSpan({ text: "Combine selected files" });
+
+  form.createEl("label", { text: "Combined record basename" });
+  const combineBasename = form.createEl("input", {
+    attr: { type: "text", placeholder: "Example: chapter-one", disabled: "disabled" }
+  });
+  combine.addEventListener("change", () => {
+    combineBasename.disabled = !combine.checked;
+    if (combine.checked) combineBasename.focus();
+  });
+
   const runButton = form.createEl("button", { text: "Dispatch Run", cls: "mod-cta" });
   const result = container.createEl("pre");
   result.style.whiteSpace = "pre-wrap";
@@ -250,10 +280,15 @@ async function renderDispatchRun({ app, container }) {
     result.setText("Resolving transclusions and handing dispatch to feeder…");
     try {
       const flattened = await flattenInPlace(app, selection);
+      const basename = combineBasename.value.trim();
+      if (combine.checked && !basename) {
+        throw new Error("Enter a basename for the combined record.");
+      }
       const handoff = handoffFeeder(app, "dispatch.run", {
         paths: selection,
         plan_slug: select.value,
-        message: message.value.trim()
+        message: message.value.trim(),
+        combine_basename: combine.checked ? basename : ""
       });
       result.setText(
         `Dispatch handed off to feeder.\n` +

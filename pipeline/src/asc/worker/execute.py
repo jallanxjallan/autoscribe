@@ -4,7 +4,14 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
-from asc.models.process.result import Failure, Response, Retrieval, Transform
+from asc.models.process.result import (
+    Failure,
+    Response,
+    Retrieval,
+    Transform,
+    failure_location,
+    record_failure,
+)
 from asc.models.process.runtime import Runtime
 from asc.redis.key import RedisKey
 from asc.worker.loader import load_engine_call
@@ -47,9 +54,24 @@ class WorkerExecutor:
 
         except Exception as exc:
             if runtime is None:
-                raise RuntimeError(
-                    f"worker could not load claimed runtime {runtime_key!r}"
-                ) from exc
+                process_identity = None
+                try:
+                    process_identity = RedisKey(runtime_key).identity
+                except Exception:
+                    pass
+                failure_key = record_failure(
+                    stage="worker.load_runtime",
+                    exc=exc,
+                    process_identity=process_identity,
+                    runtime_key=runtime_key,
+                )
+                return WorkerResult(
+                    processed=1,
+                    runtime_key=runtime_key,
+                    artifact_key=failure_key,
+                    failure_key=failure_key,
+                    action="load-runtime",
+                )
 
             artifact = _runtime_failure(
                 runtime=runtime,
@@ -122,6 +144,7 @@ def _runtime_failure(
             "failure_reason": type(exc).__name__,
             "raw_json": {
                 "runtime_key": runtime_key,
+                "location": failure_location(exc),
                 "runtime_identity": runtime.identity,
                 "plan_identity": runtime.plan_identity,
                 "ordinal": runtime.ordinal,
@@ -133,6 +156,8 @@ def _runtime_failure(
                 "boundary": "worker.runtime",
             },
             "boundary": "worker.runtime",
+            "location": failure_location(exc),
+            "stage": "worker.runtime",
         }
     )
 

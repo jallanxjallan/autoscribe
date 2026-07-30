@@ -9,6 +9,7 @@ import time
 from asc.scrivener.inbox import post as post_to_scrivener
 from asc.state.daemon import configure_logging
 from asc.redis.key import RedisKey
+from asc.models.process.result import record_failure
 from .active import IDLE_SLEEP_SECONDS, claim_initiate, schedule
 from .common import dispatch_runtime, load_job
 
@@ -39,7 +40,15 @@ def run_cycle(*, wait: bool = True) -> InitiateReport:
             raise KeyError(f"call record does not exist: {call_key}")
         post_to_scrivener(call_key)
         runtime_key, score = dispatch_runtime(claimed.key, identity=job.identity, step=1)
-    except Exception:
+    except Exception as exc:
+        failure_key = record_failure(
+            stage="orchestrator.initiate",
+            exc=exc,
+            process_identity=RedisKey(claimed.key).identity,
+            job_key=claimed.key,
+            claimed_score=claimed.score,
+        )
+        LOG.error("orchestrator.initiate job=%s failure_key=%s", claimed.key, failure_key)
         schedule(claimed.key, claimed.score)
         raise
     LOG.info("initiate job=%s call=%s runtime=%s score=%s", claimed.key, call_key, runtime_key, score)

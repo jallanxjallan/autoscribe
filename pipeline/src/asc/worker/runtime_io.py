@@ -63,14 +63,20 @@ def _load_source(*, runtime: Runtime, call: CallRecord) -> ContentSource:
     return response
 
 
-def load_instructions(instruction_keys: dict[str, str]) -> tuple[Instruction, ...]:
+def load_instructions(
+    instruction_keys: dict[str, str | list[str]],
+) -> tuple[Instruction, ...]:
     """Hydrate instructions in their canonical labeled order."""
     preferred = ("role", "context", "instructions")
     ordered_labels = [label for label in preferred if label in instruction_keys]
     ordered_labels.extend(
         label for label in instruction_keys if label not in preferred
     )
-    return tuple(Instruction.load(instruction_keys[label]) for label in ordered_labels)
+    ordered_keys: list[str] = []
+    for label in ordered_labels:
+        keys = instruction_keys[label]
+        ordered_keys.extend(keys if isinstance(keys, list) else [keys])
+    return tuple(Instruction.load(key) for key in ordered_keys)
 
 
 __all__ = [

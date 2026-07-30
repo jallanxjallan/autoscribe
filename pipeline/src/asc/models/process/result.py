@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from pathlib import Path
+import traceback
 from typing import Any, ClassVar, Self
 
 from pydantic import (
@@ -10,6 +12,7 @@ from pydantic import (
     field_validator,
 )
 
+from asc.core.identity import generate_identity
 from asc.core.timestamp import timestamp
 from asc.models.helpers.plain import redis_key_segment_text
 from asc.redis.key import RedisKey
@@ -100,6 +103,8 @@ class Failure(RedisModel):
     failure_reason: str
     raw_json: Any = Field(default_factory=dict)
     boundary: str | None = None
+    stage: str | None = None
+    location: str | None = None
     created_at: int = Field(default_factory=timestamp)
 
     @classmethod
@@ -264,6 +269,67 @@ class ExternalFailure(Failure):
     failure_type: str = "external"
 
 
+class ProcessFailure(Failure):
+    """Unique failure event emitted by a non-engine pipeline stage."""
+
+    component: ClassVar[str] = "record"
+
+    identity: str = Field(default_factory=generate_identity)
+    failure_type: str = "internal"
+    stage: str
+    location: str
+    process_identity: str | None = None
+
+
+def failure_location(exc: BaseException) -> str:
+    """Return the deepest raising file/module and function without a traceback."""
+
+    frames = traceback.extract_tb(exc.__traceback__) if exc.__traceback__ else []
+    frame = frames[-1] if frames else None
+    if frame is None:
+        return f"{type(exc).__module__}.{type(exc).__qualname__}"
+
+    path = Path(frame.filename)
+    parts = list(path.with_suffix("").parts)
+    try:
+        start = len(parts) - 1 - parts[::-1].index("asc")
+        module = ".".join(parts[start:])
+    except ValueError:
+        module = path.stem
+
+    return f"{module}.{frame.name}"
+
+
+def record_failure(
+    *,
+    stage: str,
+    exc: BaseException,
+    process_identity: str | None = None,
+    **context: Any,
+) -> str:
+    """Persist one unique failure key for a pipeline-stage exception."""
+
+    location = failure_location(exc)
+    raw_json = {
+        "stage": stage,
+        "location": location,
+        "process_identity": process_identity,
+        "error": str(exc),
+        "error_type": type(exc).__name__,
+        **context,
+    }
+    failure = ProcessFailure(
+        stage=stage,
+        location=location,
+        process_identity=process_identity,
+        content=str(exc),
+        failure_reason=type(exc).__name__,
+        boundary=stage,
+        raw_json=raw_json,
+    )
+    return failure.save()
+
+
 class Committed(RedisMessage):
     """Transient scrivener completion message, not a persisted Redis hash model."""
 
@@ -339,8 +405,11 @@ __all__ = [
     "ExternalFailure",
     "Failure",
     "InternalFailure",
+    "ProcessFailure",
     "Response",
     "Result",
     "Retrieval",
     "Transform",
+    "failure_location",
+    "record_failure",
 ]

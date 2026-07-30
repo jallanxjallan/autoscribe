@@ -8,10 +8,13 @@ from asc.models.process.result import (
     ExternalFailure,
     Failure,
     InternalFailure,
+    ProcessFailure,
     Response,
     Result,
     Retrieval,
     Transform,
+    failure_location,
+    record_failure,
 )
 from asc.models.process.task import (
     Outcome,
@@ -29,6 +32,7 @@ __all__ = [
     "ExternalFailure",
     "Failure",
     "InternalFailure",
+    "ProcessFailure",
     "Job",
     "Outcome",
     "OutcomeStatus",
@@ -41,4 +45,6 @@ __all__ = [
     "TaskStatus",
     "Transform",
     "WorkerTask",
+    "failure_location",
+    "record_failure",
 ]

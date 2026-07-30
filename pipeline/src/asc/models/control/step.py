@@ -41,8 +41,8 @@ class Step(RedisModel):
         validation_alias=AliasChoices("engine_kind", "kind"),
     )
     label: str = ""
-    instruction_keys: dict[str, str] = Field(default_factory=dict)
-    instruction_slugs: dict[str, str] = Field(default_factory=dict, exclude=True)
+    instruction_keys: dict[str, str | list[str]] = Field(default_factory=dict)
+    instruction_slugs: dict[str, str | list[str]] = Field(default_factory=dict, exclude=True)
     created_at: int = Field(default_factory=timestamp)
 
     @model_validator(mode="before")
@@ -82,7 +82,7 @@ class Step(RedisModel):
         ordinal: int,
         engine: str,
         engine_kind: str,
-        instruction_keys: dict[str, str],
+        instruction_keys: dict[str, str | list[str]],
     ) -> Step:
         payload = {
             **raw_step,
@@ -155,9 +155,36 @@ class Step(RedisModel):
             value = {labels[index]: item for index, item in enumerate(value)}
         if not isinstance(value, Mapping):
             raise ValueError("step instruction references must be a labeled object")
-        result = {str(label).strip(): str(reference).strip() for label, reference in value.items()}
-        if any(not label or not reference for label, reference in result.items()):
-            raise ValueError("step instruction references must use non-empty labels and strings")
+        result: dict[str, str | list[str]] = {}
+        for raw_label, raw_reference in value.items():
+            label = str(raw_label).strip()
+            if not label:
+                raise ValueError("step instruction references must use non-empty labels")
+
+            if isinstance(raw_reference, str):
+                reference = raw_reference.strip()
+                if not reference:
+                    raise ValueError(
+                        "step instruction references must use non-empty strings"
+                    )
+                result[label] = reference
+                continue
+
+            if isinstance(raw_reference, list) and all(
+                isinstance(item, str) for item in raw_reference
+            ):
+                references = [item.strip() for item in raw_reference]
+                if not references or any(not item for item in references):
+                    raise ValueError(
+                        "step instruction lists must contain non-empty strings"
+                    )
+                result[label] = references
+                continue
+
+            raise ValueError(
+                f"step instruction {label!r} must be a string or list of strings"
+            )
+
         return result
 
     def dump_json(self) -> dict[str, str]:

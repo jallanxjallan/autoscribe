@@ -31,7 +31,7 @@ class Runtime(RedisModel):
     engine_kind: Literal["llm", "script", "rag"] = Field(validation_alias=AliasChoices("engine_kind", "kind"))
     engine: str
     label: str = ""
-    instruction_keys: dict[str, str] = Field(default_factory=dict)
+    instruction_keys: dict[str, str | list[str]] = Field(default_factory=dict)
 
     model: str | None = None
     script: str | None = None
@@ -89,16 +89,43 @@ class Runtime(RedisModel):
 
     @field_validator("instruction_keys", mode="before")
     @classmethod
-    def deserialize_instruction_keys(cls, value: object) -> dict[str, str]:
+    def deserialize_instruction_keys(cls, value: object) -> dict[str, str | list[str]]:
         if value in (None, ""):
             return {}
         if isinstance(value, str):
             value = json.loads(value)
         if not isinstance(value, Mapping):
             raise ValueError("runtime instruction_keys must be a labeled object")
-        result = {str(k).strip(): str(v).strip() for k, v in value.items()}
-        if any(not k or not v for k, v in result.items()):
-            raise ValueError("runtime instruction_keys must use non-empty labels and keys")
+        result: dict[str, str | list[str]] = {}
+        for raw_label, raw_keys in value.items():
+            label = str(raw_label).strip()
+            if not label:
+                raise ValueError("runtime instruction_keys must use non-empty labels")
+
+            if isinstance(raw_keys, str):
+                key = raw_keys.strip()
+                if not key:
+                    raise ValueError(
+                        "runtime instruction_keys must use non-empty Redis keys"
+                    )
+                result[label] = key
+                continue
+
+            if isinstance(raw_keys, list) and all(
+                isinstance(item, str) for item in raw_keys
+            ):
+                keys = [item.strip() for item in raw_keys]
+                if not keys or any(not key for key in keys):
+                    raise ValueError(
+                        "runtime instruction key lists must contain non-empty Redis keys"
+                    )
+                result[label] = keys
+                continue
+
+            raise ValueError(
+                f"runtime instruction {label!r} must be a Redis key or list of Redis keys"
+            )
+
         return result
 
     def dump_json(self) -> dict[str, str]:
