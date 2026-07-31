@@ -123,7 +123,7 @@ def table_columns(conn: LedgerConnection, table_name: str) -> set[str]:
 
 def require_ledger_columns(conn: LedgerConnection) -> None:
     required = {
-        "calls": {"identity", "source_identity", "plan_key", "content", "created_at", "blob_json"},
+        "calls": {"identity", "source_identity", "content", "created_at", "extra_json"},
         "responses": {
             "identity",
             "final_step",
@@ -160,10 +160,9 @@ def require_ledger_columns(conn: LedgerConnection) -> None:
 CALLS: ColumnSpec = {
     "identity": "TEXT PRIMARY KEY NOT NULL UNIQUE CHECK (length(identity) = 26)",
     "source_identity": "TEXT NOT NULL",
-    "plan_key": "TEXT NOT NULL",
     "content": "TEXT NOT NULL",
     "created_at": "INTEGER NOT NULL",
-    "blob_json": "TEXT NOT NULL",
+    "extra_json": "TEXT NOT NULL DEFAULT '{}'",
 }
 
 
@@ -233,8 +232,55 @@ def reset_ledger_views(conn: LedgerConnection) -> None:
     ensure_ledger_views(conn)
 
 
+def _migrate_legacy_calls_table(conn: LedgerConnection) -> None:
+    """Replace the pre-four-field calls table without losing ledger rows."""
+
+    actual = table_columns(conn, "calls")
+    current = set(CALLS)
+    if not actual or actual == current:
+        return
+
+    legacy = {
+        "identity",
+        "source_identity",
+        "plan_key",
+        "content",
+        "created_at",
+        "blob_json",
+    }
+    if actual != legacy:
+        raise RuntimeError(
+            "unsupported calls ledger schema: "
+            f"columns={tuple(sorted(actual))!r}"
+        )
+
+    was_enabled = _foreign_keys_enabled(conn)
+    if was_enabled:
+        _set_foreign_keys(conn, enabled=False)
+    try:
+        conn.execute("DROP TABLE IF EXISTS calls_four_field")
+        conn.execute(create_table_sql("calls_four_field", CALLS))
+        conn.execute(
+            """
+            INSERT INTO calls_four_field (
+                identity, source_identity, content, created_at, extra_json
+            )
+            SELECT
+                identity, source_identity, content, created_at, blob_json
+            FROM calls
+            """
+        )
+        conn.execute("DROP TABLE calls")
+        conn.execute("ALTER TABLE calls_four_field RENAME TO calls")
+        conn.commit()
+    finally:
+        if was_enabled:
+            _set_foreign_keys(conn, enabled=True)
+
+
 def ensure_ledger_schema(conn: LedgerConnection) -> None:
     drop_views(conn, LEDGER_VIEW_NAMES)
+    _migrate_legacy_calls_table(conn)
     ensure_schema(conn, LEDGER_TABLES, LEDGER_INDEXES, CREATE_LEDGER_VIEWS_SQL)
     require_ledger_columns(conn)
 

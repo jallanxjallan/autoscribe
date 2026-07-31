@@ -209,9 +209,14 @@ class Plan(RedisModel):
         engine = step.get("engine", args.get("engine"))
         if isinstance(engine, Mapping):
             engine = engine.get("key") or engine.get("module")
-        if not isinstance(engine, str) or not engine.strip():
-            raise ValueError(f"plan step {step_number} must provide an engine")
-        return engine.strip()
+        if isinstance(engine, str) and engine.strip():
+            return engine.strip()
+
+        kind = step.get("engine_kind", step.get("kind", args.get("engine_kind")))
+        if isinstance(kind, str) and kind.strip() == "script":
+            return "engines.local"
+
+        raise ValueError(f"plan step {step_number} must provide an engine")
 
     def plan_dict(self) -> dict[str, Any]:
         data: dict[str, Any] = {

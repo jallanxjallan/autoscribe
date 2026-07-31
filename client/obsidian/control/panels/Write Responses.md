@@ -6,7 +6,7 @@ const pathMod = nodeRequire("node:path");
 const controlVaultRoot = app.vault.adapter.getBasePath?.() || app.vault.adapter.basePath;
 const loadControl = (relativePath) => nodeRequire(pathMod.join(controlVaultRoot, "_control", ...relativePath.split("/")));
 
-const { callFeeder } = loadControl("scripts/lib/feeder-ipc.js");
+const { listTransportRuns, applyResponseBranch } = loadControl("scripts/lib/git-transport.js");
 const { createInternalLink } = loadControl("scripts/lib/internal-link.js");
 
 function el(tag, attrs = {}, text = null) {
@@ -22,91 +22,114 @@ function el(tag, attrs = {}, text = null) {
   return node;
 }
 
+function short(value, width = 8) {
+  return String(value || "").slice(0, width);
+}
+
 function wikilinkLabel(path) {
   return `[[${String(path || "").replace(/\.md$/i, "")}]]`;
 }
 
-function renderFileList(parent, app, title, items, note = "") {
-  if (!Array.isArray(items) || !items.length) return;
+function formatRun(run) {
+  const when = run.created_at ? new Date(run.created_at).toLocaleString() : "unknown time";
+  return `${run.plan_identity || "unknown plan"} · ${run.count} file${run.count === 1 ? "" : "s"} · ${when}`;
+}
+
+function renderRecords(parent, app, title, records, note = "") {
+  if (!Array.isArray(records) || !records.length) return;
   parent.appendChild(el("h2", {}, title));
   if (note) parent.appendChild(el("p", {}, note));
   const list = el("ul");
-  for (const item of items) {
+  for (const record of records) {
     const li = el("li");
-    const path = item.path || item.source_path;
-    if (item.path) createInternalLink(li, app, item.path, wikilinkLabel(item.path));
-    else li.textContent = wikilinkLabel(path);
-    if (item.short_source_commit) {
-      li.appendChild(document.createTextNode(` — source ${item.short_source_commit}`));
-    }
-    if (item.error) {
-      li.appendChild(document.createTextNode(` — ${item.error}`));
-    }
+    if (record.path) createInternalLink(li, app, record.path, wikilinkLabel(record.path));
+    else li.textContent = record.identity || record.source_path || "unknown record";
+    if (record.identity) li.appendChild(document.createTextNode(` — ${record.identity}`));
     list.appendChild(li);
   }
   parent.appendChild(list);
 }
 
 async function renderWriteResponses({ app, container }) {
-  const state = { busy: false, result: null };
+  const state = {
+    busy: false,
+    runs: [],
+    selectedBranch: "",
+    result: null,
+    error: "",
+  };
 
-  async function runWriteback() {
-    if (state.busy) return;
+  function loadRuns() {
+    state.runs = listTransportRuns(app);
+    const ready = state.runs.filter((run) => run.status === "response_ready");
+    if (!ready.some((run) => run.branch === state.selectedBranch)) {
+      state.selectedBranch = ready[0]?.branch || "";
+    }
+  }
+
+  async function refresh() {
+    state.error = "";
+    state.result = null;
+    try {
+      loadRuns();
+    } catch (error) {
+      state.error = error.message || String(error);
+    }
+    render();
+  }
+
+  async function writeSelected() {
+    if (state.busy || !state.selectedBranch) return;
     state.busy = true;
     state.result = null;
+    state.error = "";
     render();
     try {
-      state.result = callFeeder(app, "writeback.run", {});
-      const written = Array.isArray(state.result?.written) ? state.result.written.length : 0;
-      const waiting = Array.isArray(state.result?.not_available) ? state.result.not_available.length : 0;
-      new Notice(`Wrote ${written} response file(s); ${waiting} inflight file(s) still waiting.`);
+      state.result = applyResponseBranch(app, state.selectedBranch);
+      if (state.result.conflicts?.length) {
+        new Notice(`Response applied with ${state.result.conflicts.length} merge conflict(s).`, 10000);
+      } else {
+        new Notice(`Wrote ${state.result.written.length} response file(s).`);
+      }
+      loadRuns();
     } catch (error) {
       console.error(error);
-      new Notice(`Writeback failed: ${error.message}`, 10000);
+      state.error = error.message || String(error);
+      new Notice(`Writeback failed: ${state.error}`, 10000);
     } finally {
       state.busy = false;
       render();
     }
   }
 
+  function renderRunSummary(parent, run) {
+    if (!run) return;
+    const details = el("div", { style: "margin: 0.75em 0;" });
+    details.appendChild(el("div", {}, `Branch: ${run.branch}`));
+    details.appendChild(el("div", {}, `Run: ${run.run_identity}`));
+    details.appendChild(el("div", {}, `Plan: ${run.plan_identity || "—"}`));
+    details.appendChild(el("div", {}, `Source: ${run.source_branch || "—"} @ ${short(run.source_commit) || "—"}`));
+    parent.appendChild(details);
+
+    renderRecords(parent, app, "Returned files", run.response?.records || run.dispatch?.records || []);
+  }
+
   function renderResult(parent) {
-    const result = state.result;
-    if (!result) return;
-
-    renderFileList(parent, app, "Downloaded files", result.written);
-    renderFileList(
+    if (!state.result) return;
+    renderRecords(parent, app, "Written files", state.result.written);
+    renderRecords(
       parent,
       app,
-      "Edited while inflight",
-      result.modified_while_inflight,
-      "These files were committed and tagged before the AI response overwrote them. Their state is set to ‘edited while inflight’; inspect the Git diff carefully.",
+      "Merge conflicts",
+      state.result.conflicts,
+      "The response bodies were written with Git conflict markers. Resolve them manually, then commit on the editorial branch. The transport branch remains unacknowledged.",
     );
-    renderFileList(
-      parent,
-      app,
-      "Not yet available from AutoScribe",
-      result.not_available,
-      "These files remain inflight, but asc has not yet exposed a response for download.",
-    );
-    renderFileList(
-      parent,
-      app,
-      "Unresolved inflight files",
-      result.unresolved,
-      "These inflight source files could not be resolved safely to a current vault file.",
-    );
-
-    if (result.preservation_commit) {
-      const tag = result.preservation_tag ? ` · tag ${result.preservation_tag}` : "";
+    if (state.result.committed) {
       parent.appendChild(el(
         "p",
         {},
-        `Preserved inflight edits in commit ${String(result.preservation_commit).slice(0, 8)}${tag}.`,
+        `Committed writeback ${short(state.result.target_commit)} on ${state.result.target_branch}.`,
       ));
-    }
-
-    if (!(result.written || []).length && !(result.not_available || []).length && !(result.unresolved || []).length) {
-      parent.appendChild(el("p", {}, "No unfinished inflight files were found."));
     }
   }
 
@@ -115,19 +138,67 @@ async function renderWriteResponses({ app, container }) {
     container.appendChild(el(
       "p",
       {},
-      "Write every response currently available for all inflight files in this repository.",
+      "Apply a completed transport-branch response to the current editorial branch. Current frontmatter is preserved and bodies are merged against the dispatched version.",
     ));
-    const button = el(
+
+    const toolbar = el("div", { style: "display:flex; gap:0.5em; align-items:center; flex-wrap:wrap;" });
+    const refreshButton = el("button", { onclick: refresh, disabled: state.busy }, "Refresh");
+    toolbar.appendChild(refreshButton);
+
+    const readyRuns = state.runs.filter((run) => run.status === "response_ready");
+    const select = el("select", { disabled: state.busy || !readyRuns.length });
+    for (const run of readyRuns) {
+      const option = el("option", { value: run.branch }, formatRun(run));
+      if (run.branch === state.selectedBranch) option.selected = true;
+      select.appendChild(option);
+    }
+    select.addEventListener("change", () => {
+      state.selectedBranch = select.value;
+      state.result = null;
+      render();
+    });
+    toolbar.appendChild(select);
+
+    const writeButton = el(
       "button",
-      { onclick: runWriteback, disabled: state.busy },
-      state.busy ? "Writing Responses…" : "Write Responses",
+      { onclick: writeSelected, disabled: state.busy || !state.selectedBranch },
+      state.busy ? "Writing Response…" : "Write Response",
     );
-    container.appendChild(button);
+    toolbar.appendChild(writeButton);
+    container.appendChild(toolbar);
+
+    if (state.error) container.appendChild(el("pre", { style: "white-space:pre-wrap;" }, state.error));
+    if (!readyRuns.length && !state.error) {
+      container.appendChild(el("p", {}, "No completed transport branches are waiting for writeback."));
+    }
+
+    const selected = readyRuns.find((run) => run.branch === state.selectedBranch);
+    renderRunSummary(container, selected);
     renderResult(container);
+
+    const waiting = state.runs.filter((run) => run.status === "waiting");
+    const completed = state.runs.filter((run) => run.status === "written_back");
+    if (waiting.length || completed.length) {
+      const status = el("details", { style: "margin-top:1em;" });
+      status.appendChild(el("summary", {}, `Other runs: ${waiting.length} waiting, ${completed.length} written back`));
+      if (waiting.length) {
+        status.appendChild(el("h3", {}, "Waiting for feeder"));
+        const list = el("ul");
+        for (const run of waiting) list.appendChild(el("li", {}, `${formatRun(run)} — ${run.branch}`));
+        status.appendChild(list);
+      }
+      if (completed.length) {
+        status.appendChild(el("h3", {}, "Written back"));
+        const list = el("ul");
+        for (const run of completed) list.appendChild(el("li", {}, `${formatRun(run)} — ${run.branch}`));
+        status.appendChild(list);
+      }
+      container.appendChild(status);
+    }
   }
 
-  render();
+  await refresh();
 }
 
-await renderWriteResponses({ app, dv, container: dv.container });
+await renderWriteResponses({ app, container: dv.container });
 ````

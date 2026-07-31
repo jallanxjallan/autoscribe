@@ -62,10 +62,10 @@ function screenSteps(plan, catalogs) {
 async function renderCreatePlan({ app, container }) {
   container.empty();
   const root = vaultRoot(app);
-  const registry = ascSnapshot("registry", root);
+  const control = ascSnapshot("control", root);
   const catalogs = {
-    engines: snapshotList(registry, "engines"), models: snapshotList(registry, "models"),
-    scripts: snapshotList(registry, "local_scripts"), ragProfiles: snapshotList(registry, "rag_profiles"),
+    engines: snapshotList(control, "engines"), models: snapshotList(control, "models"),
+    scripts: snapshotList(control, "local_scripts"), ragProfiles: snapshotList(control, "rag_profiles"),
     instructions: await callFeeder(app, "instructions.catalog", { include_pipeline: false }),
   };
   let plans = listPlanRecords(app), loaded = null, steps = [];

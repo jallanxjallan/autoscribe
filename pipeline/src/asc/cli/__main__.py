@@ -3,7 +3,6 @@ import typer
 from asc.cli.control import app as control_app
 from asc.cli.enqueue import app as enqueue_app
 from asc.cli.export import app as export_app
-from asc.cli.registry import app as registry_app
 from asc.cli.run import app as run_app
 from asc.cli.storage import app as storage_app
 from asc.cli.upload import app as upload_app
@@ -53,11 +52,6 @@ app.add_typer(
     help="Export completed results.",
 )
 
-app.add_typer(
-    registry_app,
-    name="registry",
-    help="Inspect live extensions and emit the Obsidian registry snapshot.",
-)
 
 
 def main() -> None:

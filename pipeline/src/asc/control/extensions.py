@@ -1,4 +1,4 @@
-"""Build the Obsidian plan-compiler snapshot from the live extensions tree."""
+"""Describe extension files available to AutoScribe control clients."""
 
 from __future__ import annotations
 
@@ -19,7 +19,7 @@ ENGINE_STEP_FIELDS: dict[str, list[str]] = {
 }
 
 
-def build_registry_snapshot() -> dict[str, Any]:
+def build_extension_catalog() -> dict[str, Any]:
     """Describe extensions available to the Obsidian plan compiler.
 
     Extension modules are parsed rather than imported, so generating a snapshot
@@ -28,7 +28,7 @@ def build_registry_snapshot() -> dict[str, Any]:
     engines, models = _engine_and_model_records(AUTOSCRIBE_ENGINE_PACKAGES)
     return {
         "schema_version": 2,
-        "type": "autoscribe.registries",
+        "type": "autoscribe.extensions",
         "sources": {
             "extension_root": str(AUTOSCRIBE_EXTENSIONS_ROOT),
             "engine_packages": list(AUTOSCRIBE_ENGINE_PACKAGES),
@@ -257,4 +257,4 @@ def _title(key: str) -> str:
     return leaf.replace("_", " ").replace("-", " ").title()
 
 
-__all__ = ["ENGINE_STEP_FIELDS", "build_registry_snapshot"]
+__all__ = ["ENGINE_STEP_FIELDS", "build_extension_catalog"]

@@ -18,10 +18,9 @@ LEDGER_FIELDS: dict[str, tuple[str, ...]] = {
     CALLS_TABLE: (
         "identity",
         "source_identity",
-        "plan_key",
         "content",
         "created_at",
-        "blob_json",
+        "extra_json",
     ),
     RESPONSES_TABLE: (
         "identity",

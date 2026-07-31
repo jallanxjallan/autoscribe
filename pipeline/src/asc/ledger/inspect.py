@@ -177,7 +177,7 @@ def show_call(identity: str) -> dict[str, Any]:
 
     return {
         "call": _row_dict(call_row),
-        "source": _safe_json(call_row["blob_json"]),
+        "source": _safe_json(call_row["extra_json"]),
         "response": _row_dict(response_row) if response_row is not None else None,
         "exports": [_row_dict(row) for row in export_rows],
     }

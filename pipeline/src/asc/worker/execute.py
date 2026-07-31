@@ -46,7 +46,7 @@ class WorkerExecutor:
             _validate_runtime_key(runtime=runtime, runtime_key=parsed_key)
 
             engine_input = build_engine_input(runtime)
-            engine_call = load_engine_call(runtime.engine)
+            engine_call = load_engine_call(runtime)
             artifact = engine_call(engine_input)
 
             _validate_engine_artifact(artifact=artifact, runtime=runtime)

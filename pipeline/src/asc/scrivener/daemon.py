@@ -5,11 +5,15 @@ from __future__ import annotations
 from dataclasses import dataclass
 import logging
 
+from asc.models.process.result import record_failure
+from asc.redis.key import RedisKey
 from asc.scrivener import inbox as scrivener_inbox
 from asc.scrivener.execute import ScrivenerExecutor
-from asc.models.process.result import record_failure
-from asc.state.daemon import DEFAULT_CLAIM_TIMEOUT_SECONDS, configure_logging, run_daemon
-from asc.redis.key import RedisKey
+from asc.state.daemon import (
+    DEFAULT_CLAIM_TIMEOUT_SECONDS,
+    configure_logging,
+    run_daemon,
+)
 
 
 LOG = logging.getLogger(__name__)
@@ -25,6 +29,13 @@ class ScrivenerRunReport:
 
 
 def process_next(*, timeout: int = 0) -> ScrivenerRunReport:
+    """Persist one artifact, crashing the scrivener on any write failure.
+
+    Scrivener is the single ledger writer. A failure here means ledger custody is
+    no longer trustworthy, so the exception must leave this cycle and terminate
+    the daemon. It must never be converted into an ordinary recoverable report.
+    """
+
     claimed = scrivener_inbox.daemon_claim(timeout=timeout, empty_limit=None)
     if claimed is None:
         return ScrivenerRunReport(claimed=False)
@@ -41,22 +52,27 @@ def process_next(*, timeout: int = 0) -> ScrivenerRunReport:
             process_identity = RedisKey(artifact_key).identity
         except Exception:
             pass
-        failure_key = record_failure(
-            stage="scrivener.persist",
-            exc=exc,
-            process_identity=process_identity,
-            artifact_key=artifact_key,
-        )
-        LOG.error(
-            "scrivener operation=failed artifact_key=%s failure_key=%s",
+
+        failure_key = None
+        try:
+            failure_key = record_failure(
+                stage="scrivener.persist",
+                exc=exc,
+                process_identity=process_identity,
+                artifact_key=artifact_key,
+            )
+        except Exception:
+            LOG.exception(
+                "scrivener operation=failure-record-error artifact_key=%s",
+                artifact_key,
+            )
+
+        LOG.exception(
+            "scrivener operation=fatal artifact_key=%s failure_key=%s",
             artifact_key,
             failure_key,
         )
-        return ScrivenerRunReport(
-            claimed=True,
-            artifact_key=artifact_key,
-            failure_key=failure_key,
-        )
+        raise
 
     report = ScrivenerRunReport(
         claimed=True,

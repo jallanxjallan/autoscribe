@@ -2,6 +2,7 @@
 
 from typing import Any
 
+from asc.control.extensions import build_extension_catalog
 from asc.redis.key import RedisKey
 from asc.state.slugmap import SlugMap
 
@@ -64,11 +65,23 @@ def build_control_snapshot() -> dict[str, Any]:
             kind=key.kind,
         )
 
+    extension_catalog = build_extension_catalog()
+    extension_registries = extension_catalog.get("registries", {})
+
     return {
-        "schema_version": 1,
+        "schema_version": 2,
         "type": "autoscribe.controls",
-        "source": {"slugmap": SlugMap.KEY},
-        "registries": registries,
+        "source": {
+            "slugmap": SlugMap.KEY,
+            "extensions": extension_catalog.get("sources", {}),
+        },
+        "registries": {
+            **registries,
+            "engines": dict(extension_registries.get("engines", {})),
+            "models": dict(extension_registries.get("models", {})),
+            "local_scripts": dict(extension_registries.get("local_scripts", {})),
+            "rag_profiles": dict(extension_registries.get("rag_profiles", {})),
+        },
         "stale": stale,
     }
 

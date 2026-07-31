@@ -111,9 +111,14 @@ def _engine(step: Mapping[str, Any], *, args: Mapping[str, Any], ordinal: int) -
     value = step.get("engine", args.get("engine"))
     if isinstance(value, Mapping):
         value = value.get("key") or value.get("module")
-    if not isinstance(value, str) or not value.strip():
-        raise ValueError(f"plan step {ordinal} must provide an engine")
-    return value.strip()
+    if isinstance(value, str) and value.strip():
+        return value.strip()
+
+    kind = step.get("engine_kind", step.get("kind", args.get("engine_kind")))
+    if isinstance(kind, str) and kind.strip() == "script":
+        return "engines.local"
+
+    raise ValueError(f"plan step {ordinal} must provide an engine")
 
 
 def _engine_kind(step: Mapping[str, Any], *, args: Mapping[str, Any], ordinal: int) -> str:

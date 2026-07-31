@@ -209,8 +209,8 @@ async function flattenInPlace(app, selectedPaths) {
 async function renderDispatchRun({ app, container }) {
   container.empty();
   const vaultRoot = app.vault.adapter.basePath;
-  const { handoffFeeder } = require(path.join(vaultRoot, "_control/scripts/lib/feeder-ipc.js"));
-  const { listPlanRecords } = require(path.join(vaultRoot, "_control/scripts/plans/plan-store.js"));
+  const { createDispatchBranch } = require(path.join(vaultRoot, "_control/scripts/lib/git-transport.js"));
+  const { listPlanRecords, loadPlanRecord } = require(path.join(vaultRoot, "_control/scripts/plans/plan-store.js"));
 
   const heading = container.createEl("h2", { text: "Dispatch selected files" });
   heading.style.marginTop = "0";
@@ -249,7 +249,7 @@ async function renderDispatchRun({ app, container }) {
   for (const plan of planRows) {
     const slug = String(plan.record_identity || plan.slug || "").trim();
     if (!slug) continue;
-    select.createEl("option", { text: String(plan.label || plan.name || slug), value: slug });
+    select.createEl("option", { text: String(plan.payload?.label || plan.label || plan.name || slug), value: slug });
   }
 
   form.createEl("label", { text: "Commit message (optional)" });
@@ -277,24 +277,31 @@ async function renderDispatchRun({ app, container }) {
 
   runButton.addEventListener("click", async () => {
     runButton.disabled = true;
-    result.setText("Resolving transclusions and handing dispatch to feeder…");
+    result.setText("Resolving transclusions and creating transport branch…");
     try {
       const flattened = await flattenInPlace(app, selection);
       const basename = combineBasename.value.trim();
       if (combine.checked && !basename) {
         throw new Error("Enter a basename for the combined record.");
       }
-      const handoff = handoffFeeder(app, "dispatch.run", {
+      const transport = createDispatchBranch(app, {
         paths: selection,
-        plan_slug: select.value,
+        planRecord: loadPlanRecord(app, select.value),
         message: message.value.trim(),
-        combine_basename: combine.checked ? basename : ""
+        combineBasename: combine.checked ? basename : ""
       });
       result.setText(
-        `Dispatch handed off to feeder.\n` +
-        `Flattened in place: ${flattened.length}\n` +
-        `Process: ${handoff.pid}\n` +
-        `Open System Status if the expected response does not appear.`
+        `Transport branch created.
+` +
+        `Branch: ${transport.branch}
+` +
+        `Run: ${transport.run_identity}
+` +
+        `Records: ${transport.count}
+` +
+        `Flattened in place: ${flattened.length}
+` +
+        `The feeder can now claim this branch.`
       );
     } catch (error) {
       result.setText(`Dispatch failed: ${error.message || error}`);

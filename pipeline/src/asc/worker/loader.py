@@ -4,8 +4,9 @@ from __future__ import annotations
 
 from typing import Callable
 
+from asc.extensions import load_runtime_call
 from asc.models.process.result import Failure, Response, Retrieval, Transform
-from asc.registries.extensions import load_engine_call as _load_engine_call
+from asc.models.process.runtime import Runtime
 from asc.worker.runtime_io import EngineInput
 
 
@@ -13,12 +14,9 @@ EngineArtifact = Response | Transform | Retrieval | Failure
 EngineCall = Callable[[EngineInput], EngineArtifact]
 
 
-def load_engine_call(component: str) -> EngineCall:
-    """Load the registered engine callable for a Step engine component."""
-    clean_component = component.strip()
-    if not clean_component:
-        raise ValueError("worker engine component cannot be empty")
-    return _load_engine_call(clean_component)
+def load_engine_call(runtime: Runtime) -> EngineCall:
+    """Load the executable callable directly from the extensions folder."""
+    return load_runtime_call(runtime)
 
 
 __all__ = ["EngineArtifact", "EngineCall", "load_engine_call"]
