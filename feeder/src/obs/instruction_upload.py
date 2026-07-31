@@ -12,6 +12,7 @@ from .errors import ObsError
 from .executables import autoscribe_bin
 from .markdown import parse_markdown
 from .process import run
+from .contracts import upload_record
 
 
 def _inside(root: Path, path: Path) -> bool:
@@ -36,27 +37,13 @@ def _instruction_hashes(snapshot: dict[str, Any]) -> dict[str, str]:
 
 
 def _upload_envelope(record: dict[str, Any]) -> dict[str, Any]:
-    """Return the strict instruction upload envelope."""
-    record_type = str(record.get("record_type") or "instruction").strip()
-    record_identity = str(record.get("record_identity") or record.get("slug") or "").strip()
-    if record_type != "instruction":
-        raise ObsError(f"expected instruction record_type, got: {record_type or '<empty>'}")
-    if not record_identity:
-        raise ObsError("instruction record missing record_identity")
-
-    raw_payload = record.get("payload")
-    if not isinstance(raw_payload, dict):
-        raise ObsError(f"{record_identity}: instruction payload must be an object")
-    content = raw_payload.get("content")
+    identity = str(record.get("identity") or record.get("slug") or "").strip()
+    content = record.get("content")
+    if not identity:
+        raise ObsError("instruction record missing identity")
     if not isinstance(content, str) or not content.strip():
-        raise ObsError(f"{record_identity}: instruction payload requires non-empty content")
-
-    return {
-        "record_type": "instruction",
-        "record_identity": record_identity,
-        "payload": {"content": content},
-    }
-
+        raise ObsError(f"{identity}: instruction content must be non-empty")
+    return upload_record(type="instruction", identity=identity, content=content, extra=record.get("extra") or {})
 
 def _content_hash(content: str) -> str:
     return hashlib.sha256(content.encode("utf-8")).hexdigest()
@@ -68,7 +55,7 @@ def _render_body_record(repo: Path, *, slug: str, source: Path, source_path: str
     Instruction uploads are not document conversions. Frontmatter is routing
     metadata and is excluded; the body is sent unchanged as ``payload.content``.
     """
-    del repo, source_path
+    del repo
     document = parse_markdown(source.read_text(encoding="utf-8"))
     actual_slug = str(document.frontmatter.get("slug") or "").strip()
     if actual_slug != slug:
@@ -77,11 +64,12 @@ def _render_body_record(repo: Path, *, slug: str, source: Path, source_path: str
     if not content.strip():
         raise ObsError(f"{source}: instruction body is empty")
 
-    record = {
-        "record_type": "instruction",
-        "record_identity": slug,
-        "payload": {"content": content},
-    }
+    record = upload_record(
+        type="instruction",
+        identity=slug,
+        content=content,
+        extra={"filename_hint": source.name, "source_path": source_path},
+    )
     return record, _content_hash(content)
 
 
@@ -94,14 +82,13 @@ def _instruction_remote_state(snapshot: dict[str, Any]) -> tuple[dict[str, str],
     for key, record in values.items():
         if not isinstance(record, dict):
             continue
-        slug = str(record.get("record_identity") or record.get("slug") or key).strip()
+        slug = str(record.get("identity") or record.get("slug") or key).strip()
         if not slug:
             continue
         digest = str(record.get("content_sha256") or "").strip()
         if digest:
             hashes[slug] = digest
-        payload = record.get("payload")
-        content = payload.get("content") if isinstance(payload, dict) else record.get("content")
+        content = record.get("content")
         if isinstance(content, str):
             contents[slug] = content
     return hashes, contents
@@ -208,7 +195,7 @@ def upload_instruction(repo: Path, *, source_path: str, input_path: Path,
     record, digest = _render_body_record(repo, slug=slug, source=source, source_path=source_path)
     uploaded_hashes, uploaded_contents = _instruction_remote_state(pipeline_snapshot("control"))
     uploaded = uploaded_hashes.get(slug)
-    if not force and (uploaded == digest or uploaded_contents.get(slug) == record["payload"]["content"]):
+    if not force and (uploaded == digest or uploaded_contents.get(slug) == record["content"]):
         return {"slug": slug, "status": "current", "content_sha256": digest}
     result = run(
         [autoscribe_bin(), "upload", "instructions"],

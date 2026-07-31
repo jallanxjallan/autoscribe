@@ -14,6 +14,9 @@ from .markdown import parse_markdown, slug_prefix
 from .pandoc import capture as pandoc_capture
 from .state import VaultState
 from .vault import Vault
+from .contracts import enqueue_record, provisional_slug, upload_record
+from .executables import autoscribe_bin
+from .process import run
 
 INSTRUCTION_PREFIXES = {"ins", "gbl", "cxt", "spc"}
 
@@ -74,16 +77,25 @@ def upload_instructions(repo: Path, *, force: bool = False, dry_run: bool = Fals
 
 
 
-def _dispatch_record(*, record_identity: str, plan_slug: str, content: str) -> dict[str, str]:
-    return {
-        "record_identity": record_identity,
-        "record_type": "content",
-        "record_plan": plan_slug,
-        "record_content": content,
-    }
+def _call_record(*, identity: str, content: str, extra: dict[str, Any]) -> dict[str, Any]:
+    return upload_record(type="call", identity=identity, content=content, extra=extra)
 
 
-def _encode_ndjson(records: list[dict[str, str]]) -> bytes:
+def _upload_and_enqueue(repo: Path, *, calls: list[dict[str, Any]], plan_slug: str) -> str:
+    upload = run(
+        [autoscribe_bin(), "upload", "calls"],
+        cwd=repo,
+        input_text=_encode_ndjson(calls).decode("utf-8"),
+    )
+    manifest = [enqueue_record(call=str(record["identity"]), plan=plan_slug) for record in calls]
+    enqueue = run(
+        [autoscribe_bin(), "enqueue"],
+        cwd=repo,
+        input_text=_encode_ndjson(manifest).decode("utf-8"),
+    )
+    return "\n".join(part for part in (upload.stdout.strip(), enqueue.stdout.strip()) if part)
+
+def _encode_ndjson(records: list[dict[str, Any]]) -> bytes:
     if not records:
         return b""
     text = "".join(
@@ -132,8 +144,8 @@ def _resolve_dispatch_item(repo: Path, *, relpath: str, expected_slug: str | Non
         "path": normalized,
         "absolute_path": str(absolute),
         "slug": slug,
-        "record_identity": slug,
-        "record_content": content,
+        "identity": slug,
+        "content": content,
     }
 
 
@@ -145,8 +157,7 @@ def dispatch_run(
 ) -> tuple[list[dict[str, Any]], bytes]:
     """Emit enqueue-ready NDJSON for the active run selection.
 
-    Each row contains only ``record_identity``, ``record_type``,
-    ``record_plan``, and ``record_content``. ``record_content`` is the entire
+    Each row contains only the call and plan slugs required by enqueue. ``record_content`` is the entire
     Markdown source file, including YAML frontmatter and body.
     """
     manifest_path = manifest_path or VaultState.for_vault(repo).current_run
@@ -202,17 +213,16 @@ def dispatch_run(
 
     stamp = datetime.now().astimezone().strftime("%Y-%m-%d %H:%M:%S %z")
     commit = git.commit_files(repo, [item["path"] for item in items], f"{plan_slug} {stamp}")
-    records: list[dict[str, str]] = []
+    calls: list[dict[str, Any]] = []
     for item in items:
         item["dispatch_commit"] = commit
-        records.append(
-            _dispatch_record(
-                record_identity=item["record_identity"],
-                plan_slug=plan_slug,
-                content=item["record_content"],
-            )
-        )
-    return items, _encode_ndjson(records)
+        calls.append(_call_record(
+            identity=item["identity"],
+            content=item["content"],
+            extra={"filename_hint": Path(item["path"]).name, "source_path": item["path"], "dispatch_commit": commit},
+        ))
+    pipeline_output = _upload_and_enqueue(repo, calls=calls, plan_slug=plan_slug)
+    return items, (pipeline_output + ("\n" if pipeline_output else "")).encode("utf-8")
 
 
 def dispatch_paths(
@@ -267,7 +277,7 @@ def dispatch_paths(
 
     if combined_identity:
         combined_content = "\n\n".join(
-            str(item["record_content"]).rstrip("\n") for item in items
+            str(item["content"]).rstrip("\n") for item in items
         ) + "\n"
     else:
         combined_content = ""
@@ -292,51 +302,30 @@ def dispatch_paths(
 
     plan_sync = sync_plan(effective_plan_record, cwd=repo)
 
-    records: list[dict[str, str]] = []
+    calls: list[dict[str, Any]] = []
     if combined_identity:
         # Combined dispatch is a virtual record. It deliberately performs no
         # Git commit or tag operation against the source vault.
         commit = None
-        records.append(
-            _dispatch_record(
-                record_identity=combined_identity,
-                plan_slug=plan,
-                content=combined_content,
-            )
-        )
+        call_identity = provisional_slug(combined_identity)
+        calls.append(_call_record(
+            identity=call_identity,
+            content=combined_content,
+            extra={"filename_hint": combined_identity, "source_paths": [item["path"] for item in items]},
+        ))
     else:
         # commit_files uses --allow-empty and --only, so an unchanged selection
         # still gets a distinct source commit without including unrelated changes.
         commit = git.commit_files(repo, [item["path"] for item in items], subject)
         for item in items:
             item["dispatch_commit"] = commit
-            records.append(
-                _dispatch_record(
-                    record_identity=item["record_identity"],
-                    plan_slug=plan,
-                    content=item["record_content"],
-                )
-            )
+            calls.append(_call_record(
+                identity=item["identity"],
+                content=item["content"],
+                extra={"filename_hint": Path(item["path"]).name, "source_path": item["path"], "dispatch_commit": commit},
+            ))
 
-    import os
-    import subprocess
-    from .executables import autoscribe_bin
-
-    command = [autoscribe_bin(), "enqueue"]
-    result = subprocess.run(
-        command,
-        cwd=repo,
-        env=os.environ.copy(),
-        input=_encode_ndjson(records),
-        stdout=subprocess.PIPE,
-        stderr=subprocess.PIPE,
-        check=False,
-    )
-    if result.returncode != 0:
-        detail = (result.stderr or result.stdout or f"exit status {result.returncode}".encode()).decode(
-            "utf-8", errors="replace"
-        ).strip()
-        raise ObsError(f"{' '.join(command)} failed: {detail}")
+    pipeline_output = _upload_and_enqueue(repo, calls=calls, plan_slug=plan)
 
     tag_name = None if combined_identity else git.tag_inflight(repo, commit, plan, stamp)
     return {
@@ -350,7 +339,7 @@ def dispatch_paths(
         "failed_count": 0,
         "items": items,
         "failures": [],
-        "pipeline_output": result.stdout.decode("utf-8", errors="replace").strip(),
+        "pipeline_output": pipeline_output,
         "tag": ({"name": tag_name, "plan_slug": plan, "timestamp": stamp} if tag_name else None),
         "dry_run": False,
         "plan_sync": plan_sync,
@@ -360,7 +349,7 @@ def dispatch_paths(
 def _assert_unique(items: list[dict[str, Any]], label: str) -> None:
     grouped: dict[str, list[str]] = {}
     for item in items:
-        identity = str(item.get("record_identity") or item.get("slug") or "").strip()
+        identity = str(item.get("identity") or item.get("slug") or "").strip()
         grouped.setdefault(identity, []).append(str(item["path"]))
     duplicates = {identity: paths for identity, paths in grouped.items() if identity and len(paths) > 1}
     if duplicates:
@@ -398,7 +387,7 @@ def dispatch_commit(
         raise ObsError("selected commit contains no Markdown files")
 
     items: list[dict[str, Any]] = []
-    records: list[dict[str, str]] = []
+    calls: list[dict[str, Any]] = []
     for path in markdown_paths:
         content = git.show_file(repo, commit, path)
         document = parse_markdown(content)
@@ -409,13 +398,13 @@ def dispatch_commit(
         item = {
             "path": path,
             "slug": slug,
-            "record_identity": record_identity,
-            "record_content": content,
+            "identity": record_identity,
+            "content": content,
             "dispatch_commit": commit,
             "plan_slug": plan,
         }
         items.append(item)
-        records.append(_dispatch_record(record_identity=record_identity, plan_slug=plan, content=content))
+        calls.append(_call_record(identity=record_identity, content=content, extra={"filename_hint": Path(path).name, "source_path": path, "dispatch_commit": commit}))
 
     _assert_unique(items, "dispatch")
     if dry_run:
@@ -429,25 +418,7 @@ def dispatch_commit(
             "dry_run": True,
         }
 
-    import os
-    import subprocess
-    from .executables import autoscribe_bin
-
-    command = [autoscribe_bin(), "enqueue"]
-    result = subprocess.run(
-        command,
-        cwd=repo,
-        env=os.environ.copy(),
-        input=_encode_ndjson(records),
-        stdout=subprocess.PIPE,
-        stderr=subprocess.PIPE,
-        check=False,
-    )
-    if result.returncode != 0:
-        detail = (result.stderr or result.stdout or f"exit status {result.returncode}".encode()).decode(
-            "utf-8", errors="replace"
-        ).strip()
-        raise ObsError(f"{' '.join(command)} failed: {detail}")
+    pipeline_output = _upload_and_enqueue(repo, calls=calls, plan_slug=plan)
 
     stamp = datetime.now().astimezone().strftime("%Y-%m-%d %H:%M:%S %z")
     tag = git.tag_inflight(repo, commit, plan, stamp)
@@ -456,7 +427,7 @@ def dispatch_commit(
         "plan_slug": plan,
         "count": len(items),
         "items": items,
-        "pipeline_output": result.stdout.decode("utf-8", errors="replace").strip(),
+        "pipeline_output": pipeline_output,
         "tag": {"name": tag, "plan_slug": plan, "timestamp": stamp},
         "dry_run": False,
     }

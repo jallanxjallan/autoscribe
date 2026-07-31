@@ -10,6 +10,7 @@ from .errors import ObsError
 from .process import run
 from .executables import autoscribe_bin
 from .instruction_upload import sync_instructions
+from .contracts import upload_record
 
 
 def _plan_values(snapshot: dict[str, Any]) -> list[dict[str, Any]]:
@@ -155,11 +156,7 @@ def save_plan(
 
     instruction_results = sync_instructions(cwd, instruction_sets or [])
 
-    envelope = {
-        "record_type": "plan",
-        "record_identity": slug,
-        "payload": content,
-    }
+    envelope = upload_record(type="plan", identity=slug, content=content, extra={})
     line = json.dumps(envelope, ensure_ascii=False) + "\n"
     result = run(
         [autoscribe_bin(), "upload", "plans"],
@@ -314,7 +311,7 @@ def sync_plan(record: dict[str, Any], *, cwd: Path) -> dict[str, Any]:
     if not should_upload:
         return {"slug": slug, "status": "current", "uploaded": False, "instructions": instruction_results}
 
-    envelope = {"record_type": "plan", "record_identity": slug, "payload": payload}
+    envelope = upload_record(type="plan", identity=slug, content=payload, extra={"source_path": plan_relpath} if plan_relpath else {})
     result = run([autoscribe_bin(), "upload", "plans"], cwd=cwd,
                  input_text=json.dumps(envelope, ensure_ascii=False) + "\n")
     return {
