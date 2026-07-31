@@ -24,14 +24,9 @@ class LoadedPlan:
         return self.plan.total_steps
 
 
-def load_plan_from_manifest_record(record: Mapping[str, Any]) -> LoadedPlan:
-    try:
-        plan_slug = record["record_plan"]
-    except KeyError as exc:
-        raise ValueError("enqueue record missing required field: record_plan") from exc
-
+def load_plan(plan_slug: str) -> LoadedPlan:
     if not isinstance(plan_slug, str) or not plan_slug.strip():
-        raise ValueError("record_plan must be a non-empty string")
+        raise ValueError("plan must be a non-empty slug")
 
     clean_slug = plan_slug.strip()
     plan_key = resolve_plan_record_key(clean_slug)
@@ -62,4 +57,4 @@ def resolve_plan_record_key(plan_slug: str) -> str:
     raise ValueError(f"record_plan resolved to non-plan record key: {resolved_key}")
 
 
-__all__ = ["LoadedPlan", "load_plan_from_manifest_record", "resolve_plan_record_key"]
+__all__ = ["LoadedPlan", "load_plan", "resolve_plan_record_key"]

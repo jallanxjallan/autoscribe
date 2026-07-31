@@ -33,17 +33,16 @@ def enqueue_records(records: Iterable[EnqueueRecord]) -> EnqueueReport:
 
 
 def enqueue_record(record: EnqueueRecord) -> EnqueuedCall:
-    """Persist one call, compile its runtimes, and register its job."""
+    """Compile runtimes for one uploaded call and register its job."""
 
     call = record.call
     ensure_no_pending_export(record.source_identity)
-    call_key = str(call.redis_key)
+    call_key = record.call_key
     runtimes = ()
     job = None
     job_activated = False
 
     try:
-        call.save()
         runtimes = materialize_runtimes(
             call_identity=call.identity,
             plan=record.plan.plan,
@@ -65,7 +64,6 @@ def enqueue_record(record: EnqueueRecord) -> EnqueuedCall:
         delete_ephemeral_instructions(runtimes)
         for runtime in runtimes:
             runtime.delete()
-        call.delete()
         record_failure(
             stage="enqueue.record",
             exc=exc,

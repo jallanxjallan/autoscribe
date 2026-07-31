@@ -9,27 +9,24 @@ from asc.state.slugmap import SlugMap
 from asc.ingest.common import IngestedItem, IngestInputError
 from asc.ingest.expiry import expire_old_key
 
+INSTRUCTION_TTL_SECONDS = 60 * 60 * 24 * 30
+
 
 def ingest_instruction(record: Mapping[str, Any]) -> IngestedItem:
-    slug = str(record["record_identity"]).strip()
-    payload = dict(record["payload"])
-    payload.pop("identity", None)
-    payload["identity"] = generate_identity()
-    payload["slug"] = slug
-
+    slug = str(record["identity"]).strip()
+    content = record["content"]
+    if not isinstance(content, str) or not content.strip():
+        raise IngestInputError("instruction content must be a non-empty string")
     try:
-        instruction = Instruction.model_validate(payload)
+        instruction = Instruction.model_validate({"identity": generate_identity(), "slug": slug, "content": content, "extra_json": dict(record["extra"])})
     except ValidationError as exc:
         raise IngestInputError(f"validation failed: {exc}") from exc
-
     slugmap = SlugMap()
     old_key = slugmap.get(slug)
-    new_key = str(instruction.save())
-
+    new_key = str(instruction.save(ttl=INSTRUCTION_TTL_SECONDS))
     slugmap.set(slug, new_key)
     expire_old_key(old_key, new_key)
-
     return IngestedItem(record_type="instruction", slug=slug, key=new_key)
 
 
-__all__ = ["ingest_instruction"]
+__all__ = ["INSTRUCTION_TTL_SECONDS", "ingest_instruction"]

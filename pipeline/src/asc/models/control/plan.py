@@ -5,7 +5,6 @@ from typing import Any, ClassVar
 from pydantic import ConfigDict, Field, field_serializer, field_validator, model_validator
 
 from asc.core.identity import generate_identity
-from asc.models.helpers.upload import RecordIdentity, RedisIdentity
 from asc.redis.key import RedisKey
 from asc.redis.model_base import RedisModel
 
@@ -69,22 +68,29 @@ class Plan(RedisModel):
 
     model_config = ConfigDict(extra="ignore")
 
-    identity: RedisIdentity = Field(default_factory=generate_identity)
-    slug: RecordIdentity
+    identity: str = Field(default_factory=generate_identity)
+    slug: str
     instructions: list[Any] = Field(default_factory=list, exclude=True)
     instructions_json: str = ""
 
     metadata_json: str = "{}"
+    extra_json: str = "{}"
 
     steps: dict[int, dict[str, Any]] = Field(default_factory=dict, exclude=True)
     steps_json: str = ""
 
     @classmethod
-    def from_payload(cls, payload: Mapping[str, Any], *, slug: str) -> "Plan":
-        data = dict(payload)
+    def from_content(cls, content: Mapping[str, Any], *, slug: str, extra: Mapping[str, Any] | None = None) -> "Plan":
+        data = dict(content)
         data.pop("identity", None)
         data["slug"] = slug
+        data["extra_json"] = dict(extra or {})
         return cls.model_validate(data)
+
+    @classmethod
+    def from_payload(cls, payload: Mapping[str, Any], *, slug: str) -> "Plan":
+        """Compatibility alias for internal callers; uploads use from_content()."""
+        return cls.from_content(payload, slug=slug)
 
     @model_validator(mode="before")
     @classmethod
@@ -100,6 +106,7 @@ class Plan(RedisModel):
             "instructions",
             "instructions_json",
             "metadata_json",
+            "extra_json",
             "steps",
             "steps_json",
         }
@@ -138,7 +145,7 @@ class Plan(RedisModel):
     def validate_instructions_json(cls, value: object) -> str:
         return _json_text(value, default="[]")
 
-    @field_validator("metadata_json", mode="before")
+    @field_validator("metadata_json", "extra_json", mode="before")
     @classmethod
     def validate_metadata_json(cls, value: object) -> str:
         return _json_text(value, default="{}")
@@ -156,6 +163,7 @@ class Plan(RedisModel):
     @field_serializer(
         "instructions_json",
         "metadata_json",
+        "extra_json",
         "steps_json",
         when_used="json",
     )
@@ -224,6 +232,7 @@ class Plan(RedisModel):
             "slug": self.slug,
             "instructions_json": self.instructions_json,
             "metadata_json": self.metadata_json,
+            "extra_json": self.extra_json,
             "steps_json": self.steps_json,
         }
 

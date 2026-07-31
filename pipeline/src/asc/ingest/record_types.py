@@ -26,14 +26,14 @@ TARGET_ALIASES: Final[dict[str, str]] = {
 
 def canonical_record_type(value: object) -> str:
     if not isinstance(value, str) or not value.strip():
-        raise IngestInputError("record_type must be a non-empty string")
+        raise IngestInputError("type must be a non-empty string")
 
     key = value.strip().lower()
     try:
         return RECORD_TYPE_ALIASES[key]
     except KeyError as exc:
         known = ", ".join(sorted(RECORD_TYPE_ALIASES))
-        raise IngestInputError(f"unknown record_type {value!r}; known: {known}") from exc
+        raise IngestInputError(f"unknown type {value!r}; known: {known}") from exc
 
 
 def canonical_target(value: object) -> str:

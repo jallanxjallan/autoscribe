@@ -9,39 +9,31 @@ from asc.state.slugmap import SlugMap
 from asc.ingest.common import IngestedItem, IngestInputError
 from asc.ingest.expiry import expire_old_key
 
+CALL_TTL_SECONDS = 60 * 60 * 24 * 30
+
 
 def ingest_content(record: Mapping[str, Any]) -> IngestedItem:
-    slug = str(record["record_identity"]).strip()
-    payload = dict(record["payload"])
-    payload.pop("identity", None)
-
-    plan_slug = record.get("record_plan")
-    if not isinstance(plan_slug, str) or not plan_slug.strip():
-        raise IngestInputError("content record_plan must be a non-empty string")
-
-    plan_key = SlugMap().get(plan_slug.strip())
-    if not plan_key:
-        raise IngestInputError(f"unknown record_plan: {plan_slug!r}")
-
-    payload.update(
-        identity=generate_identity(),
-        source_identity=slug,
-        plan_key=plan_key,
-    )
+    slug = str(record["identity"]).strip()
+    content = record["content"]
+    if not isinstance(content, str) or not content.strip():
+        raise IngestInputError("call content must be a non-empty string")
 
     try:
-        content = CallRecord.model_validate(payload)
+        call = CallRecord.model_validate({
+            "identity": generate_identity(),
+            "source_identity": slug,
+            "content": content,
+            "extra_json": dict(record["extra"]),
+        })
     except ValidationError as exc:
         raise IngestInputError(f"validation failed: {exc}") from exc
 
     slugmap = SlugMap()
     old_key = slugmap.get(slug)
-    new_key = str(content.save())
-
+    new_key = str(call.save(ttl=CALL_TTL_SECONDS))
     slugmap.set(slug, new_key)
     expire_old_key(old_key, new_key)
-
     return IngestedItem(record_type="content", slug=slug, key=new_key)
 
 
-__all__ = ["ingest_content"]
+__all__ = ["CALL_TTL_SECONDS", "ingest_content"]

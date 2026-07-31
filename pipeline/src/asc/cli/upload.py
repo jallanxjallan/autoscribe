@@ -69,7 +69,7 @@ def ingest_content() -> None:
 
 @app.command("calls")
 def ingest_calls() -> None:
-    """Compatibility alias for content records."""
+    """Ingest uploaded call records."""
 
     _run_ingest("content")
 

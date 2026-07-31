@@ -1,39 +1,23 @@
-from collections.abc import Mapping
-from typing import Any
-
 from asc.models.process.call import CallRecord
+from asc.redis.key import RedisKey
+from asc.state.slugmap import SlugMap
 
 
-ENQUEUE_CONTROL_FIELDS = frozenset({"record_type", "record_plan", "plan_slug"})
+def load_call(call_slug: str) -> tuple[str, CallRecord]:
+    if not isinstance(call_slug, str) or not call_slug.strip():
+        raise ValueError("call must be a non-empty slug")
+    slug = call_slug.strip()
+    resolved = SlugMap().get(slug)
+    if not resolved:
+        raise KeyError(f"missing slugmap entry for call: {slug}")
+    key = RedisKey(str(resolved))
+    if key.kind != "call":
+        raise ValueError(f"call resolved to non-call key: {resolved}")
+    if key.suffix in (None, "", "record"):
+        record_key = str(RedisKey(kind="call", identity=key.identity, suffix="record"))
+    else:
+        raise ValueError(f"call resolved to non-record key: {resolved}")
+    return record_key, CallRecord.load(record_key)
 
 
-def create_call_from_manifest_record(
-    record: Mapping[str, Any],
-    *,
-    plan_key: str,
-) -> CallRecord:
-    """Create and persist the CallRecord carried by one dispatch NDJSON row."""
-
-    return CallRecord(**_call_payload(record, plan_key=plan_key))
-
-
-def _call_payload(record: Mapping[str, Any], *, plan_key: str) -> dict[str, Any]:
-    payload = dict(record)
-    for field in ENQUEUE_CONTROL_FIELDS:
-        payload.pop(field, None)
-
-    try:
-        source_identity = payload.pop("record_identity")
-        content = payload.pop("record_content")
-    except KeyError as exc:
-        raise ValueError(f"enqueue record missing required field: {exc.args[0]}") from exc
-
-    return {
-        "source_identity": source_identity,
-        "content": content,
-        "plan_key": str(plan_key),
-        **payload,
-    }
-
-
-__all__ = ["create_call_from_manifest_record"]
+__all__ = ["load_call"]

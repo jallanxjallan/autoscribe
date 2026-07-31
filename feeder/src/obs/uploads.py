@@ -105,7 +105,7 @@ def _encode_ndjson(records: list[dict[str, Any]]) -> bytes:
     return text.encode("utf-8")
 
 
-def _resolve_dispatch_item(repo: Path, *, relpath: str, expected_slug: str | None = None) -> dict[str, str]:
+def _resolve_dispatch_item(repo: Path, *, relpath: str, expected_slug: str | None = None) -> dict[str, Any]:
     """Resolve an in-vault Markdown file for dispatch.
 
     The UI mutates transclusions in place and hands feeder the original vault
@@ -130,8 +130,8 @@ def _resolve_dispatch_item(repo: Path, *, relpath: str, expected_slug: str | Non
     if not absolute.is_file():
         raise ObsError(f"dispatch file not found: {normalized}")
 
-    content = absolute.read_text(encoding="utf-8")
-    document = parse_markdown(content)
+    source_text = absolute.read_text(encoding="utf-8")
+    document = parse_markdown(source_text)
     slug = str(document.frontmatter.get("slug") or "").strip()
     if not slug:
         raise ObsError(f"{normalized}: dispatch file is missing slug")
@@ -145,7 +145,8 @@ def _resolve_dispatch_item(repo: Path, *, relpath: str, expected_slug: str | Non
         "absolute_path": str(absolute),
         "slug": slug,
         "identity": slug,
-        "content": content,
+        "content": document.body,
+        "metadata": dict(document.frontmatter),
     }
 
 
@@ -157,8 +158,8 @@ def dispatch_run(
 ) -> tuple[list[dict[str, Any]], bytes]:
     """Emit enqueue-ready NDJSON for the active run selection.
 
-    Each row contains only the call and plan slugs required by enqueue. ``record_content`` is the entire
-    Markdown source file, including YAML frontmatter and body.
+    Each call upload contains body text only. Parsed YAML frontmatter is retained
+    under ``extra.metadata`` and is never exposed to pipeline transformations.
     """
     manifest_path = manifest_path or VaultState.for_vault(repo).current_run
     manifest = read_json(manifest_path)
@@ -219,7 +220,12 @@ def dispatch_run(
         calls.append(_call_record(
             identity=item["identity"],
             content=item["content"],
-            extra={"filename_hint": Path(item["path"]).name, "source_path": item["path"], "dispatch_commit": commit},
+            extra={
+                "filename_hint": Path(item["path"]).name,
+                "source_path": item["path"],
+                "dispatch_commit": commit,
+                "metadata": item["metadata"],
+            },
         ))
     pipeline_output = _upload_and_enqueue(repo, calls=calls, plan_slug=plan_slug)
     return items, (pipeline_output + ("\n" if pipeline_output else "")).encode("utf-8")
@@ -311,7 +317,14 @@ def dispatch_paths(
         calls.append(_call_record(
             identity=call_identity,
             content=combined_content,
-            extra={"filename_hint": combined_identity, "source_paths": [item["path"] for item in items]},
+            extra={
+                "filename_hint": combined_identity,
+                "source_paths": [item["path"] for item in items],
+                "sources": [
+                    {"source_path": item["path"], "metadata": item["metadata"]}
+                    for item in items
+                ],
+            },
         ))
     else:
         # commit_files uses --allow-empty and --only, so an unchanged selection
@@ -322,7 +335,12 @@ def dispatch_paths(
             calls.append(_call_record(
                 identity=item["identity"],
                 content=item["content"],
-                extra={"filename_hint": Path(item["path"]).name, "source_path": item["path"], "dispatch_commit": commit},
+                extra={
+                    "filename_hint": Path(item["path"]).name,
+                    "source_path": item["path"],
+                    "dispatch_commit": commit,
+                    "metadata": item["metadata"],
+                },
             ))
 
     pipeline_output = _upload_and_enqueue(repo, calls=calls, plan_slug=plan)
@@ -389,8 +407,8 @@ def dispatch_commit(
     items: list[dict[str, Any]] = []
     calls: list[dict[str, Any]] = []
     for path in markdown_paths:
-        content = git.show_file(repo, commit, path)
-        document = parse_markdown(content)
+        source_text = git.show_file(repo, commit, path)
+        document = parse_markdown(source_text)
         slug = str(document.frontmatter.get("slug") or "").strip()
         if not slug:
             raise ObsError(f"{path}: dispatch file is missing slug")
@@ -399,12 +417,22 @@ def dispatch_commit(
             "path": path,
             "slug": slug,
             "identity": record_identity,
-            "content": content,
+            "content": document.body,
+            "metadata": dict(document.frontmatter),
             "dispatch_commit": commit,
             "plan_slug": plan,
         }
         items.append(item)
-        calls.append(_call_record(identity=record_identity, content=content, extra={"filename_hint": Path(path).name, "source_path": path, "dispatch_commit": commit}))
+        calls.append(_call_record(
+            identity=record_identity,
+            content=document.body,
+            extra={
+                "filename_hint": Path(path).name,
+                "source_path": path,
+                "dispatch_commit": commit,
+                "metadata": dict(document.frontmatter),
+            },
+        ))
 
     _assert_unique(items, "dispatch")
     if dry_run:
