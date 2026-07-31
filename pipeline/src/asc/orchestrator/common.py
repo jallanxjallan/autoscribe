@@ -39,11 +39,11 @@ def dispatch_runtime(job_key: str, *, identity: str, step: int, now: float | Non
     return runtime_key, score
 
 
-def response_failed(response: dict[str, str]) -> bool:
-    status = str(response.get("status", response.get("outcome", "success"))).strip().lower()
+def result_failed(result: dict[str, str]) -> bool:
+    status = str(result.get("status", result.get("outcome", "success"))).strip().lower()
     if status in {"failure", "failed", "error"}:
         return True
-    success = str(response.get("success", "")).strip().lower()
+    success = str(result.get("success", "")).strip().lower()
     return success in {"false", "0", "no"}
 
-__all__ = ["dispatch_runtime", "load_job", "response_failed", "update_job"]
+__all__ = ["dispatch_runtime", "load_job", "result_failed", "update_job"]

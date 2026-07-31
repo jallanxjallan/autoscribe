@@ -1,12 +1,17 @@
-"""Scrivener daemon entrypoint."""
+"""Scrivener daemon entrypoint.
+
+Scrivener is deliberately fail-fast. Schema initialization happens once before
+claiming begins. Any later persistence error escapes the claim loop and
+terminates the scrivener process; it is not converted into a failure artifact.
+"""
 
 from __future__ import annotations
 
 from dataclasses import dataclass
 import logging
 
-from asc.models.process.result import record_failure
-from asc.redis.key import RedisKey
+from asc.ledger.connect import connect
+from asc.ledger.schema import ensure_ledger_schema
 from asc.scrivener import inbox as scrivener_inbox
 from asc.scrivener.execute import ScrivenerExecutor
 from asc.state.daemon import (
@@ -25,16 +30,14 @@ class ScrivenerRunReport:
     artifact_key: str | None = None
     kind: str | None = None
     table: str | None = None
-    failure_key: str | None = None
 
 
-def process_next(*, timeout: int = 0) -> ScrivenerRunReport:
-    """Persist one artifact, crashing the scrivener on any write failure.
-
-    Scrivener is the single ledger writer. A failure here means ledger custody is
-    no longer trustworthy, so the exception must leave this cycle and terminate
-    the daemon. It must never be converted into an ordinary recoverable report.
-    """
+def process_next(
+    *,
+    executor: ScrivenerExecutor,
+    timeout: int = 0,
+) -> ScrivenerRunReport:
+    """Persist one artifact or propagate the persistence exception unchanged."""
 
     claimed = scrivener_inbox.daemon_claim(timeout=timeout, empty_limit=None)
     if claimed is None:
@@ -44,36 +47,7 @@ def process_next(*, timeout: int = 0) -> ScrivenerRunReport:
     if not artifact_key:
         raise ValueError("scrivener claimed an empty artifact key")
 
-    try:
-        result = ScrivenerExecutor().execute(artifact_key)
-    except Exception as exc:
-        process_identity = None
-        try:
-            process_identity = RedisKey(artifact_key).identity
-        except Exception:
-            pass
-
-        failure_key = None
-        try:
-            failure_key = record_failure(
-                stage="scrivener.persist",
-                exc=exc,
-                process_identity=process_identity,
-                artifact_key=artifact_key,
-            )
-        except Exception:
-            LOG.exception(
-                "scrivener operation=failure-record-error artifact_key=%s",
-                artifact_key,
-            )
-
-        LOG.exception(
-            "scrivener operation=fatal artifact_key=%s failure_key=%s",
-            artifact_key,
-            failure_key,
-        )
-        raise
-
+    result = executor.execute(artifact_key)
     report = ScrivenerRunReport(
         claimed=True,
         artifact_key=result.artifact_key,
@@ -91,7 +65,17 @@ def process_next(*, timeout: int = 0) -> ScrivenerRunReport:
 
 def run_forever(*, timeout: int = DEFAULT_CLAIM_TIMEOUT_SECONDS) -> None:
     configure_logging()
-    run_daemon(name="scrivener", run_cycle=process_next, timeout=timeout)
+
+    # This is the only schema setup in the daemon lifecycle. If setup or
+    # validation fails, the scrivener exits before claiming any artifact.
+    with connect() as conn:
+        ensure_ledger_schema(conn)
+        executor = ScrivenerExecutor(conn)
+
+        def run_cycle(*, timeout: int = 0) -> ScrivenerRunReport:
+            return process_next(executor=executor, timeout=timeout)
+
+        run_daemon(name="scrivener", run_cycle=run_cycle, timeout=timeout)
 
 
 def main() -> None:

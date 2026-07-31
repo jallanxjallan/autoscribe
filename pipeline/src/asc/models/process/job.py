@@ -24,7 +24,7 @@ class Job(RedisModel):
 
     The mutable ``*_hint`` fields are lookup accelerators only. They may be
     stale after a crash and must never be treated as orchestration state. The
-    authoritative history is the set of task, response, and failure artifacts
+    authoritative history is the set of task, result, and failure artifacts
     for the call identity. The orchestrator starts from these hints, verifies
     the artifacts, derives the real state, and then refreshes the hints.
     """
@@ -37,7 +37,7 @@ class Job(RedisModel):
     identity: str
     plan_identity: str
     total_steps: int
-    response_ordinal_hint: int = 0
+    result_ordinal_hint: int = 0
     task_ordinal_hint: int = 0
     task_created_at_hint: int = 0
     created_at: int = Field(default_factory=timestamp)
@@ -60,7 +60,7 @@ class Job(RedisModel):
         return total_steps
 
     @field_validator(
-        "response_ordinal_hint",
+        "result_ordinal_hint",
         "task_ordinal_hint",
         "task_created_at_hint",
         mode="before",
@@ -74,8 +74,8 @@ class Job(RedisModel):
 
     @model_validator(mode="after")
     def validate_ordinal_hints(self) -> Self:
-        if self.response_ordinal_hint > self.total_steps:
-            raise ValueError("job response_ordinal_hint exceeds total_steps")
+        if self.result_ordinal_hint > self.total_steps:
+            raise ValueError("job result_ordinal_hint exceeds total_steps")
         if self.task_ordinal_hint > self.total_steps:
             raise ValueError("job task_ordinal_hint exceeds total_steps")
         return self
@@ -83,7 +83,7 @@ class Job(RedisModel):
     @field_serializer(
         "created_at",
         "total_steps",
-        "response_ordinal_hint",
+        "result_ordinal_hint",
         "task_ordinal_hint",
         "task_created_at_hint",
     )

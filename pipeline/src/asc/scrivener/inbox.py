@@ -1,58 +1,26 @@
-"""Scrivener inbox containing durable artifact keys only."""
-
+"""Public inbox for ledger-owned Redis artifact keys."""
+from asc.models.process.result import SUCCESS_RESULT_KINDS
 from asc.redis.key import RedisKey
 from asc.state.queue import RedisQueue
 
-
 SCRIVENER_INBOX_KEY = "control:scrivener:inbox"
 scrivener_inbox = RedisQueue(SCRIVENER_INBOX_KEY)
+ACCEPTED_KINDS = frozenset({"call", *SUCCESS_RESULT_KINDS})
 
+def _message_key(claimed):
+    if claimed is None: return None
+    return str(getattr(claimed,"key",getattr(claimed,"identity",claimed)))
 
-def _message_key(claimed: object) -> str | None:
-    if claimed is None:
-        return None
-    return str(claimed.identity)
+def post(key):
+    raw=str(key).strip()
+    if not raw: raise ValueError("scrivener inbox expects a non-empty key")
+    parsed=RedisKey(raw)
+    if parsed.kind not in ACCEPTED_KINDS:
+        raise ValueError(f"scrivener inbox accepts call/result keys, got: {raw}")
+    scrivener_inbox.insert(raw); return raw
 
-
-def post(key: str | RedisKey) -> str:
-    raw = str(key).strip()
-    if not raw:
-        raise ValueError("scrivener inbox expected a non-empty artifact key")
-    parsed = RedisKey(raw)
-    if parsed.kind not in {"call", "response"}:
-        raise ValueError(f"scrivener inbox accepts only call/response keys: {raw}")
-    scrivener_inbox.insert(raw)
-    return raw
-
-
-def daemon_claim(*, timeout: int = 0, empty_limit: int | None = None) -> str | None:
-    return _message_key(
-        scrivener_inbox.daemon_claim(timeout=timeout, empty_limit=empty_limit)
-    )
-
-
-def block_claim(*, timeout: int = 0) -> str | None:
-    return _message_key(scrivener_inbox.block_claim(timeout=timeout))
-
-
-def claim() -> str | None:
-    return _message_key(scrivener_inbox.claim())
-
-
-def count() -> int:
-    return scrivener_inbox.count()
-
-
-def clear() -> int:
-    return scrivener_inbox.clear()
-
-
-__all__ = [
-    "SCRIVENER_INBOX_KEY",
-    "post",
-    "claim",
-    "daemon_claim",
-    "block_claim",
-    "count",
-    "clear",
-]
+def daemon_claim(*,timeout=0,empty_limit=None): return _message_key(scrivener_inbox.daemon_claim(timeout=timeout,empty_limit=empty_limit))
+def block_claim(*,timeout=0): return _message_key(scrivener_inbox.block_claim(timeout=timeout))
+def claim(): return _message_key(scrivener_inbox.claim())
+def count(): return scrivener_inbox.count()
+def clear(): return scrivener_inbox.clear()

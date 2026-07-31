@@ -83,7 +83,40 @@ class Transform(Result):
 
 
 class Retrieval(Result):
-    kind: ClassVar[str] = "retrieval"
+    kind: ClassVar[str] = "retrieve_schema"
+
+
+SUCCESS_RESULT_MODELS: dict[str, type[Result]] = {
+    Response.kind: Response,
+    Transform.kind: Transform,
+    Retrieval.kind: Retrieval,
+}
+SUCCESS_RESULT_KINDS = frozenset(SUCCESS_RESULT_MODELS)
+
+
+def result_kind_for_engine_kind(engine_kind: object) -> str:
+    kind = str(engine_kind).strip()
+    mapping = {
+        "llm": Response.kind,
+        "script": Transform.kind,
+        "rag": Retrieval.kind,
+    }
+    try:
+        return mapping[kind]
+    except KeyError as exc:
+        raise ValueError(f"unsupported engine kind for result: {kind!r}") from exc
+
+
+def load_result(key: str | RedisKey) -> Result:
+    redis_key = key if isinstance(key, RedisKey) else RedisKey(str(key))
+    try:
+        model = SUCCESS_RESULT_MODELS[redis_key.kind]
+    except KeyError as exc:
+        supported = ", ".join(sorted(SUCCESS_RESULT_KINDS))
+        raise ValueError(
+            f"key is not a successful result: {redis_key.raw_key}; supported: {supported}"
+        ) from exc
+    return model.load(redis_key)
 
 
 class Failure(RedisModel):
@@ -407,6 +440,10 @@ __all__ = [
     "InternalFailure",
     "ProcessFailure",
     "Response",
+    "SUCCESS_RESULT_KINDS",
+    "SUCCESS_RESULT_MODELS",
+    "load_result",
+    "result_kind_for_engine_kind",
     "Result",
     "Retrieval",
     "Transform",

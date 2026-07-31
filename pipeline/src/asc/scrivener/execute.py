@@ -1,14 +1,19 @@
-"""Persist call records and terminal success responses from key-only inbox entries."""
+"""Persist call records and terminal successful Results.
+
+Scrivener owns one long-lived ledger connection. Schema setup is performed by
+its daemon before the claim loop starts; individual artifacts never initialize
+or migrate the schema.
+"""
 
 from __future__ import annotations
 
 from dataclasses import dataclass
 import json
 
-from asc.ledger.connect import connect
-from asc.ledger.schema import ensure_ledger_schema
+from asc.ledger.connect import LedgerConnection
 from asc.ledger.sql import insert_row
-from asc.ledger.write import write_key
+from asc.ledger.write import write_key_with_connection
+from asc.models.process.result import SUCCESS_RESULT_KINDS, load_result
 from asc.redis.key import RedisKey
 
 
@@ -20,43 +25,45 @@ class ScrivenerExecutionReport:
 
 
 class ScrivenerExecutor:
+    """Persist artifacts through an already-initialized ledger connection."""
+
+    def __init__(self, conn: LedgerConnection) -> None:
+        self.conn = conn
+
     def execute(self, artifact_key: str) -> ScrivenerExecutionReport:
         key = RedisKey(str(artifact_key).strip())
+
         if key.kind == "call":
-            write_key(key)
+            write_key_with_connection(conn=self.conn, key=key)
             return ScrivenerExecutionReport(key.raw_key, "call", "calls")
-        if key.kind == "response":
-            _write_terminal_response(key)
-            return ScrivenerExecutionReport(key.raw_key, "response", "responses")
-        raise ValueError(f"scrivener accepts only call and terminal response keys: {key.raw_key}")
+
+        if key.kind in SUCCESS_RESULT_KINDS:
+            _write_terminal_result(self.conn, key)
+            return ScrivenerExecutionReport(key.raw_key, key.kind, "results")
+
+        raise ValueError(
+            f"scrivener accepts only call and successful result keys: {key.raw_key}"
+        )
 
 
-def _write_terminal_response(key: RedisKey) -> None:
-    raw = key.hgetall()
-    if not raw:
-        raise KeyError(f"response record does not exist: {key.raw_key}")
-    ordinal = int(raw.get("ordinal", key.suffix or 0))
-    if ordinal < 1:
-        raise ValueError(f"terminal response has invalid ordinal: {key.raw_key}")
-    raw_json = raw.get("raw_json", "{}")
-    try:
-        json.loads(raw_json)
-    except json.JSONDecodeError:
-        raw_json = json.dumps(raw_json, ensure_ascii=False)
+def _write_terminal_result(conn: LedgerConnection, key: RedisKey) -> None:
+    result = load_result(key)
     row = {
-        "identity": key.identity,
-        "final_step": ordinal,
+        "identity": result.identity,
+        "final_step": result.ordinal,
         "result_key": key.raw_key,
-        "result_kind": "response",
+        "result_kind": key.kind,
         "status": "success",
-        "content": raw.get("content"),
+        "content": result.content,
         "fail_message": None,
-        "raw_json": raw_json,
-        "created_at": int(raw.get("created_at", 0)),
+        "raw_json": json.dumps(
+            result.raw_json,
+            ensure_ascii=False,
+            separators=(",", ":"),
+        ),
+        "created_at": result.created_at,
     }
-    with connect() as conn:
-        ensure_ledger_schema(conn)
-        insert_row(conn, table="responses", data=row)
+    insert_row(conn, table="results", data=row)
 
 
 __all__ = ["ScrivenerExecutionReport", "ScrivenerExecutor"]

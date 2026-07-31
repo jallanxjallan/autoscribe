@@ -137,7 +137,7 @@ def extract_selected(
         help="Message to store in each export receipt.",
     ),
 ) -> None:
-    """Emit selected pending responses as NDJSON and create export receipts."""
+    """Emit selected pending results as NDJSON and create export receipts."""
 
     cleaned = [slug.strip() for slug in slugs if slug.strip()]
     if not cleaned:
@@ -267,7 +267,7 @@ def reset_exports(
         help="Ignored under the receipt-table model; retained for CLI compatibility.",
     ),
 ) -> None:
-    """Delete export receipts for the supplied identities, making responses pending again."""
+    """Delete export receipts for the supplied identities, making results pending again."""
 
     cleaned = [identity.strip() for identity in identities if identity.strip()]
     if not cleaned:

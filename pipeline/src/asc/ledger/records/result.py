@@ -1,4 +1,4 @@
-"""Response/export query APIs owned by asc.ledger."""
+"""Result/export query APIs owned by asc.ledger."""
 
 from collections import Counter
 from typing import Any

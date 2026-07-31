@@ -32,7 +32,7 @@ def run_cycle(*, wait: bool = True) -> InitiateReport:
         return InitiateReport(False)
     try:
         job, raw = load_job(claimed.key)
-        step = int(raw.get("step", raw.get("response_ordinal_hint", "0")) or 0)
+        step = int(raw.get("step", raw.get("result_ordinal_hint", "0")) or 0)
         if step != 0:
             raise ValueError(f"initiate window job must have step 0: {claimed.key}")
         call_key = str(RedisKey(kind="call", identity=job.identity, suffix="record"))

@@ -121,40 +121,48 @@ def table_columns(conn: LedgerConnection, table_name: str) -> set[str]:
     return {str(row[1]) for row in rows}
 
 
-def require_ledger_columns(conn: LedgerConnection) -> None:
-    required = {
-        "calls": {"identity", "source_identity", "content", "created_at", "extra_json"},
-        "responses": {
-            "identity",
-            "final_step",
-            "result_key",
-            "result_kind",
-            "status",
-            "content",
-            "fail_message",
-            "raw_json",
-            "created_at",
-        },
-        "exports": {
-            "export_id",
-            "response_identity",
-            "destination",
-            "export_mode",
-            "target_slug",
-            "target_path",
-            "exported_at",
-            "export_message",
-            "consumer_json",
-            "created_at",
-        },
-    }
-    missing: list[str] = []
-    for table_name, expected in required.items():
-        actual = table_columns(conn, table_name)
-        for column_name in sorted(expected - actual):
-            missing.append(f"{table_name}.{column_name}")
-    if missing:
-        raise RuntimeError("ledger schema is incomplete; missing columns: " + ", ".join(missing))
+def _table_column_order(conn: LedgerConnection, table_name: str) -> tuple[str, ...]:
+    if not table_exists(conn, table_name):
+        return ()
+    rows = conn.execute(f'PRAGMA table_info("{table_name}")').fetchall()
+    return tuple(str(row[1]) for row in rows)
+
+
+def _user_table_names(conn: LedgerConnection) -> set[str]:
+    rows = conn.execute(
+        """
+        SELECT name
+        FROM sqlite_master
+        WHERE type = 'table'
+          AND name NOT LIKE 'sqlite_%'
+        """
+    ).fetchall()
+    return {str(row[0]) for row in rows}
+
+
+def require_ledger_schema(conn: LedgerConnection) -> None:
+    """Require an exact current ledger schema without modifying it."""
+
+    expected_tables = set(LEDGER_TABLES)
+    actual_tables = _user_table_names(conn)
+    if actual_tables != expected_tables:
+        raise RuntimeError(
+            "ledger table mismatch: "
+            f"expected={tuple(sorted(expected_tables))!r} "
+            f"actual={tuple(sorted(actual_tables))!r}"
+        )
+
+    mismatches: list[str] = []
+    for table_name, columns in LEDGER_TABLES.items():
+        expected = tuple(name for name in columns if name != "__constraints__")
+        actual = _table_column_order(conn, table_name)
+        if actual != expected:
+            mismatches.append(
+                f"{table_name}: expected={expected!r} actual={actual!r}"
+            )
+
+    if mismatches:
+        raise RuntimeError("ledger schema mismatch; " + "; ".join(mismatches))
 
 
 CALLS: ColumnSpec = {
@@ -166,13 +174,13 @@ CALLS: ColumnSpec = {
 }
 
 
-RESPONSES: ColumnSpec = {
+RESULTS: ColumnSpec = {
     # Primary key is the call identity. This is deliberate: calls.identity joins
-    # directly to responses.identity.
+    # directly to results.identity.
     "identity": "TEXT PRIMARY KEY NOT NULL UNIQUE CHECK (length(identity) = 26)",
     "final_step": "INTEGER NOT NULL CHECK (final_step > 0)",
     "result_key": "TEXT NOT NULL",
-    "result_kind": "TEXT NOT NULL CHECK (result_kind IN ('response', 'transform', 'retrieval', 'result', 'failure'))",
+    "result_kind": "TEXT NOT NULL CHECK (result_kind IN ('response', 'transform', 'retrieve_schema', 'result', 'failure'))",
     "status": "TEXT NOT NULL CHECK (status IN ('success', 'failure'))",
     "content": "TEXT",
     "fail_message": "TEXT",
@@ -186,7 +194,7 @@ RESPONSES: ColumnSpec = {
 
 EXPORTS: ColumnSpec = {
     "export_id": "INTEGER PRIMARY KEY AUTOINCREMENT",
-    "response_identity": "TEXT NOT NULL CHECK (length(response_identity) = 26)",
+    "result_identity": "TEXT NOT NULL CHECK (length(result_identity) = 26)",
     "destination": "TEXT",
     "export_mode": "TEXT NOT NULL DEFAULT 'manual'",
     "target_slug": "TEXT",
@@ -196,14 +204,14 @@ EXPORTS: ColumnSpec = {
     "consumer_json": "TEXT",
     "created_at": "INTEGER NOT NULL",
     "__constraints__": [
-        "FOREIGN KEY(response_identity) REFERENCES responses(identity) ON DELETE CASCADE",
+        "FOREIGN KEY(result_identity) REFERENCES results(identity) ON DELETE CASCADE",
     ],
 }
 
 
 LEDGER_TABLES = {
     "calls": CALLS,
-    "responses": RESPONSES,
+    "results": RESULTS,
     "exports": EXPORTS,
 }
 
@@ -211,10 +219,10 @@ LEDGER_TABLES = {
 LEDGER_INDEXES = (
     "CREATE INDEX IF NOT EXISTS idx_calls_source_identity ON calls(source_identity)",
     "CREATE INDEX IF NOT EXISTS idx_calls_created_at ON calls(created_at)",
-    "CREATE INDEX IF NOT EXISTS idx_responses_status ON responses(status)",
-    "CREATE INDEX IF NOT EXISTS idx_responses_created_at ON responses(created_at)",
-    "CREATE INDEX IF NOT EXISTS idx_responses_result_key ON responses(result_key)",
-    "CREATE INDEX IF NOT EXISTS idx_exports_response_identity ON exports(response_identity)",
+    "CREATE INDEX IF NOT EXISTS idx_results_status ON results(status)",
+    "CREATE INDEX IF NOT EXISTS idx_results_created_at ON results(created_at)",
+    "CREATE INDEX IF NOT EXISTS idx_results_result_key ON results(result_key)",
+    "CREATE INDEX IF NOT EXISTS idx_exports_result_identity ON exports(result_identity)",
     "CREATE INDEX IF NOT EXISTS idx_exports_exported_at ON exports(exported_at)",
     "CREATE INDEX IF NOT EXISTS idx_exports_created_at ON exports(created_at)",
     "CREATE INDEX IF NOT EXISTS idx_exports_target_slug ON exports(target_slug)",
@@ -232,57 +240,16 @@ def reset_ledger_views(conn: LedgerConnection) -> None:
     ensure_ledger_views(conn)
 
 
-def _migrate_legacy_calls_table(conn: LedgerConnection) -> None:
-    """Replace the pre-four-field calls table without losing ledger rows."""
-
-    actual = table_columns(conn, "calls")
-    current = set(CALLS)
-    if not actual or actual == current:
-        return
-
-    legacy = {
-        "identity",
-        "source_identity",
-        "plan_key",
-        "content",
-        "created_at",
-        "blob_json",
-    }
-    if actual != legacy:
-        raise RuntimeError(
-            "unsupported calls ledger schema: "
-            f"columns={tuple(sorted(actual))!r}"
-        )
-
-    was_enabled = _foreign_keys_enabled(conn)
-    if was_enabled:
-        _set_foreign_keys(conn, enabled=False)
-    try:
-        conn.execute("DROP TABLE IF EXISTS calls_four_field")
-        conn.execute(create_table_sql("calls_four_field", CALLS))
-        conn.execute(
-            """
-            INSERT INTO calls_four_field (
-                identity, source_identity, content, created_at, extra_json
-            )
-            SELECT
-                identity, source_identity, content, created_at, blob_json
-            FROM calls
-            """
-        )
-        conn.execute("DROP TABLE calls")
-        conn.execute("ALTER TABLE calls_four_field RENAME TO calls")
-        conn.commit()
-    finally:
-        if was_enabled:
-            _set_foreign_keys(conn, enabled=True)
-
-
 def ensure_ledger_schema(conn: LedgerConnection) -> None:
-    drop_views(conn, LEDGER_VIEW_NAMES)
-    _migrate_legacy_calls_table(conn)
-    ensure_schema(conn, LEDGER_TABLES, LEDGER_INDEXES, CREATE_LEDGER_VIEWS_SQL)
-    require_ledger_columns(conn)
+    """Create a fresh schema or validate an existing schema exactly.
+
+    Runtime code never migrates a nonempty ledger. Schema changes are explicit:
+    reset or replace the ledger, run the schema tests, then start daemons.
+    """
+
+    if not _user_table_names(conn):
+        ensure_schema(conn, LEDGER_TABLES, LEDGER_INDEXES, CREATE_LEDGER_VIEWS_SQL)
+    require_ledger_schema(conn)
 
 
 def reset_ledger_schema(conn: LedgerConnection) -> None:
@@ -300,7 +267,7 @@ def reset_all_schemas(conn: LedgerConnection) -> None:
 
 __all__ = [
     "CALLS",
-    "RESPONSES",
+    "RESULTS",
     "EXPORTS",
     "LEDGER_TABLES",
     "LEDGER_INDEXES",
@@ -309,7 +276,7 @@ __all__ = [
     "drop_tables",
     "drop_user_objects",
     "drop_views",
-    "require_ledger_columns",
+    "require_ledger_schema",
     "table_columns",
     "table_exists",
     "ensure_all_schemas",

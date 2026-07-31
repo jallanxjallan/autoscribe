@@ -10,9 +10,8 @@ from asc.ledger.inspect import (
     recent_calls,
     recent_exports,
     recent_results,
-    recent_responses,
     show_call,
-    show_response,
+    show_result,
     table_counts,
 )
 from asc.ledger.lifecycle import (
@@ -39,7 +38,7 @@ def path_command() -> None:
 
 @app.command("init")
 def init_command() -> None:
-    """Create or update the active ledger schema."""
+    """Create a fresh ledger schema or validate the existing one."""
 
     path = ensure_active_ledger()
     typer.echo(f"initialized: {path}")
@@ -79,13 +78,13 @@ def rotate_command() -> None:
     typer.echo(
         "carried: "
         f"calls={report.carried_calls} "
-        f"responses={report.carried_responses} "
+        f"results={report.carried_results} "
         f"exports={report.carried_exports}"
     )
     typer.echo(
         "removed from archive: "
         f"calls={report.old_deleted_calls} "
-        f"responses={report.old_deleted_responses} "
+        f"results={report.old_deleted_results} "
         f"exports={report.old_deleted_exports}"
     )
 
@@ -157,25 +156,25 @@ def calls_command(
             "identity",
             "source_identity",
             "created_at",
-            "response_status",
+            "result_status",
             "final_step",
             "result_key",
-            "response_created_at",
+            "result_created_at",
             "exports",
         ),
     )
 
 
-@app.command("responses")
-def responses_command(
+@app.command("results")
+def results_command(
     limit: int = typer.Option(50, "--limit", "-n", min=1, help="Maximum rows to print."),
     status: list[str] | None = typer.Option(None, "--status", "-s", help="Filter by success or failure."),
 ) -> None:
-    """Print recent terminal response rows."""
+    """Print recent terminal result rows."""
 
     statuses = tuple(status or ())
-    rows = recent_responses(limit=limit, statuses=statuses)
-    _print_response_rows(rows)
+    rows = recent_results(limit=limit, statuses=statuses)
+    _print_result_rows(rows)
 
 
 @app.command("steps")
@@ -183,11 +182,11 @@ def steps_command(
     limit: int = typer.Option(50, "--limit", "-n", min=1, help="Maximum rows to print."),
     status: list[str] | None = typer.Option(None, "--status", "-s", help="Filter by success or failure."),
 ) -> None:
-    """Compatibility alias: print terminal responses, not intermediate steps."""
+    """Compatibility alias: print terminal results, not intermediate steps."""
 
     statuses = tuple(status or ())
-    rows = recent_responses(limit=limit, statuses=statuses)
-    _print_response_rows(rows)
+    rows = recent_results(limit=limit, statuses=statuses)
+    _print_result_rows(rows)
 
 
 @app.command("exports")
@@ -201,7 +200,7 @@ def exports_command(
         rows,
         (
             "export_id",
-            "response_identity",
+            "result_identity",
             "source_identity",
             "destination",
             "export_mode",
@@ -214,21 +213,11 @@ def exports_command(
     )
 
 
-@app.command("results")
-def results_command(
-    limit: int = typer.Option(30, "--limit", "-n", min=1, help="Maximum rows to print."),
-) -> None:
-    """Legacy alias: print recent terminal responses."""
-
-    rows = recent_results(limit=limit)
-    _print_response_rows(rows)
-
-
 @app.command("pending")
 def pending_command(
     limit: int = typer.Option(50, "--limit", "-n", min=1, help="Maximum rows to print."),
 ) -> None:
-    """Print failed responses plus pending exports."""
+    """Print failed results plus pending exports."""
 
     rows = pending_work(limit=limit)
     _print_dict_rows(
@@ -249,7 +238,7 @@ def pending_command(
 
 @app.command("show")
 def show_command(identity: str) -> None:
-    """Print one call with its terminal response and export rows as JSON."""
+    """Print one call with its terminal result and export rows as JSON."""
 
     try:
         data = show_call(identity)
@@ -265,12 +254,12 @@ def show_command(identity: str) -> None:
     typer.echo(json.dumps(data, ensure_ascii=False, indent=2, sort_keys=True))
 
 
-@app.command("response")
-def response_command(identity: str) -> None:
-    """Print one terminal response as JSON."""
+@app.command("result")
+def result_command(identity: str) -> None:
+    """Print one terminal result as JSON."""
 
     try:
-        data = show_response(identity)
+        data = show_result(identity)
     except KeyError as exc:
         typer.echo(f"ERROR: {exc}", err=True)
         raise typer.Exit(1) from exc
@@ -279,21 +268,21 @@ def response_command(identity: str) -> None:
 
 @app.command("step")
 def step_command(identity: str, step_number: int | None = None) -> None:
-    """Compatibility alias: print the terminal response for a call identity.
+    """Compatibility alias: print the terminal result for a call identity.
 
     ``step_number`` is ignored because intermediate steps are no longer durable
     ledger rows.
     """
 
     try:
-        data = show_response(identity)
+        data = show_result(identity)
     except KeyError as exc:
         typer.echo(f"ERROR: {exc}", err=True)
         raise typer.Exit(1) from exc
     typer.echo(json.dumps(data, ensure_ascii=False, indent=2, sort_keys=True))
 
 
-def _print_response_rows(rows: list[dict[str, Any]]) -> None:
+def _print_result_rows(rows: list[dict[str, Any]]) -> None:
     _print_dict_rows(
         rows,
         (

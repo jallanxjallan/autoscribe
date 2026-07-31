@@ -23,10 +23,10 @@ class RotateReport:
     active_path: Path
     archive_path: Path | None
     carried_calls: int
-    carried_responses: int
+    carried_results: int
     carried_exports: int
     old_deleted_calls: int
-    old_deleted_responses: int
+    old_deleted_results: int
     old_deleted_exports: int
 
 
@@ -68,10 +68,10 @@ def rotate_ledger(*, archive_dir: Path | None = None) -> RotateReport:
             active_path=initialized,
             archive_path=None,
             carried_calls=0,
-            carried_responses=0,
+            carried_results=0,
             carried_exports=0,
             old_deleted_calls=0,
-            old_deleted_responses=0,
+            old_deleted_results=0,
             old_deleted_exports=0,
         )
 
@@ -105,28 +105,28 @@ def _carry_unexported_rows(*, archived_path: Path, new_active_path: Path) -> dic
     new.execute("PRAGMA foreign_keys = ON")
 
     try:
-        identities = _unexported_response_identities(old)
+        identities = _unexported_result_identities(old)
         if not identities:
             old.commit()
             new.commit()
             return _zero_counts()
 
         carried_calls = _copy_rows(old, new, table="calls", where=f"identity IN ({_placeholders(identities)})", params=identities)
-        carried_responses = _copy_rows(old, new, table="responses", where=f"identity IN ({_placeholders(identities)})", params=identities)
-        carried_exports = _copy_rows(old, new, table="exports", where=f"response_identity IN ({_placeholders(identities)})", params=identities)
+        carried_results = _copy_rows(old, new, table="results", where=f"identity IN ({_placeholders(identities)})", params=identities)
+        carried_exports = _copy_rows(old, new, table="exports", where=f"result_identity IN ({_placeholders(identities)})", params=identities)
         new.commit()
 
-        old_deleted_exports = _delete_rows(old, table="exports", where=f"response_identity IN ({_placeholders(identities)})", params=identities)
-        old_deleted_responses = _delete_rows(old, table="responses", where=f"identity IN ({_placeholders(identities)})", params=identities)
+        old_deleted_exports = _delete_rows(old, table="exports", where=f"result_identity IN ({_placeholders(identities)})", params=identities)
+        old_deleted_results = _delete_rows(old, table="results", where=f"identity IN ({_placeholders(identities)})", params=identities)
         old_deleted_calls = _delete_rows(old, table="calls", where=f"identity IN ({_placeholders(identities)})", params=identities)
         old.commit()
 
         return {
             "carried_calls": carried_calls,
-            "carried_responses": carried_responses,
+            "carried_results": carried_results,
             "carried_exports": carried_exports,
             "old_deleted_calls": old_deleted_calls,
-            "old_deleted_responses": old_deleted_responses,
+            "old_deleted_results": old_deleted_results,
             "old_deleted_exports": old_deleted_exports,
         }
     except Exception:
@@ -138,15 +138,15 @@ def _carry_unexported_rows(*, archived_path: Path, new_active_path: Path) -> dic
         new.close()
 
 
-def _unexported_response_identities(conn: sqlite3.Connection) -> tuple[str, ...]:
+def _unexported_result_identities(conn: sqlite3.Connection) -> tuple[str, ...]:
     rows = conn.execute(
         """
         SELECT r.identity
-        FROM responses AS r
+        FROM results AS r
         LEFT JOIN exports AS e
-            ON e.response_identity = r.identity
+            ON e.result_identity = r.identity
         WHERE r.status = 'success'
-          AND e.response_identity IS NULL
+          AND e.result_identity IS NULL
         ORDER BY r.identity ASC
         """
     ).fetchall()
@@ -180,10 +180,10 @@ def _placeholders(values: tuple[str, ...]) -> str:
 def _zero_counts() -> dict[str, int]:
     return {
         "carried_calls": 0,
-        "carried_responses": 0,
+        "carried_results": 0,
         "carried_exports": 0,
         "old_deleted_calls": 0,
-        "old_deleted_responses": 0,
+        "old_deleted_results": 0,
         "old_deleted_exports": 0,
     }
 

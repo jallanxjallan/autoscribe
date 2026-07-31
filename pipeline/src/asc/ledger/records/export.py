@@ -19,15 +19,15 @@ def insert_export_record_with_connection(
     target_path: str | None = None,
     consumer_data: dict[str, Any] | None = None,
 ) -> None:
-    """Record an export/writeback receipt for a terminal response.
+    """Record an export/writeback receipt for a terminal result.
 
     ``result_identity`` may be a call identity or a full result key such as
-    ``response:<identity>:<step>``. The response table is keyed by call identity.
+    ``result:<identity>:<step>``. The result table is keyed by call identity.
     """
 
     now = int(timestamp_now())
     row = {
-        "response_identity": _identity_part(result_identity),
+        "result_identity": _identity_part(result_identity),
         "destination": optional_text(destination),
         "export_mode": optional_text(export_mode) or "manual",
         "target_slug": optional_text(target_slug),

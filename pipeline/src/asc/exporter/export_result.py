@@ -1,4 +1,4 @@
-"""Export terminal response records from the reduced ledger."""
+"""Export terminal result records from the reduced ledger."""
 
 from __future__ import annotations
 
@@ -20,7 +20,7 @@ SELECT_LATEST_RESULT_BY_SOURCE_IDENTITY_SQL = """
     SELECT
         c.identity AS identity,
         c.source_identity AS source_identity,
-        c.source_json AS source_json,
+        c.extra_json AS source_json,
         c.created_at AS call_created_at,
         r.final_step AS step_number,
         r.result_key AS result_key,
@@ -31,10 +31,10 @@ SELECT_LATEST_RESULT_BY_SOURCE_IDENTITY_SQL = """
         e.exported_at AS exported_at,
         e.export_message AS export_message
     FROM calls AS c
-    JOIN responses AS r
+    JOIN results AS r
         ON r.identity = c.identity
     LEFT JOIN exports AS e
-        ON e.response_identity = r.identity
+        ON e.result_identity = r.identity
     WHERE c.source_identity = ?
       AND r.status = 'success'
     ORDER BY r.created_at DESC, e.exported_at DESC, e.export_id DESC
@@ -48,7 +48,7 @@ def write_extracted_result_record(
     conn: LedgerConnection,
     sink: TextIO,
 ) -> None:
-    """Emit one call/response extraction row as NDJSON."""
+    """Emit one call/result extraction row as NDJSON."""
 
     ensure_ledger_schema(conn)
     row = read_extract_result_record_by_call_identity_with_connection(
@@ -56,7 +56,7 @@ def write_extracted_result_record(
         call_identity=_identity_part(call_identity),
     )
     if row is None:
-        raise ValueError(f"no terminal response for call identity: {call_identity}")
+        raise ValueError(f"no terminal result for call identity: {call_identity}")
     _write_ndjson(row, sink=sink)
 
 
@@ -65,7 +65,7 @@ def write_pending_result_records(
     conn: LedgerConnection,
     sink: TextIO,
 ) -> None:
-    """Emit all pending successful responses as NDJSON."""
+    """Emit all pending successful results as NDJSON."""
 
     ensure_ledger_schema(conn)
     for row in read_pending_result_export_records_with_connection(conn=conn):
@@ -84,10 +84,10 @@ def write_result_records_by_slugs(
     sink: TextIO,
     export_message: str = "writeback",
 ) -> None:
-    """Emit selected pending responses and create export receipts as one batch.
+    """Emit selected pending results and create export receipts as one batch.
 
     Every supplied slug must resolve to exactly one currently pending successful
-    response. Validation is completed before any NDJSON is emitted or export
+    result. Validation is completed before any NDJSON is emitted or export
     receipt is inserted.
     """
 
@@ -109,16 +109,16 @@ def write_result_records_by_slugs(
     for slug in cleaned:
         matches = by_slug.get(slug, [])
         if not matches:
-            raise ValueError(f"no pending response found for source slug: {slug}")
+            raise ValueError(f"no pending result found for source slug: {slug}")
         if len(matches) != 1:
-            raise ValueError(f"multiple pending responses found for source slug: {slug}")
+            raise ValueError(f"multiple pending results found for source slug: {slug}")
 
         extracted = read_extract_result_record_by_call_identity_with_connection(
             conn=conn,
             call_identity=str(matches[0]["call_identity"]),
         )
         if extracted is None:
-            raise ValueError(f"terminal response disappeared for source slug: {slug}")
+            raise ValueError(f"terminal result disappeared for source slug: {slug}")
         selected.append(extracted)
 
     try:
@@ -145,10 +145,10 @@ def write_result_record_by_slug(
     sink: TextIO,
     export_message: str = "re-export",
 ) -> None:
-    """Emit the latest successful response for a source identity and receipt it.
+    """Emit the latest successful result for a source identity and receipt it.
 
     This command is intentionally overwrite-oriented. Unlike normal pending
-    export extraction, it can re-emit an already exported response.
+    export extraction, it can re-emit an already exported result.
     """
 
     ensure_ledger_schema(conn)
@@ -158,7 +158,7 @@ def write_result_record_by_slug(
 
     row = conn.execute(SELECT_LATEST_RESULT_BY_SOURCE_IDENTITY_SQL, (cleaned,)).fetchone()
     if row is None:
-        raise ValueError(f"no successful response found for source identity: {cleaned}")
+        raise ValueError(f"no successful result found for source identity: {cleaned}")
 
     data = _normalize_extract_row(row)
     _write_ndjson(data, sink=sink)
@@ -176,7 +176,7 @@ def mark_result_exported(
     conn: LedgerConnection,
     export_message: str = "writeback",
 ) -> None:
-    """Record a delivery receipt for a terminal response."""
+    """Record a delivery receipt for a terminal result."""
 
     ensure_ledger_schema(conn)
     insert_export_record_with_connection(
@@ -193,7 +193,7 @@ def reset_result_exported(
     conn: LedgerConnection,
     export_message: str = "reset",
 ) -> int:
-    """Delete export receipts so matching responses become pending again.
+    """Delete export receipts so matching results become pending again.
 
     Under the reduced ledger model, ``exports`` is a receipt table. There is no
     ``exported_at = 0`` placeholder row to preserve; pending means no receipt.
@@ -201,20 +201,20 @@ def reset_result_exported(
     """
 
     ensure_ledger_schema(conn)
-    response_identities = _resolve_response_identities(conn=conn, identities=identities)
-    if not response_identities:
+    result_identities = _resolve_result_identities(conn=conn, identities=identities)
+    if not result_identities:
         return 0
 
-    placeholders = ", ".join("?" for _ in response_identities)
+    placeholders = ", ".join("?" for _ in result_identities)
     cursor = conn.execute(
-        f"DELETE FROM exports WHERE response_identity IN ({placeholders})",
-        tuple(sorted(response_identities)),
+        f"DELETE FROM exports WHERE result_identity IN ({placeholders})",
+        tuple(sorted(result_identities)),
     )
     conn.commit()
     return int(cursor.rowcount if cursor.rowcount is not None else 0)
 
 
-def _resolve_response_identities(
+def _resolve_result_identities(
     *,
     conn: LedgerConnection,
     identities: list[str],
@@ -226,14 +226,14 @@ def _resolve_response_identities(
             continue
         identity = _identity_part(cleaned)
 
-        # Direct call/response identity.
-        row = conn.execute("SELECT identity FROM responses WHERE identity = ?", (identity,)).fetchone()
+        # Direct call/result identity.
+        row = conn.execute("SELECT identity FROM results WHERE identity = ?", (identity,)).fetchone()
         if row is not None:
             resolved.add(str(row[0]))
             continue
 
-        # Terminal result key stored on the response row.
-        row = conn.execute("SELECT identity FROM responses WHERE result_key = ?", (cleaned,)).fetchone()
+        # Terminal result key stored on the result row.
+        row = conn.execute("SELECT identity FROM results WHERE result_key = ?", (cleaned,)).fetchone()
         if row is not None:
             resolved.add(str(row[0]))
             continue
@@ -242,7 +242,7 @@ def _resolve_response_identities(
         rows = conn.execute(
             """
             SELECT r.identity
-            FROM responses AS r
+            FROM results AS r
             JOIN calls AS c
                 ON c.identity = r.identity
             WHERE c.source_identity = ?

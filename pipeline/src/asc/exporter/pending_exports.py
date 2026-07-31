@@ -18,7 +18,7 @@ def pending_export_records(
 ) -> list[dict[str, Any]]:
     """Return pending export rows with legacy-friendly aliases.
 
-    In the reduced ledger, a pending export is a successful terminal response
+    In the reduced ledger, a pending export is a successful terminal result
     with no delivery receipt in ``exports``.
     """
 
