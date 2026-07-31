@@ -11,7 +11,8 @@ from .downloads import writeback, writenew
 from .errors import ObsError
 from .ipc import handle as handle_ipc
 from .state import VaultState
-from .uploads import dispatch_run, upload_instructions
+from .uploads import upload_instructions
+from .transport import dispatch_run, export_results
 from .instruction_upload import upload_instruction
 from .vault import Vault
 
@@ -36,7 +37,10 @@ def parser() -> argparse.ArgumentParser:
     one.add_argument("--no-commit", action="store_true")
     dispatch = sub.add_parser("dispatch-run")
     dispatch.add_argument("-n", "--dry-run", action="store_true")
-    dispatch.add_argument("--manifest", type=Path)
+    dispatch.add_argument("--branch")
+    export = sub.add_parser("export-results")
+    export.add_argument("-n", "--dry-run", action="store_true")
+    export.add_argument("--branch")
     back = sub.add_parser("writeback")
     back.add_argument("-n", "--dry-run", action="store_true")
     back.add_argument("--limit", type=int)
@@ -69,11 +73,15 @@ def main(argv: list[str] | None = None) -> int:
             result = upload_instruction(repo, source_path=args.source_path, input_path=args.input, metadata_path=args.metadata, force=args.force, commit=not args.no_commit)
             print(json.dumps(result, indent=2, ensure_ascii=False))
         elif args.command == "dispatch-run":
-            items, output = dispatch_run(repo, manifest_path=args.manifest, dry_run=args.dry_run)
+            items, output = dispatch_run(repo, branch=args.branch, dry_run=args.dry_run)
             _report(args.command, items, args.dry_run)
             if output:
-                sys.stdout.buffer.write(output)
-                sys.stdout.buffer.flush()
+                sys.stdout.write(output + ("\n" if not output.endswith("\n") else ""))
+        elif args.command == "export-results":
+            items, output = export_results(repo, branch=args.branch, dry_run=args.dry_run)
+            _report(args.command, items, args.dry_run)
+            if output:
+                print(output)
         elif args.command == "writeback":
             items = writeback(repo, dry_run=args.dry_run, limit=args.limit)
             _report(args.command, items, args.dry_run)
