@@ -13,47 +13,105 @@ from .markdown import parse_markdown
 from .process import run
 
 RUN_PREFIX = "autoscribe/run/"
-DISPATCH_MANIFEST = ".autoscribe/dispatch.json"
-RESPONSE_MANIFEST = ".autoscribe/response.json"
+CLAIMED_PREFIX = "autoscribe/claimed/"
 
 
 @dataclass(frozen=True)
 class TransportRun:
     branch: str
-    manifest: dict[str, Any]
+    metadata: dict[str, Any]
+    dispatch_commit: str
 
     @property
     def identity(self) -> str:
-        return str(self.manifest.get("run_identity") or self.branch.removeprefix(RUN_PREFIX))
+        return str(self.metadata.get("run_identity") or self.branch.removeprefix(RUN_PREFIX))
+
+    @property
+    def manifest(self) -> dict[str, Any]:
+        """Compatibility alias while callers migrate from file manifests."""
+        return self.metadata
 
 
-def _json_at_ref(repo: Path, branch: str, relpath: str) -> dict[str, Any] | None:
-    result = run(["git", "show", f"{branch}:{relpath}"], cwd=repo, check=False)
-    if result.returncode != 0:
+def _safe_tag_part(value: str) -> str:
+    import re
+    result = re.sub(r"[^A-Za-z0-9._-]+", "-", str(value or "").strip()).strip("-")
+    return result or "unknown"
+
+
+def _tag_exists(repo: Path, tag: str) -> bool:
+    return run(["git", "rev-parse", "-q", "--verify", f"refs/tags/{tag}"], cwd=repo, check=False).returncode == 0
+
+
+def _dispatch_commit(repo: Path, branch: str) -> str:
+    output = run(["git", "log", "--format=%H%x09%s", branch], cwd=repo).stdout
+    for line in output.splitlines():
+        commit, _, subject = line.partition("\t")
+        if subject.strip() == "AUTOSCRIBE DISPATCH":
+            return commit.strip()
+    return ""
+
+
+def _parse_dispatch_message(message: str, branch: str) -> dict[str, Any]:
+    lines = message.splitlines()
+    if not lines or lines[0].strip() != "AUTOSCRIBE DISPATCH":
+        raise ObsError(f"{branch}: dispatch commit has an invalid subject")
+    values: dict[str, str] = {}
+    records: list[dict[str, str]] = []
+    instructions: list[str] = []
+    for line in lines[1:]:
+        key, marker, raw = line.partition(":")
+        if not marker:
+            continue
+        value = raw.strip()
+        if key == "Record":
+            identity, tab, source_path = value.partition("\t")
+            if not tab or not identity.strip() or not source_path.strip():
+                raise ObsError(f"{branch}: malformed Record line in dispatch commit")
+            records.append({"identity": identity.strip(), "source_path": source_path.strip()})
+        elif key == "Instruction":
+            if value:
+                instructions.append(value)
+        else:
+            values[key] = value
+    metadata: dict[str, Any] = {
+        "run_identity": values.get("Run") or branch.removeprefix(RUN_PREFIX),
+        "branch": branch,
+        "created_at": values.get("Created") or None,
+        "source_branch": values.get("Source-Branch") or None,
+        "source_commit": values.get("Source-Commit") or None,
+        "plan": {"identity": values.get("Plan") or "", "path": values.get("Plan-Path") or ""},
+        "records": records,
+        "instructions": instructions,
+    }
+    if values.get("Combine-Basename"):
+        metadata["combine"] = {"basename": values["Combine-Basename"]}
+    return metadata
+
+
+def _transport_run(repo: Path, branch: str) -> TransportRun | None:
+    commit = _dispatch_commit(repo, branch)
+    if not commit:
         return None
-    try:
-        value = json.loads(result.stdout)
-    except json.JSONDecodeError as exc:
-        raise ObsError(f"{branch}:{relpath}: invalid JSON: {exc}") from exc
-    if not isinstance(value, dict):
-        raise ObsError(f"{branch}:{relpath}: expected JSON object")
-    return value
+    message = run(["git", "show", "-s", "--format=%B", commit], cwd=repo).stdout
+    return TransportRun(branch=branch, metadata=_parse_dispatch_message(message, branch), dispatch_commit=commit)
+
+
+def all_runs(repo: Path) -> list[TransportRun]:
+    output = run(["git", "for-each-ref", "--format=%(refname:short)", "refs/heads/autoscribe/run/*"], cwd=repo).stdout
+    items: list[TransportRun] = []
+    for branch in sorted(line.strip() for line in output.splitlines() if line.strip()):
+        item = _transport_run(repo, branch)
+        if item is not None:
+            items.append(item)
+    return items
 
 
 def waiting_runs(repo: Path) -> list[TransportRun]:
-    output = run(
-        ["git", "for-each-ref", "--format=%(refname:short)", "refs/heads/autoscribe/run/*"],
-        cwd=repo,
-    ).stdout
-    items: list[TransportRun] = []
-    for branch in sorted(line.strip() for line in output.splitlines() if line.strip()):
-        manifest = _json_at_ref(repo, branch, DISPATCH_MANIFEST)
-        if manifest is None:
-            continue
-        if _json_at_ref(repo, branch, RESPONSE_MANIFEST) is not None:
-            continue
-        items.append(TransportRun(branch=branch, manifest=manifest))
-    return items
+    return [item for item in all_runs(repo) if not _tag_exists(repo, CLAIMED_PREFIX + _safe_tag_part(item.identity))]
+
+
+def claimed_runs(repo: Path) -> list[TransportRun]:
+    return [item for item in all_runs(repo) if _tag_exists(repo, CLAIMED_PREFIX + _safe_tag_part(item.identity))]
 
 
 def _select_run(repo: Path, branch: str | None) -> TransportRun:
@@ -63,9 +121,9 @@ def _select_run(repo: Path, branch: str | None) -> TransportRun:
         for item in runs:
             if item.branch == wanted:
                 return item
-        raise ObsError(f"transport branch is absent or already completed: {wanted}")
+        raise ObsError(f"transport branch is absent or already claimed: {wanted}")
     if not runs:
-        raise ObsError("no waiting autoscribe/run/* branch found")
+        raise ObsError("no unclaimed autoscribe/run/* branch found")
     if len(runs) > 1:
         names = "\n  ".join(item.branch for item in runs)
         raise ObsError(f"multiple runs are waiting; use --branch:\n  {names}")
@@ -102,13 +160,10 @@ def _worktree(repo: Path, branch: str):
 
 def dispatch_run(repo: Path, *, branch: str | None = None, dry_run: bool = False) -> tuple[list[dict[str, Any]], str]:
     selected = _select_run(repo, branch)
-    manifest = selected.manifest
-    if manifest.get("branch") != selected.branch:
-        raise ObsError(f"dispatch manifest branch mismatch: {manifest.get('branch')!r}")
-
+    metadata = selected.metadata
     with _worktree(repo, selected.branch) as worktree:
         instruction_records: list[dict[str, Any]] = []
-        for raw_path in manifest.get("instructions") or []:
+        for raw_path in metadata.get("instructions") or []:
             relpath = str(raw_path).strip()
             path = worktree / relpath
             if not path.is_file():
@@ -117,87 +172,56 @@ def dispatch_run(repo: Path, *, branch: str | None = None, dry_run: bool = False
             identity = str(document.frontmatter.get("slug") or "").strip()
             if not identity:
                 raise ObsError(f"{relpath}: instruction is missing slug")
-            instruction_records.append(upload_record(
-                type="instruction",
-                identity=identity,
-                content=document.body,
-                extra={
-                    "filename_hint": path.name,
-                    "source_path": relpath,
-                    "metadata": dict(document.frontmatter),
-                    "run_identity": selected.identity,
-                },
-            ))
+            instruction_records.append(upload_record(type="instruction", identity=identity, content=document.body,
+                extra={"filename_hint": path.name, "source_path": relpath, "metadata": dict(document.frontmatter), "run_identity": selected.identity}))
 
-        plan_info = manifest.get("plan")
+        plan_info = metadata.get("plan")
         if not isinstance(plan_info, dict):
-            raise ObsError("dispatch.plan must be an object")
+            raise ObsError("dispatch plan metadata is missing")
         plan_identity = str(plan_info.get("identity") or "").strip()
         plan_path = str(plan_info.get("path") or "").strip()
         if not plan_identity or not plan_path:
-            raise ObsError("dispatch.plan requires identity and path")
+            raise ObsError("dispatch commit requires Plan and Plan-Path")
         raw_plan = _read_json(worktree / plan_path)
         content = raw_plan.get("payload", raw_plan.get("content"))
         if not isinstance(content, dict):
             raise ObsError(f"{plan_path}: plan payload/content must be an object")
-        plan_record = upload_record(
-            type="plan",
-            identity=plan_identity,
-            content=content,
-            extra={"filename_hint": Path(plan_path).name, "source_path": plan_path, "run_identity": selected.identity},
-        )
+        plan_record = upload_record(type="plan", identity=plan_identity, content=content,
+            extra={"filename_hint": Path(plan_path).name, "source_path": plan_path, "run_identity": selected.identity})
 
-        dispatch_commit = run(["git", "rev-parse", "HEAD"], cwd=worktree).stdout.strip()
         call_records: list[dict[str, Any]] = []
         items: list[dict[str, Any]] = []
-        rows = manifest.get("records")
+        rows = metadata.get("records")
         if not isinstance(rows, list) or not rows:
-            raise ObsError("dispatch.records must be a non-empty list")
+            raise ObsError("dispatch commit must contain at least one Record line")
         for raw in rows:
-            if not isinstance(raw, dict):
-                raise ObsError("dispatch record must be an object")
             identity = str(raw.get("identity") or "").strip()
             relpath = str(raw.get("source_path") or "").strip()
-            if not identity or not relpath:
-                raise ObsError("dispatch record requires identity and source_path")
             path = worktree / relpath
-            if not path.is_file():
-                raise ObsError(f"transport content missing: {relpath}")
+            if not identity or not relpath or not path.is_file():
+                raise ObsError(f"invalid or missing transport record: {identity or relpath}")
             document = parse_markdown(path.read_text(encoding="utf-8"))
             actual = str(document.frontmatter.get("slug") or identity).strip()
             if actual != identity:
                 raise ObsError(f"{relpath}: expected {identity}, found {actual}")
-            call_records.append(upload_record(
-                type="call",
-                identity=identity,
-                content=document.body,
-                extra={
-                    "filename_hint": path.name,
-                    "source_path": relpath,
-                    "metadata": dict(document.frontmatter),
-                    "run_identity": selected.identity,
-                    "transport_branch": selected.branch,
-                    "dispatch_commit": dispatch_commit,
-                },
-            ))
+            call_records.append(upload_record(type="call", identity=identity, content=document.body,
+                extra={"filename_hint": path.name, "source_path": relpath, "metadata": dict(document.frontmatter),
+                       "run_identity": selected.identity, "transport_branch": selected.branch, "dispatch_commit": selected.dispatch_commit}))
             items.append({"slug": identity, "path": relpath, "branch": selected.branch})
 
         if dry_run:
             return items, ""
-
         outputs: list[str] = []
-        for command, records in (
-            ([autoscribe_bin(), "upload", "instructions"], instruction_records),
-            ([autoscribe_bin(), "upload", "plans"], [plan_record]),
-            ([autoscribe_bin(), "upload", "calls"], call_records),
-        ):
+        for command, records in (([autoscribe_bin(), "upload", "instructions"], instruction_records),
+                                 ([autoscribe_bin(), "upload", "plans"], [plan_record]),
+                                 ([autoscribe_bin(), "upload", "calls"], call_records)):
+            if not records:
+                continue
             result = run(command, cwd=repo, input_text=_ndjson(records))
-            if result.stdout.strip():
-                outputs.append(result.stdout.strip())
+            if result.stdout.strip(): outputs.append(result.stdout.strip())
         enqueue_rows = [enqueue_record(call=str(row["identity"]), plan=plan_identity) for row in call_records]
         result = run([autoscribe_bin(), "enqueue"], cwd=repo, input_text=_ndjson(enqueue_rows))
-        if result.stdout.strip():
-            outputs.append(result.stdout.strip())
+        if result.stdout.strip(): outputs.append(result.stdout.strip())
+        tag = CLAIMED_PREFIX + _safe_tag_part(selected.identity)
+        run(["git", "tag", "-f", "-a", tag, selected.dispatch_commit, "-m", f"AutoScribe run claimed: {selected.identity}"], cwd=repo)
         return items, "\n".join(outputs)
-
-

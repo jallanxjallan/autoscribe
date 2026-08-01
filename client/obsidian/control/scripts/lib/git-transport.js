@@ -8,9 +8,7 @@ const { runCommandSync } = require("./shell.js");
 
 const RUN_REF_PREFIX = "refs/heads/autoscribe/run/";
 const RUN_BRANCH_PREFIX = "autoscribe/run/";
-const DISPATCH_MANIFEST = ".autoscribe/dispatch.json";
 const RESULTS_DIR = ".autoscribe/results";
-const DECISIONS_DIR = ".autoscribe/decisions";
 
 function vaultRoot(app) {
   const root = app?.vault?.adapter?.getBasePath?.() || app?.vault?.adapter?.basePath;
@@ -95,6 +93,59 @@ function readJsonAtRef(root, ref, relative) {
   }
 }
 
+function commitMessage(root, commit) {
+  return String(git(root, ["show", "-s", "--format=%B", commit]).stdout || "");
+}
+
+function parseDispatchMessage(message, branch = "") {
+  const lines = String(message || "").split(/\r?\n/);
+  if (lines[0]?.trim() !== "AUTOSCRIBE DISPATCH") return null;
+  const values = {};
+  const records = [];
+  const instructions = [];
+  for (const line of lines.slice(1)) {
+    const match = line.match(/^([A-Za-z-]+):\s*(.*)$/);
+    if (!match) continue;
+    const [, key, raw] = match;
+    if (key === "Record") {
+      const [identity, ...rest] = raw.split("\t");
+      const source_path = rest.join("\t").trim();
+      if (identity.trim() && source_path) records.push({ identity: identity.trim(), source_path });
+    } else if (key === "Instruction") {
+      if (raw.trim()) instructions.push(raw.trim());
+    } else values[key] = raw.trim();
+  }
+  return {
+    run_identity: values.Run || branch.slice(RUN_BRANCH_PREFIX.length),
+    branch,
+    created_at: values.Created || null,
+    source_branch: values["Source-Branch"] || null,
+    source_commit: values["Source-Commit"] || null,
+    plan: { identity: values.Plan || null, path: values["Plan-Path"] || null },
+    combine: values["Combine-Basename"] ? { basename: values["Combine-Basename"] } : null,
+    records,
+    instructions,
+  };
+}
+
+function dispatchCommit(root, branch) {
+  const output = String(git(root, ["log", "--format=%H%x09%s", branch]).stdout || "");
+  for (const line of output.split(/\r?\n/)) {
+    const [commit, subject] = line.split("\t", 2);
+    if (subject === "AUTOSCRIBE DISPATCH") return commit;
+  }
+  return "";
+}
+
+function readDispatch(root, branch) {
+  const commit = dispatchCommit(root, branch);
+  return commit ? parseDispatchMessage(commitMessage(root, commit), branch) : null;
+}
+
+function gitTagExists(root, tag) {
+  return git(root, ["rev-parse", "-q", "--verify", `refs/tags/${tag}`], { allowFailure: true }).status === 0;
+}
+
 function frontmatterSlug(app, relative) {
   const file = app.vault.getAbstractFileByPath(relative);
   const slug = file ? app.metadataCache.getFileCache(file)?.frontmatter?.slug : "";
@@ -118,18 +169,46 @@ function pathTraversesSymlink(root, relative) {
   return false;
 }
 
-function listInstructionPaths(app, root) {
-  return app.vault.getMarkdownFiles()
-    .filter((file) => {
-      if (pathTraversesSymlink(root, file.path)) return false;
-      const fm = app.metadataCache.getFileCache(file)?.frontmatter || {};
-      const slug = String(fm.slug || "").trim();
-      return String(fm.type || "").toLowerCase() === "instruction"
-        || /^(rol|ctx|cxt|spc|ins)\./.test(slug)
-        || file.path.startsWith("Instructions/");
-    })
-    .map((file) => file.path)
-    .sort();
+function referencedInstructionSlugs(planRecord) {
+  const steps = planRecord?.payload?.steps;
+  const values = steps && typeof steps === "object" ? Object.values(steps) : [];
+  const slugs = new Set();
+
+  const remember = (value) => {
+    const slug = String(value || "").trim();
+    if (slug) slugs.add(slug);
+  };
+
+  for (const step of values) {
+    remember(step?.instruction);
+    const groups = step?.instruction_slugs;
+    if (!groups || typeof groups !== "object" || Array.isArray(groups)) continue;
+    for (const key of ["role", "context", "specifics", "instructions"]) {
+      const entries = Array.isArray(groups[key]) ? groups[key] : [];
+      for (const entry of entries) remember(entry);
+    }
+  }
+  return [...slugs];
+}
+
+function listInstructionPaths(app, root, planRecord) {
+  const wanted = referencedInstructionSlugs(planRecord);
+  if (!wanted.length) return [];
+
+  const bySlug = new Map();
+  for (const file of app.vault.getMarkdownFiles()) {
+    if (pathTraversesSymlink(root, file.path)) continue;
+    const fm = app.metadataCache.getFileCache(file)?.frontmatter || {};
+    const slug = String(fm.slug || "").trim();
+    if (slug && wanted.includes(slug)) bySlug.set(slug, file.path);
+  }
+
+  const missing = wanted.filter((slug) => !bySlug.has(slug));
+  if (missing.length) {
+    throw new Error(`Selected plan references missing instruction slug${missing.length === 1 ? "" : "s"}: ${missing.join(", ")}`);
+  }
+
+  return wanted.map((slug) => bySlug.get(slug)).sort();
 }
 
 function planRelativePath(root, planRecord) {
@@ -160,65 +239,51 @@ function createDispatchBranch(app, { paths, planRecord, message = "", combineBas
 
   const selected = [...new Set((paths || []).map((item) => assertRelativePath(root, item)))];
   if (!selected.length) throw new Error("Dispatch requires at least one selected file");
-
   const planSlug = String(planRecord?.record_identity || planRecord?.slug || "").trim();
   if (!planSlug) throw new Error("Selected plan is missing its identity");
 
   const runIdentity = randomRunIdentity();
   const branch = `${RUN_BRANCH_PREFIX}${runIdentity}`;
   const planPath = planRelativePath(root, planRecord);
-  const instructionPaths = listInstructionPaths(app, root).map((item) => assertRelativePath(root, item));
+  const instructionPaths = listInstructionPaths(app, root, planRecord).map((item) => assertRelativePath(root, item));
   const snapshotPaths = [...new Set([...selected, planPath, ...instructionPaths])];
   const sourceSubject = String(message || "").trim() || `DISPATCH SOURCE ${planSlug}: ${runIdentity}`;
   const sourceCommit = commitSourceSnapshot(root, snapshotPaths, sourceSubject);
-  let dispatchCommit = "";
+  const records = selected.map((relative) => ({ identity: frontmatterSlug(app, relative), source_path: relative }));
+  let dispatchCommitHash = "";
 
   withBranchWorktree(root, branch, (worktree) => {
     const copied = new Set();
-    for (const relative of [...selected, planPath, ...instructionPaths]) {
-      if (!copied.has(relative)) {
-        copyRepositoryFile(root, worktree, relative);
-        copied.add(relative);
-      }
+    for (const relative of snapshotPaths) {
+      copyRepositoryFile(root, worktree, relative);
+      copied.add(relative);
     }
-
-    const records = selected.map((relative) => ({
-      identity: frontmatterSlug(app, relative),
-      source_path: relative,
-    }));
-
-    const manifest = {
-      version: 1,
-      type: "autoscribe_dispatch",
-      run_identity: runIdentity,
-      branch,
-      created_at: new Date().toISOString(),
-      source_branch: sourceBranch,
-      source_commit: sourceCommit,
-      plan: { identity: planSlug, path: planPath },
-      instructions: instructionPaths,
-      combine: combineBasename ? { basename: String(combineBasename) } : null,
-      records,
-    };
-
-    const manifestPath = path.join(worktree, DISPATCH_MANIFEST);
-    fs.mkdirSync(path.dirname(manifestPath), { recursive: true });
-    fs.writeFileSync(manifestPath, `${JSON.stringify(manifest, null, 2)}\n`, "utf8");
-
-    git(worktree, ["add", "--", ...copied, DISPATCH_MANIFEST]);
-    git(worktree, ["commit", "--quiet", "-m", `DISPATCH ${planSlug}: ${runIdentity}`]);
-    dispatchCommit = headCommit(worktree);
+    git(worktree, ["add", "--", ...copied]);
+    const body = [
+      "Run: " + runIdentity,
+      "Created: " + new Date().toISOString(),
+      "Plan: " + planSlug,
+      "Plan-Path: " + planPath,
+      "Source-Branch: " + sourceBranch,
+      "Source-Commit: " + sourceCommit,
+      ...(combineBasename ? ["Combine-Basename: " + String(combineBasename)] : []),
+      ...records.map((row) => `Record: ${row.identity}\t${row.source_path}`),
+      ...instructionPaths.map((relative) => `Instruction: ${relative}`),
+    ].join("\n");
+    git(worktree, [
+      "commit",
+      "--quiet",
+      "--allow-empty",
+      "-m",
+      "AUTOSCRIBE DISPATCH",
+      "-m",
+      body,
+    ]);
+    dispatchCommitHash = headCommit(worktree);
   }, { createFrom: sourceCommit });
 
-  return {
-    run_identity: runIdentity,
-    branch,
-    source_branch: sourceBranch,
-    source_commit: sourceCommit,
-    dispatch_commit: dispatchCommit,
-    plan_identity: planSlug,
-    count: selected.length,
-  };
+  return { run_identity: runIdentity, branch, source_branch: sourceBranch, source_commit: sourceCommit,
+    dispatch_commit: dispatchCommitHash, plan_identity: planSlug, count: selected.length };
 }
 
 function listFilesAtRef(root, ref, relativeDir) {
@@ -249,45 +314,32 @@ function readResultRecords(root, branch) {
     .filter((record) => record?.identity);
 }
 
-function readDecisionRecords(root, branch) {
-  const decisions = new Map();
-  for (const relative of listFilesAtRef(root, branch, DECISIONS_DIR).filter((item) => item.endsWith(".json"))) {
-    const decision = readJsonAtRef(root, branch, relative);
-    const identity = resultIdentity(decision, path.basename(relative, ".json"));
-    if (decision && identity) decisions.set(identity, { ...decision, identity, decision_path: relative });
-  }
-  return decisions;
+function decisionFor(root, runIdentity, identity) {
+  const prefix = `autoscribe/decision/${safeTagPart(runIdentity)}/${safeTagPart(identity)}/`;
+  const output = String(git(root, ["tag", "--list", `${prefix}*`]).stdout || "").trim();
+  const tag = output.split(/\r?\n/).find(Boolean);
+  if (!tag) return null;
+  const outcome = tag.slice(prefix.length).split("/")[0];
+  const commit = String(git(root, ["rev-list", "-n", "1", tag]).stdout || "").trim();
+  return { identity, outcome, tag, commit };
 }
 
 function listTransportRuns(app) {
   const root = repositoryRoot(app);
-  const output = String(git(root, [
-    "for-each-ref",
-    "--format=%(refname:short)",
-    `${RUN_REF_PREFIX}*`,
-  ]).stdout || "");
-
+  const output = String(git(root, ["for-each-ref", "--format=%(refname:short)", `${RUN_REF_PREFIX}*`]).stdout || "");
   return output.split(/\r?\n/).map((line) => line.trim()).filter(Boolean).map((branch) => {
-    const dispatch = readJsonAtRef(root, branch, DISPATCH_MANIFEST);
+    const dispatch = readDispatch(root, branch);
     if (!dispatch) return null;
     const results = readResultRecords(root, branch);
-    const decisions = readDecisionRecords(root, branch);
-    const pending = results.filter((record) => !decisions.has(record.identity));
-    return {
-      branch,
-      run_identity: dispatch.run_identity || branch.slice(RUN_BRANCH_PREFIX.length),
-      created_at: dispatch.created_at || null,
-      plan_identity: dispatch.plan?.identity || null,
-      source_branch: dispatch.source_branch || null,
-      source_commit: dispatch.source_commit || null,
-      count: Array.isArray(dispatch.records) ? dispatch.records.length : 0,
-      status: pending.length ? "response_pending" : results.length ? "reviewed" : "waiting",
-      dispatch,
-      results,
-      decisions: [...decisions.values()],
-      pending,
-    };
-  }).filter(Boolean).sort((a, b) => String(b.created_at || "").localeCompare(String(a.created_at || "")));
+    const decisions = dispatch.records.map((row) => decisionFor(root, dispatch.run_identity, row.identity)).filter(Boolean);
+    const decided = new Set(decisions.map((item) => item.identity));
+    const pending = results.filter((record) => !decided.has(record.identity));
+    return { branch, run_identity: dispatch.run_identity, created_at: dispatch.created_at,
+      plan_identity: dispatch.plan?.identity || null, source_branch: dispatch.source_branch,
+      source_commit: dispatch.source_commit, count: dispatch.records.length,
+      status: pending.length ? "response_pending" : results.length ? "reviewed" : gitTagExists(root, `autoscribe/claimed/${safeTagPart(dispatch.run_identity)}`) ? "waiting" : "unclaimed",
+      dispatch, results, decisions, pending };
+  }).filter(Boolean).sort((a,b) => String(b.created_at||"").localeCompare(String(a.created_at||"")));
 }
 
 function splitFrontmatter(text) {
@@ -297,61 +349,35 @@ function splitFrontmatter(text) {
 }
 
 function safeTagPart(value) {
-  return String(value || "unknown")
-    .trim()
-    .replace(/[^A-Za-z0-9._-]+/g, "-")
-    .replace(/^-+|-+$/g, "") || "unknown";
-}
-
-function createOutcomeTag(root, commit, { runIdentity, identity, outcome, side }) {
-  const tag = `autoscribe/${safeTagPart(runIdentity)}/${safeTagPart(identity)}/${outcome}/${side}`;
-  git(root, ["tag", "-f", tag, commit]);
-  return tag;
+  return String(value || "unknown").trim().replace(/[^A-Za-z0-9._-]+/g, "-").replace(/^-+|-+$/g, "") || "unknown";
 }
 
 function currentRecordPath(app, identity, fallbackPath = "") {
-  const match = app.vault.getMarkdownFiles().find((file) => {
-    const slug = String(app.metadataCache.getFileCache(file)?.frontmatter?.slug || "").trim();
-    return slug === identity;
-  });
+  const match = app.vault.getMarkdownFiles().find((file) => String(app.metadataCache.getFileCache(file)?.frontmatter?.slug || "").trim() === identity);
   if (match) return match.path;
-  if (fallbackPath) {
-    const fallback = app.vault.getAbstractFileByPath(fallbackPath);
-    if (fallback?.extension === "md") return fallback.path;
-  }
+  if (fallbackPath) { const fallback = app.vault.getAbstractFileByPath(fallbackPath); if (fallback?.extension === "md") return fallback.path; }
   throw new Error(`Current vault file not found for ${identity}`);
 }
 
 function getResponseReview(app, branch, identity) {
   const root = repositoryRoot(app);
-  const dispatch = readJsonAtRef(root, branch, DISPATCH_MANIFEST);
-  if (!dispatch) throw new Error(`Dispatch manifest not found on ${branch}`);
+  const dispatch = readDispatch(root, branch);
+  if (!dispatch) throw new Error(`Dispatch commit not found on ${branch}`);
   const result = readResultRecords(root, branch).find((item) => item.identity === identity);
   if (!result) throw new Error(`Result not found for ${identity} on ${branch}`);
-  const decision = readDecisionRecords(root, branch).get(identity) || null;
-  const dispatchRecord = (dispatch.records || []).find((item) => item.identity === identity) || {};
+  const decision = decisionFor(root, dispatch.run_identity, identity);
+  const dispatchRecord = dispatch.records.find((item) => item.identity === identity) || {};
   const sourcePath = currentRecordPath(app, identity, result.source_path || dispatchRecord.source_path || "");
   const sourceText = fs.readFileSync(path.join(root, assertRelativePath(root, sourcePath)), "utf8");
-  return {
-    branch,
-    run_identity: dispatch.run_identity,
-    identity,
-    source_path: sourcePath,
-    source_text: sourceText,
-    source_body: splitFrontmatter(sourceText).body,
-    response_text: result.content,
-    response_body: splitFrontmatter(result.content).body,
-    result,
-    decision,
-  };
+  return { branch, run_identity: dispatch.run_identity, identity, source_path: sourcePath, source_text: sourceText,
+    source_body: splitFrontmatter(sourceText).body, response_text: result.content,
+    response_body: splitFrontmatter(result.content).body, result, decision };
 }
 
 function assertEditorialBranch(root, dispatch) {
   const active = currentBranch(root);
   if (!active || active.startsWith(RUN_BRANCH_PREFIX)) throw new Error("Write Responses must run from the editorial branch");
-  if (dispatch.source_branch && active !== dispatch.source_branch) {
-    throw new Error(`Switch to source branch ${dispatch.source_branch} before reviewing this response`);
-  }
+  if (dispatch.source_branch && active !== dispatch.source_branch) throw new Error(`Switch to source branch ${dispatch.source_branch} before reviewing this response`);
   return active;
 }
 
@@ -362,7 +388,7 @@ function commitSourceDecision(root, { path: sourcePath, runIdentity, identity, o
     if (staged.status !== 0) throw new Error("Could not inspect the Git index");
   }
   if (outcome === "accepted") git(root, ["add", "--", sourcePath]);
-  const args = ["commit", "--quiet", "--allow-empty", "-m", `RESPONSE ${outcome.toUpperCase()} ${identity}: ${runIdentity}`];
+  const args = ["commit", "--quiet", "--allow-empty", "-m", `AUTOSCRIBE RESPONSE ${outcome.toUpperCase()}`, "-m", `Run: ${runIdentity}\nRecord: ${identity}\nSource-Path: ${sourcePath}`];
   if (outcome === "accepted") args.push("--", sourcePath);
   git(root, args);
   return headCommit(root);
@@ -370,12 +396,8 @@ function commitSourceDecision(root, { path: sourcePath, runIdentity, identity, o
 
 function commitBranchDecision(root, branch, payload) {
   return withBranchWorktree(root, branch, (worktree) => {
-    const relative = `${DECISIONS_DIR}/${safeTagPart(payload.identity)}.json`;
-    const target = path.join(worktree, relative);
-    fs.mkdirSync(path.dirname(target), { recursive: true });
-    fs.writeFileSync(target, `${JSON.stringify(payload, null, 2)}\n`, "utf8");
-    git(worktree, ["add", "--", relative]);
-    git(worktree, ["commit", "--quiet", "-m", `RESPONSE ${payload.outcome.toUpperCase()} ${payload.identity}`]);
+    git(worktree, ["commit", "--quiet", "--allow-empty", "-m", `AUTOSCRIBE DECISION ${payload.outcome.toUpperCase()}`, "-m",
+      `Run: ${payload.run_identity}\nRecord: ${payload.identity}\nSource-Path: ${payload.source_path}\nSource-Commit: ${payload.source_commit}`]);
     return headCommit(worktree);
   });
 }
@@ -383,56 +405,26 @@ function commitBranchDecision(root, branch, payload) {
 function decideResponse(app, branch, identity, outcome) {
   if (!["accepted", "declined"].includes(outcome)) throw new Error(`Unknown response decision: ${outcome}`);
   const root = repositoryRoot(app);
-  const dispatch = readJsonAtRef(root, branch, DISPATCH_MANIFEST);
-  if (!dispatch) throw new Error(`Dispatch manifest not found on ${branch}`);
+  const dispatch = readDispatch(root, branch);
+  if (!dispatch) throw new Error(`Dispatch commit not found on ${branch}`);
   const activeBranch = assertEditorialBranch(root, dispatch);
   const review = getResponseReview(app, branch, identity);
   if (review.decision) throw new Error(`${identity} has already been ${review.decision.outcome}`);
-
   if (outcome === "accepted") {
     const current = splitFrontmatter(review.source_text);
     fs.writeFileSync(path.join(root, review.source_path), current.frontmatter + review.response_body, "utf8");
   }
-
-  const sourceCommit = commitSourceDecision(root, {
-    path: review.source_path,
-    runIdentity: dispatch.run_identity,
-    identity,
-    outcome,
-  });
-  const payload = {
-    version: 1,
-    type: "autoscribe_response_decision",
-    run_identity: dispatch.run_identity,
-    branch,
-    identity,
-    source_path: review.source_path,
-    outcome,
-    decided_at: new Date().toISOString(),
-    source_branch: activeBranch,
-    source_commit: sourceCommit,
-    result_identity: review.result.result_identity || review.result.call_identity || null,
-  };
+  const sourceCommit = commitSourceDecision(root, { path: review.source_path, runIdentity: dispatch.run_identity, identity, outcome });
+  const payload = { run_identity: dispatch.run_identity, branch, identity, source_path: review.source_path, outcome,
+    decided_at: new Date().toISOString(), source_branch: activeBranch, source_commit: sourceCommit };
   const branchCommit = commitBranchDecision(root, branch, payload);
-  const sourceTag = createOutcomeTag(root, sourceCommit, {
-    runIdentity: dispatch.run_identity,
-    identity,
-    outcome,
-    side: "source",
-  });
-  const branchTag = createOutcomeTag(root, branchCommit, {
-    runIdentity: dispatch.run_identity,
-    identity,
-    outcome,
-    side: "flight",
-  });
-  return { ...payload, branch_commit: branchCommit, source_tag: sourceTag, branch_tag: branchTag };
+  const tag = `autoscribe/decision/${safeTagPart(dispatch.run_identity)}/${safeTagPart(identity)}/${outcome}`;
+  git(root, ["tag", "-f", tag, branchCommit]);
+  return { ...payload, branch_commit: branchCommit, branch_tag: tag };
 }
 
 module.exports = {
-  DISPATCH_MANIFEST,
   RESULTS_DIR,
-  DECISIONS_DIR,
   repositoryRoot,
   createDispatchBranch,
   listTransportRuns,

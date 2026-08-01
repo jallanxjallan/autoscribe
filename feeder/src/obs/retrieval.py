@@ -7,10 +7,9 @@ from typing import Any
 from .errors import ObsError
 from .executables import autoscribe_bin
 from .process import run
-from .transport import RUN_PREFIX, TransportRun, _worktree, waiting_runs
+from .transport import RUN_PREFIX, TransportRun, _worktree, claimed_runs
 
 RESULTS_DIR = ".autoscribe/results"
-RETRIEVAL_STATUS = ".autoscribe/retrieval.json"
 
 
 def _parse_ndjson(text: str) -> list[dict[str, Any]]:
@@ -54,7 +53,7 @@ def _content(value: Any) -> str:
 
 
 def _selected_runs(repo: Path, branch: str | None) -> list[TransportRun]:
-    runs = waiting_runs(repo)
+    runs = claimed_runs(repo)
     if not branch:
         if not runs:
             raise ObsError("no waiting autoscribe/run/* branch found")
@@ -68,7 +67,7 @@ def _selected_runs(repo: Path, branch: str | None) -> list[TransportRun]:
 
 
 def _flight_records(flight: TransportRun) -> list[dict[str, str]]:
-    rows = flight.manifest.get("records")
+    rows = flight.metadata.get("records")
     if not isinstance(rows, list) or not rows:
         raise ObsError(f"{flight.branch}: dispatch.records must be a non-empty list")
 
@@ -212,35 +211,22 @@ def retrieve_results(
                 downloaded.append(item)
                 report["downloaded"].append(item)
 
-            status = {
-                "branch": flight.branch,
-                "run_identity": flight.identity,
-                "downloaded": sorted(
-                    identity for identity in paths if _result_path(worktree, identity).is_file()
-                ),
-                "missing": sorted(
-                    identity for identity in paths if not _result_path(worktree, identity).is_file()
-                ),
-            }
-            status_path = worktree / RETRIEVAL_STATUS
-            status_path.parent.mkdir(parents=True, exist_ok=True)
-            status_path.write_text(
-                json.dumps(status, ensure_ascii=False, indent=2, sort_keys=True) + "\n",
-                encoding="utf-8",
-            )
-
-            add_paths = [RETRIEVAL_STATUS]
-            add_paths.extend(
+            add_paths = [
                 str(_result_path(worktree, item["record_identity"]).relative_to(worktree))
                 for item in downloaded
-            )
-            run(["git", "add", *add_paths], cwd=worktree)
-            changed = run(["git", "diff", "--cached", "--quiet"], cwd=worktree, check=False).returncode != 0
-            if changed:
-                count = len(downloaded)
-                run(
-                    ["git", "commit", "-m", f"RETRIEVE {flight.identity}: {count} result(s)"],
-                    cwd=worktree,
-                )
+            ]
+            if add_paths:
+                run(["git", "add", "-f", "--", *add_paths], cwd=worktree)
+                changed = run(["git", "diff", "--cached", "--quiet"], cwd=worktree, check=False).returncode != 0
+                if changed:
+                    count = len(downloaded)
+                    message = "\n".join([
+                        f"Run: {flight.identity}",
+                        *[f"Result: {item['record_identity']}" for item in downloaded],
+                    ])
+                    run(["git", "commit", "-m", "AUTOSCRIBE RETRIEVAL", "-m", message], cwd=worktree)
+                    retrieval_commit = run(["git", "rev-parse", "HEAD"], cwd=worktree).stdout.strip()
+                    tag = f"autoscribe/retrieved/{flight.identity}"
+                    run(["git", "tag", "-f", "-a", tag, retrieval_commit, "-m", f"AutoScribe results retrieved: {flight.identity}"], cwd=repo)
 
     return report

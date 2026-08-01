@@ -214,25 +214,40 @@ async function renderDispatchRun({ app, container }) {
 
   const heading = container.createEl("h2", { text: "Dispatch selected files" });
   heading.style.marginTop = "0";
-  const status = container.createEl("div", { text: "Loading selection…" });
-  status.style.marginBottom = "0.75em";
+  const selectionRow = container.createEl("div");
+  selectionRow.style.display = "flex";
+  selectionRow.style.gap = "0.75em";
+  selectionRow.style.alignItems = "center";
+  selectionRow.style.marginBottom = "0.75em";
+
+  const status = selectionRow.createEl("div", { text: "Loading selection…" });
+  const reloadButton = selectionRow.createEl("button", { text: "Reload Clipboard" });
+  const list = container.createEl("ul");
+  list.style.marginTop = "0";
 
   let selection = [];
-  try {
-    selection = resolveSelection(app, await navigator.clipboard.readText());
-  } catch (error) {
-    status.setText(`Could not load clipboard selection: ${error.message || error}`);
-    return;
+  async function loadClipboardSelection() {
+    reloadButton.disabled = true;
+    status.setText("Loading clipboard selection…");
+    list.empty();
+    try {
+      selection = resolveSelection(app, await navigator.clipboard.readText());
+      if (!selection.length) {
+        status.setText("The clipboard selection contains no resolvable Markdown files.");
+        return;
+      }
+      status.setText(`${selection.length} selected file${selection.length === 1 ? "" : "s"}`);
+      for (const selectedPath of selection) list.createEl("li", { text: selectedPath });
+    } catch (error) {
+      selection = [];
+      status.setText(`Could not load clipboard selection: ${error.message || error}`);
+    } finally {
+      reloadButton.disabled = false;
+    }
   }
 
-  if (!selection.length) {
-    status.setText("The clipboard selection contains no resolvable Markdown files.");
-    return;
-  }
-
-  status.setText(`${selection.length} selected file${selection.length === 1 ? "" : "s"}`);
-  const list = container.createEl("ul");
-  for (const selectedPath of selection) list.createEl("li", { text: selectedPath });
+  reloadButton.addEventListener("click", loadClipboardSelection);
+  await loadClipboardSelection();
 
   const planRows = listPlanRecords(app);
   if (!Array.isArray(planRows) || !planRows.length) {
@@ -279,6 +294,9 @@ async function renderDispatchRun({ app, container }) {
     runButton.disabled = true;
     result.setText("Resolving transclusions and creating transport branch…");
     try {
+      if (!selection.length) {
+        throw new Error("Reload the clipboard with at least one resolvable Markdown file.");
+      }
       const flattened = await flattenInPlace(app, selection);
       const basename = combineBasename.value.trim();
       if (combine.checked && !basename) {
