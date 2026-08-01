@@ -9,8 +9,8 @@ const { runCommandSync } = require("./shell.js");
 const RUN_REF_PREFIX = "refs/heads/autoscribe/run/";
 const RUN_BRANCH_PREFIX = "autoscribe/run/";
 const DISPATCH_MANIFEST = ".autoscribe/dispatch.json";
-const RESPONSE_MANIFEST = ".autoscribe/response.json";
-const WRITEBACK_MANIFEST = ".autoscribe/writeback.json";
+const RESULTS_DIR = ".autoscribe/results";
+const DECISIONS_DIR = ".autoscribe/decisions";
 
 function vaultRoot(app) {
   const root = app?.vault?.adapter?.getBasePath?.() || app?.vault?.adapter?.basePath;
@@ -221,6 +221,44 @@ function createDispatchBranch(app, { paths, planRecord, message = "", combineBas
   };
 }
 
+function listFilesAtRef(root, ref, relativeDir) {
+  const result = git(root, ["ls-tree", "-r", "--name-only", ref, "--", relativeDir], { allowFailure: true });
+  if (result.status !== 0) return [];
+  return String(result.stdout || "").split(/\r?\n/).map((line) => line.trim()).filter(Boolean);
+}
+
+function resultIdentity(record, fallback = "") {
+  return String(record?.record_identity || record?.source_identity || record?.identity || fallback || "").trim();
+}
+
+function readResultRecords(root, branch) {
+  return listFilesAtRef(root, branch, RESULTS_DIR)
+    .filter((relative) => relative.endsWith(".json"))
+    .map((relative) => {
+      const record = readJsonAtRef(root, branch, relative);
+      if (!record) return null;
+      const identity = resultIdentity(record, path.basename(relative, ".json"));
+      return {
+        ...record,
+        identity,
+        result_path: relative,
+        source_path: String(record.source_path || "").trim(),
+        content: String(record.content ?? record.record_content ?? ""),
+      };
+    })
+    .filter((record) => record?.identity);
+}
+
+function readDecisionRecords(root, branch) {
+  const decisions = new Map();
+  for (const relative of listFilesAtRef(root, branch, DECISIONS_DIR).filter((item) => item.endsWith(".json"))) {
+    const decision = readJsonAtRef(root, branch, relative);
+    const identity = resultIdentity(decision, path.basename(relative, ".json"));
+    if (decision && identity) decisions.set(identity, { ...decision, identity, decision_path: relative });
+  }
+  return decisions;
+}
+
 function listTransportRuns(app) {
   const root = repositoryRoot(app);
   const output = String(git(root, [
@@ -232,8 +270,9 @@ function listTransportRuns(app) {
   return output.split(/\r?\n/).map((line) => line.trim()).filter(Boolean).map((branch) => {
     const dispatch = readJsonAtRef(root, branch, DISPATCH_MANIFEST);
     if (!dispatch) return null;
-    const response = readJsonAtRef(root, branch, RESPONSE_MANIFEST);
-    const writeback = readJsonAtRef(root, branch, WRITEBACK_MANIFEST);
+    const results = readResultRecords(root, branch);
+    const decisions = readDecisionRecords(root, branch);
+    const pending = results.filter((record) => !decisions.has(record.identity));
     return {
       branch,
       run_identity: dispatch.run_identity || branch.slice(RUN_BRANCH_PREFIX.length),
@@ -242,17 +281,13 @@ function listTransportRuns(app) {
       source_branch: dispatch.source_branch || null,
       source_commit: dispatch.source_commit || null,
       count: Array.isArray(dispatch.records) ? dispatch.records.length : 0,
-      status: writeback ? "written_back" : response ? "response_ready" : "waiting",
+      status: pending.length ? "response_pending" : results.length ? "reviewed" : "waiting",
       dispatch,
-      response,
-      writeback,
+      results,
+      decisions: [...decisions.values()],
+      pending,
     };
   }).filter(Boolean).sort((a, b) => String(b.created_at || "").localeCompare(String(a.created_at || "")));
-}
-
-function dispatchCommitForBranch(root, branch) {
-  const result = git(root, ["log", branch, "--format=%H", "--diff-filter=A", "--", DISPATCH_MANIFEST], { allowFailure: true });
-  return String(result.stdout || "").split(/\r?\n/).map((line) => line.trim()).filter(Boolean)[0] || "";
 }
 
 function splitFrontmatter(text) {
@@ -261,134 +296,146 @@ function splitFrontmatter(text) {
   return match ? { frontmatter: match[1], body: match[2] } : { frontmatter: "", body: value };
 }
 
-function showFile(root, ref, relative) {
-  const result = git(root, ["show", `${ref}:${assertRelativePath(root, relative)}`], { allowFailure: true });
-  if (result.status !== 0) throw new Error(`Could not read ${relative} from ${ref}`);
-  return String(result.stdout || "");
+function safeTagPart(value) {
+  return String(value || "unknown")
+    .trim()
+    .replace(/[^A-Za-z0-9._-]+/g, "-")
+    .replace(/^-+|-+$/g, "") || "unknown";
 }
 
-function mergeBodies(root, currentBody, baseBody, responseBody) {
-  const temp = fs.mkdtempSync(path.join(os.tmpdir(), "autoscribe-merge-"));
-  try {
-    const current = path.join(temp, "current.md");
-    const base = path.join(temp, "base.md");
-    const response = path.join(temp, "response.md");
-    fs.writeFileSync(current, currentBody, "utf8");
-    fs.writeFileSync(base, baseBody, "utf8");
-    fs.writeFileSync(response, responseBody, "utf8");
-    const result = runCommandSync("git", ["merge-file", "-p", current, base, response], {
-      cwd: root,
-      allowFailure: true,
-      maxBuffer: 64 * 1024 * 1024,
-    });
-    if (![0, 1].includes(result.status)) {
-      throw new Error(String(result.stderr || "git merge-file failed").trim());
-    }
-    return { content: String(result.stdout || ""), conflicted: result.status === 1 };
-  } finally {
-    fs.rmSync(temp, { recursive: true, force: true });
-  }
+function createOutcomeTag(root, commit, { runIdentity, identity, outcome, side }) {
+  const tag = `autoscribe/${safeTagPart(runIdentity)}/${safeTagPart(identity)}/${outcome}/${side}`;
+  git(root, ["tag", "-f", tag, commit]);
+  return tag;
 }
 
-function requireCleanWorkingTree(root) {
-  const output = String(git(root, ["status", "--porcelain"]).stdout || "");
-  if (output.trim()) throw new Error("Write Responses requires a clean working tree");
-}
-
-function acknowledgeWriteback(root, branch, payload) {
-  withBranchWorktree(root, branch, (worktree) => {
-    const target = path.join(worktree, WRITEBACK_MANIFEST);
-    fs.mkdirSync(path.dirname(target), { recursive: true });
-    fs.writeFileSync(target, `${JSON.stringify(payload, null, 2)}\n`, "utf8");
-    git(worktree, ["add", "--", WRITEBACK_MANIFEST]);
-    git(worktree, ["commit", "--quiet", "-m", `ACKNOWLEDGE ${payload.run_identity}`]);
+function currentRecordPath(app, identity, fallbackPath = "") {
+  const match = app.vault.getMarkdownFiles().find((file) => {
+    const slug = String(app.metadataCache.getFileCache(file)?.frontmatter?.slug || "").trim();
+    return slug === identity;
   });
+  if (match) return match.path;
+  if (fallbackPath) {
+    const fallback = app.vault.getAbstractFileByPath(fallbackPath);
+    if (fallback?.extension === "md") return fallback.path;
+  }
+  throw new Error(`Current vault file not found for ${identity}`);
 }
 
-function applyResponseBranch(app, branch, { commitMessage = "" } = {}) {
+function getResponseReview(app, branch, identity) {
   const root = repositoryRoot(app);
-  const activeBranch = currentBranch(root);
-  if (!activeBranch || activeBranch.startsWith(RUN_BRANCH_PREFIX)) {
-    throw new Error("Write Responses must run from the editorial branch");
-  }
-  requireCleanWorkingTree(root);
-
   const dispatch = readJsonAtRef(root, branch, DISPATCH_MANIFEST);
-  const response = readJsonAtRef(root, branch, RESPONSE_MANIFEST);
-  const priorWriteback = readJsonAtRef(root, branch, WRITEBACK_MANIFEST);
   if (!dispatch) throw new Error(`Dispatch manifest not found on ${branch}`);
-  if (!response) throw new Error(`Response manifest not found on ${branch}`);
-  if (priorWriteback) throw new Error(`Response has already been written back: ${branch}`);
-
-  const responseRecords = Array.isArray(response.records) && response.records.length
-    ? response.records
-    : dispatch.records;
-  const dispatchByIdentity = new Map((dispatch.records || []).map((item) => [item.identity, item]));
-  const written = [];
-  const conflicts = [];
-
-  for (const responseRecord of responseRecords || []) {
-    const identity = String(responseRecord.identity || "").trim();
-    const dispatchRecord = dispatchByIdentity.get(identity) || responseRecord;
-    const sourcePath = assertRelativePath(root, responseRecord.path || responseRecord.source_path || dispatchRecord.source_path);
-    const currentFile = app.vault.getMarkdownFiles().find((file) => {
-      const slug = String(app.metadataCache.getFileCache(file)?.frontmatter?.slug || "").trim();
-      return slug === identity;
-    });
-    if (!currentFile) throw new Error(`Current vault file not found for ${identity}`);
-
-    const currentPath = assertRelativePath(root, currentFile.path);
-    const currentText = fs.readFileSync(path.join(root, currentPath), "utf8");
-    const dispatchCommit = response.dispatch_commit || dispatchCommitForBranch(root, branch);
-    if (!dispatchCommit) throw new Error(`Could not locate the dispatch commit for ${branch}`);
-    const baseText = showFile(root, dispatchCommit, sourcePath);
-    const responseText = showFile(root, branch, sourcePath);
-    const current = splitFrontmatter(currentText);
-    const base = splitFrontmatter(baseText);
-    const returned = splitFrontmatter(responseText);
-    const merged = mergeBodies(root, current.body, base.body, returned.body);
-    fs.writeFileSync(path.join(root, currentPath), current.frontmatter + merged.content, "utf8");
-    const item = { identity, path: currentPath, source_path: sourcePath };
-    if (merged.conflicted) conflicts.push(item);
-    else written.push(item);
-  }
-
-  if (conflicts.length) {
-    return { branch, run_identity: dispatch.run_identity, written, conflicts, committed: false };
-  }
-
-  git(root, ["add", "--", ...written.map((item) => item.path)]);
-  const subject = String(commitMessage || "").trim() || `WRITEBACK ${dispatch.run_identity}`;
-  git(root, ["commit", "--quiet", "-m", subject]);
-  const masterCommit = headCommit(root);
-  acknowledgeWriteback(root, branch, {
-    version: 1,
-    type: "autoscribe_writeback",
-    run_identity: dispatch.run_identity,
-    branch,
-    written_at: new Date().toISOString(),
-    target_branch: activeBranch,
-    target_commit: masterCommit,
-    records: written,
-  });
-
+  const result = readResultRecords(root, branch).find((item) => item.identity === identity);
+  if (!result) throw new Error(`Result not found for ${identity} on ${branch}`);
+  const decision = readDecisionRecords(root, branch).get(identity) || null;
+  const dispatchRecord = (dispatch.records || []).find((item) => item.identity === identity) || {};
+  const sourcePath = currentRecordPath(app, identity, result.source_path || dispatchRecord.source_path || "");
+  const sourceText = fs.readFileSync(path.join(root, assertRelativePath(root, sourcePath)), "utf8");
   return {
     branch,
     run_identity: dispatch.run_identity,
-    written,
-    conflicts: [],
-    committed: true,
-    target_branch: activeBranch,
-    target_commit: masterCommit,
+    identity,
+    source_path: sourcePath,
+    source_text: sourceText,
+    source_body: splitFrontmatter(sourceText).body,
+    response_text: result.content,
+    response_body: splitFrontmatter(result.content).body,
+    result,
+    decision,
   };
+}
+
+function assertEditorialBranch(root, dispatch) {
+  const active = currentBranch(root);
+  if (!active || active.startsWith(RUN_BRANCH_PREFIX)) throw new Error("Write Responses must run from the editorial branch");
+  if (dispatch.source_branch && active !== dispatch.source_branch) {
+    throw new Error(`Switch to source branch ${dispatch.source_branch} before reviewing this response`);
+  }
+  return active;
+}
+
+function commitSourceDecision(root, { path: sourcePath, runIdentity, identity, outcome }) {
+  if (outcome === "declined") {
+    const staged = git(root, ["diff", "--cached", "--quiet"], { allowFailure: true });
+    if (staged.status === 1) throw new Error("Decline cannot proceed while unrelated changes are staged");
+    if (staged.status !== 0) throw new Error("Could not inspect the Git index");
+  }
+  if (outcome === "accepted") git(root, ["add", "--", sourcePath]);
+  const args = ["commit", "--quiet", "--allow-empty", "-m", `RESPONSE ${outcome.toUpperCase()} ${identity}: ${runIdentity}`];
+  if (outcome === "accepted") args.push("--", sourcePath);
+  git(root, args);
+  return headCommit(root);
+}
+
+function commitBranchDecision(root, branch, payload) {
+  return withBranchWorktree(root, branch, (worktree) => {
+    const relative = `${DECISIONS_DIR}/${safeTagPart(payload.identity)}.json`;
+    const target = path.join(worktree, relative);
+    fs.mkdirSync(path.dirname(target), { recursive: true });
+    fs.writeFileSync(target, `${JSON.stringify(payload, null, 2)}\n`, "utf8");
+    git(worktree, ["add", "--", relative]);
+    git(worktree, ["commit", "--quiet", "-m", `RESPONSE ${payload.outcome.toUpperCase()} ${payload.identity}`]);
+    return headCommit(worktree);
+  });
+}
+
+function decideResponse(app, branch, identity, outcome) {
+  if (!["accepted", "declined"].includes(outcome)) throw new Error(`Unknown response decision: ${outcome}`);
+  const root = repositoryRoot(app);
+  const dispatch = readJsonAtRef(root, branch, DISPATCH_MANIFEST);
+  if (!dispatch) throw new Error(`Dispatch manifest not found on ${branch}`);
+  const activeBranch = assertEditorialBranch(root, dispatch);
+  const review = getResponseReview(app, branch, identity);
+  if (review.decision) throw new Error(`${identity} has already been ${review.decision.outcome}`);
+
+  if (outcome === "accepted") {
+    const current = splitFrontmatter(review.source_text);
+    fs.writeFileSync(path.join(root, review.source_path), current.frontmatter + review.response_body, "utf8");
+  }
+
+  const sourceCommit = commitSourceDecision(root, {
+    path: review.source_path,
+    runIdentity: dispatch.run_identity,
+    identity,
+    outcome,
+  });
+  const payload = {
+    version: 1,
+    type: "autoscribe_response_decision",
+    run_identity: dispatch.run_identity,
+    branch,
+    identity,
+    source_path: review.source_path,
+    outcome,
+    decided_at: new Date().toISOString(),
+    source_branch: activeBranch,
+    source_commit: sourceCommit,
+    result_identity: review.result.result_identity || review.result.call_identity || null,
+  };
+  const branchCommit = commitBranchDecision(root, branch, payload);
+  const sourceTag = createOutcomeTag(root, sourceCommit, {
+    runIdentity: dispatch.run_identity,
+    identity,
+    outcome,
+    side: "source",
+  });
+  const branchTag = createOutcomeTag(root, branchCommit, {
+    runIdentity: dispatch.run_identity,
+    identity,
+    outcome,
+    side: "flight",
+  });
+  return { ...payload, branch_commit: branchCommit, source_tag: sourceTag, branch_tag: branchTag };
 }
 
 module.exports = {
   DISPATCH_MANIFEST,
-  RESPONSE_MANIFEST,
-  WRITEBACK_MANIFEST,
+  RESULTS_DIR,
+  DECISIONS_DIR,
   repositoryRoot,
   createDispatchBranch,
   listTransportRuns,
-  applyResponseBranch,
+  getResponseReview,
+  decideResponse,
 };
