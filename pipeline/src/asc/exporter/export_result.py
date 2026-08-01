@@ -6,7 +6,6 @@ import json
 from typing import Any, TextIO
 
 from asc.ledger.connect import LedgerConnection
-from asc.ledger.queries import SELECT_EXTRACT_RESULT_BY_CALL_IDENTITY_SQL
 from asc.ledger.records.export import insert_export_record_with_connection
 from asc.ledger.records.result import (
     read_extract_result_record_by_call_identity_with_connection,
@@ -27,19 +26,18 @@ SELECT_LATEST_RESULT_BY_SOURCE_IDENTITY_SQL = """
         r.content AS content,
         r.raw_json AS raw_json,
         r.created_at AS step_created_at,
-        e.created_at AS export_created_at,
-        e.exported_at AS exported_at,
-        e.export_message AS export_message
+        NULL AS export_created_at,
+        NULL AS exported_at,
+        NULL AS export_message
     FROM calls AS c
     JOIN results AS r
         ON r.identity = c.identity
-    LEFT JOIN exports AS e
-        ON e.result_identity = r.identity
     WHERE c.source_identity = ?
       AND r.status = 'success'
-    ORDER BY r.created_at DESC, e.exported_at DESC, e.export_id DESC
+    ORDER BY r.created_at DESC, c.created_at DESC, c.identity DESC
     LIMIT 1
 """
+
 
 
 def write_extracted_result_record(
@@ -82,92 +80,42 @@ def write_result_records_by_slugs(
     slugs: list[str],
     conn: LedgerConnection,
     sink: TextIO,
-    export_message: str = "writeback",
-) -> None:
-    """Emit selected pending results and create export receipts as one batch.
+    export_message: str = "retrieve-results",
+) -> list[str]:
+    """Emit the latest successful result available for each source slug.
 
-    Every supplied slug must resolve to exactly one currently pending successful
-    result. Validation is completed before any NDJSON is emitted or export
-    receipt is inserted.
+    Slugs are handled independently. A missing or unfinished result does not
+    prevent completed results for the other slugs from being emitted. Each
+    emitted record receives a new row in ``exports``; prior export receipts do
+    not affect selection.
+
+    Return the slugs for which no successful terminal result currently exists.
     """
 
     ensure_ledger_schema(conn)
-    cleaned = [slug.strip() for slug in slugs if slug.strip()]
+    cleaned = list(dict.fromkeys(slug.strip() for slug in slugs if slug.strip()))
     if not cleaned:
         raise ValueError("at least one slug is required")
-    if len(cleaned) != len(set(cleaned)):
-        raise ValueError("duplicate slugs are not allowed")
 
-    pending_rows = read_pending_result_export_records_with_connection(conn=conn)
-    by_slug: dict[str, list[dict[str, Any]]] = {}
-    for pending in pending_rows:
-        slug = str(pending.get("source_identity") or pending.get("record_identity") or "").strip()
-        if slug:
-            by_slug.setdefault(slug, []).append(pending)
-
-    selected: list[dict[str, Any]] = []
+    missing: list[str] = []
     for slug in cleaned:
-        matches = by_slug.get(slug, [])
-        if not matches:
-            raise ValueError(f"no pending result found for source slug: {slug}")
-        if len(matches) != 1:
-            raise ValueError(f"multiple pending results found for source slug: {slug}")
+        row = conn.execute(SELECT_LATEST_RESULT_BY_SOURCE_IDENTITY_SQL, (slug,)).fetchone()
+        if row is None:
+            missing.append(slug)
+            continue
 
-        extracted = read_extract_result_record_by_call_identity_with_connection(
+        data = _normalize_extract_row(row)
+        insert_export_record_with_connection(
             conn=conn,
-            call_identity=str(matches[0]["call_identity"]),
+            result_identity=str(data["identity"]),
+            export_message=export_message,
+            export_mode="retrieve-results",
         )
-        if extracted is None:
-            raise ValueError(f"terminal result disappeared for source slug: {slug}")
-        selected.append(extracted)
-
-    try:
-        for row in selected:
-            insert_export_record_with_connection(
-                conn=conn,
-                result_identity=str(row["identity"]),
-                export_message=export_message,
-                export_mode="writeback",
-            )
         conn.commit()
-    except Exception:
-        conn.rollback()
-        raise
+        _write_ndjson(data, sink=sink)
 
-    for row in selected:
-        _write_ndjson(row, sink=sink)
+    return missing
 
-
-def write_result_record_by_slug(
-    *,
-    slug: str,
-    conn: LedgerConnection,
-    sink: TextIO,
-    export_message: str = "re-export",
-) -> None:
-    """Emit the latest successful result for a source identity and receipt it.
-
-    This command is intentionally overwrite-oriented. Unlike normal pending
-    export extraction, it can re-emit an already exported result.
-    """
-
-    ensure_ledger_schema(conn)
-    cleaned = slug.strip()
-    if not cleaned:
-        raise ValueError("slug must not be empty")
-
-    row = conn.execute(SELECT_LATEST_RESULT_BY_SOURCE_IDENTITY_SQL, (cleaned,)).fetchone()
-    if row is None:
-        raise ValueError(f"no successful result found for source identity: {cleaned}")
-
-    data = _normalize_extract_row(row)
-    _write_ndjson(data, sink=sink)
-    insert_export_record_with_connection(
-        conn=conn,
-        result_identity=str(data["identity"]),
-        export_message=export_message,
-        export_mode="re-export",
-    )
 
 
 def mark_result_exported(
@@ -283,6 +231,5 @@ __all__ = [
     "reset_result_exported",
     "write_extracted_result_record",
     "write_pending_result_records",
-    "write_result_record_by_slug",
     "write_result_records_by_slugs",
 ]

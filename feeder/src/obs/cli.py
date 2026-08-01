@@ -7,13 +7,13 @@ import traceback
 from pathlib import Path
 
 from . import git
-from .downloads import writeback, writenew
 from .errors import ObsError
-from .ipc import handle as handle_ipc
-from .state import VaultState
-from .uploads import upload_instructions
-from .transport import dispatch_run, export_results
 from .instruction_upload import upload_instruction
+from .ipc import handle as handle_ipc
+from .retrieval import retrieve_results
+from .state import VaultState
+from .transport import dispatch_run
+from .uploads import upload_instructions
 from .vault import Vault
 
 
@@ -21,14 +21,13 @@ def parser() -> argparse.ArgumentParser:
     root = argparse.ArgumentParser(prog="obs")
     root.add_argument("--vault", type=Path, help="target vault/repository; defaults to current git root")
     sub = root.add_subparsers(dest="command", required=True)
-    state = sub.add_parser("state")
+    sub.add_parser("state")
     sub.add_parser("ipc")
     scan = sub.add_parser("scan")
     scan.add_argument("--public", action="store_true")
-    for name in ("upload-instructions",):
-        command = sub.add_parser(name)
-        command.add_argument("-n", "--dry-run", action="store_true")
-        command.add_argument("-f", "--force", action="store_true")
+    command = sub.add_parser("upload-instructions")
+    command.add_argument("-n", "--dry-run", action="store_true")
+    command.add_argument("-f", "--force", action="store_true")
     one = sub.add_parser("upload-instruction")
     one.add_argument("source_path")
     one.add_argument("--input", required=True, type=Path)
@@ -38,16 +37,10 @@ def parser() -> argparse.ArgumentParser:
     dispatch = sub.add_parser("dispatch-run")
     dispatch.add_argument("-n", "--dry-run", action="store_true")
     dispatch.add_argument("--branch")
-    export = sub.add_parser("export-results")
-    export.add_argument("-n", "--dry-run", action="store_true")
-    export.add_argument("--branch")
-    back = sub.add_parser("writeback")
-    back.add_argument("-n", "--dry-run", action="store_true")
-    back.add_argument("--limit", type=int)
-    new = sub.add_parser("writenew")
-    new.add_argument("target_dir", nargs="?", default="new")
-    new.add_argument("-n", "--dry-run", action="store_true")
-    new.add_argument("--limit", type=int)
+    retrieve = sub.add_parser("retrieve-results")
+    retrieve.add_argument("-n", "--dry-run", action="store_true")
+    retrieve.add_argument("--branch")
+    retrieve.add_argument("-f", "--force", action="store_true")
     return root
 
 
@@ -77,36 +70,22 @@ def main(argv: list[str] | None = None) -> int:
             _report(args.command, items, args.dry_run)
             if output:
                 sys.stdout.write(output + ("\n" if not output.endswith("\n") else ""))
-        elif args.command == "export-results":
-            items, output = export_results(repo, branch=args.branch, dry_run=args.dry_run)
-            _report(args.command, items, args.dry_run)
-            if output:
-                print(output)
-        elif args.command == "writeback":
-            items = writeback(repo, dry_run=args.dry_run, limit=args.limit)
-            _report(args.command, items, args.dry_run)
-        elif args.command == "writenew":
-            items = writenew(repo, target_dir=args.target_dir, dry_run=args.dry_run, limit=args.limit)
-            _report(args.command, items, args.dry_run)
+        elif args.command == "retrieve-results":
+            result = retrieve_results(
+                repo, branch=args.branch, dry_run=args.dry_run, force=args.force
+            )
+            _report_retrieval(result, args.dry_run)
         return 0
     except (ObsError, OSError, ValueError, json.JSONDecodeError) as exc:
         if getattr(args, "command", None) == "ipc":
-            print(json.dumps({
-                "ok": False,
-                "error": str(exc),
-                "error_type": type(exc).__name__,
-            }, ensure_ascii=False))
+            print(json.dumps({"ok": False, "error": str(exc), "error_type": type(exc).__name__}, ensure_ascii=False))
             return 0
         print(f"obs: ERROR: {exc}", file=sys.stderr)
         return 1
     except Exception as exc:
         if getattr(args, "command", None) == "ipc":
             traceback.print_exc(file=sys.stderr)
-            print(json.dumps({
-                "ok": False,
-                "error": f"{type(exc).__name__}: {exc}",
-                "error_type": type(exc).__name__,
-            }, ensure_ascii=False))
+            print(json.dumps({"ok": False, "error": f"{type(exc).__name__}: {exc}", "error_type": type(exc).__name__}, ensure_ascii=False))
             return 0
         raise
 
@@ -115,9 +94,29 @@ def _report(command: str, items: list[dict], dry_run: bool) -> None:
     suffix = " (dry run)" if dry_run else ""
     print(f"{command}: {len(items)} record(s){suffix}", file=sys.stderr)
     for item in items:
-        slug = item.get("slug") or item.get("prompt_slug") or item.get("call_slug") or "?"
-        path = item.get("path") or ""
+        slug = item.get("record_identity") or item.get("slug") or item.get("prompt_slug") or "?"
+        path = item.get("source_path") or item.get("path") or ""
         print(f"  {slug}  {path}", file=sys.stderr)
+
+
+def _report_retrieval(result: dict[str, list[dict]], dry_run: bool) -> None:
+    suffix = " (dry run)" if dry_run else ""
+    downloaded = result.get("downloaded", [])
+    missing = result.get("missing", [])
+    already = result.get("already_downloaded", [])
+
+    print(f"retrieve-results: {len(downloaded)} downloaded, {len(missing)} missing{suffix}")
+    for item in downloaded:
+        slug = item.get("record_identity") or "?"
+        path = item.get("source_path") or ""
+        print(f"  downloaded  {slug}  {path}")
+    for item in missing:
+        slug = item.get("record_identity") or "?"
+        path = item.get("source_path") or ""
+        print(f"  missing     {slug}  {path}")
+    for item in already:
+        slug = item.get("record_identity") or "?"
+        print(f"  {slug} already downloaded use --force to download again")
 
 
 if __name__ == "__main__":

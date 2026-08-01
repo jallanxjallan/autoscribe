@@ -1,7 +1,6 @@
 import json
 import sys
 
-import click
 from collections.abc import Iterable
 from typing import Any, TextIO
 
@@ -10,9 +9,7 @@ import typer
 from asc.exporter.export_result import (
     mark_result_exported,
     reset_result_exported,
-    write_extracted_result_record,
     write_pending_result_records,
-    write_result_record_by_slug,
     write_result_records_by_slugs,
 )
 from asc.exporter.pending_exports import pending_export_records
@@ -128,16 +125,16 @@ def list_pending(
 def extract_selected(
     slugs: list[str] = typer.Argument(
         ...,
-        help="Source slugs selected for writeback.",
+        help="Source slugs whose latest completed results should be retrieved.",
     ),
     export_message: str = typer.Option(
-        "writeback",
+        "retrieve-results",
         "--export-message",
         "--message",
         help="Message to store in each export receipt.",
     ),
 ) -> None:
-    """Emit selected pending results as NDJSON and create export receipts."""
+    """Emit available results by slug and append export receipts."""
 
     cleaned = [slug.strip() for slug in slugs if slug.strip()]
     if not cleaned:
@@ -146,32 +143,17 @@ def extract_selected(
 
     try:
         with connect() as conn:
-            write_result_records_by_slugs(
+            missing = write_result_records_by_slugs(
                 slugs=cleaned,
                 conn=conn,
                 sink=sys.stdout,
                 export_message=export_message,
             )
+        for slug in missing:
+            typer.echo(f"No completed result for source slug: {slug}", err=True)
     except ValueError as exc:
         typer.echo(f"ERROR: {exc}", err=True)
         raise typer.Exit(code=1) from exc
-
-
-@app.command("extract-result")
-def extract_result(
-    call_identity: str = typer.Argument(
-        ...,
-        help="Call identity to extract from the ledger.",
-    ),
-) -> None:
-    """Emit one extracted call/result row as NDJSON."""
-
-    with connect() as conn:
-        write_extracted_result_record(
-            call_identity=call_identity,
-            conn=conn,
-            sink=sys.stdout,
-        )
 
 
 @app.command("extract-pending")
@@ -180,55 +162,6 @@ def extract_pending_results() -> None:
 
     with connect() as conn:
         write_pending_result_records(conn=conn, sink=sys.stdout)
-
-
-@app.command("re-export")
-def re_export(
-    slug: str = typer.Argument(
-        ...,
-        help="Source slug to emit again as NDJSON.",
-    ),
-    yes: bool = typer.Option(
-        False,
-        "--yes",
-        "-y",
-        help="Skip confirmation before emitting overwrite-oriented NDJSON.",
-    ),
-    export_message: str = typer.Option(
-        "re-export",
-        "--export-message",
-        "--message",
-        help="Message to store in the exports row.",
-    ),
-) -> None:
-    """Emit one slug's latest result as NDJSON and record a fresh export receipt."""
-
-    cleaned = slug.strip()
-    if not cleaned:
-        typer.echo("ERROR: slug must not be empty", err=True)
-        raise typer.Exit(code=1)
-
-    if not yes:
-        confirmed = click.confirm(
-            f"Re-export {cleaned!r}? This is intended to overwrite a dirty writeback file.",
-            default=False,
-            err=True,
-        )
-        if not confirmed:
-            typer.echo("re-export=cancelled", err=True)
-            raise typer.Exit(code=1)
-
-    try:
-        with connect() as conn:
-            write_result_record_by_slug(
-                slug=cleaned,
-                conn=conn,
-                sink=sys.stdout,
-                export_message=export_message,
-            )
-    except ValueError as exc:
-        typer.echo(f"ERROR: {exc}", err=True)
-        raise typer.Exit(code=1) from exc
 
 
 @app.command("update-exports")

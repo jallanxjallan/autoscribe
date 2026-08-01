@@ -3,14 +3,13 @@ from __future__ import annotations
 import json
 import tempfile
 from dataclasses import dataclass
-from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
 from .contracts import enqueue_record, upload_record
 from .errors import ObsError
 from .executables import autoscribe_bin
-from .markdown import parse_markdown, strip_frontmatter
+from .markdown import parse_markdown
 from .process import run
 
 RUN_PREFIX = "autoscribe/run/"
@@ -202,150 +201,3 @@ def dispatch_run(repo: Path, *, branch: str | None = None, dry_run: bool = False
         return items, "\n".join(outputs)
 
 
-def _parse_ndjson(text: str) -> list[dict[str, Any]]:
-    records: list[dict[str, Any]] = []
-    for number, line in enumerate(text.splitlines(), 1):
-        if not line.strip():
-            continue
-        try:
-            value = json.loads(line)
-        except json.JSONDecodeError as exc:
-            raise ObsError(f"invalid NDJSON on line {number}: {exc}") from exc
-        if not isinstance(value, dict):
-            raise ObsError(f"expected NDJSON object on line {number}")
-        records.append(value)
-    return records
-
-
-def _first(record: dict[str, Any], *keys: str) -> str:
-    for key in keys:
-        value = record.get(key)
-        if isinstance(value, str) and value.strip():
-            return value.strip()
-    return ""
-
-
-def _decode(value: Any) -> dict[str, Any]:
-    if isinstance(value, dict):
-        return value
-    if isinstance(value, str) and value.strip():
-        try:
-            loaded = json.loads(value)
-        except json.JSONDecodeError:
-            return {}
-        return loaded if isinstance(loaded, dict) else {}
-    return {}
-
-
-def _content(value: Any) -> str:
-    if isinstance(value, dict):
-        for key in ("result_content", "record_content", "content", "body", "text"):
-            if key in value:
-                found = _content(value[key])
-                if found:
-                    return found
-        return ""
-    if not isinstance(value, str) or not value.strip():
-        return ""
-    try:
-        parsed = json.loads(value)
-    except json.JSONDecodeError:
-        return value
-    return _content(parsed) or value
-
-
-def export_results(repo: Path, *, branch: str | None = None, dry_run: bool = False) -> tuple[list[dict[str, Any]], str]:
-    selected = _select_run(repo, branch)
-    expected_rows = selected.manifest.get("records")
-    if not isinstance(expected_rows, list) or not expected_rows:
-        raise ObsError("dispatch.records must be a non-empty list")
-    expected = {str(row.get("identity") or "").strip(): row for row in expected_rows if isinstance(row, dict)}
-    if "" in expected:
-        raise ObsError("dispatch record is missing identity")
-
-    pending_raw = _parse_ndjson(run([autoscribe_bin(), "export", "extract-pending"], cwd=repo).stdout)
-    results: dict[str, dict[str, Any]] = {}
-    for raw in pending_raw:
-        source_identity = _first(raw, "source_identity", "record_identity", "prompt_slug", "slug")
-        if source_identity not in expected:
-            continue
-        extra = _decode(raw.get("extra_json"))
-        if not extra:
-            source_json = _decode(raw.get("source_json"))
-            extra = _decode(source_json.get("extra_json")) or _decode(source_json.get("extra"))
-        branch_hint = _first(extra, "transport_branch", "branch")
-        run_hint = _first(extra, "run_identity")
-        if branch_hint and branch_hint != selected.branch:
-            continue
-        if not branch_hint and run_hint and run_hint != selected.identity:
-            continue
-        content = _content(raw)
-        if not content.strip():
-            raise ObsError(f"{source_identity}: pending result content is empty")
-        results[source_identity] = {
-            "source_identity": source_identity,
-            "call_identity": _first(raw, "call_identity", "identity"),
-            "result_identity": _first(raw, "result_identity", "identity", "call_identity"),
-            "result_key": _first(raw, "result_key"),
-            "content": content,
-        }
-
-    missing = sorted(set(expected) - set(results))
-    if missing:
-        raise ObsError("run results are incomplete; missing: " + ", ".join(missing))
-
-    items = [{"slug": slug, "path": str(expected[slug].get("source_path") or ""), "branch": selected.branch} for slug in sorted(expected)]
-    if dry_run:
-        return items, ""
-
-    with _worktree(repo, selected.branch) as worktree:
-        response_rows: list[dict[str, Any]] = []
-        paths: list[str] = []
-        for slug in sorted(expected):
-            relpath = str(expected[slug].get("source_path") or "").strip()
-            path = worktree / relpath
-            if not path.is_file():
-                raise ObsError(f"dispatch source is missing: {relpath}")
-            document = parse_markdown(path.read_text(encoding="utf-8"))
-            body = strip_frontmatter(results[slug]["content"]).lstrip("\n")
-            if not body.strip():
-                raise ObsError(f"{slug}: returned body is empty")
-            rendered = document.frontmatter_text + body if document.has_frontmatter else body
-            path.write_text(rendered, encoding="utf-8")
-            paths.append(relpath)
-            response_rows.append({
-                "identity": slug,
-                "source_path": relpath,
-                "path": relpath,
-                "call_identity": results[slug]["call_identity"],
-                "result_identity": results[slug]["result_identity"],
-                "result_key": results[slug]["result_key"] or None,
-            })
-
-        response = {
-            "version": 1,
-            "type": "autoscribe_response",
-            "status": "completed",
-            "run_identity": selected.identity,
-            "branch": selected.branch,
-            "dispatch_commit": run(["git", "rev-parse", "HEAD"], cwd=worktree).stdout.strip(),
-            "completed_at": datetime.now(timezone.utc).isoformat().replace("+00:00", "Z"),
-            "records": response_rows,
-        }
-        response_path = worktree / RESPONSE_MANIFEST
-        response_path.parent.mkdir(parents=True, exist_ok=True)
-        response_path.write_text(json.dumps(response, indent=2, ensure_ascii=False) + "\n", encoding="utf-8")
-        run(["git", "add", "--", *paths, RESPONSE_MANIFEST], cwd=worktree)
-        changed = run(["git", "diff", "--cached", "--quiet"], cwd=worktree, check=False)
-        if changed.returncode == 0:
-            raise ObsError("response materialization produced no Git changes")
-        run(["git", "commit", "--quiet", "-m", f"RESPONSE {selected.identity}"], cwd=worktree)
-        commit = run(["git", "rev-parse", "HEAD"], cwd=worktree).stdout.strip()
-
-    for result in results.values():
-        receipt = result["result_key"] or result["result_identity"]
-        run(
-            [autoscribe_bin(), "export", "update-exports", receipt, "--export-message", f"git-transport:{selected.identity}"],
-            cwd=repo,
-        )
-    return items, commit
