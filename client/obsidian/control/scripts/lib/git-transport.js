@@ -348,6 +348,63 @@ function splitFrontmatter(text) {
   return match ? { frontmatter: match[1], body: match[2] } : { frontmatter: "", body: value };
 }
 
+function updateMachineFrontmatter(text, { removePipeline = false, pipeline = null, action = null } = {}) {
+  const parts = splitFrontmatter(text);
+  if (!parts.frontmatter) {
+    if (!pipeline && !action) return text;
+    const lines = ["---"];
+    if (action) lines.push(`action: ${action}`);
+    if (pipeline) {
+      lines.push("pipeline:");
+      lines.push(`  run: ${pipeline.run}`);
+      lines.push(`  plan: ${pipeline.plan}`);
+      lines.push(`  written_at: ${pipeline.written_at}`);
+    }
+    lines.push("---", "");
+    return `${lines.join("\n")}\n${parts.body}`;
+  }
+
+  const newline = parts.frontmatter.includes("\r\n") ? "\r\n" : "\n";
+  const raw = parts.frontmatter.replace(/^---\r?\n/, "").replace(/\r?\n---\r?\n?$/, "");
+  const input = raw.split(/\r?\n/);
+  const output = [];
+  for (let i = 0; i < input.length; i += 1) {
+    const line = input[i];
+    if (/^action\s*:/.test(line) && action) continue;
+    if (/^pipeline\s*:/.test(line)) {
+      i += 1;
+      while (i < input.length && (/^\s+/.test(input[i]) || input[i].trim() === "")) i += 1;
+      i -= 1;
+      continue;
+    }
+    output.push(line);
+  }
+  if (action) {
+    const slugAt = output.findIndex((line) => /^slug\s*:/.test(line));
+    output.splice(slugAt >= 0 ? slugAt + 1 : output.length, 0, `action: ${action}`);
+  }
+  if (!removePipeline && pipeline) {
+    while (output.length && output[output.length - 1].trim() === "") output.pop();
+    output.push("pipeline:", `  run: ${pipeline.run}`, `  plan: ${pipeline.plan}`, `  written_at: ${pipeline.written_at}`);
+  }
+  return `---${newline}${output.join(newline)}${newline}---${newline}${parts.body}`;
+}
+
+function clearPipelineMetadata(app, paths) {
+  const root = repositoryRoot(app);
+  for (const relative of paths) {
+    const safe = assertRelativePath(root, relative);
+    const absolute = path.join(root, safe);
+    const original = fs.readFileSync(absolute, "utf8");
+    const frontmatter = splitFrontmatter(original).frontmatter;
+    if (!frontmatter || !/^action\s*:\s*\S+/m.test(frontmatter)) {
+      throw new Error(`Selected file is missing required action property: ${safe}`);
+    }
+    const updated = updateMachineFrontmatter(original, { removePipeline: true });
+    if (updated !== original) fs.writeFileSync(absolute, updated, "utf8");
+  }
+}
+
 function safeTagPart(value) {
   return String(value || "unknown").trim().replace(/[^A-Za-z0-9._-]+/g, "-").replace(/^-+|-+$/g, "") || "unknown";
 }
@@ -372,6 +429,21 @@ function getResponseReview(app, branch, identity) {
   return { branch, run_identity: dispatch.run_identity, identity, source_path: sourcePath, source_text: sourceText,
     source_body: splitFrontmatter(sourceText).body, response_text: result.content,
     response_body: splitFrontmatter(result.content).body, result, decision };
+}
+
+function getArchivedResponseReview(app, branch, identity) {
+  const root = repositoryRoot(app);
+  const dispatch = readDispatch(root, branch);
+  if (!dispatch) throw new Error(`Dispatch commit not found on ${branch}`);
+  const result = readResultRecords(root, branch).find((item) => item.identity === identity);
+  if (!result) throw new Error(`Result not found for ${identity} on ${branch}`);
+  const dispatchRecord = dispatch.records.find((item) => item.identity === identity) || {};
+  const sourcePath = result.source_path || dispatchRecord.source_path || currentRecordPath(app, identity, "");
+  const source = git(root, ["show", `${dispatch.source_commit}:${sourcePath}`]);
+  const sourceText = String(source.stdout || "");
+  return { branch, run_identity: dispatch.run_identity, identity, source_path: sourcePath, source_text: sourceText,
+    source_body: splitFrontmatter(sourceText).body, response_text: result.content, response_body: splitFrontmatter(result.content).body,
+    result, decision: decisionFor(root, dispatch.run_identity, identity) };
 }
 
 function assertEditorialBranch(root, dispatch) {
@@ -412,7 +484,11 @@ function decideResponse(app, branch, identity, outcome) {
   if (review.decision) throw new Error(`${identity} has already been ${review.decision.outcome}`);
   if (outcome === "accepted") {
     const current = splitFrontmatter(review.source_text);
-    fs.writeFileSync(path.join(root, review.source_path), current.frontmatter + review.response_body, "utf8");
+    const accepted = updateMachineFrontmatter(current.frontmatter + review.response_body, {
+      action: "review",
+      pipeline: { run: dispatch.run_identity, plan: dispatch.plan?.identity || "unknown", written_at: new Date().toISOString() },
+    });
+    fs.writeFileSync(path.join(root, review.source_path), accepted, "utf8");
   }
   const sourceCommit = commitSourceDecision(root, { path: review.source_path, runIdentity: dispatch.run_identity, identity, outcome });
   const payload = { run_identity: dispatch.run_identity, branch, identity, source_path: review.source_path, outcome,
@@ -423,11 +499,58 @@ function decideResponse(app, branch, identity, outcome) {
   return { ...payload, branch_commit: branchCommit, branch_tag: tag };
 }
 
+function responseHistoryForPath(app, sourcePath) {
+  const safePath = String(sourcePath || "").replace(/\\/g, "/");
+  return listTransportRuns(app).flatMap((run) => run.results
+    .filter((record) => (record.source_path || run.dispatch.records.find((item) => item.identity === record.identity)?.source_path) === safePath)
+    .map((record) => ({ ...run, record, decision: decisionFor(repositoryRoot(app), run.run_identity, record.identity) })))
+    .sort((a, b) => String(b.created_at || "").localeCompare(String(a.created_at || "")));
+}
+
+function reconsiderResponse(app, branch, identity, outcome) {
+  if (!["accepted", "declined"].includes(outcome)) throw new Error(`Unknown response decision: ${outcome}`);
+  const root = repositoryRoot(app);
+  const dispatch = readDispatch(root, branch);
+  if (!dispatch) throw new Error(`Dispatch commit not found on ${branch}`);
+  assertEditorialBranch(root, dispatch);
+  const review = getResponseReview(app, branch, identity);
+  const existing = review.decision;
+  if (!existing) return decideResponse(app, branch, identity, outcome);
+  if (existing.outcome === outcome) throw new Error(`${identity} is already ${outcome}`);
+  const status = git(root, ["status", "--porcelain=v1", "--", review.source_path]);
+  if (String(status.stdout || "").trim()) throw new Error(`Cannot reconsider while ${review.source_path} has uncommitted changes`);
+
+  if (outcome === "accepted") {
+    const current = splitFrontmatter(review.source_text);
+    const accepted = updateMachineFrontmatter(current.frontmatter + review.response_body, {
+      action: "review",
+      pipeline: { run: dispatch.run_identity, plan: dispatch.plan?.identity || "unknown", written_at: new Date().toISOString() },
+    });
+    fs.writeFileSync(path.join(root, review.source_path), accepted, "utf8");
+  } else {
+    const restored = git(root, ["show", `${dispatch.source_commit}:${review.source_path}`]);
+    fs.writeFileSync(path.join(root, review.source_path), String(restored.stdout || ""), "utf8");
+  }
+  git(root, ["tag", "-d", existing.tag], { allowFailure: true });
+  git(root, ["add", "--", review.source_path]);
+  git(root, ["commit", "--quiet", "-m", `AUTOSCRIBE RESPONSE RECONSIDERED: ${outcome.toUpperCase()}`, "-m", `Run: ${dispatch.run_identity}\nRecord: ${identity}\nSource-Path: ${review.source_path}`, "--", review.source_path]);
+  const sourceCommit = headCommit(root);
+  const payload = { run_identity: dispatch.run_identity, branch, identity, source_path: review.source_path, outcome, decided_at: new Date().toISOString(), source_branch: currentBranch(root), source_commit: sourceCommit };
+  const branchCommit = commitBranchDecision(root, branch, payload);
+  const tag = `autoscribe/decision/${safeTagPart(dispatch.run_identity)}/${safeTagPart(identity)}/${outcome}`;
+  git(root, ["tag", "-f", tag, branchCommit]);
+  return { ...payload, branch_commit: branchCommit, branch_tag: tag, reconsidered: true };
+}
+
 module.exports = {
   RESULTS_DIR,
   repositoryRoot,
   createDispatchBranch,
   listTransportRuns,
   getResponseReview,
+  getArchivedResponseReview,
   decideResponse,
+  clearPipelineMetadata,
+  responseHistoryForPath,
+  reconsiderResponse,
 };

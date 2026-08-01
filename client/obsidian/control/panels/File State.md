@@ -18,6 +18,8 @@ const {
   writeCurrentSelection,
 } = loadControl("scripts/selections/current-selection.js");
 const { currentSelectionSummary } = loadControl("scripts/lib/selection-loader.js");
+const { responseHistoryForPath, getArchivedResponseReview, reconsiderResponse } = loadControl("scripts/lib/git-transport.js");
+const { renderDiff } = loadControl("scripts/lib/diff-view.js");
 
 const PYTHON_EXECUTABLE = '/home/jeremy/Python3.13Env/bin/python';
 const FILE_STATE_HELPER = path.join(__dirname, 'file_state.py');
@@ -120,6 +122,65 @@ function renderFileState({ app, container }) {
     filter: '',
     lastSelectionSignature: null,
   };
+
+  const activeBox = el('div');
+  activeBox.style.marginBottom = '1rem';
+  activeBox.style.padding = '0.75rem';
+  activeBox.style.border = '1px solid var(--background-modifier-border)';
+  activeBox.style.borderRadius = '6px';
+  container.appendChild(activeBox);
+
+  function renderActiveFileState() {
+    activeBox.replaceChildren();
+    activeBox.appendChild(el('h2', { text: 'Active File Response State' }));
+    const active = app.workspace.getActiveFile();
+    if (!active || active.extension !== 'md') {
+      activeBox.appendChild(el('p', { text: 'Open a Markdown file, then invoke File State from its hotkey.' }));
+      return;
+    }
+    activeBox.appendChild(el('p', { text: active.path }));
+    let history;
+    try { history = responseHistoryForPath(app, active.path); }
+    catch (error) { activeBox.appendChild(el('pre', { text: error.message || String(error) })); return; }
+    if (!history.length) {
+      activeBox.appendChild(el('p', { text: 'No retained pipeline response was found for this file.' }));
+      return;
+    }
+    const latest = history[0];
+    let review;
+    try { review = getArchivedResponseReview(app, latest.branch, latest.record.identity); }
+    catch (error) { activeBox.appendChild(el('pre', { text: error.message || String(error) })); return; }
+    const outcome = latest.decision?.outcome || 'pending';
+    activeBox.appendChild(el('p', { text: `Run ${latest.run_identity} · ${latest.plan_identity || 'unknown plan'} · current decision: ${outcome}` }));
+    renderDiff(activeBox, review);
+    const controls = el('div');
+    controls.style.display = 'flex';
+    controls.style.gap = '0.75rem';
+    controls.style.marginTop = '0.75rem';
+    if (outcome === 'declined') {
+      controls.appendChild(button('Accept response after all', () => reconsiderActive('accepted', latest, active.path)));
+    } else if (outcome === 'accepted') {
+      controls.appendChild(button('Roll back accepted response', () => reconsiderActive('declined', latest, active.path)));
+    } else {
+      controls.appendChild(button('Accept response', () => reconsiderActive('accepted', latest, active.path)));
+      controls.appendChild(button('Decline response', () => reconsiderActive('declined', latest, active.path)));
+    }
+    activeBox.appendChild(controls);
+  }
+
+  function reconsiderActive(outcome, run, sourcePath) {
+    try {
+      const verb = outcome === 'accepted' ? 'accept' : 'roll back';
+      if (!window.confirm(`Are you sure you want to ${verb} the retained response for ${sourcePath}?`)) return;
+      reconsiderResponse(app, run.branch, run.record.identity, outcome);
+      new Notice(outcome === 'accepted' ? 'Response accepted and marked for review.' : 'Accepted response rolled back.');
+      renderActiveFileState();
+      refreshFiles();
+    } catch (error) {
+      console.error(error);
+      new Notice(`Could not reconsider response: ${error.message}`, 10000);
+    }
+  }
 
   const toolbar = el('div');
   toolbar.style.display = 'flex';
@@ -425,6 +486,7 @@ function renderFileState({ app, container }) {
     }
   }
 
+  renderActiveFileState();
   refreshFiles();
   syncCurrentSelection(true, false);
   container.__fileStateSelectionTimer = setInterval(

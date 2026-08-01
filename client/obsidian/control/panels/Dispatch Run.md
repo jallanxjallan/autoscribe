@@ -209,7 +209,7 @@ async function flattenInPlace(app, selectedPaths) {
 async function renderDispatchRun({ app, container }) {
   container.empty();
   const vaultRoot = app.vault.adapter.basePath;
-  const { createDispatchBranch } = require(path.join(vaultRoot, "_control/scripts/lib/git-transport.js"));
+  const { createDispatchBranch, clearPipelineMetadata } = require(path.join(vaultRoot, "_control/scripts/lib/git-transport.js"));
   const { listPlanRecords, loadPlanRecord } = require(path.join(vaultRoot, "_control/scripts/plans/plan-store.js"));
 
   const heading = container.createEl("h2", { text: "Dispatch selected files" });
@@ -302,6 +302,7 @@ async function renderDispatchRun({ app, container }) {
       if (combine.checked && !basename) {
         throw new Error("Enter a basename for the combined record.");
       }
+      clearPipelineMetadata(app, selection);
       const transport = createDispatchBranch(app, {
         paths: selection,
         planRecord: loadPlanRecord(app, select.value),

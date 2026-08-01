@@ -1,27 +1,42 @@
 # Frontmatter Schema
 
-## Minimum For Canonical Note Creation
+## Required Fields
 
+- `slug`: immutable identity for every slugged editorial record.
+- `action`: the next editorial action. It must always be present. Use `defer` when no immediate work is required.
 - `class`
 
-## Common Optional Fields In Created Notes
+## Machine-Owned Pipeline Metadata
+
+Successful AI response acceptance writes:
+
+```yaml
+pipeline:
+  run: run.20260801T041105.a82c
+  plan: plan.cleanup-final
+  written_at: 2026-08-01T04:11:05+07:00
+action: review
+```
+
+All AI-generated or AI-revised content must be reviewed. Dispatch removes the previous `pipeline` object before creating the source snapshot, but never removes `action`. Git remains authoritative for transport and decision history; `pipeline` exists to group and review the current writeback run in Bases.
+
+## Common Optional Fields
 
 - `context`
 - `content_kind`
 - `project`
 - `stage`
 - `status`
-- `slug`
 
 ## Guidance
 
-- `slug`: leave blank in slugged note templates and let the embedded runtime fill it; topic notes do not use a slug.
 - `project`: optional grouping key for editorial work.
 - `stage`: optional editorial stage such as `draft`, `revise`, or `final`.
-- `class`: optional authored note class such as `content`, `instruction`, or `topic`.
+- `class`: authored note class such as `content`, `instruction`, or `topic`.
 - `content_kind`: optional subtype metadata for content notes, for example `passage`, `excerpt`, or `image-note`.
-- `status`: optional workflow marker for inspection only.
+- `status`: optional descriptive workflow marker for inspection.
+- `action`: required operational instruction such as `review`, `rewrite`, `research`, `submit`, or `defer`.
 
 ## Principle
 
-Active templates should not hardcode frontmatter values. The active `content` template keeps a minimal scaffold and the embedded create-note runtime or `wkb writenew` fills additional metadata such as `project`, `context`, and `content_kind` at creation time.
+Git records what happened. Frontmatter describes what the editor should do next and identifies the current pipeline writeback batch.
