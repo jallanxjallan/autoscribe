@@ -1,9 +1,9 @@
-# Write Responses
+"use strict";
 
-````dataviewjs
 const nodeRequire = typeof require === "function" ? require : window.require;
 const pathMod = nodeRequire("node:path");
-const controlVaultRoot = app.vault.adapter.getBasePath?.() || app.vault.adapter.basePath;
+const runtimeApp = globalThis.app;
+const controlVaultRoot = runtimeApp.vault.adapter.getBasePath?.() || runtimeApp.vault.adapter.basePath;
 const loadControl = (relativePath) => nodeRequire(pathMod.join(controlVaultRoot, "_control", ...relativePath.split("/")));
 
 const { listTransportRuns, getResponseReview, decideResponse } = loadControl("scripts/lib/git-transport.js");
@@ -72,7 +72,7 @@ async function renderWriteResponses({ app, container }) {
 
   function render() {
     container.replaceChildren();
-    container.appendChild(el("p", {}, "Accept writes the response, records the pipeline run, and sets action: human-review. Decline leaves the source unchanged. Each decision is committed and can later be reconsidered from File State."));
+    container.appendChild(el("p", {}, "Accept writes the response, records the pipeline run, and sets action: review. Decline leaves the source unchanged. Each decision is committed and can later be reconsidered from File State."));
 
     const bulk = el("div", { style: "display:flex;gap:0.5em;align-items:center;flex-wrap:wrap;padding:0.65em;border:1px solid var(--background-modifier-border);border-radius:6px;margin-bottom:0.8em;" });
     const acceptAll = el("button", { onclick: () => decideAll("accepted"), disabled: state.busy || !state.branch }, "Accept All");
@@ -114,5 +114,5 @@ async function renderWriteResponses({ app, container }) {
   refresh();
 }
 
-await renderWriteResponses({ app, container: dv.container });
-````
+
+module.exports = { renderWriteResponses };

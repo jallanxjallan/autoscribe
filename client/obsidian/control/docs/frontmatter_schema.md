@@ -1,42 +1,45 @@
 # Frontmatter Schema
 
-## Required Fields
+Frontmatter describes the editorial record and what should happen next. Git, transport branches, decision tags, manifests, and ledgers describe what happened operationally. Pipeline state is reconstructed in the File State panel and is not stored in frontmatter.
 
-- `slug`: immutable identity for every slugged editorial record.
-- `action`: the next editorial action. It must always be present. Use `defer` when no immediate work is required.
-- `class`
+## Design principle
 
-## Machine-Owned Pipeline Metadata
+Stable identity is separated from mutable use or treatment:
 
-Successful AI response acceptance writes:
+- `record` → `component`
+- `origin` → `producer`
+
+## Required common fields
+
+- `slug`: immutable record identity. Its prefix should agree with `record`.
+- `record`: intrinsic record type.
+- `component`: current editorial function.
+- `action`: next operation. AI actions use actor-qualified values such as `ai-draft`, `ai-revise`, and `ai-proofread`. Successful response writeback sets `human-review`.
+- `scope`: canonical structural or project home.
+- `origin`: original source or producer.
+- `producer`: producer of the current version.
+
+## Editorial content fields
+
+Content and material records may also use:
+
+- `stage`: broad production phase.
+- `status`: current editorial condition; approval is not encoded here.
+- `position`: quoted ordering code within the scalar `scope`.
+- `topic`: permanent topic wikilinks; always list-valued.
+- `source`: permanent source wikilinks; always list-valued.
+- `claims`: permanent claim wikilinks where applicable; always list-valued.
+
+Instruction records do not require `stage`, `status`, or `position`.
+
+## Pipeline rule
+
+Dispatch Run compares each selected file's `action` with the selected plan's machine-readable `type`. A mismatch raises a warning but may be overridden deliberately.
+
+Write Responses preserves the source frontmatter, replaces only the body, removes any legacy `pipeline` mapping, and sets:
 
 ```yaml
-pipeline:
-  run: run.20260801T041105.a82c
-  plan: plan.cleanup-final
-  written_at: 2026-08-01T04:11:05+07:00
-action: review
+action: human-review
 ```
 
-All AI-generated or AI-revised content must be reviewed. Dispatch removes the previous `pipeline` object before creating the source snapshot, but never removes `action`. Git remains authoritative for transport and decision history; `pipeline` exists to group and review the current writeback run in Bases.
-
-## Common Optional Fields
-
-- `context`
-- `content_kind`
-- `project`
-- `stage`
-- `status`
-
-## Guidance
-
-- `project`: optional grouping key for editorial work.
-- `stage`: optional editorial stage such as `draft`, `revise`, or `final`.
-- `class`: authored note class such as `content`, `instruction`, or `topic`.
-- `content_kind`: optional subtype metadata for content notes, for example `passage`, `excerpt`, or `image-note`.
-- `status`: optional descriptive workflow marker for inspection.
-- `action`: required operational instruction such as `review`, `rewrite`, `research`, `submit`, or `defer`.
-
-## Principle
-
-Git records what happened. Frontmatter describes what the editor should do next and identifies the current pipeline writeback batch.
+The File State panel derives per-file pipeline status from Git and retained transport records.

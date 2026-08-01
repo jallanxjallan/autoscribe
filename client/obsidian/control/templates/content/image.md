@@ -1,11 +1,14 @@
 ---
 slug: <% tp.user.make_slug(tp, "img") %>
 record: image
-section:
-position:
 component: image
-stage: new
-action: source
+topic: []
+source: []
+scope:
+position:
+stage: draft
+status: empty
+action: human-source
 origin: human
 producer: human
 assets: []

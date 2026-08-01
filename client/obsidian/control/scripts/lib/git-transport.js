@@ -348,20 +348,11 @@ function splitFrontmatter(text) {
   return match ? { frontmatter: match[1], body: match[2] } : { frontmatter: "", body: value };
 }
 
-function updateMachineFrontmatter(text, { removePipeline = false, pipeline = null, action = null } = {}) {
+function updateMachineFrontmatter(text, { action = null } = {}) {
   const parts = splitFrontmatter(text);
   if (!parts.frontmatter) {
-    if (!pipeline && !action) return text;
-    const lines = ["---"];
-    if (action) lines.push(`action: ${action}`);
-    if (pipeline) {
-      lines.push("pipeline:");
-      lines.push(`  run: ${pipeline.run}`);
-      lines.push(`  plan: ${pipeline.plan}`);
-      lines.push(`  written_at: ${pipeline.written_at}`);
-    }
-    lines.push("---", "");
-    return `${lines.join("\n")}\n${parts.body}`;
+    if (!action) return text;
+    return `---\naction: ${action}\n---\n${parts.body}`;
   }
 
   const newline = parts.frontmatter.includes("\r\n") ? "\r\n" : "\n";
@@ -371,6 +362,8 @@ function updateMachineFrontmatter(text, { removePipeline = false, pipeline = nul
   for (let i = 0; i < input.length; i += 1) {
     const line = input[i];
     if (/^action\s*:/.test(line) && action) continue;
+    // Remove legacy nested pipeline metadata. Operational state now lives in Git
+    // and is reconstructed by File State rather than copied into frontmatter.
     if (/^pipeline\s*:/.test(line)) {
       i += 1;
       while (i < input.length && (/^\s+/.test(input[i]) || input[i].trim() === "")) i += 1;
@@ -382,10 +375,6 @@ function updateMachineFrontmatter(text, { removePipeline = false, pipeline = nul
   if (action) {
     const slugAt = output.findIndex((line) => /^slug\s*:/.test(line));
     output.splice(slugAt >= 0 ? slugAt + 1 : output.length, 0, `action: ${action}`);
-  }
-  if (!removePipeline && pipeline) {
-    while (output.length && output[output.length - 1].trim() === "") output.pop();
-    output.push("pipeline:", `  run: ${pipeline.run}`, `  plan: ${pipeline.plan}`, `  written_at: ${pipeline.written_at}`);
   }
   return `---${newline}${output.join(newline)}${newline}---${newline}${parts.body}`;
 }
@@ -400,7 +389,7 @@ function clearPipelineMetadata(app, paths) {
     if (!frontmatter || !/^action\s*:\s*\S+/m.test(frontmatter)) {
       throw new Error(`Selected file is missing required action property: ${safe}`);
     }
-    const updated = updateMachineFrontmatter(original, { removePipeline: true });
+    const updated = updateMachineFrontmatter(original);
     if (updated !== original) fs.writeFileSync(absolute, updated, "utf8");
   }
 }
@@ -485,8 +474,7 @@ function decideResponse(app, branch, identity, outcome) {
   if (outcome === "accepted") {
     const current = splitFrontmatter(review.source_text);
     const accepted = updateMachineFrontmatter(current.frontmatter + review.response_body, {
-      action: "review",
-      pipeline: { run: dispatch.run_identity, plan: dispatch.plan?.identity || "unknown", written_at: new Date().toISOString() },
+      action: "human-review",
     });
     fs.writeFileSync(path.join(root, review.source_path), accepted, "utf8");
   }
@@ -497,6 +485,33 @@ function decideResponse(app, branch, identity, outcome) {
   const tag = `autoscribe/decision/${safeTagPart(dispatch.run_identity)}/${safeTagPart(identity)}/${outcome}`;
   git(root, ["tag", "-f", tag, branchCommit]);
   return { ...payload, branch_commit: branchCommit, branch_tag: tag };
+}
+
+function pipelineStateForPath(app, sourcePath) {
+  const safePath = String(sourcePath || "").replace(/\\/g, "/");
+  const root = repositoryRoot(app);
+  const matches = listTransportRuns(app).flatMap((run) => {
+    const record = run.dispatch.records.find((item) => item.source_path === safePath);
+    if (!record) return [];
+    const result = run.results.find((item) => item.identity === record.identity) || null;
+    const decision = decisionFor(root, run.run_identity, record.identity);
+    let state = run.status;
+    if (decision?.outcome === "accepted") state = "written-back";
+    else if (decision?.outcome === "declined") state = "declined";
+    else if (result) state = "response-pending";
+    return [{
+      state,
+      run_identity: run.run_identity,
+      plan_identity: run.plan_identity || null,
+      branch: run.branch,
+      created_at: run.created_at || null,
+      source_commit: run.source_commit || null,
+      identity: record.identity,
+      result: Boolean(result),
+      decision: decision?.outcome || null,
+    }];
+  });
+  return matches.sort((a, b) => String(b.created_at || "").localeCompare(String(a.created_at || "")))[0] || null;
 }
 
 function responseHistoryForPath(app, sourcePath) {
@@ -523,8 +538,7 @@ function reconsiderResponse(app, branch, identity, outcome) {
   if (outcome === "accepted") {
     const current = splitFrontmatter(review.source_text);
     const accepted = updateMachineFrontmatter(current.frontmatter + review.response_body, {
-      action: "review",
-      pipeline: { run: dispatch.run_identity, plan: dispatch.plan?.identity || "unknown", written_at: new Date().toISOString() },
+      action: "human-review",
     });
     fs.writeFileSync(path.join(root, review.source_path), accepted, "utf8");
   } else {
@@ -552,5 +566,6 @@ module.exports = {
   decideResponse,
   clearPipelineMetadata,
   responseHistoryForPath,
+  pipelineStateForPath,
   reconsiderResponse,
 };

@@ -1,9 +1,9 @@
-# Define Plan
+"use strict";
 
-````dataviewjs
 const nodeRequire = typeof require === "function" ? require : window.require;
 const pathMod = nodeRequire("node:path");
-const controlVaultRoot = app.vault.adapter.getBasePath?.() || app.vault.adapter.basePath;
+const runtimeApp = globalThis.app;
+const controlVaultRoot = runtimeApp.vault.adapter.getBasePath?.() || runtimeApp.vault.adapter.basePath;
 const loadControl = (relativePath) => nodeRequire(pathMod.join(controlVaultRoot, "_control", ...relativePath.split("/")));
 
 const { spawnSync } = require("node:child_process");
@@ -79,8 +79,6 @@ async function renderCreatePlan({ app, container }) {
   const newButton = el("button", { text: "New Plan" });
   const nameLabel = el("label", { text: "Plan label" });
   const name = el("input", { type: "text", placeholder: "Plan label" }); name.style.width = "100%";
-  const typeLabel = el("label", { text: "Plan type" });
-  const type = el("input", { type: "text", placeholder: "Example: ai-revise" }); type.style.width = "100%";
   const descriptionLabel = el("label", { text: "Description" });
   const description = el("textarea", { placeholder: "Optional description" }); description.style.width = "100%";
   const stepsBox = el("div");
@@ -97,7 +95,6 @@ async function renderCreatePlan({ app, container }) {
   function clearForm() {
     loaded = null;
     name.value = "";
-    type.value = "";
     description.value = "";
     steps = [];
     redraw();
@@ -145,7 +142,6 @@ async function renderCreatePlan({ app, container }) {
     try {
       loaded = loadPlanRecord(app, planSelect.value);
       name.value = loaded.payload?.label || loaded.label || "";
-      type.value = loaded.payload?.type || loaded.type || "";
       description.value = loaded.payload?.description || loaded.description || "";
       steps = screenSteps(loaded, catalogs);
       redraw();
@@ -175,7 +171,7 @@ async function renderCreatePlan({ app, container }) {
         const resolved = resolveInstructionStack(app, step.instruction);
         step.instruction_slugs = resolved.instruction_slugs;
       }
-      const record = buildPlanRecord({ label: name.value, type: type.value, description: description.value, steps, force_slug: planSlug(loaded) || null });
+      const record = buildPlanRecord({ label: name.value, description: description.value, steps, force_slug: planSlug(loaded) || null });
       record.created = loaded?.created || new Date().toISOString(); record.modified = new Date().toISOString();
       const savedPath = savePlanRecord(app, record); loaded = { ...record, path: savedPath }; plans = listPlanRecords(app); refreshSelect(planSlug(record));
       setStatus(`Saved ${planSlug(record)} to ${savedPath}`);
@@ -194,10 +190,10 @@ async function renderCreatePlan({ app, container }) {
   const actionButtons = el("div"); actionButtons.style.cssText = "display:flex;gap:.5rem;margin-top:.75rem"; actionButtons.append(add, save, del);
 
   refreshSelect();
-  container.append(planLabel, planSelect, pickerButtons, nameLabel, name, typeLabel, type, descriptionLabel, description, stepsBox, actionButtons, status);
+  container.append(planLabel, planSelect, pickerButtons, nameLabel, name, descriptionLabel, description, stepsBox, actionButtons, status);
   redraw();
   try { status.textContent = sessionStorage.getItem(STATUS_KEY) || ""; } catch {}
 }
 
-await renderCreatePlan({ app, dv, container: dv.container });
-````
+
+module.exports = { renderCreatePlan };

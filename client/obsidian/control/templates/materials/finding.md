@@ -1,29 +1,27 @@
 ---
 slug: <% tp.user.make_slug(tp, "fnd") %>
-type: finding
-title:
-topic:
+record: finding
+component: research
+topic: []
+source: []
+scope:
+position:
+stage: research
 status: imported
-stage: notes
-process: ready for API
-
+action: human-verify
+origin: human
+producer: human
 verification_status: pending
 source_status: unchecked
-
 source_topic_file:
 source_topic_title:
 source_topic_tag:
 source_heading:
 source_index:
 input_sha256:
-last_pipeline_run:
-
 tags:
   - finding
-
-
-sources:
-assets:
+assets: []
 created:
 updated:
 ---

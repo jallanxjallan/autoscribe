@@ -1,10 +1,11 @@
 ---
 slug: <% tp.user.make_slug(tp, "rol") %>
-type: instruction
-class: role
+record: instruction
+component: role
 scope:
+action: defer
+origin: human
+producer: human
 dependencies: {}
 tags: []
 ---
-
-

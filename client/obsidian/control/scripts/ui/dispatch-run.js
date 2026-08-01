@@ -1,9 +1,9 @@
-# Dispatch Run
+"use strict";
 
-````dataviewjs
 const nodeRequire = typeof require === "function" ? require : window.require;
 const pathMod = nodeRequire("node:path");
-const controlVaultRoot = app.vault.adapter.getBasePath?.() || app.vault.adapter.basePath;
+const runtimeApp = globalThis.app;
+const controlVaultRoot = runtimeApp.vault.adapter.getBasePath?.() || runtimeApp.vault.adapter.basePath;
 const loadControl = (relativePath) => nodeRequire(pathMod.join(controlVaultRoot, "_control", ...relativePath.split("/")));
 
 const path = require("path");
@@ -206,34 +206,6 @@ async function flattenInPlace(app, selectedPaths) {
   return changed;
 }
 
-
-function normalizedAction(value) {
-  return String(value || "").trim().toLowerCase();
-}
-
-function selectedActionMismatches(app, paths, planRecord) {
-  const planType = normalizedAction(planRecord?.payload?.type || planRecord?.type);
-  const rows = paths.map((selectedPath) => {
-    const file = app.vault.getAbstractFileByPath(selectedPath);
-    const action = normalizedAction(file && app.metadataCache.getFileCache(file)?.frontmatter?.action);
-    return { path: selectedPath, action };
-  });
-  if (!planType) return { planType: "", rows, mismatches: rows };
-  return { planType, rows, mismatches: rows.filter((row) => row.action !== planType) };
-}
-
-function confirmPlanCompatibility(app, paths, planRecord) {
-  const check = selectedActionMismatches(app, paths, planRecord);
-  if (!check.mismatches.length) return true;
-  const planLabel = check.planType || "(missing plan type)";
-  const details = check.mismatches
-    .map((row) => `• ${row.path}: ${row.action || "(missing action)"}`)
-    .join("\n");
-  return window.confirm(
-    `The selected plan type is ${planLabel}, but ${check.mismatches.length} selected file${check.mismatches.length === 1 ? " has" : "s have"} a different action:\n\n${details}\n\nDispatch anyway?`
-  );
-}
-
 async function renderDispatchRun({ app, container }) {
   container.empty();
   const vaultRoot = app.vault.adapter.basePath;
@@ -325,11 +297,6 @@ async function renderDispatchRun({ app, container }) {
       if (!selection.length) {
         throw new Error("Reload the clipboard with at least one resolvable Markdown file.");
       }
-      const planRecord = loadPlanRecord(app, select.value);
-      if (!confirmPlanCompatibility(app, selection, planRecord)) {
-        result.setText("Dispatch cancelled because the file actions do not match the selected plan type.");
-        return;
-      }
       const flattened = await flattenInPlace(app, selection);
       const basename = combineBasename.value.trim();
       if (combine.checked && !basename) {
@@ -338,7 +305,7 @@ async function renderDispatchRun({ app, container }) {
       clearPipelineMetadata(app, selection);
       const transport = createDispatchBranch(app, {
         paths: selection,
-        planRecord,
+        planRecord: loadPlanRecord(app, select.value),
         message: message.value.trim(),
         combineBasename: combine.checked ? basename : ""
       });
@@ -363,5 +330,5 @@ async function renderDispatchRun({ app, container }) {
   });
 }
 
-await renderDispatchRun({ app, dv, container: dv.container });
-````
+
+module.exports = { renderDispatchRun };

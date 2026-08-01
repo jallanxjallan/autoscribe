@@ -143,8 +143,13 @@ def list_files(vault: Path, sort: str) -> list[dict[str, Any]]:
             "path": rel,
             "title": title,
             "slug": str(meta.get("slug") or ""),
+            "record": str(meta.get("record") or meta.get("type") or ""),
+            "component": str(meta.get("component") or meta.get("class") or ""),
             "stage": str(meta.get("stage") or ""),
             "status": str(meta.get("status") or ""),
+            "action": str(meta.get("action") or ""),
+            "scope": meta.get("scope") or "",
+            "position": str(meta.get("position") or ""),
             "mtime": int(stat.st_mtime) if stat else 0,
             "worktree": {
                 "label": state_label(index_state, worktree_state),

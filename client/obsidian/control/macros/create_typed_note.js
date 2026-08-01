@@ -52,7 +52,7 @@ const NOTE_GROUPS = [
     initiallyOpen: false,
     choices: [
       { label: "Role", class: "role", prefix: "rol", template: "_control/templates/instructions/role.md" },
-      { label: "Context", class: "context", prefix: "cxt", template: "_control/templates/instructions/context.md" },
+      { label: "Context", class: "context", prefix: "ctx", template: "_control/templates/instructions/context.md" },
       { label: "Reference", class: "reference", prefix: "ref", template: "_control/templates/instructions/reference.md" },
       { label: "Instruction", class: "instruction", prefix: "ins", template: "_control/templates/instructions/instruction.md" },
     ],

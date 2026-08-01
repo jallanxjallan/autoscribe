@@ -1,11 +1,15 @@
 ---
 slug: <% tp.user.make_slug(tp, "psg") %>
 record: passage
-section:
-position:
 component: body
-stage: new
-action: write
+topic: []
+source: []
+claims: []
+scope:
+position:
+stage: draft
+status: empty
+action: ai-draft
 origin: human
 producer: human
 synopsis:

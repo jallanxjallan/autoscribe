@@ -1,9 +1,15 @@
 ---
 slug: <% tp.user.make_slug(tp, "tpc") %>
-type: topic
-title:
+record: topic
+component: research
+topic: []
+source: []
+scope:
+position:
+stage: research
 status: active
-stage: notes
-process: draft
-tags:
+action: human-research
+origin: human
+producer: human
+tags: []
 ---

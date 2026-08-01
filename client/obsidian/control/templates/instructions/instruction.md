@@ -1,10 +1,13 @@
 ---
 slug: <% tp.user.make_slug(tp, "ins") %>
-type: instruction
-kind: instruction
+record: instruction
+component: specific
 scope:
-dependencies:
-  role:
-  context:
+action: defer
+origin: human
+producer: human
+role: []
+context: []
+specifics: []
 tags: []
 ---

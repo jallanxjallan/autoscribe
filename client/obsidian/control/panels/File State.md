@@ -18,7 +18,7 @@ const {
   writeCurrentSelection,
 } = loadControl("scripts/selections/current-selection.js");
 const { currentSelectionSummary } = loadControl("scripts/lib/selection-loader.js");
-const { responseHistoryForPath, getArchivedResponseReview, reconsiderResponse } = loadControl("scripts/lib/git-transport.js");
+const { listTransportRuns, responseHistoryForPath, pipelineStateForPath, getArchivedResponseReview, reconsiderResponse } = loadControl("scripts/lib/git-transport.js");
 const { renderDiff } = loadControl("scripts/lib/diff-view.js");
 
 const PYTHON_EXECUTABLE = '/home/jeremy/Python3.13Env/bin/python';
@@ -94,6 +94,7 @@ function selectionItem(file, index) {
     title: displayTitle(file),
     stage: file.stage || '',
     status: file.status || '',
+    action: file.action || '',
     repo_state: gitState(file),
   };
 }
@@ -117,6 +118,7 @@ function renderFileState({ app, container }) {
     rows: [],
     stage: '',
     status: '',
+    action: '',
     sort: 'title_asc',
     gitState: 'all',
     filter: '',
@@ -139,11 +141,21 @@ function renderFileState({ app, container }) {
       return;
     }
     activeBox.appendChild(el('p', { text: active.path }));
+    const frontmatter = app.metadataCache.getFileCache(active)?.frontmatter || {};
+    activeBox.appendChild(el('p', { text: `Action: ${frontmatter.action || '—'} · Stage: ${frontmatter.stage || '—'} · Status: ${frontmatter.status || '—'}` }));
+    let pipeline;
+    try { pipeline = pipelineStateForPath(app, active.path); }
+    catch (error) { activeBox.appendChild(el('pre', { text: error.message || String(error) })); return; }
+    if (pipeline) {
+      activeBox.appendChild(el('p', { text: `Pipeline: ${pipeline.state} · ${pipeline.plan_identity || 'unknown plan'} · ${pipeline.run_identity}` }));
+    } else {
+      activeBox.appendChild(el('p', { text: 'Pipeline: no dispatch history found.' }));
+    }
     let history;
     try { history = responseHistoryForPath(app, active.path); }
     catch (error) { activeBox.appendChild(el('pre', { text: error.message || String(error) })); return; }
     if (!history.length) {
-      activeBox.appendChild(el('p', { text: 'No retained pipeline response was found for this file.' }));
+      activeBox.appendChild(el('p', { text: 'No retained response is available for review.' }));
       return;
     }
     const latest = history[0];
@@ -191,9 +203,10 @@ function renderFileState({ app, container }) {
 
   const stageInput = el('input', { placeholder: 'Stage (blank = all)' });
   const statusInput = el('input', { placeholder: 'Status (blank = all)' });
+  const actionInput = el('input', { placeholder: 'Action (blank = all)' });
   const sortSelect = selectOptions(el('select'), SORTS);
   const refreshButton = button('Refresh', refreshFiles);
-  toolbar.append(stageInput, statusInput, sortSelect, refreshButton);
+  toolbar.append(stageInput, statusInput, actionInput, sortSelect, refreshButton);
 
   const selectionToolbar = el('div');
   selectionToolbar.style.display = 'flex';
@@ -206,7 +219,7 @@ function renderFileState({ app, container }) {
   stateSelect.appendChild(el('option', { value: 'all', text: 'All git states' }));
   const filterInput = el('input', {
     type: 'search',
-    placeholder: 'Filter path, title, slug, stage, or status',
+    placeholder: 'Filter path, title, slug, stage, status, action, or pipeline',
   });
   filterInput.style.minWidth = '20rem';
 
@@ -255,6 +268,7 @@ function renderFileState({ app, container }) {
 
   stageInput.addEventListener('change', refreshFiles);
   statusInput.addEventListener('change', refreshFiles);
+  actionInput.addEventListener('change', refreshFiles);
   sortSelect.addEventListener('change', refreshFiles);
   stateSelect.addEventListener('change', applyView);
   filterInput.addEventListener('input', applyView);
@@ -275,6 +289,9 @@ function renderFileState({ app, container }) {
   }
 
   function matchesView(file) {
+    if (stageInput.value.trim() && String(file.stage || '').trim() !== stageInput.value.trim()) return false;
+    if (statusInput.value.trim() && String(file.status || '').trim() !== statusInput.value.trim()) return false;
+    if (actionInput.value.trim() && String(file.action || '').trim() !== actionInput.value.trim()) return false;
     const wantedState = stateSelect.value;
     if (wantedState !== 'all' && gitState(file) !== wantedState) return false;
 
@@ -287,6 +304,9 @@ function renderFileState({ app, container }) {
       file.slug,
       file.stage,
       file.status,
+      file.action,
+      file.dispatch?.state,
+      file.dispatch?.plan_identity,
       gitState(file),
     ].map((value) => String(value || '').toLowerCase()).join(' ');
     return haystack.includes(needle);
@@ -305,7 +325,7 @@ function renderFileState({ app, container }) {
     const table = el('table');
     table.style.width = '100%';
     const head = el('tr');
-    for (const label of ['', 'File', 'Stage', 'Status', 'Git state', 'User commit', 'Dispatch', 'Touched']) {
+    for (const label of ['', 'File', 'Stage', 'Status', 'Action', 'Git state', 'User commit', 'Pipeline', 'Touched']) {
       head.appendChild(el('th', { text: label }));
     }
     table.appendChild(head);
@@ -332,6 +352,7 @@ function renderFileState({ app, container }) {
         fileCell,
         el('td', { text: file.stage || '—' }),
         el('td', { text: file.status || '—' }),
+        el('td', { text: file.action || '—' }),
         el('td', { text: gitState(file) }),
         el('td', { text: shortCommit(file.user_commit) }),
         el('td', { text: dispatchReason ? `${dispatchState}: ${dispatchReason}` : dispatchState }),
@@ -345,11 +366,37 @@ function renderFileState({ app, container }) {
     applyView();
   }
 
+  function pipelineStatesByPath() {
+    const map = new Map();
+    for (const run of listTransportRuns(app)) {
+      for (const record of run.dispatch?.records || []) {
+        const sourcePath = String(record.source_path || '').replaceAll('\\', '/');
+        if (!sourcePath || map.has(sourcePath)) continue;
+        const result = run.results?.find((item) => item.identity === record.identity) || null;
+        const decision = run.decisions?.find((item) => item.identity === record.identity) || null;
+        let pipelineState = run.status;
+        if (decision?.outcome === 'accepted') pipelineState = 'written-back';
+        else if (decision?.outcome === 'declined') pipelineState = 'declined';
+        else if (result) pipelineState = 'response-pending';
+        map.set(sourcePath, {
+          state: pipelineState,
+          run_identity: run.run_identity,
+          plan_identity: run.plan_identity || null,
+          branch: run.branch,
+          created_at: run.created_at || null,
+          decision: decision?.outcome || null,
+        });
+      }
+    }
+    return map;
+  }
+
   function refreshFiles() {
     try {
       const preserved = new Set(selectedRows().map((row) => row.file.path));
       state.stage = stageInput.value.trim();
       state.status = statusInput.value.trim();
+      state.action = actionInput.value.trim();
       state.sort = sortSelect.value;
 
       const response = helperRequest(root, {
@@ -357,6 +404,7 @@ function renderFileState({ app, container }) {
         filters: {
           stage: state.stage ? [state.stage] : [],
           status: state.status ? [state.status] : [],
+          action: state.action ? [state.action] : [],
         },
         sort: state.sort,
       });
@@ -365,7 +413,8 @@ function renderFileState({ app, container }) {
         throw new Error('File State returned no file list.');
       }
 
-      state.files = response.files;
+      const pipelineByPath = pipelineStatesByPath();
+      state.files = response.files.map((file) => ({ ...file, dispatch: pipelineByPath.get(file.path) || null }));
 
       const previousState = stateSelect.value || 'all';
       const labels = [...new Set(state.files.map(gitState))].sort((a, b) => a.localeCompare(b));

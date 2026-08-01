@@ -55,7 +55,7 @@ function normalizeStepKind(step) {
   return 'llm';
 }
 
-function buildPlanRecord({ label, description, steps, force_slug = null }) {
+function buildPlanRecord({ label, type, description, steps, force_slug = null }) {
   const cleanLabel = String(label || '').trim();
   if (!cleanLabel) throw new Error('Plan label is required.');
   if (!Array.isArray(steps) || !steps.length) {
@@ -114,12 +114,15 @@ function buildPlanRecord({ label, description, steps, force_slug = null }) {
     planSteps[String(stepNumber)] = out;
   });
 
+  const cleanType = String(type || "").trim().toLowerCase();
+  if (!cleanType) throw new Error("Plan type is required.");
   const cleanDescription = String(description || '').trim();
   return {
     record_type: 'plan',
     record_identity: recordIdentity,
     payload: {
       label: cleanLabel,
+      type: cleanType,
       description: cleanDescription,
       steps: planSteps,
     },
