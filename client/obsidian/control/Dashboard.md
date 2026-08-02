@@ -95,6 +95,7 @@ for (const [label, macro] of [
   ["Define Plan", "macros/autoscribe-define-plan.js"],
   ["Dispatch Run", "macros/autoscribe-dispatch-run.js"],
   ["Write Responses", "macros/autoscribe-write-responses.js"],
+  ["Plan History", "macros/autoscribe-plan-history.js"],
   ["File State", "macros/autoscribe-file-state.js"],
 ]) command(label, macro);
 
