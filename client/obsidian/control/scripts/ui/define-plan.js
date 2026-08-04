@@ -2,22 +2,25 @@
 
 const nodeRequire = typeof require === "function" ? require : window.require;
 const pathMod = nodeRequire("node:path");
+const fs = nodeRequire("node:fs");
 const runtimeApp = globalThis.app;
 const controlVaultRoot = runtimeApp.vault.adapter.getBasePath?.() || runtimeApp.vault.adapter.basePath;
 const loadControl = (relativePath) => nodeRequire(pathMod.join(controlVaultRoot, "_control", ...relativePath.split("/")));
 
-const { spawnSync } = require("node:child_process");
-const path = require("node:path");
+const { spawnSync } = nodeRequire("node:child_process");
 const { buildPlanRecord } = loadControl("scripts/plans/plan-record.js");
 const { listPlanRecords, loadPlanRecord, savePlanRecord, deletePlanRecord } = loadControl("scripts/plans/plan-store.js");
 const { callFeeder } = loadControl("scripts/lib/feeder-ipc.js");
 const { vaultRoot } = loadControl("scripts/lib/vault-state.js");
 const { snapshotList } = loadControl("scripts/lib/control-loader.js");
-const { resolveInstructionStack } = loadControl("scripts/plans/instruction-resolver.js");
+const { makeSlug } = loadControl("scripts/lib/slug.js");
 
 const ZSH = "/usr/bin/zsh";
 const STEP_KINDS = ["llm", "script", "rag"];
+const SCOPES = ["standing", "role", "context", "task"];
+const PREFIXES = { standing: "std", role: "rol", context: "ctx", task: "tsk" };
 const STATUS_KEY = "autoscribe.define-plan.status";
+const CROCKFORD = "0123456789ABCDEFGHJKMNPQRSTVWXYZ";
 
 function el(tag, attrs = {}, children = []) {
   const node = document.createElement(tag);
@@ -44,19 +47,52 @@ function ascSnapshot(group, cwd) {
 }
 
 function id(record) { return String(record?.key || record?.slug || record?.record_identity || ""); }
-function label(record) { return String(record?.label || id(record)); }
+function label(record) { return String(record?.label || record?.title || id(record)); }
 function option(select, record) { select.appendChild(el("option", { value: id(record), text: `${label(record)} — ${id(record)}` })); }
 function selected(records, value) { return records.find((record) => id(record) === value) || null; }
 function planSlug(record) { return String(record?.record_identity || record?.slug || ""); }
+function byScope(records, scope) { return records.filter((record) => String(record?.scope || "").toLowerCase() === scope); }
+
+function encodeTime(time, length) {
+  let value = BigInt(time);
+  let out = "";
+  for (let index = 0; index < length; index += 1) {
+    out = CROCKFORD[Number(value % 32n)] + out;
+    value /= 32n;
+  }
+  return out;
+}
+
+function publicationUlid() {
+  const crypto = nodeRequire("node:crypto");
+  const bytes = crypto.randomBytes(10);
+  let random = 0n;
+  for (const byte of bytes) random = (random << 8n) | BigInt(byte);
+  let tail = "";
+  for (let index = 0; index < 16; index += 1) {
+    tail = CROCKFORD[Number(random % 32n)] + tail;
+    random /= 32n;
+  }
+  return encodeTime(Date.now(), 10) + tail;
+}
 
 function screenSteps(plan, catalogs) {
-  return Object.entries(plan?.payload?.steps || {}).sort(([a], [b]) => Number(a) - Number(b)).map(([, step]) => ({
-    kind: step.kind || "llm", label: step.label || "Step", engine: selected(catalogs.engines, step.engine),
-    model: selected(catalogs.models, step.model), script: selected(catalogs.scripts, step.script),
-    rag_profile: selected(catalogs.ragProfiles, step.rag_profile),
-    instruction: selected(catalogs.instructions, step.instruction || step.instruction_slugs?.instructions?.[0]),
-    argsJson: JSON.stringify(step.args || {}, null, 2),
-  }));
+  return Object.entries(plan?.payload?.steps || {}).sort(([a], [b]) => Number(a) - Number(b)).map(([, step]) => {
+    const refs = step.instruction_slugs || {};
+    return {
+      kind: step.kind || "llm",
+      label: step.label || "Step",
+      engine: selected(catalogs.engines, step.engine),
+      model: selected(catalogs.models, step.model),
+      script: selected(catalogs.scripts, step.script),
+      rag_profile: selected(catalogs.ragProfiles, step.rag_profile),
+      standingSlugs: Array.isArray(refs.standing) ? [...refs.standing] : [],
+      role: selected(catalogs.instructions, refs.role?.[0]),
+      context: selected(catalogs.instructions, refs.context?.[0]),
+      task: selected(catalogs.instructions, refs.task?.[0] || refs.instructions?.[0] || step.instruction),
+      argsJson: JSON.stringify(step.args || {}, null, 2),
+    };
+  });
 }
 
 async function renderCreatePlan({ app, container }) {
@@ -71,7 +107,7 @@ async function renderCreatePlan({ app, container }) {
   let plans = listPlanRecords(app), loaded = null, steps = [];
 
   container.appendChild(el("h2", { text: "Define Plan" }));
-  container.appendChild(el("p", { text: "Create a new vault plan or load an existing plan for modification. Plans are stored under _plans/ and versioned in Git." }));
+  container.appendChild(el("p", { text: "Create or modify a plan and publish its complete local instruction set. Plans are stored under _plans/ and versioned in Git." }));
 
   const planLabel = el("label", { text: "Existing plan" });
   const planSelect = el("select"); planSelect.style.width = "100%";
@@ -79,6 +115,8 @@ async function renderCreatePlan({ app, container }) {
   const newButton = el("button", { text: "New Plan" });
   const nameLabel = el("label", { text: "Plan label" });
   const name = el("input", { type: "text", placeholder: "Plan label" }); name.style.width = "100%";
+  const typeLabel = el("label", { text: "Plan type" });
+  const type = el("input", { type: "text", placeholder: "e.g. revise, research, proofread" }); type.style.width = "100%";
   const descriptionLabel = el("label", { text: "Description" });
   const description = el("textarea", { placeholder: "Optional description" }); description.style.width = "100%";
   const stepsBox = el("div");
@@ -92,9 +130,18 @@ async function renderCreatePlan({ app, container }) {
     } catch {}
   }
 
+  function refreshInstructions() {
+    return callFeeder(app, "instructions.catalog", { include_pipeline: false }).then((records) => {
+      catalogs.instructions = records;
+      redraw();
+      return records;
+    });
+  }
+
   function clearForm() {
     loaded = null;
     name.value = "";
+    type.value = "";
     description.value = "";
     steps = [];
     redraw();
@@ -108,16 +155,110 @@ async function renderCreatePlan({ app, container }) {
   }
 
   function choice(records, value, onChange, placeholder) {
-    const select = el("select"); select.appendChild(el("option", { value: "", text: placeholder }));
-    records.forEach((record) => option(select, record)); select.value = id(value);
-    select.addEventListener("change", () => onChange(selected(records, select.value))); return select;
+    const select = el("select"); select.style.width = "100%";
+    select.appendChild(el("option", { value: "", text: placeholder }));
+    records.forEach((record) => option(select, record));
+    select.value = id(value);
+    select.addEventListener("change", () => onChange(selected(records, select.value)));
+    return select;
+  }
+
+  function instructionDirectory() {
+    const active = catalogs.instructions.filter((item) => item.source === "active" && item.path);
+    if (active.length) {
+      const counts = new Map();
+      for (const item of active) {
+        const dir = pathMod.dirname(item.path);
+        counts.set(dir, (counts.get(dir) || 0) + 1);
+      }
+      return [...counts.entries()].sort((a, b) => b[1] - a[1])[0][0];
+    }
+    return "Instructions";
+  }
+
+  async function createInstruction(scope, step, field) {
+    const title = String(window.prompt(`Title for new ${scope} instruction:`) || "").trim();
+    if (!title) return;
+    const slug = makeSlug(PREFIXES[scope], title);
+    const dir = instructionDirectory();
+    const safeName = title.replace(/[\\/:*?"<>|]/g, "-").trim() || "Untitled Instruction";
+    let relpath = pathMod.posix.join(dir === "." ? "" : dir, `${safeName}.md`);
+    let counter = 2;
+    while (app.vault.getAbstractFileByPath(relpath)) {
+      relpath = pathMod.posix.join(dir === "." ? "" : dir, `${safeName} ${counter}.md`);
+      counter += 1;
+    }
+    const body = `---\nslug: ${slug}\ntype: instruction\nscope: ${scope}\nversion: 1\ntags: []\n---\n\n# ${title}\n\n`;
+    const parent = pathMod.posix.dirname(relpath);
+    if (parent && parent !== "." && !app.vault.getAbstractFileByPath(parent)) await app.vault.createFolder(parent);
+    const file = await app.vault.create(relpath, body);
+    await refreshInstructions();
+    const record = selected(catalogs.instructions, slug);
+    if (scope === "standing") {
+      step.standingSlugs = [...new Set([...(step.standingSlugs || []), slug])];
+    } else {
+      step[field] = record || { slug, path: relpath, label: title, scope, source: "active", abspath: pathMod.join(root, relpath) };
+    }
+    redraw();
+    await app.workspace.getLeaf(false).openFile(file);
+  }
+
+  function openInstruction(record) {
+    if (!record?.path) return;
+    const file = app.vault.getAbstractFileByPath(record.path);
+    if (file) app.workspace.getLeaf(false).openFile(file);
+  }
+
+  function scopedPicker(card, step, scope, field, titleText) {
+    const records = byScope(catalogs.instructions, scope);
+    const heading = el("div"); heading.style.cssText = "display:flex;align-items:center;justify-content:space-between;margin-top:.65rem";
+    heading.appendChild(el("strong", { text: titleText }));
+    const buttons = el("span");
+    const create = el("button", { text: "Create instruction" });
+    create.addEventListener("click", () => createInstruction(scope, step, field));
+    buttons.appendChild(create);
+    if (step[field]?.path) {
+      const open = el("button", { text: "Open" }); open.addEventListener("click", () => openInstruction(step[field])); buttons.appendChild(open);
+    }
+    heading.appendChild(buttons);
+    card.appendChild(heading);
+    card.appendChild(choice(records, step[field], (value) => { step[field] = value; redraw(); }, `Choose ${scope}`));
+  }
+
+  function standingPicker(card, step) {
+    const records = byScope(catalogs.instructions, "standing");
+    const heading = el("div"); heading.style.cssText = "display:flex;align-items:center;justify-content:space-between;margin-top:.65rem";
+    heading.appendChild(el("strong", { text: "Standing instructions" }));
+    const buttons = el("span");
+    const selectAll = el("button", { text: "Select all" });
+    selectAll.addEventListener("click", () => { step.standingSlugs = records.map(id); redraw(); });
+    const clearAll = el("button", { text: "Clear all" });
+    clearAll.addEventListener("click", () => { step.standingSlugs = []; redraw(); });
+    const create = el("button", { text: "Create instruction" });
+    create.addEventListener("click", () => createInstruction("standing", step, "standingSlugs"));
+    buttons.append(selectAll, clearAll, create); heading.appendChild(buttons); card.appendChild(heading);
+    const selectedSlugs = new Set(step.standingSlugs || []);
+    for (const record of records) {
+      const row = el("div"); row.style.cssText = "display:flex;align-items:center;gap:.4rem";
+      const checkbox = el("input", { type: "checkbox" }); checkbox.checked = selectedSlugs.has(id(record));
+      checkbox.addEventListener("change", () => {
+        if (checkbox.checked) selectedSlugs.add(id(record)); else selectedSlugs.delete(id(record));
+        step.standingSlugs = [...selectedSlugs];
+      });
+      const link = el("button", { text: label(record) }); link.style.cssText = "background:none;border:0;padding:0;color:var(--link-color);text-align:left";
+      link.addEventListener("click", () => openInstruction(record));
+      row.append(checkbox, link); card.appendChild(row);
+    }
+    for (const slug of selectedSlugs) {
+      if (!records.some((record) => id(record) === slug)) card.appendChild(el("div", { text: `⚠ Missing standing instruction: ${slug}` }));
+    }
   }
 
   function redraw() {
     stepsBox.innerHTML = "";
     steps.forEach((step, index) => {
       const card = el("div"); card.style.cssText = "border:1px solid var(--background-modifier-border);padding:.75rem;margin:.75rem 0;border-radius:8px";
-      const stepLabel = el("input", { type: "text", value: step.label || `Step ${index + 1}` });
+      const stepLabel = el("input", { type: "text", value: step.label || `Step ${index + 1}` }); stepLabel.style.width = "100%";
       stepLabel.addEventListener("input", () => { step.label = stepLabel.value; });
       const kind = el("select"); STEP_KINDS.forEach((value) => kind.appendChild(el("option", { value, text: value })));
       kind.value = step.kind; kind.addEventListener("change", () => { step.kind = kind.value; redraw(); });
@@ -125,10 +266,17 @@ async function renderCreatePlan({ app, container }) {
       if (step.kind === "llm") {
         card.append(choice(catalogs.engines, step.engine, (v) => { step.engine = v; }, "Engine"));
         card.append(choice(catalogs.models, step.model, (v) => { step.model = v; }, "Model"));
-      } else if (step.kind === "script") card.append(choice(catalogs.scripts, step.script, (v) => { step.script = v; }, "Script"));
-      else card.append(choice(catalogs.ragProfiles, step.rag_profile, (v) => { step.rag_profile = v; }, "RAG profile"));
-      if (step.kind !== "script") card.append(choice(catalogs.instructions, step.instruction, (v) => { step.instruction = v; }, "Instruction"));
-      const args = el("textarea"); args.value = step.argsJson || "{}"; args.addEventListener("input", () => { step.argsJson = args.value; }); card.append(args);
+        standingPicker(card, step);
+        scopedPicker(card, step, "role", "role", "Role");
+        scopedPicker(card, step, "context", "context", "Context");
+        scopedPicker(card, step, "task", "task", "Task");
+      } else if (step.kind === "script") {
+        card.append(choice(catalogs.scripts, step.script, (v) => { step.script = v; }, "Script"));
+      } else {
+        card.append(choice(catalogs.ragProfiles, step.rag_profile, (v) => { step.rag_profile = v; }, "RAG profile"));
+      }
+      const args = el("textarea"); args.style.width = "100%"; args.value = step.argsJson || "{}";
+      args.addEventListener("input", () => { step.argsJson = args.value; }); card.append(args);
       const remove = el("button", { text: "Delete Step" }); remove.addEventListener("click", () => { steps.splice(index, 1); redraw(); }); card.append(remove);
       stepsBox.appendChild(card);
     });
@@ -136,53 +284,71 @@ async function renderCreatePlan({ app, container }) {
 
   function loadSelectedPlan() {
     if (!planSelect.value) {
-      setStatus(plans.length ? "Select a saved plan, then click Load Plan." : "No saved plans were found under _plans/." );
+      setStatus(plans.length ? "Select a saved plan, then click Load Plan." : "No saved plans were found under _plans/.");
       return;
     }
     try {
       loaded = loadPlanRecord(app, planSelect.value);
       name.value = loaded.payload?.label || loaded.label || "";
+      type.value = loaded.payload?.type || loaded.type || "";
       description.value = loaded.payload?.description || loaded.description || "";
       steps = screenSteps(loaded, catalogs);
       redraw();
       setStatus(`Loaded ${planSlug(loaded)} from ${loaded.path}`);
-    } catch (error) {
-      setStatus(`Load failed: ${error.message || error}`);
-    }
+    } catch (error) { setStatus(`Load failed: ${error.message || error}`); }
   }
 
   loadButton.addEventListener("click", loadSelectedPlan);
   planSelect.addEventListener("dblclick", loadSelectedPlan);
-  newButton.addEventListener("click", () => {
-    planSelect.value = "";
-    clearForm();
-    setStatus("New plan form ready.");
-    name.focus();
+  newButton.addEventListener("click", () => { planSelect.value = ""; clearForm(); setStatus("New plan form ready."); name.focus(); });
+
+  const add = el("button", { text: "Add Step" });
+  add.addEventListener("click", () => {
+    steps.push({
+      kind: "llm", label: `Step ${steps.length + 1}`, argsJson: "{}",
+      standingSlugs: byScope(catalogs.instructions, "standing").map(id),
+    });
+    redraw();
   });
 
-  const add = el("button", { text: "Add Step" }); add.addEventListener("click", () => { steps.push({ kind: "llm", label: `Step ${steps.length + 1}`, argsJson: "{}" }); redraw(); });
-  const save = el("button", { text: "Save Plan", class: "mod-cta" }); save.addEventListener("click", () => {
+  const save = el("button", { text: "Save Plan", class: "mod-cta" });
+  save.addEventListener("click", async () => {
     try {
-      for (const step of steps) {
-        if (!step.instruction) {
-          delete step.instruction_slugs;
-          continue;
-        }
-        const resolved = resolveInstructionStack(app, step.instruction);
-        step.instruction_slugs = resolved.instruction_slugs;
+      for (const [index, step] of steps.entries()) {
+        if (step.kind !== "llm") { delete step.instruction_slugs; continue; }
+        if (!step.task) throw new Error(`Step ${index + 1}: choose a task instruction.`);
+        step.instruction_slugs = {
+          standing: [...new Set(step.standingSlugs || [])],
+          role: step.role ? [id(step.role)] : [],
+          context: step.context ? [id(step.context)] : [],
+          task: [id(step.task)],
+        };
       }
-      const record = buildPlanRecord({ label: name.value, description: description.value, steps, force_slug: planSlug(loaded) || null });
-      record.created = loaded?.created || new Date().toISOString(); record.modified = new Date().toISOString();
-      const savedPath = savePlanRecord(app, record); loaded = { ...record, path: savedPath }; plans = listPlanRecords(app); refreshSelect(planSlug(record));
-      setStatus(`Saved ${planSlug(record)} to ${savedPath}`);
+      const publication = publicationUlid();
+      const record = buildPlanRecord({ label: name.value, type: type.value, description: description.value, steps, force_slug: planSlug(loaded) || null });
+      record.payload.publication_ulid = publication;
+      const savedPath = savePlanRecord(app, record);
+      loaded = { ...record, path: savedPath };
+      plans = listPlanRecords(app); refreshSelect(planSlug(record));
+
+      const selectedSlugs = new Set();
+      for (const step of steps) for (const values of Object.values(step.instruction_slugs || {})) for (const slug of values) selectedSlugs.add(slug);
+      const instructionSets = [...selectedSlugs].map((slug) => {
+        const item = selected(catalogs.instructions, slug);
+        if (!item?.path) throw new Error(`Instruction file not found locally: ${slug}`);
+        return item;
+      });
+      await callFeeder(app, "plan.save", { record, instruction_sets: instructionSets, publication_ulid: publication });
+      setStatus(`Saved and handed off ${planSlug(record)}\nPublication ULID: ${publication}\nInstructions: ${instructionSets.length}`);
     } catch (error) { setStatus(`Save failed: ${error.message || error}`); }
   });
-  const del = el("button", { text: "Delete Plan" }); del.addEventListener("click", () => {
+
+  const del = el("button", { text: "Delete Plan" });
+  del.addEventListener("click", () => {
     if (!loaded) { setStatus("Load a plan before deleting it."); return; }
     try {
       const deletedPath = deletePlanRecord(app, planSlug(loaded));
-      plans = listPlanRecords(app); refreshSelect(); clearForm();
-      setStatus(`Deleted ${deletedPath}`);
+      plans = listPlanRecords(app); refreshSelect(); clearForm(); setStatus(`Deleted ${deletedPath}`);
     } catch (error) { setStatus(`Delete failed: ${error.message || error}`); }
   });
 
@@ -190,10 +356,9 @@ async function renderCreatePlan({ app, container }) {
   const actionButtons = el("div"); actionButtons.style.cssText = "display:flex;gap:.5rem;margin-top:.75rem"; actionButtons.append(add, save, del);
 
   refreshSelect();
-  container.append(planLabel, planSelect, pickerButtons, nameLabel, name, descriptionLabel, description, stepsBox, actionButtons, status);
+  container.append(planLabel, planSelect, pickerButtons, nameLabel, name, typeLabel, type, descriptionLabel, description, stepsBox, actionButtons, status);
   redraw();
   try { status.textContent = sessionStorage.getItem(STATUS_KEY) || ""; } catch {}
 }
-
 
 module.exports = { renderCreatePlan };

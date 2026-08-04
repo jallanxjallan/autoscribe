@@ -10,6 +10,7 @@ from . import git
 from .errors import ObsError
 from .instruction_upload import upload_instruction
 from .ipc import handle as handle_ipc
+from .logging import read_log, summarize_items, write_log
 from .retrieval import retrieve_results
 from .state import VaultState
 from .transport import dispatch_run
@@ -41,52 +42,79 @@ def parser() -> argparse.ArgumentParser:
     retrieve.add_argument("-n", "--dry-run", action="store_true")
     retrieve.add_argument("--branch")
     retrieve.add_argument("-f", "--force", action="store_true")
+    log = sub.add_parser("log")
+    log.add_argument("--date", help="local date in YYYY-MM-DD form; defaults to today")
+    log.add_argument("-n", "--lines", type=int, default=200, help="number of trailing lines to print; 0 prints all")
     return root
 
 
 def main(argv: list[str] | None = None) -> int:
     args = parser().parse_args(argv)
+    repo: Path | None = None
+    command = getattr(args, "command", "obs")
     try:
         repo = args.vault.resolve() if args.vault else git.root(Path.cwd())
-        if args.command == "ipc":
+        if command == "log":
+            sys.stdout.write(read_log(repo, date=args.date, lines=args.lines))
+        elif command == "ipc":
             request = json.load(sys.stdin)
             print(json.dumps(handle_ipc(request, repo=repo), ensure_ascii=False))
-        elif args.command == "state":
+        elif command == "state":
             current = VaultState.for_vault(repo)
             print(json.dumps({"vault_root": str(repo), "state_root": str(current.root)}, indent=2))
-        elif args.command == "scan":
+        elif command == "scan":
             records = Vault(repo).records(public_only=args.public)
             print(json.dumps([record.__dict__ for record in records], indent=2, ensure_ascii=False))
-        elif args.command == "upload-instructions":
+        elif command == "upload-instructions":
+            write_log(repo, command, "started")
             items, output = upload_instructions(repo, force=args.force, dry_run=args.dry_run)
-            _report(args.command, items, args.dry_run)
+            _report(command, items, args.dry_run)
             if output:
                 sys.stdout.write(output)
-        elif args.command == "upload-instruction":
+            write_log(repo, command, f"completed: {len(items)} record(s)\n{summarize_items(items)}")
+        elif command == "upload-instruction":
+            write_log(repo, command, f"started: {args.source_path}")
             result = upload_instruction(repo, source_path=args.source_path, input_path=args.input, metadata_path=args.metadata, force=args.force, commit=not args.no_commit)
             print(json.dumps(result, indent=2, ensure_ascii=False))
-        elif args.command == "dispatch-run":
+            write_log(repo, command, f"completed: {args.source_path}")
+        elif command == "dispatch-run":
+            write_log(repo, command, f"started: branch={args.branch or 'auto'}")
             items, output = dispatch_run(repo, branch=args.branch, dry_run=args.dry_run)
-            _report(args.command, items, args.dry_run)
+            _report(command, items, args.dry_run)
             if output:
                 sys.stdout.write(output + ("\n" if not output.endswith("\n") else ""))
-        elif args.command == "retrieve-results":
-            result = retrieve_results(
-                repo, branch=args.branch, dry_run=args.dry_run, force=args.force
-            )
+            write_log(repo, command, f"completed: {len(items)} record(s)\n{summarize_items(items)}")
+        elif command == "retrieve-results":
+            write_log(repo, command, f"started: branch={args.branch or 'all'} force={args.force}")
+            result = retrieve_results(repo, branch=args.branch, dry_run=args.dry_run, force=args.force)
             _report_retrieval(result, args.dry_run)
+            downloaded = result.get("downloaded", [])
+            missing = result.get("missing", [])
+            already = result.get("already_downloaded", [])
+            detail = summarize_items([*downloaded, *missing, *already])
+            write_log(repo, command, f"completed: {len(downloaded)} downloaded, {len(missing)} missing, {len(already)} already downloaded\n{detail}")
         return 0
     except (ObsError, OSError, ValueError, json.JSONDecodeError) as exc:
-        if getattr(args, "command", None) == "ipc":
+        if command == "ipc":
             print(json.dumps({"ok": False, "error": str(exc), "error_type": type(exc).__name__}, ensure_ascii=False))
             return 0
+        if repo is not None:
+            try:
+                write_log(repo, command, f"{type(exc).__name__}: {exc}", level="ERROR")
+            except OSError:
+                pass
         print(f"obs: ERROR: {exc}", file=sys.stderr)
         return 1
     except Exception as exc:
-        if getattr(args, "command", None) == "ipc":
+        if command == "ipc":
             traceback.print_exc(file=sys.stderr)
             print(json.dumps({"ok": False, "error": f"{type(exc).__name__}: {exc}", "error_type": type(exc).__name__}, ensure_ascii=False))
             return 0
+        if repo is not None:
+            try:
+                write_log(repo, command, f"{type(exc).__name__}: {exc}", level="ERROR")
+            except OSError:
+                pass
         raise
 
 

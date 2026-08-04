@@ -105,7 +105,7 @@ def _dirty_relpaths(repo: Path, paths: Iterable[Path]) -> list[str]:
     return result
 
 
-INSTRUCTION_PREFIXES = ("ins.", "rol.", "ctx.", "spc.")
+INSTRUCTION_PREFIXES = ("std.", "rol.", "ctx.", "tsk.")
 
 
 def sync_instruction(repo: Path, *, slug: str, path: str, source_path: str,

@@ -108,7 +108,12 @@ def _plan_save(repo: Path, request: dict[str, Any]) -> dict[str, Any]:
     instruction_sets = request.get("instruction_sets")
     if instruction_sets is not None and not isinstance(instruction_sets, list):
         raise ObsError("plan.save instruction_sets must be a list")
-    return save_plan(record, cwd=repo, instruction_sets=instruction_sets or [])
+    return save_plan(
+        record,
+        cwd=repo,
+        instruction_sets=instruction_sets or [],
+        publication_ulid=str(request.get("publication_ulid") or ""),
+    )
 
 
 def _plan_delete(repo: Path, request: dict[str, Any]) -> dict[str, Any]:

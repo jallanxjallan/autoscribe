@@ -97,10 +97,10 @@ function buildPlanRecord({ label, type, description, steps, force_slug = null })
 
     if (instructionSlugs && typeof instructionSlugs === 'object' && !Array.isArray(instructionSlugs)) {
       out.instruction_slugs = {
+        standing: Array.isArray(instructionSlugs.standing) ? [...instructionSlugs.standing] : [],
         role: Array.isArray(instructionSlugs.role) ? [...instructionSlugs.role] : [],
         context: Array.isArray(instructionSlugs.context) ? [...instructionSlugs.context] : [],
-        specifics: Array.isArray(instructionSlugs.specifics) ? [...instructionSlugs.specifics] : [],
-        instructions: Array.isArray(instructionSlugs.instructions) ? [...instructionSlugs.instructions] : [],
+        task: Array.isArray(instructionSlugs.task) ? [...instructionSlugs.task] : [],
       };
     } else if (instruction?.slug || instruction?.key) {
       out.instruction = String(instruction.slug || instruction.key).trim();

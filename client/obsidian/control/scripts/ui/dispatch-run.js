@@ -211,6 +211,7 @@ async function renderDispatchRun({ app, container }) {
   const vaultRoot = app.vault.adapter.basePath;
   const { createDispatchBranch, clearPipelineMetadata } = require(path.join(vaultRoot, "_control/scripts/lib/git-transport.js"));
   const { listPlanRecords, loadPlanRecord } = require(path.join(vaultRoot, "_control/scripts/plans/plan-store.js"));
+  const { runFeederCommand } = require(path.join(vaultRoot, "_control/scripts/lib/feeder-command.js"));
 
   const heading = container.createEl("h2", { text: "Dispatch selected files" });
   heading.style.marginTop = "0";
@@ -309,8 +310,9 @@ async function renderDispatchRun({ app, container }) {
         message: message.value.trim(),
         combineBasename: combine.checked ? basename : ""
       });
+      const feeder = await runFeederCommand(app, ["dispatch-run", "--branch", transport.branch], { detached: true });
       result.setText(
-        `Transport branch created.
+        `Transport branch created and handed to feeder.
 ` +
         `Branch: ${transport.branch}
 ` +
@@ -320,7 +322,9 @@ async function renderDispatchRun({ app, container }) {
 ` +
         `Flattened in place: ${flattened.length}
 ` +
-        `The feeder can now claim this branch.`
+        `Feeder PID: ${feeder.pid}
+` +
+        `Use obs log from this vault to inspect the handoff.`
       );
     } catch (error) {
       result.setText(`Dispatch failed: ${error.message || error}`);

@@ -61,7 +61,17 @@ function extractHighlights(line) {
   return [...line.matchAll(/==(.+?)==/g)]
     .map((match) => match[1].trim())
     .filter(Boolean)
-    .map((text) => ({ type: "Highlight", text: truncateAtWord(text) }));
+    .map((text) => {
+      const aiMatch = text.match(/^\{\{ai:([^|}]+)\|([\s\S]+)\}\}$/i);
+      if (aiMatch) {
+        return {
+          type: `AI · ${normalizeType(aiMatch[1])}`,
+          text: truncateAtWord(aiMatch[2]),
+        };
+      }
+
+      return { type: "Highlight", text: truncateAtWord(text) };
+    });
 }
 
 function extractTk(line) {

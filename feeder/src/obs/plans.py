@@ -9,8 +9,11 @@ from .catalog import pipeline_snapshot
 from .errors import ObsError
 from .process import run
 from .executables import autoscribe_bin
-from .instruction_upload import sync_instructions
+from .markdown import parse_markdown
 from .contracts import upload_record
+
+INSTRUCTION_LABELS = ("standing", "role", "context", "task")
+INSTRUCTION_PREFIXES = ("std.", "rol.", "ctx.", "tsk.")
 
 
 def _plan_values(snapshot: dict[str, Any]) -> list[dict[str, Any]]:
@@ -31,9 +34,8 @@ def _plan_values(snapshot: dict[str, Any]) -> list[dict[str, Any]]:
         if not isinstance(value, dict):
             continue
         slug = str(value.get("record_identity") or value.get("slug") or "").strip()
-        if not slug:
-            continue
-        records.append({**value, "record_identity": slug, "slug": slug, "record_type": "plan"})
+        if slug:
+            records.append({**value, "record_identity": slug, "slug": slug, "record_type": "plan"})
     return records
 
 
@@ -54,43 +56,17 @@ def _decode_object(value: Any, *, slug: str, field: str) -> dict[str, Any]:
 
 
 def _materialize_plan(record: dict[str, Any]) -> dict[str, Any]:
-    """Expose a stored plan definition in the shape used by Define Plan.
-
-    The upload envelope is not persisted. A full plan read must therefore
-    return artifact fields such as ``metadata_json`` and ``steps_json`` (or an
-    already materialized ``payload`` object). Catalog-only records cannot be
-    used to edit an existing plan.
-    """
     slug = str(record.get("slug") or record.get("record_identity") or "<unknown>")
-
     raw_payload = record.get("payload")
     if raw_payload is not None:
-        payload = _decode_object(raw_payload, slug=slug, field="payload")
-        return {**record, **payload}
-
+        return {**record, **_decode_object(raw_payload, slug=slug, field="payload")}
     if "steps" in record and isinstance(record.get("steps"), dict):
         return dict(record)
-
     if "steps_json" not in record:
-        raise ObsError(
-            f"{slug}: control returned catalog metadata only; "
-            "a full plan-read operation must return metadata_json and steps_json"
-        )
-
+        raise ObsError(f"{slug}: control returned catalog metadata only")
     steps = _decode_object(record.get("steps_json"), slug=slug, field="steps_json")
     metadata = _decode_object(record.get("metadata_json", "{}"), slug=slug, field="metadata_json")
-
-    result = {
-        **record,
-        **metadata,
-        "record_type": "plan",
-        "record_identity": slug,
-        "slug": slug,
-        "steps": steps,
-    }
-    result.pop("metadata_json", None)
-    result.pop("steps_json", None)
-    return result
+    return {**record, **metadata, "record_type": "plan", "record_identity": slug, "slug": slug, "steps": steps}
 
 
 def load_plan(slug: str) -> dict[str, Any]:
@@ -103,11 +79,84 @@ def load_plan(slug: str) -> dict[str, Any]:
     raise ObsError(f"plan not found in pipeline: {slug}")
 
 
-def _plan_payload(record: dict[str, Any], *, slug: str) -> dict[str, Any]:
-    payload = record.get("payload")
-    if not isinstance(payload, dict):
-        raise ObsError(f"{slug}: plan.save requires payload object")
-    return dict(payload)
+def _inside(root: Path, path: Path) -> bool:
+    root = root.resolve()
+    path = path.resolve()
+    return path == root or root in path.parents
+
+
+def _ndjson(records: list[dict[str, Any]]) -> str:
+    return "".join(json.dumps(record, ensure_ascii=False, separators=(",", ":")) + "\n" for record in records)
+
+
+def _validate_steps(slug: str, content: dict[str, Any]) -> None:
+    raw_steps = content.get("steps")
+    if not isinstance(raw_steps, dict) or not raw_steps:
+        raise ObsError(f"{slug}: plan steps must be a non-empty indexed object")
+    ordered = sorted(raw_steps.items(), key=lambda item: int(str(item[0])) if str(item[0]).isdigit() else -1)
+    actual = [int(str(key)) for key, _ in ordered if str(key).isdigit()]
+    if actual != list(range(1, len(ordered) + 1)):
+        raise ObsError(f"{slug}: plan step indexes must be contiguous from 1; got {actual}")
+    for ordinal, (_, step) in enumerate(ordered, 1):
+        if not isinstance(step, dict):
+            raise ObsError(f"{slug}: step {ordinal} must be an object")
+        refs = step.get("instruction_slugs") or {}
+        if not isinstance(refs, dict):
+            raise ObsError(f"{slug}: step {ordinal} instruction_slugs must be an object")
+        legacy = sorted(set(refs) & {"specifics", "instructions"})
+        if legacy:
+            raise ObsError(f"{slug}: step {ordinal} uses legacy instruction labels: {', '.join(legacy)}")
+        unknown = sorted(set(refs) - set(INSTRUCTION_LABELS))
+        if unknown:
+            raise ObsError(f"{slug}: step {ordinal} has unsupported instruction labels: {', '.join(unknown)}")
+        for label in INSTRUCTION_LABELS:
+            value = refs.get(label, [])
+            if not isinstance(value, list) or any(not isinstance(item, str) for item in value):
+                raise ObsError(f"{slug}: step {ordinal} instruction_slugs.{label} must be a slug list")
+
+
+def _instruction_records(cwd: Path, instruction_sets: list[dict[str, Any]], publication_ulid: str) -> list[dict[str, Any]]:
+    unique: dict[str, dict[str, Any]] = {}
+    for item in instruction_sets:
+        slug = str(item.get("slug") or item.get("record_identity") or "").strip()
+        if not slug.startswith(INSTRUCTION_PREFIXES):
+            raise ObsError(f"invalid instruction slug: {slug or '<empty>'}")
+        raw_path = str(item.get("abspath") or item.get("path") or "").strip()
+        if not raw_path:
+            raise ObsError(f"{slug}: instruction component requires path")
+        source = Path(raw_path).expanduser()
+        if not source.is_absolute():
+            source = cwd / source
+        source = source.resolve()
+        if not source.is_file() or not _inside(cwd, source):
+            raise ObsError(f"{slug}: instruction file is unavailable in the active vault: {source}")
+        relpath = source.relative_to(cwd.resolve()).as_posix()
+        document = parse_markdown(source.read_text(encoding="utf-8"))
+        actual = str(document.frontmatter.get("slug") or "").strip()
+        scope = str(document.frontmatter.get("scope") or "").strip().lower()
+        if actual != slug:
+            raise ObsError(f"{relpath}: expected slug {slug}, found {actual or '<empty>'}")
+        if scope not in INSTRUCTION_LABELS:
+            raise ObsError(f"{relpath}: invalid instruction scope {scope or '<empty>'}")
+        if not document.body.strip():
+            raise ObsError(f"{relpath}: instruction body is empty")
+        record = upload_record(
+            type="instruction",
+            identity=slug,
+            content=document.body,
+            extra={
+                "filename_hint": source.name,
+                "source_path": relpath,
+                "metadata": dict(document.frontmatter),
+                "scope": scope,
+                "publication_ulid": publication_ulid,
+            },
+        )
+        prior = unique.get(slug)
+        if prior and prior["extra"]["source_path"] != relpath:
+            raise ObsError(f"instruction slug {slug} resolves to multiple files")
+        unique[slug] = record
+    return list(unique.values())
 
 
 def save_plan(
@@ -115,58 +164,53 @@ def save_plan(
     *,
     cwd: Path,
     instruction_sets: list[dict[str, Any]] | None = None,
+    publication_ulid: str | None = None,
 ) -> dict[str, Any]:
-    """Synchronize referenced instructions, then upload the plan last."""
+    """Publish a complete plan snapshot and every referenced local instruction."""
     slug = str(record.get("record_identity") or record.get("slug") or "").strip()
     if not slug:
         raise ObsError("plan record missing record_identity")
+    content = record.get("payload")
+    if not isinstance(content, dict):
+        raise ObsError(f"{slug}: plan.save requires payload object")
+    publication = str(publication_ulid or content.get("publication_ulid") or "").strip()
+    if len(publication) != 26:
+        raise ObsError(f"{slug}: publication_ulid must be a 26-character ULID")
+    content = {**content, "publication_ulid": publication}
+    _validate_steps(slug, content)
 
-    content = _plan_payload(record, slug=slug)
-    raw_steps = content.get("steps")
-    if not isinstance(raw_steps, dict) or not raw_steps:
-        raise ObsError(f"{slug}: plan steps must be a non-empty indexed object")
+    instructions = _instruction_records(cwd, instruction_sets or [], publication)
+    referenced = {
+        value
+        for step in content["steps"].values()
+        for values in (step.get("instruction_slugs") or {}).values()
+        for value in values
+    }
+    supplied = {record["identity"] for record in instructions}
+    missing = sorted(referenced - supplied)
+    if missing:
+        raise ObsError(f"{slug}: referenced instructions were not supplied: {', '.join(missing)}")
 
-    def step_order(item: tuple[Any, Any]) -> int:
-        key, _ = item
-        text = str(key)
-        if not text.isdigit() or int(text) < 1:
-            raise ObsError(f"{slug}: invalid plan step index: {key!r}")
-        return int(text)
-
-    ordered = sorted(raw_steps.items(), key=step_order)
-    expected = list(range(1, len(ordered) + 1))
-    actual = [int(str(key)) for key, _ in ordered]
-    if actual != expected:
-        raise ObsError(f"{slug}: plan step indexes must be contiguous from 1; got {actual}")
-
-    for ordinal, (_, step) in enumerate(ordered, 1):
-        if not isinstance(step, dict):
-            raise ObsError(f"{slug}: step {ordinal} must be an object")
-        refs = step.get("instruction_slugs", {})
-        if refs is None:
-            refs = {}
-        if not isinstance(refs, dict):
-            raise ObsError(f"{slug}: step {ordinal} instruction_slugs must be an object")
-        for label in ("role", "context", "specifics", "instructions"):
-            value = refs.get(label, [])
-            if not isinstance(value, list) or any(not isinstance(item, str) for item in value):
-                raise ObsError(
-                    f"{slug}: step {ordinal} instruction_slugs.{label} must be a slug list"
-                )
-
-    instruction_results = sync_instructions(cwd, instruction_sets or [])
-
-    envelope = upload_record(type="plan", identity=slug, content=content, extra={})
-    line = json.dumps(envelope, ensure_ascii=False) + "\n"
-    result = run(
-        [autoscribe_bin(), "upload", "plans"],
-        cwd=cwd,
-        input_text=line,
+    outputs: list[str] = []
+    if instructions:
+        result = run([autoscribe_bin(), "upload", "instructions"], cwd=cwd, input_text=_ndjson(instructions))
+        if result.stdout.strip():
+            outputs.append(result.stdout.strip())
+    plan_record = upload_record(
+        type="plan",
+        identity=slug,
+        content=content,
+        extra={"publication_ulid": publication},
     )
+    result = run([autoscribe_bin(), "upload", "plans"], cwd=cwd, input_text=_ndjson([plan_record]))
+    if result.stdout.strip():
+        outputs.append(result.stdout.strip())
     return {
-        "record": envelope,
-        "instructions": instruction_results,
-        "pipeline_output": result.stdout.strip(),
+        "record": plan_record,
+        "publication_ulid": publication,
+        "instruction_count": len(instructions),
+        "instructions": [record["identity"] for record in instructions],
+        "pipeline_output": "\n".join(outputs),
     }
 
 
@@ -177,147 +221,3 @@ def delete_plan(slug: str, *, cwd: Path) -> dict[str, Any]:
     args = [part.format(slug=slug) for part in command.split()]
     result = run(args, cwd=cwd)
     return {"slug": slug, "pipeline_output": result.stdout.strip()}
-
-
-
-
-
-def _plan_path(cwd: Path, slug: str) -> Path:
-    plan_slug = str(slug or "").strip()
-    if not plan_slug:
-        raise ObsError("dispatch requires plan_slug")
-    if not plan_slug.startswith("plan.") or any(ch in plan_slug for ch in "/\\"):
-        raise ObsError(f"invalid plan slug: {plan_slug}")
-    path = (cwd / "_plans" / f"{plan_slug}.json").resolve()
-    try:
-        path.relative_to(cwd.resolve())
-    except ValueError as exc:
-        raise ObsError(f"plan path escaped active vault: {path}") from exc
-    return path
-
-
-def _rg_slug_paths(cwd: Path, slug: str) -> list[Path]:
-    """Find Markdown instruction files whose frontmatter contains the exact slug."""
-    result = run(
-        ["rg", "-l", "--glob", "*.md", "--", rf"^slug:\s*{slug.replace('.', r'\.') }\s*$", "."],
-        cwd=cwd,
-        check=False,
-    )
-    if result.returncode not in (0, 1):
-        raise ObsError(f"rg failed while resolving {slug}: {result.stderr.strip()}")
-    return [(cwd / line.strip()).resolve() for line in result.stdout.splitlines() if line.strip()]
-
-
-def _single_slug_path(cwd: Path, slug: str, *, label: str) -> Path:
-    matches = _rg_slug_paths(cwd, slug)
-    if not matches:
-        raise ObsError(f"{label} slug not found in vault: {slug}")
-    if len(matches) > 1:
-        rendered = ", ".join(path.relative_to(cwd.resolve()).as_posix() for path in matches)
-        raise ObsError(f"duplicate {label} slug {slug}: {rendered}")
-    return matches[0]
-
-
-def load_local_plan(cwd: Path, slug: str) -> dict[str, Any]:
-    """Load _plans/<slug>.json directly; plans do not require ripgrep."""
-    plan_slug = str(slug or "").strip()
-    path = _plan_path(cwd, plan_slug)
-    if not path.is_file():
-        raise ObsError(f"plan not found: {path.relative_to(cwd.resolve()).as_posix()}")
-    try:
-        record = json.loads(path.read_text(encoding="utf-8"))
-    except json.JSONDecodeError as exc:
-        raise ObsError(f"{path}: invalid JSON plan: {exc}") from exc
-    if not isinstance(record, dict):
-        raise ObsError(f"{path}: plan JSON must be an object")
-    actual = str(record.get("record_identity") or record.get("slug") or "").strip()
-    if actual != plan_slug:
-        raise ObsError(f"{path}: expected plan slug {plan_slug}, found {actual or '<empty>'}")
-    return {
-        **record,
-        "record_type": "plan",
-        "record_identity": plan_slug,
-        "slug": plan_slug,
-        "path": path.relative_to(cwd.resolve()).as_posix(),
-    }
-
-
-def _sync_payload(record: dict[str, Any], *, slug: str) -> dict[str, Any]:
-    payload = record.get("payload")
-    if not isinstance(payload, dict):
-        raise ObsError(f"{slug}: local plan must contain payload")
-    steps = payload.get("steps")
-    if not isinstance(steps, dict) or not steps:
-        raise ObsError(f"{slug}: local plan payload must contain non-empty steps")
-    return dict(payload)
-
-
-def _instruction_slugs(payload: dict[str, Any], *, plan_slug: str) -> list[str]:
-    found: list[str] = []
-    seen: set[str] = set()
-    steps = payload.get("steps") or {}
-    for step_number, step in steps.items():
-        if not isinstance(step, dict):
-            raise ObsError(f"{plan_slug}: step {step_number} must be an object")
-        refs = step.get("instruction_slugs") or {}
-        if not isinstance(refs, dict):
-            raise ObsError(f"{plan_slug}: step {step_number} instruction_slugs must be an object")
-        for label in ("role", "context", "specifics", "instructions"):
-            values = refs.get(label, [])
-            if isinstance(values, str):
-                values = [values]
-            if not isinstance(values, list) or any(not isinstance(value, str) for value in values):
-                raise ObsError(f"{plan_slug}: step {step_number} instruction_slugs.{label} must be strings")
-            for value in values:
-                value = value.strip()
-                if value and value not in seen:
-                    seen.add(value)
-                    found.append(value)
-    return found
-
-
-def _git_dirty(cwd: Path, relpath: str) -> bool:
-    return relpath in set(__import__("obs.git", fromlist=["dirty_files"]).dirty_files(cwd))
-
-
-def sync_plan(record: dict[str, Any], *, cwd: Path) -> dict[str, Any]:
-    """Upload missing or Git-dirty plan/instruction records; never hash them."""
-    from .instruction_upload import sync_instruction
-
-    slug = str(record.get("record_identity") or record.get("slug") or "").strip()
-    if not slug:
-        raise ObsError("dispatch plan record missing record_identity")
-    payload = _sync_payload(record, slug=slug)
-
-    snapshot = pipeline_snapshot("control")
-    instruction_registry = snapshot.get("registries", {}).get("instructions", {})
-    remote_instruction_slugs = set(instruction_registry) if isinstance(instruction_registry, dict) else set()
-    instruction_results: list[dict[str, Any]] = []
-    for instruction_slug in _instruction_slugs(payload, plan_slug=slug):
-        source = _single_slug_path(cwd, instruction_slug, label="instruction")
-        relpath = source.relative_to(cwd.resolve()).as_posix()
-        instruction_results.append(sync_instruction(
-            cwd,
-            slug=instruction_slug,
-            path=str(source),
-            source_path=relpath,
-            remote_present=instruction_slug in remote_instruction_slugs,
-            local_dirty=_git_dirty(cwd, relpath),
-        ))
-
-    plan_relpath = str(record.get("path") or "").strip()
-    remote_plan_slugs = {item["slug"] for item in list_plans()}
-    should_upload = slug not in remote_plan_slugs or (plan_relpath and _git_dirty(cwd, plan_relpath))
-    if not should_upload:
-        return {"slug": slug, "status": "current", "uploaded": False, "instructions": instruction_results}
-
-    envelope = upload_record(type="plan", identity=slug, content=payload, extra={"source_path": plan_relpath} if plan_relpath else {})
-    result = run([autoscribe_bin(), "upload", "plans"], cwd=cwd,
-                 input_text=json.dumps(envelope, ensure_ascii=False) + "\n")
-    return {
-        "slug": slug,
-        "status": "uploaded",
-        "uploaded": True,
-        "instructions": instruction_results,
-        "pipeline_output": result.stdout.strip(),
-    }

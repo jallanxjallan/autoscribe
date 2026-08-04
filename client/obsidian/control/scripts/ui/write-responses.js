@@ -8,6 +8,7 @@ const loadControl = (relativePath) => nodeRequire(pathMod.join(controlVaultRoot,
 
 const { listTransportRuns, getResponseReview, decideResponse } = loadControl("scripts/lib/git-transport.js");
 const { element: el, renderDiff } = loadControl("scripts/lib/diff-view.js");
+const { runFeederCommand } = loadControl("scripts/lib/feeder-command.js");
 
 function formatRun(run) {
   const when = run.created_at ? new Date(run.created_at).toLocaleString() : "unknown time";
@@ -15,7 +16,7 @@ function formatRun(run) {
 }
 
 async function renderWriteResponses({ app, container }) {
-  const state = { busy: false, runs: [], branch: "", identity: "", review: null, error: "", notice: "" };
+  const state = { busy: false, retrieving: true, runs: [], branch: "", identity: "", review: null, error: "", notice: "Retrieving available results…" };
 
   function loadRuns() {
     state.runs = listTransportRuns(app).filter((run) => run.status === "response_pending");
@@ -102,6 +103,7 @@ async function renderWriteResponses({ app, container }) {
 
     if (state.error) container.appendChild(el("pre", { style: "white-space:pre-wrap;" }, state.error));
     if (state.notice) container.appendChild(el("p", {}, state.notice));
+    if (state.retrieving) { container.appendChild(el("p", {}, "Retrieving available results from feeder…")); return; }
     if (!state.runs.length && !state.error) { container.appendChild(el("p", {}, "No downloaded responses await a decision.")); return; }
     if (!state.review) return;
     container.appendChild(el("div", { style: "margin-bottom:0.75em;" }, `Branch: ${state.branch}`));
@@ -111,7 +113,26 @@ async function renderWriteResponses({ app, container }) {
     actions.appendChild(el("button", { onclick: () => decideOne("declined"), disabled: state.busy }, "Decline overwrite"));
     container.appendChild(actions);
   }
-  refresh();
+  render();
+  try {
+    const retrieval = await runFeederCommand(app, ["retrieve-results"]);
+    const detail = [retrieval.stdout.trim(), retrieval.stderr.trim()].filter(Boolean).join("\n");
+    state.notice = detail || "Result retrieval completed.";
+  } catch (error) {
+    const message = error.message || String(error);
+    if (/no waiting autoscribe\/run\/\* branch found|no waiting|no claimed/i.test(message)) {
+      state.notice = "No claimed runs currently have results to retrieve.";
+    } else {
+      console.error(error);
+      state.error = message;
+      state.notice = "Result retrieval failed. Use obs log from this vault for details.";
+    }
+  } finally {
+    state.retrieving = false;
+    try { loadRuns(); }
+    catch (error) { state.error = state.error || error.message || String(error); state.review = null; }
+    render();
+  }
 }
 
 

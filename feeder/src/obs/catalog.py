@@ -45,7 +45,7 @@ def _roots(active: Path, roots: Iterable[str] | None, library_vault: str | None)
     return result
 
 
-_INSTRUCTION_SLUG = re.compile(r"(?mi)^\s*slug\s*:\s*[\"']?ins\.")
+_INSTRUCTION_SLUG = re.compile(r"(?mi)^\s*slug\s*:\s*[\"\']?(?:std|rol|ctx|tsk)\.")
 
 
 def _local_instruction(active: Path, root: Path, path: Path) -> dict[str, Any] | None:
@@ -59,13 +59,16 @@ def _local_instruction(active: Path, root: Path, path: Path) -> dict[str, Any] |
     except (yaml.YAMLError, ValueError) as exc:
         raise ObsError(f"invalid instruction frontmatter in {path}: {exc}") from exc
     slug = str(document.frontmatter.get("slug") or "").strip()
-    if not slug.startswith("ins."):
+    if not slug.startswith(("std.", "rol.", "ctx.", "tsk.")):
         return None
     rel = path.relative_to(root).as_posix()
     state = git.file_state(root, rel) if (root / ".git").exists() else {"repo_state": "untracked-repository"}
     return {
         "slug": slug,
         "kind": "instruction",
+        "type": str(document.frontmatter.get("type") or "instruction").strip(),
+        "scope": str(document.frontmatter.get("scope") or "").strip().lower(),
+        "operation": str(document.frontmatter.get("operation") or "").strip(),
         "label": str(document.frontmatter.get("title") or document.frontmatter.get("label") or path.stem),
         "source": "active" if root == active else ("library" if root.name == "Library" else root.name),
         "root": str(root),
@@ -105,7 +108,7 @@ def instruction_catalog(active: Path, *, roots: Iterable[str] | None = None,
             if not isinstance(raw, dict):
                 continue
             slug = str(raw.get("slug") or raw.get("record_identity") or "").strip()
-            if not slug.startswith("ins."):
+            if not slug.startswith(("std.", "rol.", "ctx.", "tsk.")):
                 continue
             pipeline = {**raw, "slug": slug, "kind": "instruction", "pipeline": True, "source": "pipeline"}
             if slug in merged:

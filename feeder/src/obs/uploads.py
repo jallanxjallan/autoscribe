@@ -18,7 +18,7 @@ from .contracts import enqueue_record, provisional_slug, upload_record
 from .executables import autoscribe_bin
 from .process import run
 
-INSTRUCTION_PREFIXES = {"ins", "gbl", "cxt", "spc"}
+INSTRUCTION_PREFIXES = {"std", "rol", "ctx", "tsk"}
 
 
 def _sha256(text: str) -> str:
@@ -256,7 +256,6 @@ def dispatch_paths(
     if combined_identity:
         if Path(combined_identity).name != combined_identity or combined_identity in {".", ".."}:
             raise ObsError("combined record basename must not contain a directory path")
-    plan_sync = None
 
     items: list[dict[str, Any]] = []
     seen: set[str] = set()
@@ -273,9 +272,7 @@ def dispatch_paths(
     if not combined_identity:
         _assert_unique(items, "dispatch")
 
-    from .plans import load_local_plan, sync_plan
     del plan_record
-    effective_plan_record = load_local_plan(repo, plan)
 
     stamp = datetime.now().astimezone().strftime("%Y-%m-%d %H:%M:%S %z")
     user_message = str(message or "").strip()
@@ -303,10 +300,7 @@ def dispatch_paths(
             "commit": None,
             "tag": None,
             "dry_run": True,
-            "plan_sync": plan_sync,
         }
-
-    plan_sync = sync_plan(effective_plan_record, cwd=repo)
 
     calls: list[dict[str, Any]] = []
     if combined_identity:
@@ -360,7 +354,6 @@ def dispatch_paths(
         "pipeline_output": pipeline_output,
         "tag": ({"name": tag_name, "plan_slug": plan, "timestamp": stamp} if tag_name else None),
         "dry_run": False,
-        "plan_sync": plan_sync,
     }
 
 
