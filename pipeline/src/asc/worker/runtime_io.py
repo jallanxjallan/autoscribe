@@ -24,7 +24,7 @@ def _load_previous_result(runtime:Runtime)->Result:
     return result
 
 def load_instructions(instruction_keys):
-    preferred=("role","context","instructions")
+    preferred=("standing","role","context","task","directive")
     labels=[x for x in preferred if x in instruction_keys]+[x for x in instruction_keys if x not in preferred]
     keys=[]
     for label in labels:

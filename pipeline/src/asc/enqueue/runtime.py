@@ -7,11 +7,11 @@ from typing import Any
 
 from asc.models.control.instruction import Instruction
 from asc.models.process.runtime import Runtime
-from asc.state.slugmap import SlugMap
+from asc.state.publications import resolve as resolve_publication
 
 RUNTIME_TTL_SECONDS = 60 * 60 * 24
 DIRECTIVE_TTL_SECONDS = 60 * 60
-INSTRUCTION_ORDER = ("role", "context", "specifics", "instructions", "directive")
+INSTRUCTION_ORDER = ("standing", "role", "context", "task", "directive")
 
 
 def materialize_runtimes(
@@ -19,6 +19,7 @@ def materialize_runtimes(
     call_identity: str,
     plan: Any,
     directive: str | None = None,
+    publication_ulid: str | None = None,
 ) -> tuple[Runtime, ...]:
     """Compile and save every embedded plan step for one call.
 
@@ -46,7 +47,9 @@ def materialize_runtimes(
             args = _step_args(step, ordinal=ordinal)
             engine = _engine(step, args=args, ordinal=ordinal)
             engine_kind = _engine_kind(step, args=args, ordinal=ordinal)
-            instruction_keys = _resolve_instruction_keys(step, ordinal=ordinal)
+            instruction_keys = _resolve_instruction_keys(
+                step, ordinal=ordinal, publication_ulid=publication_ulid
+            )
             if ordinal == 1 and directive_instruction is not None:
                 instruction_keys["directive"] = directive_instruction.raw_key
 
@@ -132,22 +135,27 @@ def _resolve_instruction_keys(
     step: Mapping[str, Any],
     *,
     ordinal: int,
+    publication_ulid: str | None,
 ) -> dict[str, str | list[str]]:
     raw = step.get("instruction_slugs", step.get("instructions"))
     if raw in (None, ""):
         instruction = step.get("instruction")
-        raw = {} if instruction in (None, "") else {"instructions": instruction}
+        raw = {} if instruction in (None, "") else {"task": instruction}
     if raw in (None, ""):
         return {}
     if isinstance(raw, list):
-        legacy_order = INSTRUCTION_ORDER[:-1]
-        if len(raw) > len(legacy_order):
+        if len(raw) > 4:
             raise ValueError(f"plan step {ordinal} has too many legacy instruction references")
-        raw = {legacy_order[index]: value for index, value in enumerate(raw)}
+        # Historical positional order was role, context, specifics, instructions.
+        # Both former bottom-of-stack slots now normalize to task.
+        raw = {
+            "role": raw[0] if len(raw) > 0 else None,
+            "context": raw[1] if len(raw) > 1 else None,
+            "task": [value for value in raw[2:4] if value not in (None, "", [])],
+        }
     if not isinstance(raw, Mapping):
         raise ValueError(f"plan step {ordinal} instruction references must be a labeled object")
 
-    resolver = SlugMap()
     resolved: dict[str, str | list[str]] = {}
     for label in INSTRUCTION_ORDER[:-1]:
         reference = raw.get(label)
@@ -173,7 +181,9 @@ def _resolve_instruction_keys(
             )
 
         keys = [
-            resolver.resolve(item, expected_kind="instruction")
+            resolve_publication(
+                kind="instruction", slug=item, publication_ulid=publication_ulid
+            )[1]
             for item in clean
         ]
         # Preserve the representation supplied by the plan. Older plans and

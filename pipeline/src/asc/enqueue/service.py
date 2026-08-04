@@ -47,6 +47,7 @@ def enqueue_record(record: EnqueueRecord) -> EnqueuedCall:
             call_identity=call.identity,
             plan=record.plan.plan,
             directive=record.directive,
+            publication_ulid=record.plan.publication_ulid,
         )
         job = create_job(
             call_identity=call.identity,
