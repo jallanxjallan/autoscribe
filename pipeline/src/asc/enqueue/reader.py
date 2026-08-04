@@ -34,8 +34,7 @@ def iter_enqueue_records(stream: TextIO) -> Iterator[EnqueueRecord]:
         call_slug = _required_slug(raw, "call", parsed.line_number)
         plan_slug = _required_slug(raw, "plan", parsed.line_number)
         call_key, call = load_call(call_slug)
-        publication_ulid = _optional_ulid(raw, "publication_ulid", parsed.line_number)
-        plan = load_plan(plan_slug, publication_ulid=publication_ulid)
+        plan = load_plan(plan_slug)
         extracted = extract_leading_directive(call.content)
         yield EnqueueRecord(
             call_slug=call_slug,
@@ -54,15 +53,6 @@ def _required_slug(raw: Mapping[str, Any], field: str, line_number: int) -> str:
         raise ValueError(f"row {line_number} missing required non-empty field: {field}")
     return value.strip()
 
-
-
-def _optional_ulid(raw: Mapping[str, Any], field: str, line_number: int) -> str | None:
-    value = raw.get(field)
-    if value in (None, ""):
-        return None
-    if not isinstance(value, str) or len(value.strip()) != 26:
-        raise ValueError(f"row {line_number} field {field} must be a 26-character ULID")
-    return value.strip()
 
 
 def load_enqueue_records(stream: TextIO) -> list[EnqueueRecord]:

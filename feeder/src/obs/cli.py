@@ -91,8 +91,9 @@ def main(argv: list[str] | None = None) -> int:
             downloaded = result.get("downloaded", [])
             missing = result.get("missing", [])
             already = result.get("already_downloaded", [])
-            detail = summarize_items([*downloaded, *missing, *already])
-            write_log(repo, command, f"completed: {len(downloaded)} downloaded, {len(missing)} missing, {len(already)} already downloaded\n{detail}")
+            detail = summarize_items([*downloaded, *missing])
+            summary = f"completed: {len(downloaded)} downloaded, {len(missing)} missing, {len(already)} already resolved"
+            write_log(repo, command, summary + (f"\n{detail}" if detail else ""))
         return 0
     except (ObsError, OSError, ValueError, json.JSONDecodeError) as exc:
         if command == "ipc":
@@ -142,9 +143,6 @@ def _report_retrieval(result: dict[str, list[dict]], dry_run: bool) -> None:
         slug = item.get("record_identity") or "?"
         path = item.get("source_path") or ""
         print(f"  missing     {slug}  {path}")
-    for item in already:
-        slug = item.get("record_identity") or "?"
-        print(f"  {slug} already downloaded use --force to download again")
 
 
 if __name__ == "__main__":

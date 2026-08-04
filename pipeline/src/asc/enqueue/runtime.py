@@ -7,7 +7,7 @@ from typing import Any
 
 from asc.models.control.instruction import Instruction
 from asc.models.process.runtime import Runtime
-from asc.state.publications import resolve as resolve_publication
+from asc.state.slugmap import SlugMap
 
 RUNTIME_TTL_SECONDS = 60 * 60 * 24
 DIRECTIVE_TTL_SECONDS = 60 * 60
@@ -19,7 +19,6 @@ def materialize_runtimes(
     call_identity: str,
     plan: Any,
     directive: str | None = None,
-    publication_ulid: str | None = None,
 ) -> tuple[Runtime, ...]:
     """Compile and save every embedded plan step for one call.
 
@@ -48,7 +47,7 @@ def materialize_runtimes(
             engine = _engine(step, args=args, ordinal=ordinal)
             engine_kind = _engine_kind(step, args=args, ordinal=ordinal)
             instruction_keys = _resolve_instruction_keys(
-                step, ordinal=ordinal, publication_ulid=publication_ulid
+                step, ordinal=ordinal
             )
             if ordinal == 1 and directive_instruction is not None:
                 instruction_keys["directive"] = directive_instruction.raw_key
@@ -96,7 +95,11 @@ def delete_ephemeral_instructions(runtimes: tuple[Runtime, ...]) -> None:
 def _save_directive_instruction(*, call_identity: str, content: str) -> Instruction:
     """Persist the call-scoped directive using the call identity."""
 
-    instruction = Instruction(identity=call_identity, content=content)
+    instruction = Instruction(
+        identity=call_identity,
+        slug=f"directive.{call_identity}",
+        content=content,
+    )
     instruction.save(ttl=DIRECTIVE_TTL_SECONDS)
     return instruction
 
@@ -135,7 +138,6 @@ def _resolve_instruction_keys(
     step: Mapping[str, Any],
     *,
     ordinal: int,
-    publication_ulid: str | None,
 ) -> dict[str, str | list[str]]:
     raw = step.get("instruction_slugs", step.get("instructions"))
     if raw in (None, ""):
@@ -180,12 +182,8 @@ def _resolve_instruction_keys(
                 f"plan step {ordinal} instruction {label} contains an empty slug"
             )
 
-        keys = [
-            resolve_publication(
-                kind="instruction", slug=item, publication_ulid=publication_ulid
-            )[1]
-            for item in clean
-        ]
+        slugmap = SlugMap()
+        keys = [slugmap.resolve(item, expected_kind="instruction") for item in clean]
         # Preserve the representation supplied by the plan. Older plans and
         # consumers continue to receive one key as a string; current plans can
         # carry an ordered list of keys under any instruction label.

@@ -116,8 +116,11 @@ async function renderWriteResponses({ app, container }) {
   render();
   try {
     const retrieval = await runFeederCommand(app, ["retrieve-results"]);
-    const detail = [retrieval.stdout.trim(), retrieval.stderr.trim()].filter(Boolean).join("\n");
-    state.notice = detail || "Result retrieval completed.";
+    const lines = [retrieval.stdout, retrieval.stderr]
+      .flatMap((value) => String(value || "").split(/\r?\n/))
+      .map((line) => line.trim())
+      .filter(Boolean);
+    state.notice = lines.find((line) => line.startsWith("retrieve-results:")) || "Result retrieval completed.";
   } catch (error) {
     const message = error.message || String(error);
     if (/no waiting autoscribe\/run\/\* branch found|no waiting|no claimed/i.test(message)) {
