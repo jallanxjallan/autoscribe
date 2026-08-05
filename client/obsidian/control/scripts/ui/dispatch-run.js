@@ -10,76 +10,97 @@ const path = require("path");
 
 const TRANSCLUSION_RE = /!\[\[([^\]]+)\]\]/g;
 
-function clipboardCandidates(text) {
-  const rows = String(text || "")
-    .split(/\r?\n/)
-    .map((line) => line.trim())
-    .filter(Boolean);
+const SESSION_KEY = "__autoscribeDispatchRunSessions";
 
-  if (!rows.length) return [];
+function sessionRegistry() {
+  if (!globalThis[SESSION_KEY]) globalThis[SESSION_KEY] = new Map();
+  return globalThis[SESSION_KEY];
+}
 
-  const firstCells = rows[0].split("\t").map((cell) => cell.trim().toLowerCase());
-  const fileNameIndex = firstCells.findIndex((cell) => cell === "file name" || cell === "filename" || cell === "file");
-  const pathIndex = firstCells.findIndex((cell) => cell === "path" || cell === "filepath" || cell === "file path");
-  const hasHeader = fileNameIndex >= 0 || pathIndex >= 0;
-  const candidates = [];
+function vaultSessionKey(app) {
+  return app.vault.adapter.getBasePath?.() || app.vault.adapter.basePath || app.vault.getName();
+}
 
-  for (let index = hasHeader ? 1 : 0; index < rows.length; index += 1) {
-    const row = rows[index];
-    const cells = row.split("\t").map((cell) => cell.trim());
-    let candidate = "";
-
-    if (pathIndex >= 0) candidate = cells[pathIndex] || "";
-    if (!candidate && fileNameIndex >= 0) candidate = cells[fileNameIndex] || "";
-    if (!candidate) candidate = cells.find((cell) => /\.md$/i.test(cell)) || "";
-
-    if (!candidate) {
-      const wiki = row.match(/\[\[([^\]|]+)(?:\|[^\]]+)?\]\]/);
-      if (wiki) candidate = wiki[1].trim();
-    }
-
-    if (candidate) candidates.push(candidate);
+function getDispatchSession(app) {
+  const registry = sessionRegistry();
+  const key = vaultSessionKey(app);
+  let session = registry.get(key);
+  if (!session) {
+    session = { candidates: new Map(), cleanupRegistered: false };
+    registry.set(key, session);
   }
-
-  return candidates;
+  if (!session.cleanupRegistered) {
+    const clear = () => registry.delete(key);
+    session.cleanupRegistered = true;
+    try { app.workspace.on("quit", clear); } catch (_) {}
+    try { window.addEventListener("beforeunload", clear, { once: true }); } catch (_) {}
+  }
+  return session;
 }
 
 function normalizeCandidate(value) {
   return String(value || "")
     .trim()
-    .replace(/^file:\/\//, "")
+    .replace(/^file:\/\//i, "")
+    .replace(/^!\[\[/, "[[")
     .replace(/^\[\[/, "")
     .replace(/\]\]$/, "")
     .split("|")[0]
+    .split("#")[0]
     .trim()
     .replace(/\\/g, "/");
 }
 
-function resolveSelection(app, text) {
-  const paths = [];
-  const seen = new Set();
+function clipboardCandidates(text) {
+  const results = [];
+  for (const line of String(text || "").split(/\r?\n/)) {
+    const trimmed = line.trim();
+    if (!trimmed) continue;
 
-  for (const raw of clipboardCandidates(text)) {
-    const candidate = normalizeCandidate(raw);
-    if (!candidate) continue;
+    const wikilinks = [...trimmed.matchAll(/!?\[\[([^\]]+)\]\]/g)];
+    if (wikilinks.length) {
+      for (const match of wikilinks) results.push(match[1]);
+      continue;
+    }
 
-    let file = app.vault.getAbstractFileByPath(candidate);
-    if (!file && !/\.md$/i.test(candidate)) {
-      file = app.vault.getAbstractFileByPath(`${candidate}.md`);
-    }
-    if (!file) {
-      file = app.metadataCache.getFirstLinkpathDest(candidate.replace(/\.md$/i, ""), "");
-    }
-    if (!file || file.extension !== "md") {
-      throw new Error(`Could not resolve selected Markdown file: ${raw}`);
-    }
-    if (!seen.has(file.path)) {
-      seen.add(file.path);
-      paths.push(file.path);
+    for (const cell of trimmed.split("\t")) {
+      const value = normalizeCandidate(cell);
+      if (!value) continue;
+      if (/^(file ?name|filename|file|path|filepath|file path|slug|title)$/i.test(value)) continue;
+      results.push(value);
     }
   }
+  return results;
+}
 
-  return paths;
+function resolveCandidate(app, raw) {
+  const candidate = normalizeCandidate(raw);
+  if (!candidate) return null;
+
+  let file = app.vault.getAbstractFileByPath(candidate);
+  if (!file && !/\.md$/i.test(candidate)) file = app.vault.getAbstractFileByPath(`${candidate}.md`);
+  if (!file) file = app.metadataCache.getFirstLinkpathDest(candidate.replace(/\.md$/i, ""), "");
+
+  if (!file && candidate.includes(".")) {
+    const matches = app.vault.getMarkdownFiles().filter((item) => {
+      const cache = app.metadataCache.getFileCache(item);
+      return String(cache?.frontmatter?.slug || "").trim() === candidate;
+    });
+    if (matches.length === 1) file = matches[0];
+  }
+
+  return file?.extension === "md" ? file : null;
+}
+
+function appendClipboardCandidates(app, session, text) {
+  let added = 0;
+  for (const raw of clipboardCandidates(text)) {
+    const file = resolveCandidate(app, raw);
+    if (!file || session.candidates.has(file.path)) continue;
+    session.candidates.set(file.path, { path: file.path, title: file.basename, selected: true });
+    added += 1;
+  }
+  return added;
 }
 
 function splitFrontmatter(text) {
@@ -213,42 +234,80 @@ async function renderDispatchRun({ app, container }) {
   const { listPlanRecords, loadPlanRecord } = require(path.join(vaultRoot, "_control/scripts/plans/plan-store.js"));
   const { runFeederCommand } = require(path.join(vaultRoot, "_control/scripts/lib/feeder-command.js"));
 
-  const heading = container.createEl("h2", { text: "Dispatch selected files" });
+  const session = getDispatchSession(app);
+  const heading = container.createEl("h2", { text: "Dispatch candidate files" });
   heading.style.marginTop = "0";
+
   const selectionRow = container.createEl("div");
   selectionRow.style.display = "flex";
-  selectionRow.style.gap = "0.75em";
+  selectionRow.style.gap = "0.5em";
   selectionRow.style.alignItems = "center";
+  selectionRow.style.flexWrap = "wrap";
   selectionRow.style.marginBottom = "0.75em";
 
-  const status = selectionRow.createEl("div", { text: "Loading selection…" });
-  const reloadButton = selectionRow.createEl("button", { text: "Reload Clipboard" });
-  const list = container.createEl("ul");
-  list.style.marginTop = "0";
+  const status = selectionRow.createEl("div", { text: "Loading candidates…" });
+  status.style.marginRight = "auto";
+  const clearButton = selectionRow.createEl("button", { text: "Clear Dispatch List" });
+  const selectAllButton = selectionRow.createEl("button", { text: "Select all" });
+  const selectNoneButton = selectionRow.createEl("button", { text: "Select none" });
+  const list = container.createEl("div");
+  list.style.display = "grid";
+  list.style.gap = "0.35em";
+  list.style.marginBottom = "1em";
 
-  let selection = [];
-  async function loadClipboardSelection() {
-    reloadButton.disabled = true;
-    status.setText("Loading clipboard selection…");
+  function selectedPaths() {
+    return [...session.candidates.values()].filter((item) => item.selected).map((item) => item.path);
+  }
+
+  function renderCandidates(note = "") {
     list.empty();
-    try {
-      selection = resolveSelection(app, await navigator.clipboard.readText());
-      if (!selection.length) {
-        status.setText("The clipboard selection contains no resolvable Markdown files.");
-        return;
-      }
-      status.setText(`${selection.length} selected file${selection.length === 1 ? "" : "s"}`);
-      for (const selectedPath of selection) list.createEl("li", { text: selectedPath });
-    } catch (error) {
-      selection = [];
-      status.setText(`Could not load clipboard selection: ${error.message || error}`);
-    } finally {
-      reloadButton.disabled = false;
+    const candidates = [...session.candidates.values()];
+    const selectedCount = candidates.filter((item) => item.selected).length;
+    status.setText(
+      candidates.length
+        ? `${candidates.length} candidate${candidates.length === 1 ? "" : "s"}; ${selectedCount} selected${note ? ` — ${note}` : ""}`
+        : `No candidate files in this vault session${note ? ` — ${note}` : ""}`
+    );
+    for (const item of candidates) {
+      const row = list.createEl("label");
+      row.style.display = "flex";
+      row.style.gap = "0.55em";
+      row.style.alignItems = "baseline";
+      const checkbox = row.createEl("input", { attr: { type: "checkbox" } });
+      checkbox.checked = item.selected;
+      checkbox.addEventListener("change", () => {
+        item.selected = checkbox.checked;
+        renderCandidates();
+      });
+      const text = row.createSpan();
+      text.createEl("strong", { text: item.title });
+      text.createSpan({ text: ` — ${item.path}` });
     }
   }
 
-  reloadButton.addEventListener("click", loadClipboardSelection);
-  await loadClipboardSelection();
+  async function addClipboardSelection() {
+    try {
+      const added = appendClipboardCandidates(app, session, await navigator.clipboard.readText());
+      renderCandidates(added ? `added ${added} from clipboard` : "clipboard contained no new file references");
+    } catch (error) {
+      renderCandidates(`could not read clipboard: ${error.message || error}`);
+    }
+  }
+
+  clearButton.addEventListener("click", () => {
+    session.candidates.clear();
+    renderCandidates("dispatch list cleared");
+  });
+  selectAllButton.addEventListener("click", () => {
+    for (const item of session.candidates.values()) item.selected = true;
+    renderCandidates();
+  });
+  selectNoneButton.addEventListener("click", () => {
+    for (const item of session.candidates.values()) item.selected = false;
+    renderCandidates();
+  });
+
+  await addClipboardSelection();
 
   const planRows = listPlanRecords(app);
   if (!Array.isArray(planRows) || !planRows.length) {
@@ -295,8 +354,9 @@ async function renderDispatchRun({ app, container }) {
     runButton.disabled = true;
     result.setText("Resolving transclusions and creating transport branch…");
     try {
+      const selection = selectedPaths();
       if (!selection.length) {
-        throw new Error("Reload the clipboard with at least one resolvable Markdown file.");
+        throw new Error("Select at least one candidate file.");
       }
       const flattened = await flattenInPlace(app, selection);
       const basename = combineBasename.value.trim();
@@ -311,6 +371,8 @@ async function renderDispatchRun({ app, container }) {
         combineBasename: combine.checked ? basename : ""
       });
       const feeder = await runFeederCommand(app, ["dispatch-run", "--branch", transport.branch], { detached: true });
+      session.candidates.clear();
+      renderCandidates("manifest cleared after dispatch");
       result.setText(
         `Transport branch created and handed to feeder.
 ` +
