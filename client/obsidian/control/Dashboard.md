@@ -90,13 +90,13 @@ function folderSection(title, requestedPath) {
 
 dv.header(2, "Workflow");
 for (const [label, macro] of [
-  ["Commit Files", "macros/autoscribe-commit-files.js"],
   ["Stage Files", "macros/autoscribe-stage-files.js"],
   ["Define Plan", "macros/autoscribe-define-plan.js"],
   ["Dispatch Run", "macros/autoscribe-dispatch-run.js"],
   ["Write Responses", "macros/autoscribe-write-responses.js"],
   ["Plan History", "macros/autoscribe-plan-history.js"],
   ["File State", "macros/autoscribe-file-state.js"],
+  ["File History", "macros/autoscribe-file-history.js"],
 ]) command(label, macro);
 
 link("System Status", "_control/panels/System Status.md");

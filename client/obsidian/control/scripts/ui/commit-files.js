@@ -7,7 +7,7 @@ const controlVaultRoot = runtimeApp.vault.adapter.getBasePath?.() || runtimeApp.
 const loadControl = (relativePath) => nodeRequire(pathMod.join(controlVaultRoot, "_control", ...relativePath.split("/")));
 
 const path = require("node:path");
-const { callFeeder } = loadControl("scripts/lib/feeder-ipc.js");
+const { callFeederAsync } = loadControl("scripts/lib/feeder-ipc.js");
 const { readClipboardSelection } = loadControl("scripts/lib/clipboard-selection.js");
 
 function element(tag, attrs = {}, text = null) {
@@ -223,7 +223,7 @@ async function renderCommitFiles({ app, container }) {
 
     try {
       const parsed = await readClipboardSelection(app);
-      const result = callFeeder(app, "git.resolve_selection", { items: parsed });
+      const result = await callFeederAsync(app, "git.resolve_selection", { items: parsed });
       const normalized = normalizedResponse(result, parsed);
       state.parsed = parsed;
       state.items = normalized.items;
@@ -243,7 +243,7 @@ async function renderCommitFiles({ app, container }) {
     }
   }
 
-  function commitFiles() {
+  async function commitFiles() {
     state.error = "";
     const message = description.value.trim();
     const items = state.items;
@@ -259,7 +259,7 @@ async function renderCommitFiles({ app, container }) {
       state.committing = true;
       updateControls();
 
-      const result = callFeeder(app, "git.commit_selection", {
+      const result = await callFeederAsync(app, "git.commit_selection", {
         message,
         commit_type: commitType,
         tag_type: commitType,
@@ -278,7 +278,7 @@ async function renderCommitFiles({ app, container }) {
       const tag = String(result?.tag || result?.commit_tag || "").trim();
       description.value = "";
       new Notice(`Committed ${count} file(s) as ${commitType}: ${hash}${tag ? ` · ${tag}` : ""}`);
-      refreshSelection();
+      await refreshSelection();
     } catch (error) {
       console.error("Commit Files commit failed:", error);
       state.error = `Commit failed: ${error.message}`;

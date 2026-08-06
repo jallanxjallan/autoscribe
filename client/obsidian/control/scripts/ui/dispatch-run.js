@@ -10,98 +10,7 @@ const path = require("path");
 
 const TRANSCLUSION_RE = /!\[\[([^\]]+)\]\]/g;
 
-const SESSION_KEY = "__autoscribeDispatchRunSessions";
-
-function sessionRegistry() {
-  if (!globalThis[SESSION_KEY]) globalThis[SESSION_KEY] = new Map();
-  return globalThis[SESSION_KEY];
-}
-
-function vaultSessionKey(app) {
-  return app.vault.adapter.getBasePath?.() || app.vault.adapter.basePath || app.vault.getName();
-}
-
-function getDispatchSession(app) {
-  const registry = sessionRegistry();
-  const key = vaultSessionKey(app);
-  let session = registry.get(key);
-  if (!session) {
-    session = { candidates: new Map(), cleanupRegistered: false };
-    registry.set(key, session);
-  }
-  if (!session.cleanupRegistered) {
-    const clear = () => registry.delete(key);
-    session.cleanupRegistered = true;
-    try { app.workspace.on("quit", clear); } catch (_) {}
-    try { window.addEventListener("beforeunload", clear, { once: true }); } catch (_) {}
-  }
-  return session;
-}
-
-function normalizeCandidate(value) {
-  return String(value || "")
-    .trim()
-    .replace(/^file:\/\//i, "")
-    .replace(/^!\[\[/, "[[")
-    .replace(/^\[\[/, "")
-    .replace(/\]\]$/, "")
-    .split("|")[0]
-    .split("#")[0]
-    .trim()
-    .replace(/\\/g, "/");
-}
-
-function clipboardCandidates(text) {
-  const results = [];
-  for (const line of String(text || "").split(/\r?\n/)) {
-    const trimmed = line.trim();
-    if (!trimmed) continue;
-
-    const wikilinks = [...trimmed.matchAll(/!?\[\[([^\]]+)\]\]/g)];
-    if (wikilinks.length) {
-      for (const match of wikilinks) results.push(match[1]);
-      continue;
-    }
-
-    for (const cell of trimmed.split("\t")) {
-      const value = normalizeCandidate(cell);
-      if (!value) continue;
-      if (/^(file ?name|filename|file|path|filepath|file path|slug|title)$/i.test(value)) continue;
-      results.push(value);
-    }
-  }
-  return results;
-}
-
-function resolveCandidate(app, raw) {
-  const candidate = normalizeCandidate(raw);
-  if (!candidate) return null;
-
-  let file = app.vault.getAbstractFileByPath(candidate);
-  if (!file && !/\.md$/i.test(candidate)) file = app.vault.getAbstractFileByPath(`${candidate}.md`);
-  if (!file) file = app.metadataCache.getFirstLinkpathDest(candidate.replace(/\.md$/i, ""), "");
-
-  if (!file && candidate.includes(".")) {
-    const matches = app.vault.getMarkdownFiles().filter((item) => {
-      const cache = app.metadataCache.getFileCache(item);
-      return String(cache?.frontmatter?.slug || "").trim() === candidate;
-    });
-    if (matches.length === 1) file = matches[0];
-  }
-
-  return file?.extension === "md" ? file : null;
-}
-
-function appendClipboardCandidates(app, session, text) {
-  let added = 0;
-  for (const raw of clipboardCandidates(text)) {
-    const file = resolveCandidate(app, raw);
-    if (!file || session.candidates.has(file.path)) continue;
-    session.candidates.set(file.path, { path: file.path, title: file.basename, selected: true });
-    added += 1;
-  }
-  return added;
-}
+const { getFileManifest, appendClipboardCandidates } = loadControl("scripts/lib/file-manifest.js");
 
 function splitFrontmatter(text) {
   const match = String(text).match(/^(---\r?\n[\s\S]*?\r?\n---\r?\n?)([\s\S]*)$/);
@@ -234,7 +143,7 @@ async function renderDispatchRun({ app, container }) {
   const { listPlanRecords, loadPlanRecord } = require(path.join(vaultRoot, "_control/scripts/plans/plan-store.js"));
   const { runFeederCommand } = require(path.join(vaultRoot, "_control/scripts/lib/feeder-command.js"));
 
-  const session = getDispatchSession(app);
+  const session = getFileManifest(app);
   const heading = container.createEl("h2", { text: "Dispatch candidate files" });
   heading.style.marginTop = "0";
 

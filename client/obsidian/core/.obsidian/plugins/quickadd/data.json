@@ -59,6 +59,46 @@
           }
         ]
       }
+    },
+    {
+      "id": "2ba1ae71-b8d2-40a8-bcfe-cbd1ee68068c",
+      "name": "File State",
+      "type": "Macro",
+      "command": true,
+      "runOnStartup": false,
+      "macro": {
+        "name": "File State",
+        "id": "bc4928f7-b854-4d16-93d1-6149c009e9cf",
+        "commands": [
+          {
+            "name": "autoscribe-file-state",
+            "type": "UserScript",
+            "id": "7d8ad447-b0c7-4c3a-be17-c78e96398fe9",
+            "path": "_control/macros/autoscribe-file-state.js",
+            "settings": {}
+          }
+        ]
+      }
+    },
+    {
+      "id": "9b6f415a-5bdf-49d5-89c8-1c0e04323791",
+      "name": "Clip Note Refs",
+      "type": "Macro",
+      "command": true,
+      "runOnStartup": false,
+      "macro": {
+        "name": "Clip Note Refs",
+        "id": "15047e39-0ebe-4099-a060-71a904ff2e87",
+        "commands": [
+          {
+            "name": "autoscribe-add-active-file",
+            "type": "UserScript",
+            "id": "c782f286-60a5-4422-a271-90e62dcc6291",
+            "path": "_control/macros/autoscribe-add-active-file.js",
+            "settings": {}
+          }
+        ]
+      }
     }
   ],
   "inputPrompt": "single-line",

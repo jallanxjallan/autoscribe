@@ -10,7 +10,7 @@ const loadControl = (relativePath) => nodeRequire(pathMod.join(controlVaultRoot,
 const { spawnSync } = nodeRequire("node:child_process");
 const { buildPlanRecord } = loadControl("scripts/plans/plan-record.js");
 const { listPlanRecords, loadPlanRecord, savePlanRecord, deletePlanRecord } = loadControl("scripts/plans/plan-store.js");
-const { callFeeder } = loadControl("scripts/lib/feeder-ipc.js");
+const { callFeederAsync } = loadControl("scripts/lib/feeder-ipc.js");
 const { vaultRoot } = loadControl("scripts/lib/vault-state.js");
 const { snapshotList } = loadControl("scripts/lib/control-loader.js");
 const { makeSlug } = loadControl("scripts/lib/slug.js");
@@ -102,7 +102,7 @@ async function renderCreatePlan({ app, container }) {
   const catalogs = {
     engines: snapshotList(control, "engines"), models: snapshotList(control, "models"),
     scripts: snapshotList(control, "local_scripts"), ragProfiles: snapshotList(control, "rag_profiles"),
-    instructions: await callFeeder(app, "instructions.catalog", { include_pipeline: false }),
+    instructions: await callFeederAsync(app, "instructions.catalog", { include_pipeline: false }),
   };
   let plans = listPlanRecords(app), loaded = null, steps = [];
 
@@ -131,7 +131,7 @@ async function renderCreatePlan({ app, container }) {
   }
 
   function refreshInstructions() {
-    return callFeeder(app, "instructions.catalog", { include_pipeline: false }).then((records) => {
+    return callFeederAsync(app, "instructions.catalog", { include_pipeline: false }).then((records) => {
       catalogs.instructions = records;
       redraw();
       return records;
@@ -338,7 +338,7 @@ async function renderCreatePlan({ app, container }) {
         if (!item?.path) throw new Error(`Instruction file not found locally: ${slug}`);
         return item;
       });
-      await callFeeder(app, "plan.save", { record, instruction_sets: instructionSets, publication_ulid: publication });
+      await callFeederAsync(app, "plan.save", { record, instruction_sets: instructionSets, publication_ulid: publication });
       setStatus(`Saved and handed off ${planSlug(record)}\nPublication ULID: ${publication}\nInstructions: ${instructionSets.length}`);
     } catch (error) { setStatus(`Save failed: ${error.message || error}`); }
   });

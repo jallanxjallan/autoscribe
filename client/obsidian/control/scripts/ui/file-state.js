@@ -1,98 +1,46 @@
 "use strict";
-
 const nodeRequire = typeof require === "function" ? require : window.require;
 const pathMod = nodeRequire("node:path");
 const runtimeApp = globalThis.app;
-const controlVaultRoot = runtimeApp.vault.adapter.getBasePath?.() || runtimeApp.vault.adapter.basePath;
-const loadControl = (relativePath) => nodeRequire(pathMod.join(controlVaultRoot, "_control", ...relativePath.split("/")));
+const root = runtimeApp.vault.adapter.getBasePath?.() || runtimeApp.vault.adapter.basePath;
+const load = (p) => nodeRequire(pathMod.join(root, "_control", ...p.split("/")));
+const { el, clear, button } = load("scripts/lib/dom.js");
+const { getFileManifest, appendClipboardCandidates } = load("scripts/lib/file-manifest.js");
+const { liveState } = load("scripts/lib/file-git-history.js");
+const { callFeederAsync } = load("scripts/lib/feeder-ipc.js");
 
-const { el, clear, button } = loadControl("scripts/lib/dom.js");
-const {
-  responseHistoryForPath,
-  getArchivedResponseReview,
-  reconsiderResponse,
-} = loadControl("scripts/lib/git-transport.js");
-const { renderDiff } = loadControl("scripts/lib/diff-view.js");
-
-function renderFileState({ app, container }) {
+async function renderFileState({ app, container }) {
   clear(container);
+  const manifest = getFileManifest(app);
+  const state = { rows: [], busy: false };
+  const title = el("h2", { text: "File State" });
+  const status = el("p", { text: "Reading Git…" });
+  const toolbar = el("div"); toolbar.style.display="flex"; toolbar.style.gap=".5rem"; toolbar.style.flexWrap="wrap";
+  const add = button("Reload clipboard", async()=>{ try { const n=appendClipboardCandidates(app,manifest,await navigator.clipboard.readText()); await refresh(n ? `${n} added from clipboard` : "clipboard contained no new files"); } catch(e){ new Notice(e.message,10000); } });
+  const clearBtn = button("Clear Clipboard List", async()=>{ manifest.candidates.clear(); await refresh("clipboard list cleared"); });
+  const refreshBtn = button("Refresh Git state", ()=>refresh());
+  toolbar.append(add, clearBtn, refreshBtn);
+  const host=el("div");
+  const commit=el("div"); commit.style.display="grid"; commit.style.gap=".6rem"; commit.style.marginTop="1rem";
+  const msg=el("input", { placeholder:"Commit description" });
+  const type=el("select"); type.append(el("option",{value:"version",text:"Version"}),el("option",{value:"lock",text:"Lock"}));
+  const commitBtn=button("Commit selected files", doCommit); commitBtn.classList.add("mod-cta");
+  commit.append(msg,type,commitBtn); container.append(title,toolbar,status,host,commit);
 
-  const active = app.workspace.getActiveFile();
-  if (!active || active.extension !== "md") {
-    container.appendChild(el("p", {
-      text: "Open a Markdown file, then invoke File State again.",
-    }));
-    return;
+  function selected(){ return state.rows.filter(r=>r.checkbox.checked).map(r=>r.item); }
+  function render(){ host.replaceChildren(); const table=el("table"); table.style.width="100%"; const h=el("tr"); for(const x of ["","File","Git state","Latest commit"] ) h.append(el("th",{text:x})); table.append(h);
+    for(const row of state.rows){ const tr=el("tr"); const link=el("a",{href:row.item.path,text:row.item.title}); link.onclick=async e=>{e.preventDefault(); const file=app.vault.getAbstractFileByPath(row.item.path); if(!file)return; const leaf=app.workspace.getLeaf("tab"); await leaf.openFile(file,{active:true}); app.workspace.revealLeaf(leaf);};
+      tr.append(el("td",{},row.checkbox),el("td",{},link),el("td",{text:row.git.status}),el("td",{text:row.git.latest_commit?`${row.git.latest_commit.hash.slice(0,8)} · ${row.git.latest_commit.subject}`:"—"})); table.append(tr); }
+    host.append(table); commitBtn.disabled=!selected().length;
   }
-
-  container.appendChild(el("h2", { text: active.basename }));
-  container.appendChild(el("p", { text: active.path }));
-
-  let history;
-  try {
-    history = responseHistoryForPath(app, active.path);
-  } catch (error) {
-    container.appendChild(el("pre", { text: error.message || String(error) }));
-    return;
-  }
-
-  if (!history.length) {
-    container.appendChild(el("p", {
-      text: "No retained pipeline response was found for this file.",
-    }));
-    return;
-  }
-
-  const latest = history[0];
-  let review;
-  try {
-    review = getArchivedResponseReview(app, latest.branch, latest.record.identity);
-  } catch (error) {
-    container.appendChild(el("pre", { text: error.message || String(error) }));
-    return;
-  }
-
-  const outcome = latest.decision?.outcome || "pending";
-  container.appendChild(el("p", {
-    text: `Run ${latest.run_identity} · ${latest.plan_identity || "unknown plan"} · current decision: ${outcome}`,
-  }));
-
-  renderDiff(container, review);
-
-  const controls = el("div");
-  controls.style.display = "flex";
-  controls.style.gap = "0.75rem";
-  controls.style.marginTop = "0.75rem";
-
-  const reconsider = (nextOutcome) => {
-    try {
-      const verb = nextOutcome === "accepted" ? "accept" : "roll back";
-      if (!window.confirm(`Are you sure you want to ${verb} the retained response for ${active.path}?`)) {
-        return;
-      }
-      reconsiderResponse(app, latest.branch, latest.record.identity, nextOutcome);
-      new Notice(
-        nextOutcome === "accepted"
-          ? "Response accepted and marked for review."
-          : "Accepted response rolled back.",
-      );
-      renderFileState({ app, container });
-    } catch (error) {
-      console.error(error);
-      new Notice(`Could not reconsider response: ${error.message}`, 10000);
-    }
-  };
-
-  if (outcome === "declined") {
-    controls.appendChild(button("Accept response after all", () => reconsider("accepted")));
-  } else if (outcome === "accepted") {
-    controls.appendChild(button("Roll back accepted response", () => reconsider("declined")));
-  } else {
-    controls.appendChild(button("Accept response", () => reconsider("accepted")));
-    controls.appendChild(button("Decline response", () => reconsider("declined")));
-  }
-
-  container.appendChild(controls);
+  async function refresh(note="") { state.rows=[]; for(const item of manifest.candidates.values()){ try{ state.rows.push({item,git:liveState(app,item.path),checkbox:el("input",{type:"checkbox"})}); }catch(e){ state.rows.push({item,git:{status:`ERROR: ${e.message}`,latest_commit:null},checkbox:el("input",{type:"checkbox"})}); } }
+    for(const r of state.rows){ r.checkbox.checked=Boolean(r.item.selected); r.checkbox.onchange=()=>{r.item.selected=r.checkbox.checked;render();}; }
+    status.textContent=state.rows.length?`${state.rows.length} manifest file(s); Git read live${note?` · ${note}`:""}.`:`The Dispatch Run manifest is empty.`; render(); }
+  async function doCommit(){ try{ const items=selected(); if(!items.length) throw new Error("Select at least one file."); if(!msg.value.trim()) throw new Error("Enter a commit description."); state.busy=true; commitBtn.disabled=true;
+      const resolved=await callFeederAsync(app,"git.resolve_selection",{items}); const rows=resolved.items||resolved.files||[]; const blocked=rows.filter(x=>x.error||x.problem||x.committable===false); if(blocked.length) throw new Error("One or more selected files cannot be committed.");
+      const kind=type.value; const result=await callFeederAsync(app,"git.commit_selection",{message:msg.value.trim(),commit_type:kind,tag_type:kind,state:kind==="lock"?"locked":"versioned",items:rows});
+      new Notice(`Committed ${result.count||rows.length} file(s): ${String(result.commit?.hash||result.commit||"").slice(0,8)}`); msg.value=""; await refresh();
+    }catch(e){new Notice(`Commit failed: ${e.message}`,10000);}finally{state.busy=false;commitBtn.disabled=!selected().length;} }
+  try { const n=appendClipboardCandidates(app,manifest,await navigator.clipboard.readText()); await refresh(n ? `${n} added from clipboard` : "clipboard loaded"); } catch(e) { await refresh(`clipboard unavailable: ${e.message}`); }
 }
-
-module.exports = { renderFileState };
+module.exports={renderFileState};

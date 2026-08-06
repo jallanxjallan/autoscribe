@@ -20,15 +20,6 @@
       "key": "T"
     }
   ],
-  "workspace:toggle-pin": [
-    {
-      "modifiers": [
-        "Alt",
-        "Shift"
-      ],
-      "key": "P"
-    }
-  ],
   "editor:insert-callout": [
     {
       "modifiers": [
@@ -56,12 +47,6 @@
       "key": "H"
     }
   ],
-  "app:toggle-left-sidebar": [
-    {
-      "modifiers": [],
-      "key": "F9"
-    }
-  ],
   "editor:toggle-strikethrough": [
     {
       "modifiers": [
@@ -84,14 +69,6 @@
     {
       "modifiers": [],
       "key": "F3"
-    }
-  ],
-  "app:toggle-right-sidebar": [
-    {
-      "modifiers": [
-        "Shift"
-      ],
-      "key": "F9"
     }
   ],
   "app:go-back": [
@@ -119,12 +96,6 @@
     }
   ],
   "quickadd:choice:caebd934-84e0-43ed-bcfe-c9a2d44231f0": [
-    {
-      "modifiers": [],
-      "key": "F3"
-    }
-  ],
-  "quickadd:choice:a6c33ed6-42b1-4348-98a9-d86092e73b43": [
     {
       "modifiers": [],
       "key": "F3"
@@ -218,13 +189,6 @@
     {
       "modifiers": [],
       "key": "F6"
-    },
-    {
-      "modifiers": [
-        "Alt",
-        "Shift"
-      ],
-      "key": "E"
     }
   ],
   "open-with-default-app:open": [
@@ -272,12 +236,94 @@
       "key": "N"
     }
   ],
+  "quickadd:choice:9b6f415a-5bdf-49d5-89c8-1c0e04323791": [
+    {
+      "modifiers": [
+        "Alt",
+        "Meta"
+      ],
+      "key": "C"
+    }
+  ],
+  "quickadd:choice:2ba1ae71-b8d2-40a8-bcfe-cbd1ee68068c": [
+    {
+      "modifiers": [
+        "Mod",
+        "Meta"
+      ],
+      "key": "C"
+    }
+  ],
+  "quickadd:choice:a6c33ed6-42b1-4348-98a9-d86092e73b43": [
+    {
+      "modifiers": [
+        "Mod",
+        "Meta"
+      ],
+      "key": "D"
+    }
+  ],
   "file-explorer:open": [
     {
       "modifiers": [
+        "Mod",
+        "Meta"
+      ],
+      "key": "F"
+    }
+  ],
+  "app:toggle-left-sidebar": [
+    {
+      "modifiers": [
+        "Mod",
+        "Meta"
+      ],
+      "key": "L"
+    }
+  ],
+  "app:toggle-right-sidebar": [
+    {
+      "modifiers": [
+        "Mod",
+        "Meta"
+      ],
+      "key": "R"
+    }
+  ],
+  "workspace:split-horizontal": [
+    {
+      "modifiers": [
+        "Mod",
+        "Meta"
+      ],
+      "key": "ArrowDown"
+    }
+  ],
+  "workspace:split-vertical": [
+    {
+      "modifiers": [
+        "Mod",
+        "Meta"
+      ],
+      "key": "ArrowRight"
+    }
+  ],
+  "workspace:toggle-pin": [
+    {
+      "modifiers": [
+        "Mod",
         "Shift"
       ],
-      "key": "F3"
+      "key": "P"
+    }
+  ],
+  "workspace:copy-path": [
+    {
+      "modifiers": [
+        "Alt",
+        "Shift"
+      ],
+      "key": "C"
     }
   ]
 }
