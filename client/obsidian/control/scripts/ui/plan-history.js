@@ -7,6 +7,7 @@ const controlVaultRoot = runtimeApp.vault.adapter.getBasePath?.() || runtimeApp.
 const loadControl = (relativePath) => nodeRequire(pathMod.join(controlVaultRoot, "_control", ...relativePath.split("/")));
 
 const { el, clear, button } = loadControl("scripts/lib/dom.js");
+const { notify } = loadControl("scripts/lib/notify.js");
 const { createInternalLink } = loadControl("scripts/lib/internal-link.js");
 const { listTransportRuns } = loadControl("scripts/lib/git-transport.js");
 const { listPlanRecords } = loadControl("scripts/plans/plan-store.js");
@@ -149,16 +150,17 @@ function renderPlanHistory({ app, container }) {
     placeholder: "Filter plan slug or label",
   }));
   filter.style.minWidth = "22rem";
-  const refresh = toolbar.appendChild(button("Refresh", draw));
+  const refresh = toolbar.appendChild(button("Refresh", () => { notify("Refreshing plan history…"); draw(true); }));
   const output = container.appendChild(el("div"));
 
-  function draw() {
+  function draw(notifyUser = false) {
     output.replaceChildren();
     let runs;
     try {
       runs = listTransportRuns(app);
     } catch (error) {
       output.appendChild(el("pre", { text: error.message || String(error) }));
+      if (notifyUser) notify(`Plan history refresh failed: ${error.message || error}`, 10000);
       return;
     }
 
@@ -194,10 +196,10 @@ function renderPlanHistory({ app, container }) {
 
       for (const run of planRuns) renderRun(app, card, run);
     }
+    if (notifyUser) notify(`Plan history refreshed: ${runs.length} run(s).`);
   }
 
   filter.addEventListener("input", draw);
-  refresh.addEventListener("click", draw);
   draw();
 }
 

@@ -100,6 +100,8 @@ module.exports = async function createTypedNote(params = {}) {
 
   let file = null;
 
+  notify(`Creating ${title}…`);
+
   try {
     file = await app.vault.create(filePath, "");
 

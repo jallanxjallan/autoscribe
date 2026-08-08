@@ -13,6 +13,7 @@ from .retrieval import retrieve_results
 from .errors import ObsError
 from .git_selection import commit_selection, resolve_selection
 from .plans import delete_plan, list_plans, load_plan, save_plan
+from .instruction_upload import sync_instructions
 from .uploads import dispatch_paths, dispatch_run
 from .vault import Vault
 
@@ -37,6 +38,13 @@ def _instructions(repo: Path, request: dict[str, Any]) -> list[dict[str, Any]]:
     roots = request.get("roots")
     library = request.get("library_vault") or os.environ.get("AUTOSCRIBE_LIBRARY_VAULT")
     return instruction_catalog(repo, roots=roots, library_vault=library, include_pipeline=bool(request.get("include_pipeline", True)))
+
+
+def _instructions_sync(repo: Path, request: dict[str, Any]) -> list[dict[str, Any]]:
+    instruction_sets = request.get("instruction_sets")
+    if not isinstance(instruction_sets, list):
+        raise ObsError("instructions.sync requires instruction_sets list")
+    return sync_instructions(repo, instruction_sets)
 
 
 def _snapshot(repo: Path, request: dict[str, Any]) -> dict[str, Any]:
@@ -112,7 +120,6 @@ def _plan_save(repo: Path, request: dict[str, Any]) -> dict[str, Any]:
         record,
         cwd=repo,
         instruction_sets=instruction_sets or [],
-        publication_ulid=str(request.get("publication_ulid") or ""),
     )
 
 
@@ -123,6 +130,7 @@ HANDLERS: dict[str, Handler] = {
     "vault.state": _vault_state,
     "vault.scan": _scan,
     "instructions.catalog": _instructions,
+    "instructions.sync": _instructions_sync,
     "pipeline.snapshot": _snapshot,
     "git.commit": _commit,
     "git.resolve_selection": _resolve_selection,

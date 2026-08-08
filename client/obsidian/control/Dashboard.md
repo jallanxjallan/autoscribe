@@ -5,11 +5,12 @@ const nodeRequire = typeof require === "function" ? require : window.require;
 const pathMod = nodeRequire("node:path");
 const vaultRoot = app.vault.adapter.getBasePath?.() || app.vault.adapter.basePath;
 const loadControl = (relativePath) => nodeRequire(pathMod.join(vaultRoot, "_control", ...relativePath.split("/")));
+const { notify } = loadControl("scripts/lib/notify.js");
 
 async function openInMain(path) {
   const file = app.vault.getAbstractFileByPath(path);
   if (!file) {
-    new Notice(`File not found: ${path}`);
+    notify(`File not found: ${path}`, 10000);
     return;
   }
   const leaf = app.workspace.getLeaf("tab");
@@ -44,12 +45,13 @@ function command(label, macroPath) {
   button.style.minWidth = "14rem";
   button.onclick = async () => {
     button.disabled = true;
+    notify(`Opening ${label}…`);
     try {
       const run = loadControl(macroPath);
       await run({ app });
     } catch (error) {
       console.error(`${label} failed:`, error);
-      new Notice(`${label} failed: ${error?.message || error}`, 10000);
+      notify(`${label} failed: ${error?.message || error}`, 10000);
     } finally {
       button.disabled = false;
     }

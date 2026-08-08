@@ -50,6 +50,8 @@ async function applyTemplate(params = {}) {
   );
   if (!chosen) return;
 
+  notify(`Applying ${templateLabel(chosen.path)}…`);
+
   const activeEditor = app.workspace.activeEditor?.editor || null;
   const editor = app.workspace.getActiveFile()?.path === targetFile.path ? activeEditor : null;
 

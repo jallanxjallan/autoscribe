@@ -42,6 +42,8 @@ module.exports = async function createEditorialNote(params = {}) {
     }
   }
 
+  notify(`Creating ${title}…`);
+
   const yamlTargets = targets.length
     ? ["targets:", ...targets.map((target) => `  - \"[[${target.replace(/\.md$/i, "")}]]\"`)].join("\n")
     : "targets: []";

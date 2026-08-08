@@ -18,6 +18,7 @@ CONTROL_KIND_TO_REGISTRY = {
 SNAPSHOT_FIELDS = {
     "instruction": (
         "record_identity",
+        "title",
         "label",
         "content_sha256",
     ),
@@ -103,7 +104,8 @@ def _snapshot_record(*, slug: str, key: RedisKey, kind: str) -> dict[str, Any]:
     # Older records may not carry record_identity. The slug remains the public
     # control identity and is the correct fallback for client selection.
     record.setdefault("record_identity", slug)
-    record.setdefault("label", slug)
+    record.setdefault("title", slug)
+    record.setdefault("label", record.get("title") or slug)
     return record
 
 

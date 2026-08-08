@@ -21,7 +21,7 @@ def pipeline_snapshot(kind: str) -> dict[str, Any]:
     }
     if kind not in commands:
         raise ObsError(f"unsupported pipeline snapshot: {kind}")
-    result = run([autoscribe_bin(), *commands[kind]], cwd=Path.cwd())
+    result = run([autoscribe_bin(), *commands[kind]], cwd=Path.home())
     value = json.loads(result.stdout)
     if not isinstance(value, dict):
         raise ObsError(f"asc {kind} snapshot did not return an object")
@@ -45,7 +45,17 @@ def _roots(active: Path, roots: Iterable[str] | None, library_vault: str | None)
     return result
 
 
-_INSTRUCTION_SLUG = re.compile(r"(?mi)^\s*slug\s*:\s*[\"\']?(?:std|rol|ctx|tsk)\.")
+_INSTRUCTION_SLUG = re.compile(r"(?mi)^\s*slug\s*:\s*[\"\']?(?:std|rol|cxt|tsk)\.")
+
+
+def _scope_from_slug(slug: str) -> str:
+    prefix = str(slug or "").split(".", 1)[0].lower()
+    return {
+        "std": "standing",
+        "rol": "role",
+        "cxt": "context",
+        "tsk": "task",
+    }.get(prefix, "")
 
 
 def _local_instruction(active: Path, root: Path, path: Path) -> dict[str, Any] | None:
@@ -59,7 +69,7 @@ def _local_instruction(active: Path, root: Path, path: Path) -> dict[str, Any] |
     except (yaml.YAMLError, ValueError) as exc:
         raise ObsError(f"invalid instruction frontmatter in {path}: {exc}") from exc
     slug = str(document.frontmatter.get("slug") or "").strip()
-    if not slug.startswith(("std.", "rol.", "ctx.", "tsk.")):
+    if not slug.startswith(("std.", "rol.", "cxt.", "tsk.")):
         return None
     rel = path.relative_to(root).as_posix()
     state = git.file_state(root, rel) if (root / ".git").exists() else {"repo_state": "untracked-repository"}
@@ -67,7 +77,7 @@ def _local_instruction(active: Path, root: Path, path: Path) -> dict[str, Any] |
         "slug": slug,
         "kind": "instruction",
         "type": str(document.frontmatter.get("type") or "instruction").strip(),
-        "scope": str(document.frontmatter.get("scope") or "").strip().lower(),
+        "scope": str(document.frontmatter.get("scope") or _scope_from_slug(slug)).strip().lower(),
         "operation": str(document.frontmatter.get("operation") or "").strip(),
         "label": str(document.frontmatter.get("title") or document.frontmatter.get("label") or path.stem),
         "source": "active" if root == active else ("library" if root.name == "Library" else root.name),
@@ -108,9 +118,17 @@ def instruction_catalog(active: Path, *, roots: Iterable[str] | None = None,
             if not isinstance(raw, dict):
                 continue
             slug = str(raw.get("slug") or raw.get("record_identity") or "").strip()
-            if not slug.startswith(("std.", "rol.", "ctx.", "tsk.")):
+            if not slug.startswith(("std.", "rol.", "cxt.", "tsk.")):
                 continue
-            pipeline = {**raw, "slug": slug, "kind": "instruction", "pipeline": True, "source": "pipeline"}
+            pipeline = {
+                **raw,
+                "slug": slug,
+                "kind": "instruction",
+                "scope": str(raw.get("scope") or _scope_from_slug(slug)).strip().lower(),
+                "label": str(raw.get("title") or raw.get("label") or slug),
+                "pipeline": True,
+                "source": "pipeline",
+            }
             if slug in merged:
                 merged[slug] = {**pipeline, **merged[slug], "pipeline": True, "pipeline_record": raw}
             else:

@@ -1,19 +1,24 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-src_dir="$(cd "$(dirname "$0")" && pwd)/feeder"
+src_dir="$(cd "$(dirname "$0")" && pwd)"
 target="${1:-$HOME/AutoScribe/feeder}"
 
 [[ -d "$target/src/obs" ]] || { echo "Not a feeder checkout: $target" >&2; exit 1; }
 
-cp "$src_dir/README.md" "$target/README.md"
-cp "$src_dir/src/obs/cli.py" "$target/src/obs/cli.py"
-cp "$src_dir/src/obs/ipc.py" "$target/src/obs/ipc.py"
-cp "$src_dir/src/obs/retrieval.py" "$target/src/obs/retrieval.py"
-cp "$src_dir/src/obs/transport.py" "$target/src/obs/transport.py"
-cp "$src_dir/src/obs.egg-info/SOURCES.txt" "$target/src/obs.egg-info/SOURCES.txt"
-cp "$src_dir/src/obs.egg-info/PKG-INFO" "$target/src/obs.egg-info/PKG-INFO"
-cp "$src_dir/tests/test_retrieve_results.py" "$target/tests/test_retrieve_results.py"
-rm -f "$target/src/obs/downloads.py"
+for rel in src/obs/catalog.py src/obs/instruction_upload.py src/obs/ipc.py; do
+  install -m 0644 "$src_dir/$rel" "$target/$rel"
+done
 
-echo "Installed Retrieve Results refactor into $target"
+python -m py_compile   "$target/src/obs/catalog.py"   "$target/src/obs/instruction_upload.py"   "$target/src/obs/ipc.py"
+
+# Fail loudly if the live target does not contain the fixes this package promises.
+grep -Fq 'cwd=Path.home()' "$target/src/obs/catalog.py"
+grep -Fq '"instructions.sync": _instructions_sync' "$target/src/obs/ipc.py"
+grep -Fq 'INSTRUCTION_PREFIXES = ("std.", "rol.", "cxt.", "tsk.")' "$target/src/obs/instruction_upload.py"
+grep -Fq 'record["title"] = source.stem.strip()' "$target/src/obs/instruction_upload.py"
+
+echo "Installed and verified Library/Feeder IPC fixes in $target"
+echo "catalog.py: pipeline snapshot uses neutral cwd"
+echo "ipc.py: instructions.sync registered"
+echo "instruction_upload.py: cxt prefix + first-class filename title"

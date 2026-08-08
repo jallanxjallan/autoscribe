@@ -11,6 +11,7 @@ const path = require("path");
 const TRANSCLUSION_RE = /!\[\[([^\]]+)\]\]/g;
 
 const { getFileManifest, appendClipboardCandidates } = loadControl("scripts/lib/file-manifest.js");
+const { notify } = loadControl("scripts/lib/notify.js");
 
 function splitFrontmatter(text) {
   const match = String(text).match(/^(---\r?\n[\s\S]*?\r?\n---\r?\n?)([\s\S]*)$/);
@@ -206,14 +207,17 @@ async function renderDispatchRun({ app, container }) {
   clearButton.addEventListener("click", () => {
     session.candidates.clear();
     renderCandidates("dispatch list cleared");
+    notify("Dispatch list cleared.");
   });
   selectAllButton.addEventListener("click", () => {
     for (const item of session.candidates.values()) item.selected = true;
     renderCandidates();
+    notify(`Selected all ${session.candidates.size} dispatch candidate(s).`);
   });
   selectNoneButton.addEventListener("click", () => {
     for (const item of session.candidates.values()) item.selected = false;
     renderCandidates();
+    notify("Cleared dispatch selection.");
   });
 
   await addClipboardSelection();
@@ -233,7 +237,7 @@ async function renderDispatchRun({ app, container }) {
   for (const plan of planRows) {
     const slug = String(plan.record_identity || plan.slug || "").trim();
     if (!slug) continue;
-    select.createEl("option", { text: String(plan.payload?.label || plan.label || plan.name || slug), value: slug });
+    select.createEl("option", { text: String(plan.payload?.title || plan.title || plan.payload?.label || plan.label || plan.name || slug), value: slug });
   }
 
   form.createEl("label", { text: "Commit message (optional)" });
@@ -260,6 +264,7 @@ async function renderDispatchRun({ app, container }) {
   result.style.whiteSpace = "pre-wrap";
 
   runButton.addEventListener("click", async () => {
+    notify("Preparing dispatch…");
     runButton.disabled = true;
     result.setText("Resolving transclusions and creating transport branch…");
     try {
@@ -297,8 +302,9 @@ async function renderDispatchRun({ app, container }) {
 ` +
         `Use obs log from this vault to inspect the handoff.`
       );
+      // Fire-and-forget: no completion notice. Inspect feeder/server logs if needed.
     } catch (error) {
-      result.setText(`Dispatch failed: ${error.message || error}`);
+      console.error("Dispatch Run handoff failed before feeder launch", error);
     } finally {
       runButton.disabled = false;
     }

@@ -16,6 +16,7 @@ def ingest_instruction(record: Mapping[str, Any]) -> IngestedItem:
     slug = str(record["identity"]).strip()
     content = record["content"]
     extra = dict(record["extra"])
+    title = str(extra.get("title") or slug).strip()
     if not isinstance(content, str) or not content.strip():
         raise IngestInputError("instruction content must be a non-empty string")
     try:
@@ -23,6 +24,7 @@ def ingest_instruction(record: Mapping[str, Any]) -> IngestedItem:
             {
                 "identity": instruction_version_identity(slug, content),
                 "slug": slug,
+                "title": title,
                 "content": content,
                 "extra_json": extra,
             }

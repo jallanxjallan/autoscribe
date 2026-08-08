@@ -4,6 +4,7 @@ async function renderStageFiles({ app, container }) {
   const { spawnSync } = require("child_process");
   const vaultRoot = app.vault.adapter.getBasePath?.() || app.vault.adapter.basePath;
   const { readCurrentSelection } = require(`${vaultRoot}/_control/scripts/selections/current-selection.js`);
+  const { notify } = require(`${vaultRoot}/_control/scripts/lib/notify.js`);
   const root = container;
   const state = {
     files: [],
@@ -87,7 +88,9 @@ async function renderStageFiles({ app, container }) {
       sort.append(option);
     }
     const refresh = el("button", {}, "Refresh");
-    refresh.onclick = () => {
+    refresh.onclick = (eventOrNotify = true) => {
+      const notifyUser = eventOrNotify !== false;
+      if (notifyUser) notify("Refreshing Stage Files…");
       try {
         state.stage = stage.value.trim();
         state.status = status.value.trim();
@@ -111,8 +114,9 @@ async function renderStageFiles({ app, container }) {
         const current = readCurrentSelection(app);
         state.selected = new Set((current?.items || []).map((item) => item.path).filter(Boolean));
         render();
+        if (notifyUser) notify(`Stage Files refreshed: ${state.files.length} file(s).`);
       } catch (error) {
-        new Notice(error.message, 10000);
+        if (notifyUser) notify(`Stage Files refresh failed: ${error.message}`, 10000);
       }
     };
     state.refresh = refresh.onclick;
@@ -163,17 +167,18 @@ async function renderStageFiles({ app, container }) {
     commit.onclick = () => {
       try {
         const paths = [...state.selected];
+        notify(`Committing ${paths.length} selected file(s)…`);
         const response = ipc({ operation: "stage_files.commit", paths, message: message.value, amend: amend.checked });
         if (!response || response.ok !== true) {
           throw new Error(response?.error || "Stage Files commit failed");
         }
         const committedFiles = Array.isArray(response.files) ? response.files.length : paths.length;
         const commitHash = response.commit ? response.commit.slice(0, 8) : "unknown";
-        new Notice(`Committed ${committedFiles} file(s): ${commitHash}`);
+        notify(`Committed ${committedFiles} file(s): ${commitHash}`);
         state.selected.clear();
-        refresh.click();
+        state.refresh(false);
       } catch (error) {
-        new Notice(error.message, 10000);
+        notify(`Stage Files commit failed: ${error.message}`, 10000);
       }
     };
     commitBox.append(message, amendLabel, commit);
@@ -181,7 +186,7 @@ async function renderStageFiles({ app, container }) {
   }
 
   render();
-  state.refresh();
+  state.refresh(false);
 }
 
 module.exports = { renderStageFiles };

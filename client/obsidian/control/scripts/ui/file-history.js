@@ -6,6 +6,7 @@ const load=p=>nodeRequire(pathMod.join(root,"_control",...p.split("/")));
 const {el,clear,button}=load("scripts/lib/dom.js");
 const {getFileManifest,appendClipboardCandidates}=load("scripts/lib/file-manifest.js");
 const {history,restoreVersion,listFileStashes,stashCurrent,restoreFileStash,dropFileStash}=load("scripts/lib/file-git-history.js");
+const {notify}=load("scripts/lib/notify.js");
 
 function refSummary(item){
  const exact=item.refs||[]; const transport=item.transport_refs||[]; const parts=[];
@@ -17,9 +18,9 @@ function formatStashDate(value){try{return new Date(value).toLocaleString();}cat
 async function renderFileHistory({app,container}){
  clear(container); const manifest=getFileManifest(app); let rows=[];
  const select=el("select");
- const add=button("Reload clipboard",async()=>{try{const n=appendClipboardCandidates(app,manifest,await navigator.clipboard.readText());populate();loadHistory(n?`${n} added from clipboard`:"clipboard contained no new files");}catch(e){new Notice(e.message,10000);}});
- const clearBtn=button("Clear Clipboard List",()=>{manifest.candidates.clear();populate();loadHistory("clipboard list cleared");});
- const refresh=button("Refresh history",()=>loadHistory());
+ const add=button("Reload clipboard",async()=>{notify("Reloading clipboard…");try{const n=appendClipboardCandidates(app,manifest,await navigator.clipboard.readText());populate();loadHistory(n?`${n} added from clipboard`:"clipboard contained no new files");notify(n?`Clipboard reloaded: ${n} file(s) added.`:"Clipboard reloaded: no new files.");}catch(e){notify(e.message,10000);}});
+ const clearBtn=button("Clear Clipboard List",()=>{notify("Clearing clipboard list…");manifest.candidates.clear();populate();loadHistory("clipboard list cleared");notify("Clipboard list cleared.");});
+ const refresh=button("Refresh history",()=>{notify("Refreshing file history…");loadHistory("",true);});
  const stashBtn=button("Stash Current",()=>stashSelected());
  const reminder=el("div"); const status=el("p"); const stashHost=el("div"); const host=el("div");
  const bar=el("div"); bar.style.display="flex";bar.style.gap=".5rem";bar.style.flexWrap="wrap";bar.append(select,add,clearBtn,refresh,stashBtn);
@@ -41,11 +42,11 @@ async function renderFileHistory({app,container}){
      stashHost.append(row);
    }
  }
- function loadHistory(note=""){
+ function loadHistory(note="",notifyUser=false){
    host.replaceChildren();renderReminder();const file=select.value;renderStashes(file);
    if(!file){status.textContent=`The clipboard file list is empty${note?` · ${note}`:""}.`;stashBtn.disabled=true;return;} stashBtn.disabled=false;
    status.textContent="Reading this file’s complete Git history across all refs…";
-   try{rows=history(app,file);status.textContent=`${rows.length} distinct file version${rows.length===1?"":"s"} found for ${file}${note?` · ${note}`:""}.`;}catch(e){status.textContent=e.message;return;}
+   try{rows=history(app,file);status.textContent=`${rows.length} distinct file version${rows.length===1?"":"s"} found for ${file}${note?` · ${note}`:""}.`;if(notifyUser)notify(`File history refreshed: ${rows.length} version(s).`);}catch(e){status.textContent=e.message;if(notifyUser)notify(`History refresh failed: ${e.message}`,10000);return;}
    if(!rows.length){host.append(el("p",{text:"Git has no recorded version of this file."}));return;}
    const table=el("table");table.style.width="100%";const h=el("tr");for(const x of ["Version","When / who","What happened","Change","Git context","Action"])h.append(el("th",{text:x}));table.append(h);
    for(const item of rows){
@@ -58,10 +59,10 @@ async function renderFileHistory({app,container}){
    }
    host.append(table);
  }
- function stashSelected(){const file=select.value;if(!file)return;try{const item=stashCurrent(app,file);new Notice(`Current contents stashed as ${item.blob.slice(0,8)}. The reminder will remain until you restore or drop it.`,10000);loadHistory("current contents stashed");}catch(e){new Notice(`Stash failed: ${e.message}`,12000);}}
- function restoreStash(file,item){if(!window.confirm(`Restore the saved current contents from ${formatStashDate(item.created_at)}?\n\nThis will replace and stage the file. The stash will remain available until you drop it.`))return;try{restoreFileStash(app,file,item.id);new Notice("Stashed contents restored and staged. The stash remains saved.",10000);loadHistory("stash restored");}catch(e){new Notice(`Stash restore failed: ${e.message}`,12000);}}
- function dropStash(file,item){const short=item.blob.slice(0,8);const typed=window.prompt(`Permanently drop stash ${short}? Type ${short} to confirm.`);if(typed!==short){new Notice("Drop cancelled.");return;}try{dropFileStash(app,file,item.id);new Notice(`Dropped stash ${short}.`);loadHistory("stash dropped");}catch(e){new Notice(`Drop failed: ${e.message}`,12000);}}
- function restore(item,file){const short=item.hash.slice(0,8);if(!window.confirm(`Replace the current contents of ${file} with the version from ${item.date}?\n\nCommit: ${short}\n${item.subject}\n\nConsider using Stash Current first. The file must be clean. A safety tag will preserve the current HEAD.`))return;const typed=window.prompt(`Guardrail: type ${short} to confirm the replacement.`);if(typed!==short){new Notice("Replacement cancelled: confirmation did not match.");return;}try{const result=restoreVersion(app,file,item.hash);new Notice(`Restored ${short}. Safety tag: ${result.safety_tag}. Commit the staged replacement in File State.`,12000);loadHistory();}catch(e){new Notice(`Restore failed: ${e.message}`,12000);}}
+ function stashSelected(){const file=select.value;if(!file)return;notify("Stashing current file contents…");try{const item=stashCurrent(app,file);notify(`Current contents stashed as ${item.blob.slice(0,8)}. The reminder will remain until you restore or drop it.`,10000);loadHistory("current contents stashed");}catch(e){notify(`Stash failed: ${e.message}`,12000);}}
+ function restoreStash(file,item){if(!window.confirm(`Restore the saved current contents from ${formatStashDate(item.created_at)}?\n\nThis will replace and stage the file. The stash will remain available until you drop it.`))return;notify("Restoring stashed contents…");try{restoreFileStash(app,file,item.id);notify("Stashed contents restored and staged. The stash remains saved.",10000);loadHistory("stash restored");}catch(e){notify(`Stash restore failed: ${e.message}`,12000);}}
+ function dropStash(file,item){const short=item.blob.slice(0,8);const typed=window.prompt(`Permanently drop stash ${short}? Type ${short} to confirm.`);if(typed!==short){notify("Drop cancelled.");return;}notify(`Dropping stash ${short}…`);try{dropFileStash(app,file,item.id);notify(`Dropped stash ${short}.`);loadHistory("stash dropped");}catch(e){notify(`Drop failed: ${e.message}`,12000);}}
+ function restore(item,file){const short=item.hash.slice(0,8);if(!window.confirm(`Replace the current contents of ${file} with the version from ${item.date}?\n\nCommit: ${short}\n${item.subject}\n\nConsider using Stash Current first. The file must be clean. A safety tag will preserve the current HEAD.`))return;const typed=window.prompt(`Guardrail: type ${short} to confirm the replacement.`);if(typed!==short){notify("Replacement cancelled: confirmation did not match.");return;}notify(`Restoring ${short} into the working file…`);try{const result=restoreVersion(app,file,item.hash);notify(`Restored ${short}. Safety tag: ${result.safety_tag}. Commit the staged replacement in File State.`,12000);loadHistory();}catch(e){notify(`Restore failed: ${e.message}`,12000);}}
  select.onchange=()=>loadHistory();
  try{const n=appendClipboardCandidates(app,manifest,await navigator.clipboard.readText());populate();loadHistory(n?`${n} added from clipboard`:"clipboard loaded");}catch(e){populate();loadHistory(`clipboard unavailable: ${e.message}`);}
 }

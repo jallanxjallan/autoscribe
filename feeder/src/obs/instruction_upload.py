@@ -43,7 +43,11 @@ def _upload_envelope(record: dict[str, Any]) -> dict[str, Any]:
         raise ObsError("instruction record missing identity")
     if not isinstance(content, str) or not content.strip():
         raise ObsError(f"{identity}: instruction content must be non-empty")
-    return upload_record(type="instruction", identity=identity, content=content, extra=record.get("extra") or {})
+    extra = dict(record.get("extra") or {})
+    title = str(record.get("title") or extra.get("title") or "").strip()
+    if title:
+        extra["title"] = title
+    return upload_record(type="instruction", identity=identity, content=content, extra=extra)
 
 def _content_hash(content: str) -> str:
     return hashlib.sha256(content.encode("utf-8")).hexdigest()
@@ -68,17 +72,19 @@ def _render_body_record(repo: Path, *, slug: str, source: Path, source_path: str
         type="instruction",
         identity=slug,
         content=content,
-        extra={"filename_hint": source.name, "source_path": source_path},
+        extra={"filename_hint": source.name, "source_path": source_path, "title": source.stem.strip()},
     )
+    record["title"] = source.stem.strip()
     return record, _content_hash(content)
 
 
-def _instruction_remote_state(snapshot: dict[str, Any]) -> tuple[dict[str, str], dict[str, str]]:
+def _instruction_remote_state(snapshot: dict[str, Any]) -> tuple[dict[str, str], dict[str, str], dict[str, str]]:
     values = snapshot.get("registries", {}).get("instructions", {})
     if not isinstance(values, dict):
-        return {}, {}
+        return {}, {}, {}
     hashes: dict[str, str] = {}
     contents: dict[str, str] = {}
+    titles: dict[str, str] = {}
     for key, record in values.items():
         if not isinstance(record, dict):
             continue
@@ -91,7 +97,10 @@ def _instruction_remote_state(snapshot: dict[str, Any]) -> tuple[dict[str, str],
         content = record.get("content")
         if isinstance(content, str):
             contents[slug] = content
-    return hashes, contents
+        title = str(record.get("title") or "").strip()
+        if title:
+            titles[slug] = title
+    return hashes, contents, titles
 
 def _dirty_relpaths(repo: Path, paths: Iterable[Path]) -> list[str]:
     dirty = set(git.dirty_files(repo))
@@ -105,11 +114,11 @@ def _dirty_relpaths(repo: Path, paths: Iterable[Path]) -> list[str]:
     return result
 
 
-INSTRUCTION_PREFIXES = ("std.", "rol.", "ctx.", "tsk.")
+INSTRUCTION_PREFIXES = ("std.", "rol.", "cxt.", "tsk.")
 
 
 def sync_instruction(repo: Path, *, slug: str, path: str, source_path: str,
-                     remote_present: bool, local_dirty: bool) -> dict[str, Any]:
+                     remote_present: bool, remote_title: str, local_dirty: bool) -> dict[str, Any]:
     if not slug.startswith(INSTRUCTION_PREFIXES):
         raise ObsError(f"expected an instruction slug prefix {INSTRUCTION_PREFIXES}, got: {slug or '<empty>'}")
     source = Path(path).expanduser().resolve()
@@ -119,7 +128,8 @@ def sync_instruction(repo: Path, *, slug: str, path: str, source_path: str,
     record, generated_hash = _render_body_record(
         repo, slug=slug, source=source, source_path=source_path or str(source)
     )
-    if remote_present and not local_dirty:
+    expected_title = source.stem.strip()
+    if remote_present and not local_dirty and remote_title == expected_title:
         return {
             "slug": slug,
             "status": "current",
@@ -165,14 +175,15 @@ def sync_instructions(repo: Path, instruction_sets: list[dict[str, Any]]) -> lis
             raise ObsError(f"instruction slug {slug} resolves to both {prior['relpath']} and {relpath}")
         unique[slug] = {**item, "source": source, "relpath": relpath}
 
-    uploaded_hashes, uploaded_contents = _instruction_remote_state(pipeline_snapshot("control"))
+    uploaded_hashes, uploaded_contents, uploaded_titles = _instruction_remote_state(pipeline_snapshot("control"))
     return [
         sync_instruction(
             repo,
             slug=slug,
             path=str(item["source"]),
             source_path=str(item.get("source_path") or item["relpath"]),
-            remote_present=slug in uploaded_hashes or slug in uploaded_contents,
+            remote_present=slug in uploaded_hashes or slug in uploaded_contents or slug in uploaded_titles,
+            remote_title=uploaded_titles.get(slug, ""),
             local_dirty=item["relpath"] in set(git.dirty_files(repo)),
         )
         for slug, item in unique.items()
@@ -193,9 +204,10 @@ def upload_instruction(repo: Path, *, source_path: str, input_path: Path,
     if not slug.startswith(INSTRUCTION_PREFIXES):
         raise ObsError(f"{source_path}: expected an instruction slug prefix {INSTRUCTION_PREFIXES}")
     record, digest = _render_body_record(repo, slug=slug, source=source, source_path=source_path)
-    uploaded_hashes, uploaded_contents = _instruction_remote_state(pipeline_snapshot("control"))
+    uploaded_hashes, uploaded_contents, uploaded_titles = _instruction_remote_state(pipeline_snapshot("control"))
     uploaded = uploaded_hashes.get(slug)
-    if not force and (uploaded == digest or uploaded_contents.get(slug) == record["content"]):
+    expected_title = source.stem.strip()
+    if not force and uploaded_titles.get(slug) == expected_title and (uploaded == digest or uploaded_contents.get(slug) == record["content"]):
         return {"slug": slug, "status": "current", "content_sha256": digest}
     result = run(
         [autoscribe_bin(), "upload", "instructions"],

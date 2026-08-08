@@ -9,6 +9,7 @@ const loadControl = (relativePath) => nodeRequire(pathMod.join(controlVaultRoot,
 const path = require("node:path");
 const { callFeederAsync } = loadControl("scripts/lib/feeder-ipc.js");
 const { readClipboardSelection } = loadControl("scripts/lib/clipboard-selection.js");
+const { notify } = loadControl("scripts/lib/notify.js");
 
 function element(tag, attrs = {}, text = null) {
   const node = document.createElement(tag);
@@ -216,7 +217,8 @@ async function renderCommitFiles({ app, container }) {
     tableHost.append(table);
   }
 
-  async function refreshSelection() {
+  async function refreshSelection(notifyUser = true) {
+    if (notifyUser) notify("Refreshing file selection…");
     state.loading = true;
     state.error = "";
     updateControls();
@@ -229,6 +231,7 @@ async function renderCommitFiles({ app, container }) {
       state.items = normalized.items;
       state.summary = normalized.summary;
       renderTable();
+      if (notifyUser) notify(`File selection refreshed: ${state.items.length} row(s).`);
     } catch (error) {
       console.error("Commit Files refresh failed:", error);
       state.parsed = [];
@@ -236,7 +239,7 @@ async function renderCommitFiles({ app, container }) {
       state.summary = {};
       state.error = `Refresh failed: ${error.message}`;
       renderTable();
-      new Notice(state.error, 10000);
+      notify(state.error, 10000);
     } finally {
       state.loading = false;
       updateControls();
@@ -258,6 +261,7 @@ async function renderCommitFiles({ app, container }) {
 
       state.committing = true;
       updateControls();
+      notify(`Committing ${items.length} file(s)…`);
 
       const result = await callFeederAsync(app, "git.commit_selection", {
         message,
@@ -277,12 +281,12 @@ async function renderCommitFiles({ app, container }) {
       const count = Number(result?.count || result?.files?.length || items.length);
       const tag = String(result?.tag || result?.commit_tag || "").trim();
       description.value = "";
-      new Notice(`Committed ${count} file(s) as ${commitType}: ${hash}${tag ? ` · ${tag}` : ""}`);
-      await refreshSelection();
+      notify(`Committed ${count} file(s) as ${commitType}: ${hash}${tag ? ` · ${tag}` : ""}`);
+      await refreshSelection(false);
     } catch (error) {
       console.error("Commit Files commit failed:", error);
       state.error = `Commit failed: ${error.message}`;
-      new Notice(state.error, 10000);
+      notify(state.error, 10000);
     } finally {
       state.committing = false;
       updateControls();
@@ -293,7 +297,7 @@ async function renderCommitFiles({ app, container }) {
   commitButton.onclick = commitFiles;
 
   updateControls();
-  await refreshSelection();
+  await refreshSelection(false);
 }
 
 

@@ -111,6 +111,10 @@ module.exports = async function addActiveFileToClipboard(params = {}) {
   const { readClipboardSelection } =
     loadClipboardSelectionLibrary(app);
 
+  const notify = (() => {
+    try { return require(path.join(getVaultRoot(app), "_control", "scripts", "lib", "notify.js")).notify; }
+    catch (_) { return (message) => console.log(message); }
+  })();
   if (typeof readClipboardSelection !== "function") {
     throw new Error(
       "clipboard-selection.js does not export readClipboardSelection()."
@@ -131,6 +135,8 @@ module.exports = async function addActiveFileToClipboard(params = {}) {
     filename,
     systemPath,
   ].join("\t");
+
+  notify("Adding active file to clipboard…");
 
   let existingText = "";
 
@@ -158,5 +164,6 @@ const output = existingText
   ? `${existingText}\n${newLine}`
   : newLine;
 
-await writeClipboardText(output)
+await writeClipboardText(output);
+notify(`Added ${filename} to clipboard selection.`);
 };

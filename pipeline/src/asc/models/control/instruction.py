@@ -40,10 +40,11 @@ class Instruction(RedisModel):
 
     identity: str = Field(default_factory=generate_identity)
     slug: str
+    title: str
     content: str
     extra_json: str = "{}"
 
-    @field_validator("identity", "slug", mode="before")
+    @field_validator("identity", "slug", "title", mode="before")
     @classmethod
     def validate_identity_text(cls, value: object, info):
         return _required_text(value, info.field_name)

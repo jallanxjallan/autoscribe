@@ -5,6 +5,7 @@ const nodeRequire = typeof require === "function" ? require : window.require;
 const pathMod = nodeRequire("node:path");
 const controlVaultRoot = app.vault.adapter.getBasePath?.() || app.vault.adapter.basePath;
 const loadControl = (relativePath) => nodeRequire(pathMod.join(controlVaultRoot, "_control", ...relativePath.split("/")));
+const { notify } = loadControl("scripts/lib/notify.js");
 
 const fs = require("node:fs");
 const path = require("node:path");
@@ -19,13 +20,14 @@ function renderSystemStatus({ app, container }) {
   const refresh = container.createEl("button", { text: "Refresh" });
   const output = container.createEl("div");
 
-  function draw() {
+  function draw(notifyUser = false) {
+    if (notifyUser) notify("Refreshing System Status…");
     output.empty();
     let names = [];
     try { names = fs.readdirSync(statusDir).sort().reverse(); }
-    catch { output.createEl("p", { text: "No feeder handoffs have been recorded." }); return; }
+    catch { output.createEl("p", { text: "No feeder handoffs have been recorded." }); if (notifyUser) notify("System Status refreshed: no feeder handoffs."); return; }
     const requests = names.filter((name) => name.endsWith(".request.json"));
-    if (!requests.length) { output.createEl("p", { text: "No feeder handoffs have been recorded." }); return; }
+    if (!requests.length) { output.createEl("p", { text: "No feeder handoffs have been recorded." }); if (notifyUser) notify("System Status refreshed: no feeder handoffs."); return; }
     for (const requestName of requests.slice(0, 50)) {
       const stem = requestName.replace(/\.request\.json$/, "");
       const card = output.createEl("div");
@@ -40,10 +42,11 @@ function renderSystemStatus({ app, container }) {
         pre.style.whiteSpace = "pre-wrap";
       }
     }
+    if (notifyUser) notify(`System Status refreshed: ${Math.min(requests.length, 50)} handoff(s) shown.`);
   }
 
-  refresh.addEventListener("click", draw);
-  draw();
+  refresh.addEventListener("click", () => draw(true));
+  draw(false);
 }
 
 await renderSystemStatus({ app, dv, container: dv.container });

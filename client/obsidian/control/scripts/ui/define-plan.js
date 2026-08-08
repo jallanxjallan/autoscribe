@@ -6,11 +6,12 @@ const fs = nodeRequire("node:fs");
 const runtimeApp = globalThis.app;
 const controlVaultRoot = runtimeApp.vault.adapter.getBasePath?.() || runtimeApp.vault.adapter.basePath;
 const loadControl = (relativePath) => nodeRequire(pathMod.join(controlVaultRoot, "_control", ...relativePath.split("/")));
+const { notify } = loadControl("scripts/lib/notify.js");
 
 const { spawnSync } = nodeRequire("node:child_process");
 const { buildPlanRecord } = loadControl("scripts/plans/plan-record.js");
 const { listPlanRecords, loadPlanRecord, savePlanRecord, deletePlanRecord } = loadControl("scripts/plans/plan-store.js");
-const { callFeederAsync } = loadControl("scripts/lib/feeder-ipc.js");
+const { callFeederAsync, handoffFeeder } = loadControl("scripts/lib/feeder-ipc.js");
 const { vaultRoot } = loadControl("scripts/lib/vault-state.js");
 const { snapshotList } = loadControl("scripts/lib/control-loader.js");
 const { makeSlug } = loadControl("scripts/lib/slug.js");
@@ -18,7 +19,7 @@ const { makeSlug } = loadControl("scripts/lib/slug.js");
 const ZSH = "/usr/bin/zsh";
 const STEP_KINDS = ["llm", "script", "rag"];
 const SCOPES = ["standing", "role", "context", "task"];
-const PREFIXES = { standing: "std", role: "rol", context: "ctx", task: "tsk" };
+const PREFIXES = { standing: "std", role: "rol", context: "cxt", task: "tsk" };
 const STATUS_KEY = "autoscribe.define-plan.status";
 const CROCKFORD = "0123456789ABCDEFGHJKMNPQRSTVWXYZ";
 
@@ -48,10 +49,28 @@ function ascSnapshot(group, cwd) {
 
 function id(record) { return String(record?.key || record?.slug || record?.record_identity || ""); }
 function label(record) { return String(record?.label || record?.title || id(record)); }
-function option(select, record) { select.appendChild(el("option", { value: id(record), text: `${label(record)} — ${id(record)}` })); }
+function title(record) { return String(record?.title || record?.label || id(record)); }
+function option(select, record, { titleOnly = false } = {}) {
+  const text = titleOnly ? title(record) : `${label(record)} — ${id(record)}`;
+  select.appendChild(el("option", { value: id(record), text }));
+}
 function selected(records, value) { return records.find((record) => id(record) === value) || null; }
 function planSlug(record) { return String(record?.record_identity || record?.slug || ""); }
 function byScope(records, scope) { return records.filter((record) => String(record?.scope || "").toLowerCase() === scope); }
+function isLocalInstruction(record) {
+  return Boolean(record && record.source === "active" && record.path);
+}
+function localInstructionSet(record, root) {
+  if (!isLocalInstruction(record)) return null;
+  const relpath = String(record.path || "").trim();
+  if (!relpath) return null;
+  return {
+    slug: id(record),
+    path: relpath,
+    source_path: relpath,
+    abspath: pathMod.resolve(root, relpath),
+  };
+}
 
 function encodeTime(time, length) {
   let value = BigInt(time);
@@ -63,18 +82,6 @@ function encodeTime(time, length) {
   return out;
 }
 
-function publicationUlid() {
-  const crypto = nodeRequire("node:crypto");
-  const bytes = crypto.randomBytes(10);
-  let random = 0n;
-  for (const byte of bytes) random = (random << 8n) | BigInt(byte);
-  let tail = "";
-  for (let index = 0; index < 16; index += 1) {
-    tail = CROCKFORD[Number(random % 32n)] + tail;
-    random /= 32n;
-  }
-  return encodeTime(Date.now(), 10) + tail;
-}
 
 function screenSteps(plan, catalogs) {
   return Object.entries(plan?.payload?.steps || {}).sort(([a], [b]) => Number(a) - Number(b)).map(([, step]) => {
@@ -102,7 +109,7 @@ async function renderCreatePlan({ app, container }) {
   const catalogs = {
     engines: snapshotList(control, "engines"), models: snapshotList(control, "models"),
     scripts: snapshotList(control, "local_scripts"), ragProfiles: snapshotList(control, "rag_profiles"),
-    instructions: await callFeederAsync(app, "instructions.catalog", { include_pipeline: false }),
+    instructions: await callFeederAsync(app, "instructions.catalog", { include_pipeline: true }),
   };
   let plans = listPlanRecords(app), loaded = null, steps = [];
 
@@ -131,7 +138,7 @@ async function renderCreatePlan({ app, container }) {
   }
 
   function refreshInstructions() {
-    return callFeederAsync(app, "instructions.catalog", { include_pipeline: false }).then((records) => {
+    return callFeederAsync(app, "instructions.catalog", { include_pipeline: true }).then((records) => {
       catalogs.instructions = records;
       redraw();
       return records;
@@ -150,14 +157,17 @@ async function renderCreatePlan({ app, container }) {
   function refreshSelect(slug = "") {
     planSelect.innerHTML = "";
     planSelect.appendChild(el("option", { value: "", text: plans.length ? "Select a plan…" : "No saved plans" }));
-    plans.forEach((plan) => option(planSelect, { ...plan, key: planSlug(plan) }));
+    plans.forEach((plan) => {
+      const display = String(plan?.payload?.title || plan?.title || plan?.payload?.label || plan?.label || planSlug(plan));
+      planSelect.appendChild(el("option", { value: planSlug(plan), text: display }));
+    });
     planSelect.value = slug;
   }
 
-  function choice(records, value, onChange, placeholder) {
+  function choice(records, value, onChange, placeholder, { titleOnly = false } = {}) {
     const select = el("select"); select.style.width = "100%";
     select.appendChild(el("option", { value: "", text: placeholder }));
-    records.forEach((record) => option(select, record));
+    records.forEach((record) => option(select, record, { titleOnly }));
     select.value = id(value);
     select.addEventListener("change", () => onChange(selected(records, select.value)));
     return select;
@@ -177,6 +187,7 @@ async function renderCreatePlan({ app, container }) {
   }
 
   async function createInstruction(scope, step, field) {
+    notify(`Creating ${scope} instruction…`);
     const title = String(window.prompt(`Title for new ${scope} instruction:`) || "").trim();
     if (!title) return;
     const slug = makeSlug(PREFIXES[scope], title);
@@ -197,10 +208,11 @@ async function renderCreatePlan({ app, container }) {
     if (scope === "standing") {
       step.standingSlugs = [...new Set([...(step.standingSlugs || []), slug])];
     } else {
-      step[field] = record || { slug, path: relpath, label: title, scope, source: "active", abspath: pathMod.join(root, relpath) };
+      step[field] = record || { slug, path: relpath, title, label: title, scope, source: "active", abspath: pathMod.join(root, relpath) };
     }
     redraw();
     await app.workspace.getLeaf(false).openFile(file);
+    notify(`Created ${scope} instruction: ${title}.`);
   }
 
   function openInstruction(record) {
@@ -215,14 +227,27 @@ async function renderCreatePlan({ app, container }) {
     heading.appendChild(el("strong", { text: titleText }));
     const buttons = el("span");
     const create = el("button", { text: "Create instruction" });
-    create.addEventListener("click", () => createInstruction(scope, step, field));
+    create.addEventListener("click", () => createInstruction(scope, step, field).catch((error) => notify(`Create instruction failed: ${error.message || error}`, 10000)));
     buttons.appendChild(create);
     if (step[field]?.path) {
       const open = el("button", { text: "Open" }); open.addEventListener("click", () => openInstruction(step[field])); buttons.appendChild(open);
     }
     heading.appendChild(buttons);
     card.appendChild(heading);
-    card.appendChild(choice(records, step[field], (value) => { step[field] = value; redraw(); }, `Choose ${scope}`));
+    card.appendChild(choice(records, step[field], (value) => { step[field] = value; redraw(); }, `Choose ${scope}`, { titleOnly: true }));
+    const current = step[field];
+    if (current) {
+      const selectedRow = el("div"); selectedRow.style.cssText = "margin:.2rem 0 .35rem";
+      if (isLocalInstruction(current)) {
+        const link = el("button", { text: `[[${title(current)}]]` });
+        link.style.cssText = "background:none;border:0;padding:0;color:var(--link-color);text-align:left";
+        link.addEventListener("click", () => openInstruction(current));
+        selectedRow.appendChild(link);
+      } else {
+        selectedRow.appendChild(el("span", { text: title(current) }));
+      }
+      card.appendChild(selectedRow);
+    }
   }
 
   function standingPicker(card, step) {
@@ -231,11 +256,11 @@ async function renderCreatePlan({ app, container }) {
     heading.appendChild(el("strong", { text: "Standing instructions" }));
     const buttons = el("span");
     const selectAll = el("button", { text: "Select all" });
-    selectAll.addEventListener("click", () => { step.standingSlugs = records.map(id); redraw(); });
+    selectAll.addEventListener("click", () => { step.standingSlugs = records.map(id); redraw(); notify(`Selected all ${records.length} standing instruction(s).`); });
     const clearAll = el("button", { text: "Clear all" });
-    clearAll.addEventListener("click", () => { step.standingSlugs = []; redraw(); });
+    clearAll.addEventListener("click", () => { step.standingSlugs = []; redraw(); notify("Cleared standing instruction selection."); });
     const create = el("button", { text: "Create instruction" });
-    create.addEventListener("click", () => createInstruction("standing", step, "standingSlugs"));
+    create.addEventListener("click", () => createInstruction("standing", step, "standingSlugs").catch((error) => notify(`Create instruction failed: ${error.message || error}`, 10000)));
     buttons.append(selectAll, clearAll, create); heading.appendChild(buttons); card.appendChild(heading);
     const selectedSlugs = new Set(step.standingSlugs || []);
     for (const record of records) {
@@ -245,9 +270,15 @@ async function renderCreatePlan({ app, container }) {
         if (checkbox.checked) selectedSlugs.add(id(record)); else selectedSlugs.delete(id(record));
         step.standingSlugs = [...selectedSlugs];
       });
-      const link = el("button", { text: label(record) }); link.style.cssText = "background:none;border:0;padding:0;color:var(--link-color);text-align:left";
-      link.addEventListener("click", () => openInstruction(record));
-      row.append(checkbox, link); card.appendChild(row);
+      if (isLocalInstruction(record)) {
+        const link = el("button", { text: `[[${title(record)}]]` });
+        link.style.cssText = "background:none;border:0;padding:0;color:var(--link-color);text-align:left";
+        link.addEventListener("click", () => openInstruction(record));
+        row.append(checkbox, link);
+      } else {
+        row.append(checkbox, el("span", { text: title(record) }));
+      }
+      card.appendChild(row);
     }
     for (const slug of selectedSlugs) {
       if (!records.some((record) => id(record) === slug)) card.appendChild(el("div", { text: `⚠ Missing standing instruction: ${slug}` }));
@@ -277,12 +308,13 @@ async function renderCreatePlan({ app, container }) {
       }
       const args = el("textarea"); args.style.width = "100%"; args.value = step.argsJson || "{}";
       args.addEventListener("input", () => { step.argsJson = args.value; }); card.append(args);
-      const remove = el("button", { text: "Delete Step" }); remove.addEventListener("click", () => { steps.splice(index, 1); redraw(); }); card.append(remove);
+      const remove = el("button", { text: "Delete Step" }); remove.addEventListener("click", () => { steps.splice(index, 1); redraw(); notify(`Deleted step ${index + 1}.`); }); card.append(remove);
       stepsBox.appendChild(card);
     });
   }
 
   function loadSelectedPlan() {
+    notify("Loading plan…");
     if (!planSelect.value) {
       setStatus(plans.length ? "Select a saved plan, then click Load Plan." : "No saved plans were found under _plans/.");
       return;
@@ -295,12 +327,13 @@ async function renderCreatePlan({ app, container }) {
       steps = screenSteps(loaded, catalogs);
       redraw();
       setStatus(`Loaded ${planSlug(loaded)} from ${loaded.path}`);
-    } catch (error) { setStatus(`Load failed: ${error.message || error}`); }
+      notify(`Loaded plan ${planSlug(loaded)}.`);
+    } catch (error) { const message = `Load failed: ${error.message || error}`; setStatus(message); notify(message, 10000); }
   }
 
   loadButton.addEventListener("click", loadSelectedPlan);
   planSelect.addEventListener("dblclick", loadSelectedPlan);
-  newButton.addEventListener("click", () => { planSelect.value = ""; clearForm(); setStatus("New plan form ready."); name.focus(); });
+  newButton.addEventListener("click", () => { planSelect.value = ""; clearForm(); setStatus("New plan form ready."); notify("New plan form ready."); name.focus(); });
 
   const add = el("button", { text: "Add Step" });
   add.addEventListener("click", () => {
@@ -309,10 +342,12 @@ async function renderCreatePlan({ app, container }) {
       standingSlugs: byScope(catalogs.instructions, "standing").map(id),
     });
     redraw();
+    notify(`Added step ${steps.length}.`);
   });
 
   const save = el("button", { text: "Save Plan", class: "mod-cta" });
   save.addEventListener("click", async () => {
+    notify("Saving plan and publishing dependencies…");
     try {
       for (const [index, step] of steps.entries()) {
         if (step.kind !== "llm") { delete step.instruction_slugs; continue; }
@@ -324,32 +359,31 @@ async function renderCreatePlan({ app, container }) {
           task: [id(step.task)],
         };
       }
-      const publication = publicationUlid();
       const record = buildPlanRecord({ label: name.value, type: type.value, description: description.value, steps, force_slug: planSlug(loaded) || null });
-      record.payload.publication_ulid = publication;
       const savedPath = savePlanRecord(app, record);
       loaded = { ...record, path: savedPath };
       plans = listPlanRecords(app); refreshSelect(planSlug(record));
 
       const selectedSlugs = new Set();
       for (const step of steps) for (const values of Object.values(step.instruction_slugs || {})) for (const slug of values) selectedSlugs.add(slug);
-      const instructionSets = [...selectedSlugs].map((slug) => {
-        const item = selected(catalogs.instructions, slug);
-        if (!item?.path) throw new Error(`Instruction file not found locally: ${slug}`);
-        return item;
-      });
-      await callFeederAsync(app, "plan.save", { record, instruction_sets: instructionSets, publication_ulid: publication });
-      setStatus(`Saved and handed off ${planSlug(record)}\nPublication ULID: ${publication}\nInstructions: ${instructionSets.length}`);
-    } catch (error) { setStatus(`Save failed: ${error.message || error}`); }
+      const instructionSets = [...selectedSlugs]
+        .map((slug) => localInstructionSet(selected(catalogs.instructions, slug), root))
+        .filter(Boolean);
+      handoffFeeder(app, "plan.save", { record, instruction_sets: instructionSets });
+      // Fire-and-forget: feeder/server completion and failures belong in logs/status.
+    } catch (error) {
+      console.error("Define Plan handoff failed before feeder launch", error);
+    }
   });
 
   const del = el("button", { text: "Delete Plan" });
   del.addEventListener("click", () => {
-    if (!loaded) { setStatus("Load a plan before deleting it."); return; }
+    notify("Deleting plan…");
+    if (!loaded) { const message = "Load a plan before deleting it."; setStatus(message); notify(message); return; }
     try {
       const deletedPath = deletePlanRecord(app, planSlug(loaded));
-      plans = listPlanRecords(app); refreshSelect(); clearForm(); setStatus(`Deleted ${deletedPath}`);
-    } catch (error) { setStatus(`Delete failed: ${error.message || error}`); }
+      plans = listPlanRecords(app); refreshSelect(); clearForm(); setStatus(`Deleted ${deletedPath}`); notify(`Deleted plan ${deletedPath}.`);
+    } catch (error) { const message = `Delete failed: ${error.message || error}`; setStatus(message); notify(message, 10000); }
   });
 
   const pickerButtons = el("div"); pickerButtons.style.cssText = "display:flex;gap:.5rem;margin:.4rem 0 1rem"; pickerButtons.append(loadButton, newButton);

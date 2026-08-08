@@ -8,6 +8,7 @@ const { el, clear, button } = load("scripts/lib/dom.js");
 const { getFileManifest, appendClipboardCandidates } = load("scripts/lib/file-manifest.js");
 const { liveState } = load("scripts/lib/file-git-history.js");
 const { callFeederAsync } = load("scripts/lib/feeder-ipc.js");
+const { notify } = load("scripts/lib/notify.js");
 
 async function renderFileState({ app, container }) {
   clear(container);
@@ -16,9 +17,9 @@ async function renderFileState({ app, container }) {
   const title = el("h2", { text: "File State" });
   const status = el("p", { text: "Reading Git…" });
   const toolbar = el("div"); toolbar.style.display="flex"; toolbar.style.gap=".5rem"; toolbar.style.flexWrap="wrap";
-  const add = button("Reload clipboard", async()=>{ try { const n=appendClipboardCandidates(app,manifest,await navigator.clipboard.readText()); await refresh(n ? `${n} added from clipboard` : "clipboard contained no new files"); } catch(e){ new Notice(e.message,10000); } });
-  const clearBtn = button("Clear Clipboard List", async()=>{ manifest.candidates.clear(); await refresh("clipboard list cleared"); });
-  const refreshBtn = button("Refresh Git state", ()=>refresh());
+  const add = button("Reload clipboard", async()=>{ notify("Reloading clipboard…"); try { const n=appendClipboardCandidates(app,manifest,await navigator.clipboard.readText()); await refresh(n ? `${n} added from clipboard` : "clipboard contained no new files"); notify(n ? `Clipboard reloaded: ${n} file(s) added.` : "Clipboard reloaded: no new files."); } catch(e){ notify(e.message,10000); } });
+  const clearBtn = button("Clear Clipboard List", async()=>{ notify("Clearing clipboard list…"); manifest.candidates.clear(); await refresh("clipboard list cleared"); notify("Clipboard list cleared."); });
+  const refreshBtn = button("Refresh Git state", async()=>{ notify("Refreshing Git state…"); await refresh(); notify(`Git state refreshed: ${state.rows.length} file(s).`); });
   toolbar.append(add, clearBtn, refreshBtn);
   const host=el("div");
   const commit=el("div"); commit.style.display="grid"; commit.style.gap=".6rem"; commit.style.marginTop="1rem";
@@ -36,11 +37,11 @@ async function renderFileState({ app, container }) {
   async function refresh(note="") { state.rows=[]; for(const item of manifest.candidates.values()){ try{ state.rows.push({item,git:liveState(app,item.path),checkbox:el("input",{type:"checkbox"})}); }catch(e){ state.rows.push({item,git:{status:`ERROR: ${e.message}`,latest_commit:null},checkbox:el("input",{type:"checkbox"})}); } }
     for(const r of state.rows){ r.checkbox.checked=Boolean(r.item.selected); r.checkbox.onchange=()=>{r.item.selected=r.checkbox.checked;render();}; }
     status.textContent=state.rows.length?`${state.rows.length} manifest file(s); Git read live${note?` · ${note}`:""}.`:`The Dispatch Run manifest is empty.`; render(); }
-  async function doCommit(){ try{ const items=selected(); if(!items.length) throw new Error("Select at least one file."); if(!msg.value.trim()) throw new Error("Enter a commit description."); state.busy=true; commitBtn.disabled=true;
+  async function doCommit(){ try{ const items=selected(); if(!items.length) throw new Error("Select at least one file."); if(!msg.value.trim()) throw new Error("Enter a commit description."); notify(`Committing ${items.length} file(s)…`); state.busy=true; commitBtn.disabled=true;
       const resolved=await callFeederAsync(app,"git.resolve_selection",{items}); const rows=resolved.items||resolved.files||[]; const blocked=rows.filter(x=>x.error||x.problem||x.committable===false); if(blocked.length) throw new Error("One or more selected files cannot be committed.");
       const kind=type.value; const result=await callFeederAsync(app,"git.commit_selection",{message:msg.value.trim(),commit_type:kind,tag_type:kind,state:kind==="lock"?"locked":"versioned",items:rows});
-      new Notice(`Committed ${result.count||rows.length} file(s): ${String(result.commit?.hash||result.commit||"").slice(0,8)}`); msg.value=""; await refresh();
-    }catch(e){new Notice(`Commit failed: ${e.message}`,10000);}finally{state.busy=false;commitBtn.disabled=!selected().length;} }
+      notify(`Committed ${result.count||rows.length} file(s): ${String(result.commit?.hash||result.commit||"").slice(0,8)}`); msg.value=""; await refresh();
+    }catch(e){notify(`Commit failed: ${e.message}`,10000);}finally{state.busy=false;commitBtn.disabled=!selected().length;} }
   try { const n=appendClipboardCandidates(app,manifest,await navigator.clipboard.readText()); await refresh(n ? `${n} added from clipboard` : "clipboard loaded"); } catch(e) { await refresh(`clipboard unavailable: ${e.message}`); }
 }
 module.exports={renderFileState};

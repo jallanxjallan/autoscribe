@@ -3,7 +3,6 @@ from collections.abc import Iterable
 from typing import TextIO
 
 from asc.enqueue.custody import ensure_no_pending_export
-from asc.enqueue.daemons import ensure_pipeline_daemons_running
 from asc.enqueue.job import activate_job, create_job, deactivate_job
 from asc.enqueue.reader import EnqueueRecord, iter_enqueue_records
 from asc.enqueue.report import EnqueuedCall, EnqueueReport
@@ -44,7 +43,6 @@ def enqueue_record(record: EnqueueRecord) -> EnqueuedCall:
     job_activated = False
 
     try:
-        ensure_pipeline_daemons_running()
         runtimes = materialize_runtimes(
             call_identity=call.identity,
             plan=record.plan.plan,

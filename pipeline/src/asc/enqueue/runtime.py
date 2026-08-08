@@ -95,11 +95,7 @@ def delete_ephemeral_instructions(runtimes: tuple[Runtime, ...]) -> None:
 def _save_directive_instruction(*, call_identity: str, content: str) -> Instruction:
     """Persist the call-scoped directive using the call identity."""
 
-    instruction = Instruction(
-        identity=call_identity,
-        slug=f"directive.{call_identity}",
-        content=content,
-    )
+    instruction = Instruction(identity=call_identity, content=content)
     instruction.save(ttl=DIRECTIVE_TTL_SECONDS)
     return instruction
 

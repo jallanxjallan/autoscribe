@@ -13,7 +13,7 @@ from .markdown import parse_markdown
 from .contracts import upload_record
 
 INSTRUCTION_LABELS = ("standing", "role", "context", "task")
-INSTRUCTION_PREFIXES = ("std.", "rol.", "ctx.", "tsk.")
+INSTRUCTION_PREFIXES = ("std.", "rol.", "cxt.", "tsk.")
 
 
 def _plan_values(snapshot: dict[str, Any]) -> list[dict[str, Any]]:
@@ -115,7 +115,7 @@ def _validate_steps(slug: str, content: dict[str, Any]) -> None:
                 raise ObsError(f"{slug}: step {ordinal} instruction_slugs.{label} must be a slug list")
 
 
-def _instruction_records(cwd: Path, instruction_sets: list[dict[str, Any]], publication_ulid: str) -> list[dict[str, Any]]:
+def _instruction_records(cwd: Path, instruction_sets: list[dict[str, Any]]) -> list[dict[str, Any]]:
     unique: dict[str, dict[str, Any]] = {}
     for item in instruction_sets:
         slug = str(item.get("slug") or item.get("record_identity") or "").strip()
@@ -147,9 +147,9 @@ def _instruction_records(cwd: Path, instruction_sets: list[dict[str, Any]], publ
             extra={
                 "filename_hint": source.name,
                 "source_path": relpath,
+                "title": source.stem.strip(),
                 "metadata": dict(document.frontmatter),
                 "scope": scope,
-                "publication_ulid": publication_ulid,
             },
         )
         prior = unique.get(slug)
@@ -164,7 +164,6 @@ def save_plan(
     *,
     cwd: Path,
     instruction_sets: list[dict[str, Any]] | None = None,
-    publication_ulid: str | None = None,
 ) -> dict[str, Any]:
     """Publish a complete plan snapshot and every referenced local instruction."""
     slug = str(record.get("record_identity") or record.get("slug") or "").strip()
@@ -173,13 +172,15 @@ def save_plan(
     content = record.get("payload")
     if not isinstance(content, dict):
         raise ObsError(f"{slug}: plan.save requires payload object")
-    publication = str(publication_ulid or content.get("publication_ulid") or "").strip()
-    if len(publication) != 26:
-        raise ObsError(f"{slug}: publication_ulid must be a 26-character ULID")
-    content = {**content, "publication_ulid": publication}
+    content = {key: value for key, value in content.items() if key != "publication_ulid"}
     _validate_steps(slug, content)
 
-    instructions = _instruction_records(cwd, instruction_sets or [], publication)
+    # Local wikilink-backed instruction files are reconciled through the same
+    # sync path used by Library. Unchanged records are skipped; server-only
+    # instruction slugs are never treated as files.
+    from .instruction_upload import sync_instructions
+    sync_results = sync_instructions(cwd, instruction_sets or []) if instruction_sets else []
+    instructions = _instruction_records(cwd, instruction_sets or [])
     referenced = {
         value
         for step in content["steps"].values()
@@ -187,29 +188,42 @@ def save_plan(
         for value in values
     }
     supplied = {record["identity"] for record in instructions}
-    missing = sorted(referenced - supplied)
+    snapshot = pipeline_snapshot("control")
+    registries = snapshot.get("registries", {}) if isinstance(snapshot, dict) else {}
+    server_records = registries.get("instructions", {}) if isinstance(registries, dict) else {}
+    if isinstance(server_records, dict):
+        server_slugs = {str(key) for key in server_records}
+    elif isinstance(server_records, list):
+        server_slugs = {
+            str(item.get("slug") or item.get("record_identity") or "").strip()
+            for item in server_records
+            if isinstance(item, dict)
+        }
+    else:
+        server_slugs = set()
+    available = supplied | server_slugs
+    missing = sorted(referenced - available)
     if missing:
-        raise ObsError(f"{slug}: referenced instructions were not supplied: {', '.join(missing)}")
+        raise ObsError(
+            f"{slug}: referenced instructions are neither supplied locally nor present on the server: "
+            + ", ".join(missing)
+        )
 
     outputs: list[str] = []
-    if instructions:
-        result = run([autoscribe_bin(), "upload", "instructions"], cwd=cwd, input_text=_ndjson(instructions))
-        if result.stdout.strip():
-            outputs.append(result.stdout.strip())
     plan_record = upload_record(
         type="plan",
         identity=slug,
         content=content,
-        extra={"publication_ulid": publication},
+        extra={},
     )
     result = run([autoscribe_bin(), "upload", "plans"], cwd=cwd, input_text=_ndjson([plan_record]))
     if result.stdout.strip():
         outputs.append(result.stdout.strip())
     return {
         "record": plan_record,
-        "publication_ulid": publication,
         "instruction_count": len(instructions),
         "instructions": [record["identity"] for record in instructions],
+        "instruction_sync": sync_results,
         "pipeline_output": "\n".join(outputs),
     }
 

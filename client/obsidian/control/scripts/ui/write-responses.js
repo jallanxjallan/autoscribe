@@ -9,6 +9,7 @@ const loadControl = (relativePath) => nodeRequire(pathMod.join(controlVaultRoot,
 const { listTransportRuns, getResponseReview, decideResponse } = loadControl("scripts/lib/git-transport.js");
 const { element: el, renderDiff } = loadControl("scripts/lib/diff-view.js");
 const { runFeederCommand } = loadControl("scripts/lib/feeder-command.js");
+const { notify } = loadControl("scripts/lib/notify.js");
 
 function formatRun(run) {
   const when = run.created_at ? new Date(run.created_at).toLocaleString() : "unknown time";
@@ -26,23 +27,26 @@ async function renderWriteResponses({ app, container }) {
     state.review = state.branch && state.identity ? getResponseReview(app, state.branch, state.identity) : null;
   }
 
-  function refresh() {
+  function refresh(notifyUser = true) {
+    if (notifyUser) notify("Refreshing response review…");
     state.error = "";
     try { loadRuns(); } catch (error) { state.error = error.message || String(error); state.review = null; }
     render();
+    if (notifyUser) notify(state.error ? `Response refresh failed: ${state.error}` : "Response review refreshed.", state.error ? 10000 : 4000);
   }
 
   function decideOne(outcome) {
     if (state.busy || !state.branch || !state.identity) return;
+    notify(`${outcome === "accepted" ? "Accepting" : "Declining"} response ${state.identity}…`);
     state.busy = true; state.error = ""; state.notice = ""; render();
     try {
       const result = decideResponse(app, state.branch, state.identity, outcome);
       state.notice = `${result.identity} ${outcome}.`;
-      new Notice(state.notice);
+      notify(state.notice);
       loadRuns();
     } catch (error) {
       console.error(error); state.error = error.message || String(error);
-      new Notice(`Response decision failed: ${state.error}`, 10000);
+      notify(`Response decision failed: ${state.error}`, 10000);
     } finally { state.busy = false; render(); }
   }
 
@@ -53,6 +57,7 @@ async function renderWriteResponses({ app, container }) {
     if (!records.length) return;
     const verb = outcome === "accepted" ? "accept" : "decline";
     if (!window.confirm(`Are you sure you want to ${verb} all ${records.length} responses in the selected run?`)) return;
+    notify(`${outcome === "accepted" ? "Accepting" : "Declining"} ${records.length} response(s)…`);
     state.busy = true; state.error = ""; state.notice = ""; render();
     let completed = 0;
     try {
@@ -61,12 +66,12 @@ async function renderWriteResponses({ app, container }) {
         completed += 1;
       }
       state.notice = `${completed} response${completed === 1 ? "" : "s"} ${outcome}.`;
-      new Notice(state.notice);
+      notify(state.notice);
       loadRuns();
     } catch (error) {
       console.error(error);
       state.error = `${completed} completed before failure: ${error.message || error}`;
-      new Notice(`Bulk response decision stopped: ${state.error}`, 10000);
+      notify(`Bulk response decision stopped: ${state.error}`, 10000);
       loadRuns();
     } finally { state.busy = false; render(); }
   }
@@ -89,7 +94,7 @@ async function renderWriteResponses({ app, container }) {
       if (run.branch === state.branch) option.selected = true;
       branchSelect.appendChild(option);
     }
-    branchSelect.addEventListener("change", () => { state.branch = branchSelect.value; state.identity = ""; refresh(); });
+    branchSelect.addEventListener("change", () => { state.branch = branchSelect.value; state.identity = ""; refresh(false); });
     toolbar.appendChild(branchSelect);
     const run = state.runs.find((item) => item.branch === state.branch);
     const recordSelect = el("select", { disabled: state.busy || !run?.pending?.length });
@@ -98,7 +103,7 @@ async function renderWriteResponses({ app, container }) {
       if (record.identity === state.identity) option.selected = true;
       recordSelect.appendChild(option);
     }
-    recordSelect.addEventListener("change", () => { state.identity = recordSelect.value; refresh(); });
+    recordSelect.addEventListener("change", () => { state.identity = recordSelect.value; refresh(false); });
     toolbar.appendChild(recordSelect); container.appendChild(toolbar);
 
     if (state.error) container.appendChild(el("pre", { style: "white-space:pre-wrap;" }, state.error));
