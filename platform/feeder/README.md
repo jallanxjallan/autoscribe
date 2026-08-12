@@ -24,6 +24,10 @@ obs dispatch-run [--dry-run] [--branch BRANCH]
 obs retrieve-results [--dry-run] [--branch BRANCH]
 ```
 
+Markdown instruction uploads and Markdown result writeback do not use Pandoc.
+The feeder parses YAML frontmatter directly and sends or writes the Markdown
+body unchanged. Pandoc is reserved for actual document-format conversion.
+
 `retrieve-results` reads each waiting `autoscribe/run/*` flight branch, takes the
 record identities from its dispatch manifest, and calls:
 

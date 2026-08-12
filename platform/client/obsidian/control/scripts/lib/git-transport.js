@@ -244,9 +244,10 @@ function createDispatchBranch(app, { paths, planRecord, message = "", combineBas
 
   const runIdentity = randomRunIdentity();
   const branch = `${RUN_BRANCH_PREFIX}${runIdentity}`;
-  const planPath = planRelativePath(root, planRecord);
-  const instructionPaths = listInstructionPaths(app, root, planRecord).map((item) => assertRelativePath(root, item));
-  const snapshotPaths = [...new Set([...selected, planPath, ...instructionPaths])];
+  // Define Plan owns publication of plans and their instruction dependencies.
+  // Dispatch selects the already-published plan by slug, so its transport
+  // branch needs only the selected call files.
+  const snapshotPaths = selected;
   const sourceSubject = String(message || "").trim() || `DISPATCH SOURCE ${planSlug}: ${runIdentity}`;
   const sourceCommit = commitSourceSnapshot(root, snapshotPaths, sourceSubject);
   const records = selected.map((relative) => ({ identity: frontmatterSlug(app, relative), source_path: relative }));
@@ -263,12 +264,10 @@ function createDispatchBranch(app, { paths, planRecord, message = "", combineBas
       "Run: " + runIdentity,
       "Created: " + new Date().toISOString(),
       "Plan: " + planSlug,
-      "Plan-Path: " + planPath,
       "Source-Branch: " + sourceBranch,
       "Source-Commit: " + sourceCommit,
       ...(combineBasename ? ["Combine-Basename: " + String(combineBasename)] : []),
       ...records.map((row) => `Record: ${row.identity}\t${row.source_path}`),
-      ...instructionPaths.map((relative) => `Instruction: ${relative}`),
     ].join("\n");
     git(worktree, [
       "commit",

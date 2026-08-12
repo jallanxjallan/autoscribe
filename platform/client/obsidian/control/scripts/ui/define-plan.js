@@ -88,7 +88,7 @@ function encodeTime(time, length) {
 
 
 function screenSteps(plan, catalogs) {
-  return Object.entries(plan?.payload?.steps || {}).sort(([a], [b]) => Number(a) - Number(b)).map(([, step]) => {
+  return Object.entries(plan?.payload?.steps || plan?.steps || {}).sort(([a], [b]) => Number(a) - Number(b)).map(([, step]) => {
     const refs = step.instruction_slugs || {};
     return {
       kind: step.kind || "llm",
@@ -118,8 +118,7 @@ async function renderCreatePlan({ app, container }) {
   };
   const { notify } = loadControl("scripts/lib/notify.js");
   const { buildPlanRecord } = loadControl("scripts/plans/plan-record.js");
-  const { listPlanRecords, loadPlanRecord, savePlanRecord, deletePlanRecord } = loadControl("scripts/plans/plan-store.js");
-  const { callFeederAsync, handoffFeeder } = loadControl("scripts/lib/feeder-ipc.js");
+  const { callFeederAsync } = loadControl("scripts/lib/feeder-ipc.js");
   const { vaultRoot } = loadControl("scripts/lib/vault-state.js");
   const { snapshotList } = loadControl("scripts/lib/control-loader.js");
   const { makeSlug } = loadControl("scripts/lib/slug.js");
@@ -130,10 +129,10 @@ async function renderCreatePlan({ app, container }) {
     scripts: snapshotList(control, "local_scripts"), ragProfiles: snapshotList(control, "rag_profiles"),
     instructions: await callFeederAsync(app, "instructions.catalog", { include_pipeline: true }),
   };
-  let plans = listPlanRecords(app), loaded = null, steps = [];
+  let plans = await callFeederAsync(app, "plans.list", {}), loaded = null, steps = [];
 
   container.appendChild(el("h2", { text: "Define Plan" }));
-  container.appendChild(el("p", { text: "Create or modify a plan and publish its complete local instruction set. Plans are stored under _plans/ and versioned in Git." }));
+  container.appendChild(el("p", { text: "Create or modify a project plan on the AutoScribe server. Referenced local instructions are synchronized before the plan is saved." }));
 
   const planLabel = el("label", { text: "Existing plan" });
   const planSelect = el("select"); planSelect.style.width = "100%";
@@ -332,26 +331,26 @@ async function renderCreatePlan({ app, container }) {
     });
   }
 
-  function loadSelectedPlan() {
+  async function loadSelectedPlan() {
     notify("Loading plan…");
     if (!planSelect.value) {
-      setStatus(plans.length ? "Select a saved plan, then click Load Plan." : "No saved plans were found under _plans/.");
+      setStatus(plans.length ? "Select a server plan, then click Load Plan." : "No plans were found on the server.");
       return;
     }
     try {
-      loaded = loadPlanRecord(app, planSelect.value);
+      loaded = await callFeederAsync(app, "plan.load", { slug: planSelect.value });
       name.value = loaded.payload?.label || loaded.label || "";
       type.value = loaded.payload?.type || loaded.type || "";
       description.value = loaded.payload?.description || loaded.description || "";
       steps = screenSteps(loaded, catalogs);
       redraw();
-      setStatus(`Loaded ${planSlug(loaded)} from ${loaded.path}`);
+      setStatus(`Loaded ${planSlug(loaded)} from the server.`);
       notify(`Loaded plan ${planSlug(loaded)}.`);
     } catch (error) { const message = `Load failed: ${error.message || error}`; setStatus(message); notify(message, 10000); }
   }
 
-  loadButton.addEventListener("click", loadSelectedPlan);
-  planSelect.addEventListener("dblclick", loadSelectedPlan);
+  loadButton.addEventListener("click", () => loadSelectedPlan().catch((error) => notify(`Load failed: ${error.message || error}`, 10000)));
+  planSelect.addEventListener("dblclick", () => loadSelectedPlan().catch((error) => notify(`Load failed: ${error.message || error}`, 10000)));
   newButton.addEventListener("click", () => { planSelect.value = ""; clearForm(); setStatus("New plan form ready."); notify("New plan form ready."); name.focus(); });
 
   const add = el("button", { text: "Add Step" });
@@ -379,29 +378,33 @@ async function renderCreatePlan({ app, container }) {
         };
       }
       const record = buildPlanRecord({ label: name.value, type: type.value, description: description.value, steps, force_slug: planSlug(loaded) || null });
-      const savedPath = savePlanRecord(app, record);
-      loaded = { ...record, path: savedPath };
-      plans = listPlanRecords(app); refreshSelect(planSlug(record));
-
       const selectedSlugs = new Set();
       for (const step of steps) for (const values of Object.values(step.instruction_slugs || {})) for (const slug of values) selectedSlugs.add(slug);
       const instructionSets = [...selectedSlugs]
         .map((slug) => localInstructionSet(selected(catalogs.instructions, slug), root))
         .filter(Boolean);
-      handoffFeeder(app, "plan.save", { record, instruction_sets: instructionSets });
-      // Fire-and-forget: feeder/server completion and failures belong in logs/status.
+      const result = await callFeederAsync(app, "plan.save", { record, instruction_sets: instructionSets });
+      loaded = record;
+      plans = await callFeederAsync(app, "plans.list", {});
+      refreshSelect(planSlug(record));
+      setStatus(`Saved ${planSlug(record)} on the server.`);
+      notify(`Saved plan ${planSlug(record)}.`);
     } catch (error) {
-      console.error("Define Plan handoff failed before feeder launch", error);
+      const message = `Save failed: ${error.message || error}`;
+      setStatus(message);
+      notify(message, 10000);
     }
   });
 
   const del = el("button", { text: "Delete Plan" });
-  del.addEventListener("click", () => {
+  del.addEventListener("click", async () => {
     notify("Deleting plan…");
     if (!loaded) { const message = "Load a plan before deleting it."; setStatus(message); notify(message); return; }
     try {
-      const deletedPath = deletePlanRecord(app, planSlug(loaded));
-      plans = listPlanRecords(app); refreshSelect(); clearForm(); setStatus(`Deleted ${deletedPath}`); notify(`Deleted plan ${deletedPath}.`);
+      const slug = planSlug(loaded);
+      await callFeederAsync(app, "plan.delete", { slug });
+      plans = await callFeederAsync(app, "plans.list", {});
+      refreshSelect(); clearForm(); setStatus(`Deleted ${slug} from the server.`); notify(`Deleted plan ${slug}.`);
     } catch (error) { const message = `Delete failed: ${error.message || error}`; setStatus(message); notify(message, 10000); }
   });
 

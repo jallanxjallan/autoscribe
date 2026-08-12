@@ -5,7 +5,7 @@ const nodeRequire = typeof require === "function" ? require : window.require;
 const pathMod = nodeRequire("node:path");
 const vaultRoot = app.vault.adapter.getBasePath?.() || app.vault.adapter.basePath;
 const loadControl = (relativePath) => nodeRequire(pathMod.join(vaultRoot, "_control", ...relativePath.split("/")));
-const { listPlanRecords } = loadControl("scripts/plans/plan-store.js");
+const { callFeederAsync } = loadControl("scripts/lib/feeder-ipc.js");
 
 function text(value) {
   return String(value ?? "").trim();
@@ -98,10 +98,13 @@ function renderInstructionList(cell, slugs) {
   }
 }
 
-function renderPlanIndex() {
+async function renderPlanIndex() {
   let plans;
   try {
-    plans = listPlanRecords(app);
+    const catalog = await callFeederAsync(app, "plans.list", {});
+    plans = await Promise.all(catalog.map((record) =>
+      callFeederAsync(app, "plan.load", { slug: text(record?.record_identity || record?.slug) })
+    ));
   } catch (error) {
     console.error("Plan Index failed:", error);
     dv.paragraph(`**Unable to read plans:** ${error?.message || error}`);
@@ -109,7 +112,7 @@ function renderPlanIndex() {
   }
 
   if (!plans.length) {
-    dv.paragraph("*No plans found in `_plans`.*");
+    dv.paragraph("*No plans found on the server.*");
     return;
   }
 
@@ -237,5 +240,5 @@ function renderPlanIndex() {
   });
 }
 
-renderPlanIndex();
+await renderPlanIndex();
 ```

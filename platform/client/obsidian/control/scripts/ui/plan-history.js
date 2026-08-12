@@ -10,7 +10,7 @@ const { el, clear, button } = loadControl("scripts/lib/dom.js");
 const { notify } = loadControl("scripts/lib/notify.js");
 const { createInternalLink } = loadControl("scripts/lib/internal-link.js");
 const { listTransportRuns } = loadControl("scripts/lib/git-transport.js");
-const { listPlanRecords } = loadControl("scripts/plans/plan-store.js");
+const { callFeederAsync } = loadControl("scripts/lib/feeder-ipc.js");
 
 function formatTimestamp(value) {
   if (!value) return "Unknown timestamp";
@@ -18,10 +18,11 @@ function formatTimestamp(value) {
   return Number.isNaN(date.getTime()) ? String(value) : date.toLocaleString();
 }
 
-function currentPlanLabels(app) {
+async function currentPlanLabels(app) {
   try {
-    return new Map(listPlanRecords(app).map((record) => [
-      record.slug,
+    const records = await callFeederAsync(app, "plans.list", {});
+    return new Map(records.map((record) => [
+      record.record_identity || record.slug,
       String(record.payload?.label || record.label || record.slug),
     ]));
   } catch (error) {
@@ -153,7 +154,7 @@ function renderPlanHistory({ app, container }) {
   const refresh = toolbar.appendChild(button("Refresh", () => { notify("Refreshing plan history…"); draw(true); }));
   const output = container.appendChild(el("div"));
 
-  function draw(notifyUser = false) {
+  async function draw(notifyUser = false) {
     output.replaceChildren();
     let runs;
     try {
@@ -164,7 +165,7 @@ function renderPlanHistory({ app, container }) {
       return;
     }
 
-    const labels = currentPlanLabels(app);
+    const labels = await currentPlanLabels(app);
     const grouped = new Map();
     for (const run of runs) {
       const slug = String(run.plan_identity || "unknown-plan").trim() || "unknown-plan";

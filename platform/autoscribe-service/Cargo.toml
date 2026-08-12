@@ -1,0 +1,17 @@
+[package]
+name = "autoscribe-service"
+version = "0.1.0"
+edition = "2024"
+description = "Client-side AutoScribe service contract and implementation scaffold"
+license = "Proprietary"
+
+[lib]
+name = "autoscribe_service"
+path = "src/lib.rs"
+
+[[bin]]
+name = "autoscribe-service"
+path = "src/main.rs"
+
+[dependencies]
+

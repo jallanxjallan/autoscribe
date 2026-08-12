@@ -11,29 +11,28 @@ from . import git
 from .errors import ObsError
 from .manifests import now_iso, read_json, rows, write_json
 from .markdown import parse_markdown, slug_prefix
-from .pandoc import capture as pandoc_capture
 from .state import VaultState
 from .vault import Vault
 from .contracts import enqueue_record, provisional_slug, upload_record
 from .executables import autoscribe_bin
 from .process import run
 
-INSTRUCTION_PREFIXES = {"std", "rol", "ctx", "tsk"}
+INSTRUCTION_PREFIXES = {"std", "rol", "cxt", "tsk"}
 
 
 def _sha256(text: str) -> str:
     return hashlib.sha256(text.encode("utf-8")).hexdigest()
 
 
-def _emit_pandoc(repo: Path, relpath: str, defaults: list[str], metadata: dict[str, Any]) -> str:
-    output = pandoc_capture(repo=repo, input_path=relpath, defaults=defaults, metadata=metadata)
-    if output and not output.endswith("\n"):
-        output += "\n"
-    return output
-
-
 def upload_instructions(repo: Path, *, force: bool = False, dry_run: bool = False,
                         defaults: list[str] | None = None) -> tuple[list[dict[str, Any]], str]:
+    """Upload instruction Markdown bodies directly as instruction records.
+
+    ``defaults`` remains only for command compatibility with older callers.
+    Markdown instruction upload is not a document conversion and must not
+    invoke Pandoc.
+    """
+    del defaults
     vault = Vault(repo)
     candidates = {path.relative_to(repo).as_posix() for path in vault.markdown_paths()}
     if not force:
@@ -50,7 +49,7 @@ def upload_instructions(repo: Path, *, force: bool = False, dry_run: bool = Fals
             "path": relpath,
             "prefix": slug_prefix(slug),
             "previous_commit": git.last_commit(repo, relpath),
-            "content_sha256": _sha256(document.body.strip()),
+            "content_sha256": _sha256(document.body),
         })
     _assert_unique(items, "instruction")
     if dry_run or not items:
@@ -58,22 +57,34 @@ def upload_instructions(repo: Path, *, force: bool = False, dry_run: bool = Fals
     stamp = datetime.now().strftime("%Y%m%d-%H%M%S")
     commit = git.commit_files(repo, [item["path"] for item in items], f"UPLOAD instructions: {stamp}")
     uploaded_at = now_iso()
-    output = ""
+    records: list[dict[str, Any]] = []
     for order, item in enumerate(items, 1):
-        metadata = {
-            "slug": item["slug"], "record_identity": item["slug"],
-            "record_type": "instruction", "control_prefix": item["prefix"],
-            "source": {
+        path = repo / item["path"]
+        document = parse_markdown(path.read_text(encoding="utf-8"))
+        if not document.body.strip():
+            raise ObsError(f"{item['path']}: instruction body is empty")
+        records.append(upload_record(
+            type="instruction",
+            identity=item["slug"],
+            content=document.body,
+            extra={
+                "title": path.stem.strip(),
+                "filename_hint": path.name,
+                "source_path": item["path"],
+                "control_prefix": item["prefix"],
                 "origin": "obsidian.upload-instructions", "vault_root": str(repo),
-                "path": item["path"], "filename_hint": Path(item["path"]).name,
                 "previous_commit": item["previous_commit"], "upload_commit": commit,
                 "uploaded_at": uploaded_at, "content_sha256": item["content_sha256"],
                 "selection_mode": "force-all-matching-prefix" if force else "dirty-matching-prefix",
                 "selection_order": order,
             },
-        }
-        output += _emit_pandoc(repo, item["path"], defaults or ["upload_control"], metadata)
-    return items, output
+        ))
+    result = run(
+        [autoscribe_bin(), "upload", "instructions"],
+        cwd=repo,
+        input_text=_encode_ndjson(records).decode("utf-8"),
+    )
+    return items, result.stdout.strip()
 
 
 

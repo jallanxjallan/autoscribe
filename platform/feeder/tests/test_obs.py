@@ -76,6 +76,51 @@ def test_user_commits_exclude_autoscribe_commits(tmp_path: Path):
     assert commits[0]["files"] == ["one.md"]
 
 
+def test_upload_instructions_sends_markdown_body_without_pandoc(tmp_path: Path, monkeypatch):
+    import json
+    import subprocess
+    from types import SimpleNamespace
+    import obs.uploads as uploads
+
+    subprocess.run(["git", "init"], cwd=tmp_path, check=True, capture_output=True)
+    subprocess.run(["git", "config", "user.email", "test@example.com"], cwd=tmp_path, check=True)
+    subprocess.run(["git", "config", "user.name", "Test"], cwd=tmp_path, check=True)
+    (tmp_path / ".obsidian").mkdir()
+    (tmp_path / "_control").mkdir()
+    source = tmp_path / "Task.md"
+    source.write_text(
+        "---\nslug: tsk.task.abc123\nscope: task\n---\n\nKeep **Markdown** unchanged.\n",
+        encoding="utf-8",
+    )
+    subprocess.run(["git", "add", "."], cwd=tmp_path, check=True)
+    subprocess.run(["git", "commit", "-m", "Initial"], cwd=tmp_path, check=True, capture_output=True)
+    source.write_text(source.read_text(encoding="utf-8") + "Second line.\n", encoding="utf-8")
+
+    captured = {}
+    monkeypatch.setattr(uploads, "autoscribe_bin", lambda: "/fake/asc")
+
+    def fake_run(command, *, cwd, input_text=None, **kwargs):
+        if command[0] == "rg":
+            return SimpleNamespace(returncode=0, stdout="Task.md\n", stderr="")
+        captured["command"] = command
+        captured["input_text"] = input_text
+        return SimpleNamespace(returncode=0, stdout="uploaded\n", stderr="")
+
+    monkeypatch.setattr(uploads, "run", fake_run)
+    monkeypatch.setattr(uploads.Vault, "markdown_paths", lambda self: iter([source]))
+
+    items, output = uploads.upload_instructions(tmp_path)
+
+    record = json.loads(captured["input_text"])
+    assert captured["command"] == ["/fake/asc", "upload", "instructions"]
+    assert record["type"] == "instruction"
+    assert record["identity"] == "tsk.task.abc123"
+    assert record["content"] == "\nKeep **Markdown** unchanged.\nSecond line.\n"
+    assert "slug:" not in record["content"]
+    assert items[0]["slug"] == "tsk.task.abc123"
+    assert output == "uploaded"
+
+
 def test_dispatch_run_emits_nul_pandoc_arguments_and_commits(tmp_path: Path):
     import json
     import subprocess

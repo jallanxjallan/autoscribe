@@ -136,7 +136,7 @@ async function renderDispatchRun({ app, container }) {
   const { getFileManifest, appendClipboardCandidates } = loadControl("scripts/lib/file-manifest.js");
   const { notify } = loadControl("scripts/lib/notify.js");
   const { createDispatchBranch, clearPipelineMetadata } = loadControl("scripts/lib/git-transport.js");
-  const { listPlanRecords, loadPlanRecord } = loadControl("scripts/plans/plan-store.js");
+  const { callFeederAsync } = loadControl("scripts/lib/feeder-ipc.js");
   const { runFeederCommand } = loadControl("scripts/lib/feeder-command.js");
 
   const session = getFileManifest(app);
@@ -217,7 +217,7 @@ async function renderDispatchRun({ app, container }) {
 
   await addClipboardSelection();
 
-  const planRows = listPlanRecords(app);
+  const planRows = await callFeederAsync(app, "plans.list", {});
   if (!Array.isArray(planRows) || !planRows.length) {
     container.createEl("p", { text: "No plans are available." });
     return;
@@ -275,7 +275,7 @@ async function renderDispatchRun({ app, container }) {
       clearPipelineMetadata(app, selection);
       const transport = createDispatchBranch(app, {
         paths: selection,
-        planRecord: loadPlanRecord(app, select.value),
+        planRecord: { record_identity: select.value },
         message: message.value.trim(),
         combineBasename: combine.checked ? basename : ""
       });
