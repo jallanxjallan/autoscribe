@@ -25,7 +25,7 @@ policy.
   out: `Transaction` used to make a state transition atomic.
 
 The database will store plans, catalog snapshots, dispatch identities, exact
-payload bytes, attempts, results, file/run associations, notices, and cache
+payload bytes, attempts, results, file/run associations, notices, and sync
 metadata. Domain modules own meanings; `db` only provides persistence.
 
 ## `events`
@@ -36,6 +36,18 @@ metadata. Domain modules own meanings; `db` only provides persistence.
 
 Every command first publishes `Accepted`, then later `Completed`, `Failed`, or
 `NeedsDecision`. This supports immediate feedback in any frontend.
+
+## `pandoc`
+
+- `run_parallel(executable, jobs, max_parallel)` — in: an absolute Pandoc
+  executable path, independent jobs, and a concurrency bound; out: one typed
+  outcome per job in input order.
+
+Pandoc owns all Markdown parsing and construction at document boundaries. The
+service invokes it only through batches. Multi-job batches reject a concurrency
+limit below two, and one failed document does not prevent the remaining jobs
+from completing. Filters, defaults, templates, and reference documents live in
+the first-class `platform/pandoc` package.
 
 ## `git`
 
@@ -49,16 +61,18 @@ Every command first publishes `Accepted`, then later `Completed`, `Failed`, or
 - `restore_version(repo, request)` — in: guarded restore request; out: new
   commit preserving the prior head in history.
 
-## `shadow`
+## `sync`
 
-- `sync_for_dispatch(request)` — in: document and shadow-tree locations; out:
-  ordered chunks, hashes, and sentinel mappings used to assemble a call.
-- `apply_response(request)` — in: returned chunks plus expected base hashes;
-  out: files changed and conflicts. It must refuse an unsafe overwrite.
-- `verify(request)` — in: source document and shadow tree; out: missing,
-  changed, and orphaned chunks without modifying either side.
+- `run(request)` — in: an optional forced-sync request; out: counts of uploads
+  sent, downloads received, records still pending outbound, and the sync time.
+- `status()` — in: none; out: the last successful sync time plus pending and
+  uncertain outbound counts.
 
-Synchronization is command-driven. No watcher or document daemon is implied.
+The daemon synchronizes periodically. A frontend can also request a sync, but
+does not transmit or modify sync records itself. The SQLite outbox is durable
+and authoritative for runs that have not been acknowledged by the pipeline;
+it is not a disposable cache. This module is unrelated to the future Shadow
+deployment package for chunking office documents into hidden Markdown files.
 
 ## `catalog`
 
@@ -106,7 +120,7 @@ written in one transaction before any network call.
 - `list_pending()` — in: none; out: available results not yet written.
 - `retrieve(identity)` — in: dispatch identity; out: locally persisted result
   metadata and bytes.
-- `preview_write(request)` — in: selected result and current Git/shadow state;
+- `preview_write(request)` — in: selected result and current Git/sync state;
   out: proposed writes and conflicts without modification.
 - `write(request)` — in: confirmed preview token; out: writeback commit and
   changed-file links. It rechecks the preview assumptions before writing.
@@ -114,7 +128,7 @@ written in one transaction before any network call.
 ## `reconcile`
 
 - `run(request)` — in: optional dispatch/file scope; out: discrepancies among
-  SQLite, Git, shadow files, and the remote pipeline.
+  SQLite sync state, Git, local files, and the remote pipeline.
 - `apply(decision)` — in: one explicit reconciliation decision; out: updated
   state and audit record.
 
@@ -124,7 +138,7 @@ Reconciliation reports ambiguity; it does not silently invent state.
 
 - `overview()` — in: none; out: counts and summaries of pending uploads,
   dispatches, expected responses, failures, and recovery decisions.
-- `file_state(path)` — in: file path; out: Git, shadow, dispatch, and response
+- `file_state(path)` — in: file path; out: Git, sync, dispatch, and response
   state derived from authoritative sources.
 - `history(path)` — in: file path; out: commits, dispatch tags, writebacks, and
   any active stash marker.

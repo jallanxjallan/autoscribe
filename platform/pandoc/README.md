@@ -1,4 +1,9 @@
-# Import Vault Pandoc Filter Kit
+# AutoScribe Pandoc Package
+
+This is AutoScribe's first-class document parsing and construction package.
+It owns the canonical filters, defaults, templates, and reference documents
+used by the Rust service. It is not an extension and should not be copied into
+a separate tools tree.
 
 These filters are meant for importing old `.docx` / `.odt` material into a provisional Obsidian-style vault.
 
@@ -131,20 +136,16 @@ filters:
   - normalize_headings.lua
 ```
 
-## Installation shape
+## Service execution shape
 
-Copy the Lua files into your Pandoc data-dir filters folder, for example:
+The Rust service invokes Pandoc with this directory as the working directory,
+so defaults can resolve package-relative filters, templates, and references.
+Independent conversions are always submitted as parallel batches.
 
-```text
-~/Workspace/Tools/pandoc/filters/
-```
-
-Copy the defaults files into the defaults location your Pandoc setup already uses.
-
-Then your import function can keep calling:
+For a direct smoke check from this directory:
 
 ```zsh
-pandoc -d import_vault.yaml "$src" -o "$dest"
+pandoc --defaults=defaults/ingest_vault.yaml "$src" --output="$dest"
 ```
 
 ## Notes

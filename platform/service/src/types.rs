@@ -13,8 +13,11 @@ pub struct ResultId(pub String);
 pub struct ServiceConfig {
     pub database_path: PathBuf,
     pub repository_path: PathBuf,
-    pub shadow_root: PathBuf,
     pub server_endpoint: String,
+    pub pandoc_binary: PathBuf,
+    pub pandoc_package_root: PathBuf,
+    pub pandoc_parallelism: usize,
+    pub sync_interval_seconds: u64,
     pub poll_interval_seconds: u64,
     pub poll_limit: u32,
 }
@@ -52,18 +55,16 @@ pub struct TagRequest { pub commit: CommitId, pub plan: PlanId, pub dispatch: Di
 pub struct VersionRequest { pub path: PathBuf, pub revision: String }
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RestoreRequest { pub version: VersionRequest, pub confirmation: String }
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct SyncRequest { pub force: bool }
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct ShadowSyncRequest { pub document: PathBuf, pub shadow_root: PathBuf }
+pub struct SyncReport { pub uploads_sent: u32, pub downloads_received: u32, pub pending_outbound: u32, pub synced_at: String }
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct Chunk { pub sentinel: String, pub path: PathBuf, pub bytes: Vec<u8>, pub sha256: String }
+pub struct SyncStatus { pub last_synced_at: Option<String>, pub pending_outbound: u32, pub uncertain_outbound: u32 }
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct ShadowSyncReport { pub chunks: Vec<Chunk>, pub changed: Vec<PathBuf> }
+pub struct PandocJob { pub identity: String, pub working_directory: PathBuf, pub arguments: Vec<String> }
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct ShadowApplyRequest { pub chunks: Vec<Chunk>, pub expected_base_hashes: Vec<(PathBuf, String)> }
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct ShadowApplyReport { pub changed: Vec<PathBuf>, pub conflicts: Vec<PathBuf> }
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct ShadowVerifyReport { pub missing: Vec<PathBuf>, pub changed: Vec<PathBuf>, pub orphaned: Vec<PathBuf> }
+pub struct PandocOutcome { pub identity: String, pub exit_code: Option<i32>, pub stdout: Vec<u8>, pub stderr: Vec<u8>, pub error: Option<String> }
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CatalogRefreshRequest { pub cached_revision: Option<String> }
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
@@ -101,15 +102,14 @@ pub struct ReconcileDecision { pub code: String, pub choice: String }
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct DashboardOverview { pub pending_dispatches: u32, pub uncertain_dispatches: u32, pub pending_results: u32, pub failures: u32 }
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct FileStateView { pub path: PathBuf, pub git: FileStatus, pub shadow_ok: bool, pub active_dispatch: Option<DispatchId> }
+pub struct FileStateView { pub path: PathBuf, pub git: FileStatus, pub sync_current: bool, pub active_dispatch: Option<DispatchId> }
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct HistoryEntry { pub identity: String, pub label: String }
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub enum Command { Dispatch(PrepareDispatchRequest), Retry(DispatchId), Cancel(DispatchId), Retrieve(DispatchId), Write(WriteRequest), Reconcile(ReconcileDecision) }
+pub enum Command { Dispatch(PrepareDispatchRequest), Retry(DispatchId), Cancel(DispatchId), Retrieve(DispatchId), Write(WriteRequest), Reconcile(ReconcileDecision), Pandoc(Vec<PandocJob>) }
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CommandReceipt { pub operation_id: String, pub accepted: bool }
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Query { Overview, Dispatch(DispatchId), FileState(PathBuf), History(PathBuf), Plans, Catalog, NoticesSince(u64) }
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum QueryResponse { Overview(DashboardOverview), Dispatch(DispatchView), FileState(FileStateView), History(Vec<HistoryEntry>), Plans(Vec<PlanSummary>), Catalog(CatalogSnapshot), Notices(Vec<(u64, Notice)>) }
-

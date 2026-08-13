@@ -111,6 +111,12 @@ Pandoc is responsible for document interpretation and conversion:
 - Apply preliminary labels derived from document structure.
 - Emit typed NDJSON to the service.
 
+Pandoc is also responsible for parsing and constructing Markdown files. Its
+filters, defaults, templates, and reference documents are a first-class package
+at `platform/pandoc`, rather than an extension. The Rust service invokes
+independent Pandoc operations concurrently in bounded batches; serial document
+conversion is not an accepted execution path.
+
 Binary source files should normally be referenced by path and cryptographic hash, not embedded in NDJSON.
 
 A Pandoc Lua filter has no native Unix-socket API, but it can call a small socket client synchronously with `pandoc.pipe()`. The preferred production arrangement is for the Rust package to supply that helper, rather than making Lua responsible for framing, timeouts, errors, or acknowledgements.
@@ -125,7 +131,9 @@ The Rust service owns:
 - SQLite-backed durable local state.
 - Plan and instruction resolution.
 - Git state, commits, and overwrite guardrails.
-- Shadow Markdown tree maintenance and DOCX sentinel relationships.
+- SQLite-backed offline synchronization of uploads and downloads, including a
+  durable outbox for runs not yet acknowledged by the pipeline. The daemon
+  synchronizes periodically or explicitly on request.
 - Dispatch construction and exact-payload persistence.
 - Idempotent retry using the original dispatch identity and the exact saved payload.
 - Response retrieval, validation, staging, and writeback.
@@ -178,4 +186,3 @@ The JavaScript for these panels should be intentionally thin. If a behaviour can
 ## Consequence
 
 AutoScribe gains one stable public language without forcing every component to work like a JSON processor. Obsidian can be replaced or supplemented without rewriting the service, Pandoc can become a general ingestion tool, and all important policy remains in a typed, testable Rust core that the project owner can specify in plain English and audit module by module.
-
