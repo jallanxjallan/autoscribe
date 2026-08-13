@@ -135,9 +135,9 @@ async function renderDispatchRun({ app, container }) {
   const loadControl = (relativePath) => nodeRequire(pathMod.join(vaultRoot, "_control", ...relativePath.split("/")));
   const { getFileManifest, appendClipboardCandidates } = loadControl("scripts/lib/file-manifest.js");
   const { notify } = loadControl("scripts/lib/notify.js");
-  const { createDispatchBranch, clearPipelineMetadata } = loadControl("scripts/lib/git-transport.js");
+  const { clearPipelineMetadata } = loadControl("scripts/lib/git-transport.js");
+  const { prepareDispatch } = loadControl("scripts/lib/dispatch-service.js");
   const { callFeederAsync } = loadControl("scripts/lib/feeder-ipc.js");
-  const { runFeederCommand } = loadControl("scripts/lib/feeder-command.js");
 
   const session = getFileManifest(app);
   const heading = container.createEl("h2", { text: "Dispatch candidate files" });
@@ -229,9 +229,11 @@ async function renderDispatchRun({ app, container }) {
   form.style.maxWidth = "42em";
   form.createEl("label", { text: "Plan" });
   const select = form.createEl("select");
+  const plansBySlug = new Map();
   for (const plan of planRows) {
     const slug = String(plan.record_identity || plan.slug || "").trim();
     if (!slug) continue;
+    plansBySlug.set(slug, plan);
     select.createEl("option", { text: String(plan.payload?.title || plan.title || plan.payload?.label || plan.label || plan.name || slug), value: slug });
   }
 
@@ -261,7 +263,7 @@ async function renderDispatchRun({ app, container }) {
   runButton.addEventListener("click", async () => {
     notify("Preparing dispatch…");
     runButton.disabled = true;
-    result.setText("Resolving transclusions and creating transport branch…");
+    result.setText("Resolving transclusions, converting selected files, and preparing dispatch…");
     try {
       const selection = selectedPaths();
       if (!selection.length) {
@@ -272,32 +274,27 @@ async function renderDispatchRun({ app, container }) {
       if (combine.checked && !basename) {
         throw new Error("Enter a basename for the combined record.");
       }
+      if (combine.checked) {
+        throw new Error("Combined dispatch is not yet available through the Rust adapter.");
+      }
       clearPipelineMetadata(app, selection);
-      const transport = createDispatchBranch(app, {
+      const planRecord = plansBySlug.get(select.value) || {};
+      const transport = await prepareDispatch(app, {
         paths: selection,
-        planRecord: { record_identity: select.value },
+        plan: select.value,
+        planVersion: planRecord.content_hash || planRecord.revision || planRecord.version || select.value,
         message: message.value.trim(),
-        combineBasename: combine.checked ? basename : ""
       });
-      const feeder = await runFeederCommand(app, ["dispatch-run", "--branch", transport.branch], { detached: true });
       session.candidates.clear();
       renderCandidates("manifest cleared after dispatch");
       result.setText(
-        `Transport branch created and handed to feeder.
-` +
-        `Branch: ${transport.branch}
-` +
-        `Run: ${transport.run_identity}
-` +
-        `Records: ${transport.count}
-` +
-        `Flattened in place: ${flattened.length}
-` +
-        `Feeder PID: ${feeder.pid}
-` +
-        `Use obs log from this vault to inspect the handoff.`
+        `Dispatch prepared by Rust and queued in SQLite.\n` +
+        `Branch: ${transport.branch}\n` +
+        `Run: ${transport.dispatch}\n` +
+        `Records: ${transport.count}\n` +
+        `Flattened in place: ${flattened.length}\n` +
+        `Payload: ${transport.payload_sha256}`
       );
-      // Fire-and-forget: no completion notice. Inspect feeder/server logs if needed.
     } catch (error) {
       console.error("Dispatch Run handoff failed before feeder launch", error);
     } finally {
