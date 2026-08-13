@@ -29,6 +29,8 @@ or a future Electron client without changing domain behavior.
   runs that have not yet reached the pipeline and locally retained downloaded
   data. The daemon synchronizes periodically, and a frontend may request an
   immediate synchronization.
+- A definitely unsent run remains pending and retryable. A run whose remote
+  acceptance is unknown becomes uncertain and waits for an explicit decision.
 - There is no automatic filesystem-watching daemon for document conversion.
   Dispatch and write-response commands invoke synchronization explicitly.
 - Plans, models, engine metadata, instructions, runs, responses, and notices

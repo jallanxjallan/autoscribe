@@ -63,16 +63,25 @@ the first-class `platform/pandoc` package.
 
 ## `sync`
 
-- `run(request)` — in: an optional forced-sync request; out: counts of uploads
-  sent, downloads received, records still pending outbound, and the sync time.
-- `status()` — in: none; out: the last successful sync time plus pending and
+- `enqueue(db, payload)` — durably inserts an immutable dispatch identity,
+  exact payload bytes, and payload hash into the SQLite outbox. Re-enqueuing
+  identical data is idempotent; reusing an identity for different data fails.
+- `run(db, transport, request)` — attempts pending uploads, retains offline
+  work, quarantines uncertain delivery, downloads available results, and
+  returns synchronization counts.
+- `status(db)` — returns the last successful sync time plus pending and
   uncertain outbound counts.
+- `pending_payloads(db)` and `inbound(db, identity)` — expose exact queued
+  payloads and locally retained downloaded results to service-core callers.
 
 The daemon synchronizes periodically. A frontend can also request a sync, but
 does not transmit or modify sync records itself. The SQLite outbox is durable
 and authoritative for runs that have not been acknowledged by the pipeline;
 it is not a disposable cache. This module is unrelated to the future Shadow
 deployment package for chunking office documents into hidden Markdown files.
+An ordinary connection failure leaves a record pending for a later automatic
+attempt. A failure where remote acceptance is unknown moves it to `uncertain`;
+periodic synchronization must not retry it without an explicit decision.
 
 ## `catalog`
 

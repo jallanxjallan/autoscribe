@@ -1,4 +1,4 @@
-use autoscribe_service::{config, pandoc, sync, types::{PandocJob, SyncRequest}, ServiceError};
+use autoscribe_service::{config, pandoc, types::PandocJob, ServiceError};
 use std::path::Path;
 use std::time::{Duration, Instant};
 
@@ -7,18 +7,6 @@ fn unfinished_operations_fail_explicitly() {
     assert_eq!(
         config::load(Path::new("missing.toml")),
         Err(ServiceError::NotImplemented("config.load"))
-    );
-}
-
-#[test]
-fn sync_operations_use_sync_contract_names() {
-    assert_eq!(
-        sync::run(SyncRequest::default()),
-        Err(ServiceError::NotImplemented("sync.run"))
-    );
-    assert_eq!(
-        sync::status(),
-        Err(ServiceError::NotImplemented("sync.status"))
     );
 }
 

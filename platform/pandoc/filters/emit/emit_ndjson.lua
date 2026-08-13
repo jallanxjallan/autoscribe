@@ -98,6 +98,24 @@ local function markdown_content(blocks)
   return trim_right(pandoc.write(pandoc.Pandoc(blocks, pandoc.Meta({})), "markdown"))
 end
 
+local function has_class(block, class_name)
+  if block.t ~= "Div" then return false end
+  for _, class in ipairs(block.classes or {}) do
+    if tostring(class):lower() == class_name then return true end
+  end
+  return false
+end
+
+local function extract_leading_directive(blocks)
+  local first = blocks[1]
+  if first == nil or not has_class(first, "directive") then return nil end
+
+  local directive = markdown_content(first.content)
+  blocks:remove(1)
+  if directive == "" then return nil end
+  return directive
+end
+
 function Pandoc(doc)
   local metadata = {}
   local legacy_identity = nil
@@ -133,6 +151,7 @@ function Pandoc(doc)
     end
   end
   payload.identity = nil
+  local directive = extract_leading_directive(doc.blocks)
   payload.content = markdown_content(doc.blocks)
 
   local record = {
@@ -141,6 +160,7 @@ function Pandoc(doc)
     payload = payload,
   }
   if record_plan ~= nil then record.record_plan = record_plan end
+  if directive ~= nil then record.directive = directive end
 
   io.stdout:write(pandoc.json.encode(record) .. "\n")
   return pandoc.Pandoc({}, pandoc.Meta({}))

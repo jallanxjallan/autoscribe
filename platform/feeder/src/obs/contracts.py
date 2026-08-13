@@ -20,12 +20,19 @@ def upload_record(*, type: str, identity: str, content: Any, extra: dict[str, An
     return {"type": record_type, "identity": slug, "content": content, "extra": dict(extra or {})}
 
 
-def enqueue_record(*, call: str, plan: str) -> dict[str, str]:
+def enqueue_record(*, call: str, plan: str, directive: str | None = None) -> dict[str, str]:
     call_slug = str(call or "").strip()
     plan_slug = str(plan or "").strip()
     if not call_slug or not plan_slug:
         raise ObsError("enqueue manifest requires call and plan slugs")
-    return {"call": call_slug, "plan": plan_slug}
+    record = {"call": call_slug, "plan": plan_slug}
+    if directive is not None:
+        if not isinstance(directive, str):
+            raise ObsError("enqueue manifest directive must be a string or null")
+        clean_directive = directive.strip()
+        if clean_directive:
+            record["directive"] = clean_directive
+    return record
 
 
 def provisional_slug(filename_hint: str) -> str:
