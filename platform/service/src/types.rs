@@ -142,6 +142,25 @@ pub struct DispatchBranch {
     pub name: String,
     pub commit: CommitId,
 }
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PrepareSavedDispatchRequest {
+    pub dispatch: DispatchId,
+    pub plan: PlanId,
+    pub plan_version: String,
+    pub records: Vec<DispatchSource>,
+    pub payload: Vec<u8>,
+    pub payload_sha256: String,
+    pub commit_message: String,
+}
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PreparedDispatch {
+    pub dispatch: DispatchId,
+    pub source_revision: CommitId,
+    pub source_branch: String,
+    pub branch: DispatchBranch,
+    pub payload_sha256: String,
+    pub committed_paths: Vec<PathBuf>,
+}
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct SyncRequest {
     pub force: bool,

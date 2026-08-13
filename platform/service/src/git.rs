@@ -11,6 +11,24 @@ const GIT: &str = "/usr/bin/git";
 const RUN_PREFIX: &str = "autoscribe/run/";
 const DISPATCH_TAG_PREFIX: &str = "autoscribe/dispatch/";
 
+pub fn head(repo: &Path) -> ServiceResult<CommitId> {
+    let repo = repository_root(repo)?;
+    Ok(CommitId(revision(&repo, "HEAD")?))
+}
+
+pub fn current_branch(repo: &Path) -> ServiceResult<String> {
+    let repo = repository_root(repo)?;
+    let branch = text(&git(&repo, ["branch", "--show-current"])?)
+        .trim()
+        .to_string();
+    if branch.is_empty() {
+        return Err(ServiceError::Conflict(
+            "dispatch preparation requires an attached source branch".into(),
+        ));
+    }
+    Ok(branch)
+}
+
 pub fn inspect(repo: &Path, paths: &[PathBuf]) -> ServiceResult<Vec<FileStatus>> {
     let repo = repository_root(repo)?;
     paths

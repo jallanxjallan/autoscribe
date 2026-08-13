@@ -121,8 +121,12 @@ written in one transaction before any network call.
 
 ## `dispatch`
 
-- `prepare(request)` — in: selected files and plan identity; out: persisted
-  dispatch identity, exact payload, and initial `Prepared` state.
+- `prepare(db, repo, request)` — in: selected path/slug pairs, plan identity
+  and version, and the exact canonical payload bytes and SHA-256 produced by the
+  client-side Pandoc conversion; out: the locked source revision, durable
+  dispatch branch, and persisted SQLite outbox record. Dirty selected files are
+  committed explicitly. Clean selected files remain valid inputs, and an
+  all-clean selection creates no source commit. Unselected work is untouched.
 - `transmit(identity)` — in: existing dispatch identity; out: attempt record.
   It loads the saved payload; it never rebuilds it.
 - `poll(identity)` — in: dispatch identity; out: `Succeeded` or `Uncertain`

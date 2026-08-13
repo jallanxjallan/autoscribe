@@ -21,6 +21,10 @@ or a future Electron client without changing domain behavior.
 
 - SQLite is the authority for client-side service state.
 - A dispatch is saved before transmission.
+- Dispatch preparation accepts exact client-produced payload bytes, verifies
+  their SHA-256, commits only dirty selected files, creates no source commit for
+  an all-clean selection, creates the immutable run branch, and durably queues
+  the same bytes in SQLite before any transport attempt.
 - A retry reuses the original dispatch identity and the exact saved payload.
 - After polling, a dispatch becomes `Succeeded` or `Uncertain`; an uncertain
   dispatch waits for an explicit retry or cancel command.
