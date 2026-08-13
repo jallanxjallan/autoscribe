@@ -55,11 +55,21 @@ the first-class `platform/pandoc` package.
   state for each path.
 - `commit(repo, request)` — in: paths, message, and commit purpose; out: commit
   identity.
+- `create_dispatch_branch(repo, request)` — in: an exact source revision,
+  source branch, dispatch and plan identities, selected path/slug pairs, and
+  canonical payload hash; out: an idempotently created
+  `autoscribe/run/<dispatch-id>` branch and its metadata commit. Creation uses a
+  temporary worktree and never switches the user's active branch. Reusing the
+  branch name with different metadata is a hard conflict.
 - `tag_dispatch(repo, request)` — in: commit, plan, and dispatch identity; out:
-  created tag.
+  idempotently created `autoscribe/dispatch/<dispatch-id>` tag.
 - `read_version(repo, request)` — in: file and revision; out: exact bytes.
 - `restore_version(repo, request)` — in: guarded restore request; out: new
   commit preserving the prior head in history.
+
+All repository paths are validated as normalized, repository-relative paths.
+Dispatch branches are durable reproducibility records; SQLite remains the
+operational authority for pending, acknowledged, and uncertain delivery state.
 
 ## `sync`
 

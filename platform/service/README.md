@@ -25,6 +25,11 @@ or a future Electron client without changing domain behavior.
 - After polling, a dispatch becomes `Succeeded` or `Uncertain`; an uncertain
   dispatch waits for an explicit retry or cancel command.
 - Git is the overwrite guardrail and preserves editorial second-guessing.
+- Every dispatch has an immutable `autoscribe/run/<dispatch-id>` branch rooted
+  at the exact selected source revision. Its metadata commit records the source
+  branch, plan version, selected path/slug pairs, and canonical payload hash.
+  The service creates it in a temporary worktree without switching the user's
+  active branch, and refuses collisions with different metadata.
 - SQLite holds the offline-capable sync store, including a durable outbox for
   runs that have not yet reached the pipeline and locally retained downloaded
   data. The daemon synchronizes periodically, and a frontend may request an

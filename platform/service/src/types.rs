@@ -23,93 +23,298 @@ pub struct ServiceConfig {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub enum DispatchState { Prepared, Transmitting, Polling, Succeeded, Uncertain, Cancelled, Failed }
+pub enum DispatchState {
+    Prepared,
+    Transmitting,
+    Polling,
+    Succeeded,
+    Uncertain,
+    Cancelled,
+    Failed,
+}
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub enum NoticeKind { Accepted, Progress, Completed, Failed, NeedsDecision }
+pub enum NoticeKind {
+    Accepted,
+    Progress,
+    Completed,
+    Failed,
+    NeedsDecision,
+}
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub enum CommitPurpose { Version, Lock, DispatchWriteback, Restore }
+pub enum CommitPurpose {
+    Version,
+    Lock,
+    DispatchWriteback,
+    Restore,
+}
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct Notice { pub kind: NoticeKind, pub operation: String, pub message: String }
+pub struct Notice {
+    pub kind: NoticeKind,
+    pub operation: String,
+    pub message: String,
+}
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct SavedPayload { pub dispatch_id: DispatchId, pub bytes: Vec<u8>, pub sha256: String }
+pub struct SavedPayload {
+    pub dispatch_id: DispatchId,
+    pub bytes: Vec<u8>,
+    pub sha256: String,
+}
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct DispatchView { pub id: DispatchId, pub state: DispatchState, pub attempts: u32, pub payload_sha256: String }
+pub struct DispatchView {
+    pub id: DispatchId,
+    pub state: DispatchState,
+    pub attempts: u32,
+    pub payload_sha256: String,
+}
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct AttemptRecord { pub dispatch_id: DispatchId, pub ordinal: u32, pub accepted_by_transport: bool }
+pub struct AttemptRecord {
+    pub dispatch_id: DispatchId,
+    pub ordinal: u32,
+    pub accepted_by_transport: bool,
+}
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct PlanSummary { pub id: PlanId, pub title: String, pub content_hash: String }
+pub struct PlanSummary {
+    pub id: PlanId,
+    pub title: String,
+    pub content_hash: String,
+}
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct PlanRecord { pub summary: PlanSummary, pub body: Vec<u8> }
+pub struct PlanRecord {
+    pub summary: PlanSummary,
+    pub body: Vec<u8>,
+}
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct PlanDraft { pub title: String, pub body: Vec<u8> }
+pub struct PlanDraft {
+    pub title: String,
+    pub body: Vec<u8>,
+}
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct ValidationReport { pub warnings: Vec<String>, pub errors: Vec<String> }
+pub struct ValidationReport {
+    pub warnings: Vec<String>,
+    pub errors: Vec<String>,
+}
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct FileStatus { pub path: PathBuf, pub tracked: bool, pub dirty: bool }
+pub struct FileStatus {
+    pub path: PathBuf,
+    pub tracked: bool,
+    pub dirty: bool,
+}
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct CommitRequest { pub paths: Vec<PathBuf>, pub message: String, pub purpose: CommitPurpose }
+pub struct CommitRequest {
+    pub paths: Vec<PathBuf>,
+    pub message: String,
+    pub purpose: CommitPurpose,
+}
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct TagRequest { pub commit: CommitId, pub plan: PlanId, pub dispatch: DispatchId }
+pub struct TagRequest {
+    pub commit: CommitId,
+    pub plan: PlanId,
+    pub dispatch: DispatchId,
+}
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct VersionRequest { pub path: PathBuf, pub revision: String }
+pub struct VersionRequest {
+    pub path: PathBuf,
+    pub revision: String,
+}
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct RestoreRequest { pub version: VersionRequest, pub confirmation: String }
+pub struct RestoreRequest {
+    pub version: VersionRequest,
+    pub confirmation: String,
+}
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DispatchSource {
+    pub slug: String,
+    pub path: PathBuf,
+}
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CreateDispatchBranchRequest {
+    pub dispatch: DispatchId,
+    pub source_revision: String,
+    pub source_branch: String,
+    pub plan: PlanId,
+    pub plan_version: String,
+    pub records: Vec<DispatchSource>,
+    pub payload_sha256: String,
+}
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DispatchBranch {
+    pub name: String,
+    pub commit: CommitId,
+}
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
-pub struct SyncRequest { pub force: bool }
+pub struct SyncRequest {
+    pub force: bool,
+}
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct SyncReport { pub uploads_sent: u32, pub downloads_received: u32, pub pending_outbound: u32, pub synced_at: String }
+pub struct SyncReport {
+    pub uploads_sent: u32,
+    pub downloads_received: u32,
+    pub pending_outbound: u32,
+    pub synced_at: String,
+}
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct SyncStatus { pub last_synced_at: Option<String>, pub pending_outbound: u32, pub uncertain_outbound: u32 }
+pub struct SyncStatus {
+    pub last_synced_at: Option<String>,
+    pub pending_outbound: u32,
+    pub uncertain_outbound: u32,
+}
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct PandocJob { pub identity: String, pub working_directory: PathBuf, pub arguments: Vec<String> }
+pub struct PandocJob {
+    pub identity: String,
+    pub working_directory: PathBuf,
+    pub arguments: Vec<String>,
+}
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct PandocOutcome { pub identity: String, pub exit_code: Option<i32>, pub stdout: Vec<u8>, pub stderr: Vec<u8>, pub error: Option<String> }
+pub struct PandocOutcome {
+    pub identity: String,
+    pub exit_code: Option<i32>,
+    pub stdout: Vec<u8>,
+    pub stderr: Vec<u8>,
+    pub error: Option<String>,
+}
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct CatalogRefreshRequest { pub cached_revision: Option<String> }
+pub struct CatalogRefreshRequest {
+    pub cached_revision: Option<String>,
+}
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
-pub struct CatalogSnapshot { pub revision: String, pub engines: Vec<String>, pub models: Vec<String>, pub scripts: Vec<String>, pub instructions: Vec<String> }
+pub struct CatalogSnapshot {
+    pub revision: String,
+    pub engines: Vec<String>,
+    pub models: Vec<String>,
+    pub scripts: Vec<String>,
+    pub instructions: Vec<String>,
+}
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct InstructionRequest { pub references: Vec<String> }
+pub struct InstructionRequest {
+    pub references: Vec<String>,
+}
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct ResolvedInstruction { pub key: String, pub version: String, pub content: Vec<u8> }
+pub struct ResolvedInstruction {
+    pub key: String,
+    pub version: String,
+    pub content: Vec<u8>,
+}
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct PlanDispatchValidation { pub plan: PlanId, pub records: Vec<PathBuf> }
+pub struct PlanDispatchValidation {
+    pub plan: PlanId,
+    pub records: Vec<PathBuf>,
+}
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct BuildPayloadRequest { pub plan: PlanRecord, pub files: Vec<(PathBuf, Vec<u8>)>, pub instructions: Vec<ResolvedInstruction>, pub directive: Option<String> }
+pub struct BuildPayloadRequest {
+    pub plan: PlanRecord,
+    pub files: Vec<(PathBuf, Vec<u8>)>,
+    pub instructions: Vec<ResolvedInstruction>,
+    pub directive: Option<String>,
+}
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct VerifyPayloadRequest { pub dispatch_id: DispatchId, pub bytes: Vec<u8>, pub expected_sha256: String }
+pub struct VerifyPayloadRequest {
+    pub dispatch_id: DispatchId,
+    pub bytes: Vec<u8>,
+    pub expected_sha256: String,
+}
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct PrepareDispatchRequest { pub plan: PlanId, pub files: Vec<PathBuf>, pub directive: Option<String> }
+pub struct PrepareDispatchRequest {
+    pub plan: PlanId,
+    pub files: Vec<PathBuf>,
+    pub directive: Option<String>,
+}
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct ResultRecord { pub id: ResultId, pub dispatch: DispatchId, pub bytes: Vec<u8> }
+pub struct ResultRecord {
+    pub id: ResultId,
+    pub dispatch: DispatchId,
+    pub bytes: Vec<u8>,
+}
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct WritePreviewRequest { pub result: ResultId }
+pub struct WritePreviewRequest {
+    pub result: ResultId,
+}
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct WritePreview { pub token: String, pub writes: Vec<PathBuf>, pub conflicts: Vec<String> }
+pub struct WritePreview {
+    pub token: String,
+    pub writes: Vec<PathBuf>,
+    pub conflicts: Vec<String>,
+}
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct WriteRequest { pub preview_token: String }
+pub struct WriteRequest {
+    pub preview_token: String,
+}
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct WriteReport { pub commit: CommitId, pub changed: Vec<PathBuf> }
+pub struct WriteReport {
+    pub commit: CommitId,
+    pub changed: Vec<PathBuf>,
+}
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
-pub struct ReconcileRequest { pub dispatch: Option<DispatchId>, pub path: Option<PathBuf> }
+pub struct ReconcileRequest {
+    pub dispatch: Option<DispatchId>,
+    pub path: Option<PathBuf>,
+}
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct Discrepancy { pub code: String, pub description: String, pub choices: Vec<String> }
+pub struct Discrepancy {
+    pub code: String,
+    pub description: String,
+    pub choices: Vec<String>,
+}
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct ReconcileReport { pub discrepancies: Vec<Discrepancy> }
+pub struct ReconcileReport {
+    pub discrepancies: Vec<Discrepancy>,
+}
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct ReconcileDecision { pub code: String, pub choice: String }
+pub struct ReconcileDecision {
+    pub code: String,
+    pub choice: String,
+}
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct DashboardOverview { pub pending_dispatches: u32, pub uncertain_dispatches: u32, pub pending_results: u32, pub failures: u32 }
+pub struct DashboardOverview {
+    pub pending_dispatches: u32,
+    pub uncertain_dispatches: u32,
+    pub pending_results: u32,
+    pub failures: u32,
+}
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct FileStateView { pub path: PathBuf, pub git: FileStatus, pub sync_current: bool, pub active_dispatch: Option<DispatchId> }
+pub struct FileStateView {
+    pub path: PathBuf,
+    pub git: FileStatus,
+    pub sync_current: bool,
+    pub active_dispatch: Option<DispatchId>,
+}
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct HistoryEntry { pub identity: String, pub label: String }
+pub struct HistoryEntry {
+    pub identity: String,
+    pub label: String,
+}
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub enum Command { Dispatch(PrepareDispatchRequest), Retry(DispatchId), Cancel(DispatchId), Retrieve(DispatchId), Write(WriteRequest), Reconcile(ReconcileDecision), Pandoc(Vec<PandocJob>) }
+pub enum Command {
+    Dispatch(PrepareDispatchRequest),
+    Retry(DispatchId),
+    Cancel(DispatchId),
+    Retrieve(DispatchId),
+    Write(WriteRequest),
+    Reconcile(ReconcileDecision),
+    Pandoc(Vec<PandocJob>),
+}
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct CommandReceipt { pub operation_id: String, pub accepted: bool }
+pub struct CommandReceipt {
+    pub operation_id: String,
+    pub accepted: bool,
+}
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub enum Query { Overview, Dispatch(DispatchId), FileState(PathBuf), History(PathBuf), Plans, Catalog, NoticesSince(u64) }
+pub enum Query {
+    Overview,
+    Dispatch(DispatchId),
+    FileState(PathBuf),
+    History(PathBuf),
+    Plans,
+    Catalog,
+    NoticesSince(u64),
+}
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub enum QueryResponse { Overview(DashboardOverview), Dispatch(DispatchView), FileState(FileStateView), History(Vec<HistoryEntry>), Plans(Vec<PlanSummary>), Catalog(CatalogSnapshot), Notices(Vec<(u64, Notice)>) }
+pub enum QueryResponse {
+    Overview(DashboardOverview),
+    Dispatch(DispatchView),
+    FileState(FileStateView),
+    History(Vec<HistoryEntry>),
+    Plans(Vec<PlanSummary>),
+    Catalog(CatalogSnapshot),
+    Notices(Vec<(u64, Notice)>),
+}
