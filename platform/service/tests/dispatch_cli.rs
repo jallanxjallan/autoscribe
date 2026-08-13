@@ -35,7 +35,7 @@ fn dispatch_prepare_command_returns_stable_json() {
         "payload_sha256": autoscribe_service::dispatch::sha256_hex(payload.as_bytes()),
         "commit_message": "Lock CLI dispatch"
     });
-    let mut child = Command::new(env!("CARGO_BIN_EXE_autoscribe-service"))
+    let mut child = Command::new(env!("CARGO_BIN_EXE_svc"))
         .arg("dispatch-prepare")
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())

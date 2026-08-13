@@ -297,6 +297,9 @@ async function renderDispatchRun({ app, container }) {
       );
     } catch (error) {
       console.error("Dispatch Run handoff failed before feeder launch", error);
+      const detail = String(error?.message || error || "Unknown dispatch error");
+      result.setText(`Dispatch preparation failed.\n${detail}`);
+      notify(`Dispatch preparation failed: ${detail}`);
     } finally {
       runButton.disabled = false;
     }

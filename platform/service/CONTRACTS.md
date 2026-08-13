@@ -129,6 +129,11 @@ written in one transaction before any network call.
   all-clean selection creates no source commit. Unselected work is untouched.
 - `transmit(identity)` — in: existing dispatch identity; out: attempt record.
   It loads the saved payload; it never rebuilds it.
+  The one-shot `svc dispatch-transmit IDENTITY` command verifies the saved
+  SHA-256, streams the saved `calls` records to `asc upload calls`, then streams
+  the saved `enqueue` records to `asc enqueue`. Only completion of both commands
+  acknowledges the outbox row. A failure after a child process starts is
+  uncertain and cannot be retried automatically.
 - `poll(identity)` — in: dispatch identity; out: `Succeeded` or `Uncertain`
   after the configured polling interval and limit.
 - `retry(identity)` — in: uncertain dispatch identity; out: new attempt for

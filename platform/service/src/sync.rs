@@ -143,6 +143,41 @@ pub fn pending_payloads(db: &Database) -> ServiceResult<Vec<SavedPayload>> {
     rows.collect::<Result<Vec<_>, _>>().map_err(storage)
 }
 
+pub fn pending_payload(db: &Database, identity: &DispatchId) -> ServiceResult<SavedPayload> {
+    db.connection()
+        .query_row(
+            "SELECT payload, payload_sha256 FROM sync_outbox
+             WHERE dispatch_identity = ?1 AND state = 'pending'",
+            [&identity.0],
+            |row| {
+                Ok(SavedPayload {
+                    dispatch_id: identity.clone(),
+                    bytes: row.get(0)?,
+                    sha256: row.get(1)?,
+                })
+            },
+        )
+        .optional()
+        .map_err(storage)?
+        .ok_or_else(|| {
+            ServiceError::Conflict(format!("dispatch is absent or not pending: {}", identity.0))
+        })
+}
+
+pub fn record_upload_outcome(
+    db: &Database,
+    identity: &DispatchId,
+    outcome: UploadOutcome,
+) -> ServiceResult<()> {
+    match outcome {
+        UploadOutcome::Acknowledged => set_outbox_state(db, identity, "acknowledged", None),
+        UploadOutcome::NotSent(reason) => set_outbox_state(db, identity, "pending", Some(&reason)),
+        UploadOutcome::Uncertain(reason) => {
+            set_outbox_state(db, identity, "uncertain", Some(&reason))
+        }
+    }
+}
+
 pub fn inbound(db: &Database, identity: &ResultId) -> ServiceResult<Option<InboundResult>> {
     db.connection()
         .query_row(

@@ -10,7 +10,7 @@ name = "autoscribe_service"
 path = "src/lib.rs"
 
 [[bin]]
-name = "autoscribe-service"
+name = "svc"
 path = "src/main.rs"
 
 [dependencies]

@@ -2,14 +2,16 @@ use autoscribe_service::{
     Service,
     db::{self, Database},
     dispatch,
+    events::{self, NoticeSink},
+    sync::{self, UploadOutcome},
     types::{DispatchId, DispatchSource, PlanId, PrepareSavedDispatchRequest},
 };
 use serde::{Deserialize, Serialize};
 use std::{
     env,
     io::{self, Read},
-    path::PathBuf,
-    process::ExitCode,
+    path::{Path, PathBuf},
+    process::{Command, ExitCode, Stdio},
 };
 
 #[derive(Deserialize)]
@@ -54,9 +56,29 @@ struct ErrorOutput {
     error: String,
 }
 
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct DispatchEnvelope {
+    version: u32,
+    calls: Vec<serde_json::Value>,
+    enqueue: Vec<serde_json::Value>,
+}
+
+#[derive(Serialize)]
+struct DispatchTransmitOutput {
+    ok: bool,
+    operation: &'static str,
+    dispatch: String,
+    state: &'static str,
+    calls: usize,
+    enqueue: usize,
+}
+
 fn main() -> ExitCode {
-    if env::args().nth(1).as_deref() == Some("dispatch-prepare") {
-        return dispatch_prepare();
+    match env::args().nth(1).as_deref() {
+        Some("dispatch-prepare") => return dispatch_prepare(),
+        Some("dispatch-transmit") => return dispatch_transmit(),
+        _ => {}
     }
     let config = env::args_os()
         .nth(1)
@@ -65,10 +87,201 @@ fn main() -> ExitCode {
     match Service::start(&config) {
         Ok(_) => ExitCode::SUCCESS,
         Err(error) => {
-            eprintln!("autoscribe-service: {error}");
+            eprintln!("svc: {error}");
             ExitCode::FAILURE
         }
     }
+}
+
+fn dispatch_transmit() -> ExitCode {
+    match transmit_from_args() {
+        Ok(output) => {
+            println!(
+                "{}",
+                serde_json::to_string(&output).expect("serializable transmit output")
+            );
+            ExitCode::SUCCESS
+        }
+        Err(error) => {
+            println!(
+                "{}",
+                serde_json::to_string(&ErrorOutput {
+                    ok: false,
+                    operation: "dispatch.transmit",
+                    error: error.to_string(),
+                })
+                .expect("serializable error output")
+            );
+            ExitCode::FAILURE
+        }
+    }
+}
+
+fn transmit_from_args() -> Result<DispatchTransmitOutput, Box<dyn std::error::Error>> {
+    let identity = env::args()
+        .nth(2)
+        .filter(|value| !value.trim().is_empty())
+        .ok_or("dispatch-transmit requires a dispatch identity")?;
+    let database_path = env::var_os("AUTOSCRIBE_DATABASE")
+        .map(PathBuf::from)
+        .unwrap_or(default_database_path()?);
+    let db = Database::open_path(&database_path)?;
+    db::migrate(&db)?;
+    let dispatch = DispatchId(identity);
+    let saved = sync::pending_payload(&db, &dispatch)?;
+    let actual_hash = dispatch::sha256_hex(&saved.bytes);
+    if actual_hash != saved.sha256 {
+        return Err(format!(
+            "saved payload hash mismatch for {}: expected {}, computed {actual_hash}",
+            dispatch.0, saved.sha256
+        )
+        .into());
+    }
+    let envelope: DispatchEnvelope = serde_json::from_slice(&saved.bytes)?;
+    if envelope.version != 1 || envelope.calls.is_empty() || envelope.enqueue.is_empty() {
+        return Err("saved dispatch envelope requires version 1 calls and enqueue records".into());
+    }
+
+    let sink = NoticeSink::new(&db);
+    events::publish(
+        &sink,
+        autoscribe_service::types::Notice {
+            kind: autoscribe_service::types::NoticeKind::Accepted,
+            operation: "dispatch.transmit".into(),
+            message: format!("Transmitting dispatch {}", dispatch.0),
+        },
+    )?;
+    let asc = asc_command();
+    if let Err(error) = run_asc(&asc, ["upload", "calls"], &ndjson(&envelope.calls)?) {
+        let reason = error.to_string();
+        sync::record_upload_outcome(
+            &db,
+            &dispatch,
+            if error.started {
+                UploadOutcome::Uncertain(reason.clone())
+            } else {
+                UploadOutcome::NotSent(reason.clone())
+            },
+        )?;
+        publish_transmit_failure(&sink, &dispatch, &reason)?;
+        return Err(reason.into());
+    }
+    if let Err(error) = run_asc(&asc, ["enqueue"], &ndjson(&envelope.enqueue)?) {
+        let reason = error.to_string();
+        sync::record_upload_outcome(&db, &dispatch, UploadOutcome::Uncertain(reason.clone()))?;
+        publish_transmit_failure(&sink, &dispatch, &reason)?;
+        return Err(reason.into());
+    }
+    sync::record_upload_outcome(&db, &dispatch, UploadOutcome::Acknowledged)?;
+    events::publish(
+        &sink,
+        autoscribe_service::types::Notice {
+            kind: autoscribe_service::types::NoticeKind::Completed,
+            operation: "dispatch.transmit".into(),
+            message: format!("Transmitted dispatch {}", dispatch.0),
+        },
+    )?;
+    Ok(DispatchTransmitOutput {
+        ok: true,
+        operation: "dispatch.transmit",
+        dispatch: dispatch.0,
+        state: "acknowledged",
+        calls: envelope.calls.len(),
+        enqueue: envelope.enqueue.len(),
+    })
+}
+
+fn default_database_path() -> Result<PathBuf, Box<dyn std::error::Error>> {
+    let home = env::var_os("HOME").ok_or("HOME is not set")?;
+    Ok(PathBuf::from(home).join(".local/share/autoscribe/service.sqlite"))
+}
+
+fn asc_command() -> PathBuf {
+    env::var_os("ASC_BIN")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| PathBuf::from("/home/jeremy/Python3.13Env/bin/asc"))
+}
+
+fn ndjson(records: &[serde_json::Value]) -> Result<Vec<u8>, serde_json::Error> {
+    let mut output = Vec::new();
+    for record in records {
+        serde_json::to_writer(&mut output, record)?;
+        output.push(b'\n');
+    }
+    Ok(output)
+}
+
+#[derive(Debug)]
+struct AscFailure {
+    started: bool,
+    message: String,
+}
+
+impl std::fmt::Display for AscFailure {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str(&self.message)
+    }
+}
+
+fn run_asc<I, S>(asc: &Path, args: I, input: &[u8]) -> Result<(), AscFailure>
+where
+    I: IntoIterator<Item = S>,
+    S: AsRef<std::ffi::OsStr>,
+{
+    let mut child = Command::new(asc)
+        .args(args)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .map_err(|error| AscFailure {
+            started: false,
+            message: format!("could not start {}: {error}", asc.display()),
+        })?;
+    if let Some(mut stdin) = child.stdin.take() {
+        use std::io::Write;
+        stdin.write_all(input).map_err(|error| AscFailure {
+            started: true,
+            message: format!("could not stream payload to {}: {error}", asc.display()),
+        })?;
+    }
+    let output = child.wait_with_output().map_err(|error| AscFailure {
+        started: true,
+        message: format!("could not wait for {}: {error}", asc.display()),
+    })?;
+    if output.status.success() {
+        return Ok(());
+    }
+    let detail = String::from_utf8_lossy(if output.stderr.is_empty() {
+        &output.stdout
+    } else {
+        &output.stderr
+    });
+    Err(AscFailure {
+        started: true,
+        message: format!(
+            "{} exited with {}: {}",
+            asc.display(),
+            output.status,
+            detail.trim()
+        ),
+    })
+}
+
+fn publish_transmit_failure(
+    sink: &NoticeSink<'_>,
+    dispatch: &DispatchId,
+    reason: &str,
+) -> Result<(), Box<dyn std::error::Error>> {
+    events::publish(
+        sink,
+        autoscribe_service::types::Notice {
+            kind: autoscribe_service::types::NoticeKind::NeedsDecision,
+            operation: "dispatch.transmit".into(),
+            message: format!("Dispatch {} needs review: {reason}", dispatch.0),
+        },
+    )?;
+    Ok(())
 }
 
 fn dispatch_prepare() -> ExitCode {

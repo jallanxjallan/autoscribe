@@ -66,6 +66,13 @@ cargo check
 cargo test
 ```
 
+The client-side service executable is `svc`. To transmit one already prepared
+dispatch from the default SQLite store:
+
+```sh
+svc dispatch-transmit run-identity
+```
+
 The tests confirm that the package is wired correctly and that unimplemented
 operations fail explicitly rather than pretending to succeed.
 
