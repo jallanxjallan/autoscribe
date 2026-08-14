@@ -64,6 +64,19 @@ pub fn migrate(db: &Database) -> ServiceResult<()> {
                 message TEXT NOT NULL
             );
 
+            CREATE TABLE IF NOT EXISTS authored_instructions (
+                instruction_identity TEXT PRIMARY KEY,
+                record_json TEXT NOT NULL,
+                content_sha256 TEXT NOT NULL,
+                updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+            );
+
+            CREATE TABLE IF NOT EXISTS authored_plans (
+                plan_identity TEXT PRIMARY KEY,
+                record_json TEXT NOT NULL,
+                updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+            );
+
             CREATE INDEX IF NOT EXISTS sync_outbox_state
                 ON sync_outbox(state, created_at);
             CREATE INDEX IF NOT EXISTS sync_inbox_dispatch

@@ -257,12 +257,29 @@ async function renderDispatchRun({ app, container }) {
   });
 
   const runButton = form.createEl("button", { text: "Dispatch Run", cls: "mod-cta" });
+  const copyDispatchIdButton = form.createEl("button", { text: "Copy Dispatch ID" });
+  copyDispatchIdButton.style.display = "none";
+  let preparedDispatchId = "";
+  copyDispatchIdButton.addEventListener("click", async () => {
+    if (!preparedDispatchId) return;
+    try {
+      await navigator.clipboard.writeText(preparedDispatchId);
+      copyDispatchIdButton.setText("Copied Dispatch ID");
+      notify(`Copied dispatch ID: ${preparedDispatchId}`);
+    } catch (error) {
+      const detail = String(error?.message || error || "Clipboard write failed");
+      notify(`Could not copy dispatch ID: ${detail}`);
+    }
+  });
   const result = container.createEl("pre");
   result.style.whiteSpace = "pre-wrap";
 
   runButton.addEventListener("click", async () => {
     notify("Preparing dispatch…");
     runButton.disabled = true;
+    preparedDispatchId = "";
+    copyDispatchIdButton.style.display = "none";
+    copyDispatchIdButton.setText("Copy Dispatch ID");
     result.setText("Resolving transclusions, converting selected files, and preparing dispatch…");
     try {
       const selection = selectedPaths();
@@ -287,6 +304,8 @@ async function renderDispatchRun({ app, container }) {
       });
       session.candidates.clear();
       renderCandidates("manifest cleared after dispatch");
+      preparedDispatchId = String(transport.dispatch || "").trim();
+      copyDispatchIdButton.style.display = preparedDispatchId ? "" : "none";
       result.setText(
         `Dispatch prepared by Rust and queued in SQLite.\n` +
         `Branch: ${transport.branch}\n` +

@@ -3,6 +3,7 @@ use autoscribe_service::{
     db::{self, Database},
     dispatch,
     events::{self, NoticeSink},
+    plan_repository,
     sync::{self, UploadOutcome},
     types::{DispatchId, DispatchSource, PlanId, PrepareSavedDispatchRequest},
 };
@@ -74,10 +75,38 @@ struct DispatchTransmitOutput {
     enqueue: usize,
 }
 
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct PlanSaveInput {
+    version: u32,
+    database_path: PathBuf,
+    plan: serde_json::Value,
+    instructions: Vec<serde_json::Value>,
+}
+
+#[derive(Serialize)]
+struct PlanSaveOutput {
+    ok: bool,
+    operation: &'static str,
+    plan: String,
+    instructions: usize,
+}
+
+#[derive(Serialize)]
+struct DefinePlanSnapshotOutput {
+    ok: bool,
+    operation: &'static str,
+    server: serde_json::Value,
+    authored_plans: Vec<serde_json::Value>,
+    authored_instructions: Vec<serde_json::Value>,
+}
+
 fn main() -> ExitCode {
     match env::args().nth(1).as_deref() {
         Some("dispatch-prepare") => return dispatch_prepare(),
         Some("dispatch-transmit") => return dispatch_transmit(),
+        Some("define-plan-snapshot") => return define_plan_snapshot(),
+        Some("plan-save") => return plan_save(),
         _ => {}
     }
     let config = env::args_os()
@@ -90,6 +119,147 @@ fn main() -> ExitCode {
             eprintln!("svc: {error}");
             ExitCode::FAILURE
         }
+    }
+}
+
+fn define_plan_snapshot() -> ExitCode {
+    command_output("define-plan.snapshot", snapshot_from_service())
+}
+
+fn snapshot_from_service() -> Result<DefinePlanSnapshotOutput, Box<dyn std::error::Error>> {
+    let database_path = env::var_os("AUTOSCRIBE_DATABASE")
+        .map(PathBuf::from)
+        .unwrap_or(default_database_path()?);
+    if let Some(parent) = database_path.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
+    let db = Database::open_path(&database_path)?;
+    db::migrate(&db)?;
+    let server = serde_json::from_slice(&run_asc_capture(
+        &asc_command(),
+        ["control", "snapshot"],
+        &[],
+    )?)?;
+    Ok(DefinePlanSnapshotOutput {
+        ok: true,
+        operation: "define-plan.snapshot",
+        server,
+        authored_plans: plan_repository::list(&db, "plans")?,
+        authored_instructions: plan_repository::list(&db, "instructions")?,
+    })
+}
+
+fn plan_save() -> ExitCode {
+    command_output("plan.save", save_plan_from_stdin())
+}
+
+fn save_plan_from_stdin() -> Result<PlanSaveOutput, Box<dyn std::error::Error>> {
+    let mut raw = String::new();
+    io::stdin().read_to_string(&mut raw)?;
+    let input: PlanSaveInput = serde_json::from_str(&raw)?;
+    if input.version != 1 {
+        return Err(format!("unsupported plan save version: {}", input.version).into());
+    }
+    if let Some(parent) = input.database_path.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
+    let db = Database::open_path(&input.database_path)?;
+    db::migrate(&db)?;
+    plan_repository::save(&db, &input.plan, &input.instructions)?;
+    let asc = asc_command();
+    if !input.instructions.is_empty() {
+        run_asc(
+            &asc,
+            ["upload", "instructions"],
+            &ndjson(&input.instructions)?,
+        )?;
+    }
+    let identity = input
+        .plan
+        .get("record_identity")
+        .and_then(serde_json::Value::as_str)
+        .ok_or("saved plan is missing record_identity")?
+        .to_string();
+    let plan_upload = serde_json::json!({"type":"plan","identity":identity.clone(),"content":input.plan["payload"],"extra":{}});
+    run_asc(&asc, ["upload", "plans"], &ndjson(&[plan_upload])?)?;
+    Ok(PlanSaveOutput {
+        ok: true,
+        operation: "plan.save",
+        plan: identity,
+        instructions: input.instructions.len(),
+    })
+}
+
+fn command_output<T: Serialize>(
+    operation: &'static str,
+    result: Result<T, Box<dyn std::error::Error>>,
+) -> ExitCode {
+    match result {
+        Ok(output) => {
+            println!(
+                "{}",
+                serde_json::to_string(&output).expect("serializable output")
+            );
+            ExitCode::SUCCESS
+        }
+        Err(error) => {
+            println!(
+                "{}",
+                serde_json::to_string(&ErrorOutput {
+                    ok: false,
+                    operation,
+                    error: error.to_string()
+                })
+                .expect("serializable error")
+            );
+            ExitCode::FAILURE
+        }
+    }
+}
+
+fn run_asc_capture<I, S>(asc: &Path, args: I, input: &[u8]) -> Result<Vec<u8>, AscFailure>
+where
+    I: IntoIterator<Item = S>,
+    S: AsRef<std::ffi::OsStr>,
+{
+    let mut child = Command::new(asc)
+        .args(args)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .map_err(|error| AscFailure {
+            started: false,
+            message: format!("could not start {}: {error}", asc.display()),
+        })?;
+    if let Some(mut stdin) = child.stdin.take() {
+        use std::io::Write;
+        stdin.write_all(input).map_err(|error| AscFailure {
+            started: true,
+            message: format!("could not stream payload to {}: {error}", asc.display()),
+        })?;
+    }
+    let output = child.wait_with_output().map_err(|error| AscFailure {
+        started: true,
+        message: error.to_string(),
+    })?;
+    if output.status.success() {
+        Ok(output.stdout)
+    } else {
+        let detail = String::from_utf8_lossy(if output.stderr.is_empty() {
+            &output.stdout
+        } else {
+            &output.stderr
+        });
+        Err(AscFailure {
+            started: true,
+            message: format!(
+                "{} exited with {}: {}",
+                asc.display(),
+                output.status,
+                detail.trim()
+            ),
+        })
     }
 }
 
@@ -222,6 +392,8 @@ impl std::fmt::Display for AscFailure {
         formatter.write_str(&self.message)
     }
 }
+
+impl std::error::Error for AscFailure {}
 
 fn run_asc<I, S>(asc: &Path, args: I, input: &[u8]) -> Result<(), AscFailure>
 where

@@ -2,6 +2,7 @@
 
 const nodeRequire = typeof require === "function" ? require : window.require;
 const pathMod = nodeRequire("node:path");
+const os = nodeRequire("node:os");
 const { spawnSync } = nodeRequire("node:child_process");
 
 const ZSH = "/usr/bin/zsh";
@@ -35,7 +36,19 @@ function ascSnapshot(group, cwd) {
   return JSON.parse(String(result.stdout || "{}"));
 }
 
-function id(record) { return String(record?.registry_key || record?.key || record?.slug || record?.record_identity || ""); }
+async function serviceCall(app, command, input = null) {
+  const root = app.vault.adapter.getBasePath?.() || app.vault.adapter.basePath;
+  const control = nodeRequire(pathMod.join(root, "_control/scripts/lib/dispatch-service.js"));
+  const executable = control.serviceCommand(app);
+  const result = await control.run(executable.command, [...executable.prefix, command], {
+    cwd: root, input: input == null ? "" : JSON.stringify(input),
+  });
+  const output = JSON.parse(String(result.stdout || "{}").trim() || "{}");
+  if (!output.ok) throw new Error(output.error || `${command} failed`);
+  return output;
+}
+
+function id(record) { return String(record?.slug || record?.record_identity || record?.registry_key || record?.key || ""); }
 function fileStem(value) {
   const clean = String(value || "").replace(/\\/g, "/");
   return clean ? pathMod.posix.basename(clean).replace(/\.[^.]+$/, "") : "";
@@ -61,21 +74,6 @@ function option(select, record, { titleOnly = false } = {}) {
 function selected(records, value) { return records.find((record) => id(record) === value) || null; }
 function planSlug(record) { return String(record?.record_identity || record?.slug || ""); }
 function byScope(records, scope) { return records.filter((record) => String(record?.scope || "").toLowerCase() === scope); }
-function isLocalInstruction(record) {
-  return Boolean(record && record.source === "active" && record.path);
-}
-function localInstructionSet(record, root) {
-  if (!isLocalInstruction(record)) return null;
-  const relpath = String(record.path || "").trim();
-  if (!relpath) return null;
-  return {
-    slug: id(record),
-    path: relpath,
-    source_path: relpath,
-    abspath: pathMod.resolve(root, relpath),
-  };
-}
-
 function encodeTime(time, length) {
   let value = BigInt(time);
   let out = "";
@@ -106,6 +104,44 @@ function screenSteps(plan, catalogs) {
   });
 }
 
+function materializeServerPlan(record) {
+  const slug = String(record?.record_identity || record?.slug || "");
+  const parse = (value, fallback = {}) => {
+    if (value && typeof value === "object") return value;
+    try { return JSON.parse(String(value || "")); } catch { return fallback; }
+  };
+  if (record?.payload) return { ...record, record_identity: slug };
+  return { ...record, record_identity: slug, payload: {
+    ...parse(record?.metadata_json), steps: parse(record?.steps_json),
+    label: record?.label || slug,
+  }};
+}
+
+function instructionEditor(scope) {
+  return new Promise((resolve) => {
+    const overlay = el("div");
+    overlay.style.cssText = "position:fixed;inset:0;z-index:10000;display:grid;place-items:center;background:rgba(0,0,0,.45)";
+    const dialog = el("div");
+    dialog.style.cssText = "width:min(52rem,92vw);background:var(--background-primary);padding:1rem;border:1px solid var(--background-modifier-border);border-radius:8px";
+    const titleInput = el("input", { type: "text", placeholder: `${scope} instruction title` }); titleInput.style.width = "100%";
+    const content = el("textarea", { placeholder: "Paste or write the instruction text here…" });
+    content.style.cssText = "width:100%;height:45vh;margin-top:.75rem;font-family:var(--font-monospace)";
+    const actions = el("div"); actions.style.cssText = "display:flex;gap:.5rem;justify-content:flex-end;margin-top:.75rem";
+    const cancel = el("button", { text: "Cancel" });
+    const keep = el("button", { text: "Use Instruction", class: "mod-cta" });
+    const close = (value) => { overlay.remove(); resolve(value); };
+    cancel.onclick = () => close(null);
+    keep.onclick = () => {
+      const title = titleInput.value.trim(), body = content.value.trim();
+      if (!title || !body) return;
+      close({ title, content: body });
+    };
+    overlay.onmousedown = (event) => { if (event.target === overlay) close(null); };
+    actions.append(cancel, keep); dialog.append(el("h2", { text: `Create ${scope} instruction` }), titleInput, content, actions);
+    overlay.append(dialog); document.body.append(overlay); titleInput.focus();
+  });
+}
+
 async function renderCreatePlan({ app, container }) {
   container.empty();
   const controlVaultRoot = app.vault.adapter.getBasePath?.() || app.vault.adapter.basePath;
@@ -118,18 +154,33 @@ async function renderCreatePlan({ app, container }) {
   };
   const { notify } = loadControl("scripts/lib/notify.js");
   const { buildPlanRecord } = loadControl("scripts/plans/plan-record.js");
-  const { callFeederAsync } = loadControl("scripts/lib/feeder-ipc.js");
   const { vaultRoot } = loadControl("scripts/lib/vault-state.js");
   const { snapshotList } = loadControl("scripts/lib/control-loader.js");
   const { makeSlug } = loadControl("scripts/lib/slug.js");
   const root = vaultRoot(app);
   const control = ascSnapshot("control", root);
+  const service = await serviceCall(app, "define-plan-snapshot");
+  const serverRegistries = service.server?.registries || {};
+  const serverInstructions = Object.values(serverRegistries.instructions || {}).map((record) => ({
+    ...record, slug: record.slug || record.record_identity, source: "server",
+    scope: record.scope || ({ std: "standing", rol: "role", cxt: "context", tsk: "task" })[String(record.slug || record.record_identity || "").split(".")[0]],
+  }));
+  const authoredInstructions = service.authored_instructions.map((record) => ({
+    ...record.extra, slug: record.identity, record_identity: record.identity,
+    title: record.extra?.title || record.identity, label: record.extra?.title || record.identity,
+    scope: record.extra?.scope, content: record.content, authored: true, source: "service",
+  }));
+  const instructionMap = new Map(serverInstructions.map((record) => [id(record), record]));
+  authoredInstructions.forEach((record) => instructionMap.set(id(record), record));
   const catalogs = {
     engines: snapshotList(control, "engines"), models: snapshotList(control, "models"),
     scripts: snapshotList(control, "local_scripts"), ragProfiles: snapshotList(control, "rag_profiles"),
-    instructions: await callFeederAsync(app, "instructions.catalog", { include_pipeline: true }),
+    instructions: [...instructionMap.values()],
   };
-  let plans = await callFeederAsync(app, "plans.list", {}), loaded = null, steps = [];
+  const serverPlans = Object.values(serverRegistries.plans || {}).map(materializeServerPlan);
+  const planMap = new Map(serverPlans.map((record) => [planSlug(record), record]));
+  service.authored_plans.forEach((record) => planMap.set(planSlug(record), record));
+  let plans = [...planMap.values()], loaded = null, steps = [], instructionDrafts = new Map();
 
   container.appendChild(el("h2", { text: "Define Plan" }));
   container.appendChild(el("p", { text: "Create or modify a project plan on the AutoScribe server. Referenced local instructions are synchronized before the plan is saved." }));
@@ -153,14 +204,6 @@ async function renderCreatePlan({ app, container }) {
       if (message) sessionStorage.setItem(STATUS_KEY, message);
       else sessionStorage.removeItem(STATUS_KEY);
     } catch {}
-  }
-
-  function refreshInstructions() {
-    return callFeederAsync(app, "instructions.catalog", { include_pipeline: true }).then((records) => {
-      catalogs.instructions = records;
-      redraw();
-      return records;
-    });
   }
 
   function clearForm() {
@@ -191,52 +234,21 @@ async function renderCreatePlan({ app, container }) {
     return select;
   }
 
-  function instructionDirectory() {
-    const active = catalogs.instructions.filter((item) => item.source === "active" && item.path);
-    if (active.length) {
-      const counts = new Map();
-      for (const item of active) {
-        const dir = pathMod.dirname(item.path);
-        counts.set(dir, (counts.get(dir) || 0) + 1);
-      }
-      return [...counts.entries()].sort((a, b) => b[1] - a[1])[0][0];
-    }
-    return "Instructions";
-  }
-
   async function createInstruction(scope, step, field) {
-    notify(`Creating ${scope} instruction…`);
-    const title = String(window.prompt(`Title for new ${scope} instruction:`) || "").trim();
-    if (!title) return;
-    const slug = makeSlug(PREFIXES[scope], title);
-    const dir = instructionDirectory();
-    const safeName = title.replace(/[\\/:*?"<>|]/g, "-").trim() || "Untitled Instruction";
-    let relpath = pathMod.posix.join(dir === "." ? "" : dir, `${safeName}.md`);
-    let counter = 2;
-    while (app.vault.getAbstractFileByPath(relpath)) {
-      relpath = pathMod.posix.join(dir === "." ? "" : dir, `${safeName} ${counter}.md`);
-      counter += 1;
-    }
-    const body = `---\nslug: ${slug}\ntype: instruction\nscope: ${scope}\nversion: 1\ntags: []\n---\n\n# ${title}\n\n`;
-    const parent = pathMod.posix.dirname(relpath);
-    if (parent && parent !== "." && !app.vault.getAbstractFileByPath(parent)) await app.vault.createFolder(parent);
-    const file = await app.vault.create(relpath, body);
-    await refreshInstructions();
-    const record = selected(catalogs.instructions, slug);
+    const draft = await instructionEditor(scope);
+    if (!draft) return;
+    const slug = makeSlug(PREFIXES[scope], draft.title);
+    const record = { slug, record_identity: slug, title: draft.title, label: draft.title,
+      scope, content: draft.content, authored: true, source: "service" };
+    instructionDrafts.set(slug, record);
+    catalogs.instructions.push(record);
     if (scope === "standing") {
       step.standingSlugs = [...new Set([...(step.standingSlugs || []), slug])];
     } else {
-      step[field] = record || { slug, path: relpath, title, label: title, scope, source: "active", abspath: pathMod.join(root, relpath) };
+      step[field] = record;
     }
     redraw();
-    await app.workspace.getLeaf(false).openFile(file);
-    notify(`Created ${scope} instruction: ${title}.`);
-  }
-
-  function openInstruction(record) {
-    if (!record?.path) return;
-    const file = app.vault.getAbstractFileByPath(record.path);
-    if (file) app.workspace.getLeaf(false).openFile(file);
+    notify(`Created ${scope} instruction: ${draft.title}.`);
   }
 
   function scopedPicker(card, step, scope, field, titleText) {
@@ -247,23 +259,13 @@ async function renderCreatePlan({ app, container }) {
     const create = el("button", { text: "Create instruction" });
     create.addEventListener("click", () => createInstruction(scope, step, field).catch((error) => notify(`Create instruction failed: ${error.message || error}`, 10000)));
     buttons.appendChild(create);
-    if (step[field]?.path) {
-      const open = el("button", { text: "Open" }); open.addEventListener("click", () => openInstruction(step[field])); buttons.appendChild(open);
-    }
     heading.appendChild(buttons);
     card.appendChild(heading);
     card.appendChild(choice(records, step[field], (value) => { step[field] = value; redraw(); }, `Choose ${scope}`, { titleOnly: true }));
     const current = step[field];
     if (current) {
       const selectedRow = el("div"); selectedRow.style.cssText = "margin:.2rem 0 .35rem";
-      if (isLocalInstruction(current)) {
-        const link = el("button", { text: `[[${title(current)}]]` });
-        link.style.cssText = "background:none;border:0;padding:0;color:var(--link-color);text-align:left";
-        link.addEventListener("click", () => openInstruction(current));
-        selectedRow.appendChild(link);
-      } else {
-        selectedRow.appendChild(el("span", { text: title(current) }));
-      }
+      selectedRow.appendChild(el("span", { text: title(current) }));
       card.appendChild(selectedRow);
     }
   }
@@ -288,14 +290,7 @@ async function renderCreatePlan({ app, container }) {
         if (checkbox.checked) selectedSlugs.add(id(record)); else selectedSlugs.delete(id(record));
         step.standingSlugs = [...selectedSlugs];
       });
-      if (isLocalInstruction(record)) {
-        const link = el("button", { text: `[[${title(record)}]]` });
-        link.style.cssText = "background:none;border:0;padding:0;color:var(--link-color);text-align:left";
-        link.addEventListener("click", () => openInstruction(record));
-        row.append(checkbox, link);
-      } else {
-        row.append(checkbox, el("span", { text: title(record) }));
-      }
+      row.append(checkbox, el("span", { text: title(record) }));
       card.appendChild(row);
     }
     for (const slug of selectedSlugs) {
@@ -338,7 +333,7 @@ async function renderCreatePlan({ app, container }) {
       return;
     }
     try {
-      loaded = await callFeederAsync(app, "plan.load", { slug: planSelect.value });
+      loaded = plans.find((plan) => planSlug(plan) === planSelect.value) || null;
       name.value = loaded.payload?.label || loaded.label || "";
       type.value = loaded.payload?.type || loaded.type || "";
       description.value = loaded.payload?.description || loaded.description || "";
@@ -378,14 +373,15 @@ async function renderCreatePlan({ app, container }) {
         };
       }
       const record = buildPlanRecord({ label: name.value, type: type.value, description: description.value, steps, force_slug: planSlug(loaded) || null });
-      const selectedSlugs = new Set();
-      for (const step of steps) for (const values of Object.values(step.instruction_slugs || {})) for (const slug of values) selectedSlugs.add(slug);
-      const instructionSets = [...selectedSlugs]
-        .map((slug) => localInstructionSet(selected(catalogs.instructions, slug), root))
-        .filter(Boolean);
-      const result = await callFeederAsync(app, "plan.save", { record, instruction_sets: instructionSets });
+      const instructions = [...instructionDrafts.values()].map((draft) => ({
+        type: "instruction", identity: draft.slug, content: draft.content,
+        extra: { title: draft.title, scope: draft.scope },
+      }));
+      await serviceCall(app, "plan-save", { version: 1,
+        database_path: process.env.AUTOSCRIBE_DATABASE || pathMod.join(os.homedir(), ".local/share/autoscribe/service.sqlite"),
+        plan: record, instructions });
       loaded = record;
-      plans = await callFeederAsync(app, "plans.list", {});
+      planMap.set(planSlug(record), record); plans = [...planMap.values()]; instructionDrafts.clear();
       refreshSelect(planSlug(record));
       setStatus(`Saved ${planSlug(record)} on the server.`);
       notify(`Saved plan ${planSlug(record)}.`);
@@ -396,20 +392,8 @@ async function renderCreatePlan({ app, container }) {
     }
   });
 
-  const del = el("button", { text: "Delete Plan" });
-  del.addEventListener("click", async () => {
-    notify("Deleting plan…");
-    if (!loaded) { const message = "Load a plan before deleting it."; setStatus(message); notify(message); return; }
-    try {
-      const slug = planSlug(loaded);
-      await callFeederAsync(app, "plan.delete", { slug });
-      plans = await callFeederAsync(app, "plans.list", {});
-      refreshSelect(); clearForm(); setStatus(`Deleted ${slug} from the server.`); notify(`Deleted plan ${slug}.`);
-    } catch (error) { const message = `Delete failed: ${error.message || error}`; setStatus(message); notify(message, 10000); }
-  });
-
   const pickerButtons = el("div"); pickerButtons.style.cssText = "display:flex;gap:.5rem;margin:.4rem 0 1rem"; pickerButtons.append(loadButton, newButton);
-  const actionButtons = el("div"); actionButtons.style.cssText = "display:flex;gap:.5rem;margin-top:.75rem"; actionButtons.append(add, save, del);
+  const actionButtons = el("div"); actionButtons.style.cssText = "display:flex;gap:.5rem;margin-top:.75rem"; actionButtons.append(add, save);
 
   refreshSelect();
   container.append(planLabel, planSelect, pickerButtons, nameLabel, name, typeLabel, type, descriptionLabel, description, stepsBox, actionButtons, status);
