@@ -30,7 +30,7 @@ fn dispatch_run_converts_uploads_and_enqueues_in_one_service_call() {
     assert_eq!(response["records"], 1);
     assert_eq!(
         fs::read_to_string(root.join("asc.log")).unwrap(),
-        "export list-pending --ndjson\nupload calls\nenqueue\nrun status\n"
+        "control snapshot\nexport list-pending --ndjson\nupload calls\nenqueue\nrun status\n"
     );
     let input = fs::read_to_string(root.join("asc.log.input")).unwrap();
     assert!(input.contains("\"type\":\"call\""));
@@ -55,7 +55,7 @@ fn dispatch_starts_runtime_daemons_when_status_is_unhealthy() {
     assert!(output.status.success(), "{}", String::from_utf8_lossy(&output.stdout));
     assert_eq!(
         fs::read_to_string(root.join("asc.log")).unwrap(),
-        "export list-pending --ndjson\nupload calls\nenqueue\nrun status\nrun start\n"
+        "control snapshot\nexport list-pending --ndjson\nupload calls\nenqueue\nrun status\nrun start\n"
     );
     fs::remove_dir_all(root).unwrap();
 }
@@ -70,7 +70,7 @@ fn conversion_failure_prevents_upload_and_enqueue() {
     let asc = fake_asc(&root);
     let output = invoke(&root, &pandoc, &asc);
     assert!(!output.status.success());
-    assert!(!root.join("asc.log").exists());
+    assert_eq!(fs::read_to_string(root.join("asc.log")).unwrap(), "control snapshot\n");
     fs::remove_dir_all(root).unwrap();
 }
 
@@ -82,7 +82,7 @@ fn pending_response_blocks_dispatch_before_upload_and_enqueue() {
     fs::write(&pandoc, "#!/bin/sh\nprintf '%s\\n' '{\"record_type\":\"content\",\"record_identity\":\"cnt.one\",\"payload\":{\"content\":\"Body\"}}'\n").unwrap();
     executable(&pandoc);
     let asc = root.join("asc");
-    fs::write(&asc, format!("#!/bin/sh\nprintf '%s\\n' \"$*\" >> '{}'\nif [ \"$1 $2\" = \"export list-pending\" ]; then printf '%s\\n' '{{\"record_identity\":\"cnt.one\",\"call_identity\":\"call.one\",\"result_identity\":\"result.one\"}}'; fi\n", root.join("asc.log").display())).unwrap();
+    fs::write(&asc, format!("#!/bin/sh\nprintf '%s\\n' \"$*\" >> '{}'\nif [ \"$1 $2\" = \"control snapshot\" ]; then printf '%s\\n' '{{\"registries\":{{\"instructions\":{{}},\"plans\":{{}}}}}}'; exit 0; fi\nif [ \"$1 $2\" = \"export list-pending\" ]; then printf '%s\\n' '{{\"record_identity\":\"cnt.one\",\"call_identity\":\"call.one\",\"result_identity\":\"result.one\"}}'; fi\n", root.join("asc.log").display())).unwrap();
     executable(&asc);
     let output = invoke(&root, &pandoc, &asc);
     assert!(!output.status.success());
@@ -90,7 +90,7 @@ fn pending_response_blocks_dispatch_before_upload_and_enqueue() {
     assert!(response["error"].as_str().unwrap().contains("cnt.one"));
     assert_eq!(
         fs::read_to_string(root.join("asc.log")).unwrap(),
-        "export list-pending --ndjson\n"
+        "control snapshot\nexport list-pending --ndjson\n"
     );
     fs::remove_dir_all(root).unwrap();
 }
@@ -123,7 +123,7 @@ fn fake_asc_with_status(root: &Path, status: &str) -> PathBuf {
     fs::write(
         &path,
         format!(
-            "#!/bin/sh\nprintf '%s\\n' \"$*\" >> '{}'\nif [ \"$1 $2\" = \"export list-pending\" ]; then exit 0; fi\nif [ \"$1 $2\" = \"run status\" ]; then printf '%s\\n' '{}'; exit 0; fi\ncat >> '{}.input'\n",
+            "#!/bin/sh\nprintf '%s\\n' \"$*\" >> '{}'\nif [ \"$1 $2\" = \"control snapshot\" ]; then printf '%s\\n' '{{\"registries\":{{\"instructions\":{{}},\"plans\":{{}}}}}}'; exit 0; fi\nif [ \"$1 $2\" = \"export list-pending\" ]; then exit 0; fi\nif [ \"$1 $2\" = \"run status\" ]; then printf '%s\\n' '{}'; exit 0; fi\ncat >> '{}.input'\n",
             root.join("asc.log").display(),
             status,
             root.join("asc.log").display()

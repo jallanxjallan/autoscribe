@@ -57,6 +57,28 @@ fn plan_save_persists_authored_records_and_uploads_dependencies_before_plan() {
     fs::remove_dir_all(root).unwrap();
 }
 
+#[test]
+fn define_plan_snapshot_restores_authored_dependencies_after_server_flush() {
+    let root = temp();
+    let database = root.join("service.sqlite");
+    let log = root.join("asc.log");
+    let asc = root.join("asc");
+    fs::write(&asc, format!(
+        "#!/bin/sh\nif [ \"$1 $2\" = \"control snapshot\" ]; then printf '%s\\n' '{{\"registries\":{{\"instructions\":{{}},\"plans\":{{}}}}}}'; exit 0; fi\nprintf '%s\\n' \"$1 $2\" >> '{}'\ncat >> '{}.input'\n",
+        log.display(), log.display())).unwrap();
+    executable(&asc);
+    let instruction = json!({"type":"instruction","identity":"cxt.local.test","content":"Local context","extra":{"title":"Local","scope":"context"}});
+    let plan = json!({"record_type":"plan","record_identity":"plan.local.test","payload":{"label":"Local","steps":{"1":{"kind":"llm","instruction_slugs":{"context":["cxt.local.test"]}}}}});
+    let request = json!({"version":1,"database_path":database,"plan":plan,"instructions":[instruction]});
+    assert!(invoke(&root, &asc, "plan-save", Some(request)).status.success());
+    fs::write(&log, "").unwrap();
+
+    let snapshot = invoke(&root, &asc, "define-plan-snapshot", None);
+    assert!(snapshot.status.success(), "{}", String::from_utf8_lossy(&snapshot.stdout));
+    assert_eq!(fs::read_to_string(&log).unwrap(), "upload instructions\nupload plans\n");
+    fs::remove_dir_all(root).unwrap();
+}
+
 fn invoke(root: &Path, asc: &Path, command: &str, input: Option<Value>) -> std::process::Output {
     let mut child = Command::new(env!("CARGO_BIN_EXE_svc"))
         .arg(command)

@@ -3,7 +3,7 @@ use autoscribe_service::{
     db::{self, Database},
     dispatch, git, instruction_sync,
     events::{self, NoticeSink},
-    pandoc, plan_repository, response_repository,
+    pandoc, plan_repository, reconcile, response_repository,
     sync::{self, UploadOutcome},
     types::{CommitPurpose, CommitRequest, DispatchId, DispatchSource, LedgerSnapshotRequest,
         LedgerSource, PandocJob, PlanId, PrepareSavedDispatchRequest},
@@ -423,6 +423,7 @@ fn run_dispatch_from_stdin() -> Result<DispatchRunOutput, Box<dyn std::error::Er
     if let Some(parent) = input.database_path.parent() { std::fs::create_dir_all(parent)?; }
     let database = Database::open_path(&input.database_path)?;
     db::migrate(&database)?;
+    reconcile_authored_catalog(&database, &asc_command())?;
     let mut paths = input.paths;
     paths.sort();
     paths.dedup();
@@ -615,11 +616,7 @@ fn snapshot_from_service() -> Result<DefinePlanSnapshotOutput, Box<dyn std::erro
     }
     let db = Database::open_path(&database_path)?;
     db::migrate(&db)?;
-    let server = serde_json::from_slice(&run_asc_capture(
-        &asc_command(),
-        ["control", "snapshot"],
-        &[],
-    )?)?;
+    let server = reconcile_authored_catalog(&db, &asc_command())?;
     Ok(DefinePlanSnapshotOutput {
         ok: true,
         operation: "define-plan.snapshot",
@@ -627,6 +624,27 @@ fn snapshot_from_service() -> Result<DefinePlanSnapshotOutput, Box<dyn std::erro
         authored_plans: plan_repository::list(&db, "plans")?,
         authored_instructions: plan_repository::list(&db, "instructions")?,
     })
+}
+
+fn reconcile_authored_catalog(
+    db: &Database,
+    asc: &Path,
+) -> Result<serde_json::Value, Box<dyn std::error::Error>> {
+    let snapshot = || -> Result<serde_json::Value, Box<dyn std::error::Error>> {
+        Ok(serde_json::from_slice(&run_asc_capture(asc, ["control", "snapshot"], &[])?)?)
+    };
+    let server = snapshot()?;
+    let authored_instructions = plan_repository::list(db, "instructions")?;
+    let authored_plans = plan_repository::list(db, "plans")?;
+    let upload = reconcile::authored_catalog(&server, authored_instructions, authored_plans);
+    let changed = !upload.instructions.is_empty() || !upload.plans.is_empty();
+    if !upload.instructions.is_empty() {
+        run_asc(asc, ["upload", "instructions"], &ndjson(&upload.instructions)?)?;
+    }
+    if !upload.plans.is_empty() {
+        run_asc(asc, ["upload", "plans"], &ndjson(&upload.plans)?)?;
+    }
+    if changed { snapshot() } else { Ok(server) }
 }
 
 fn plan_save() -> ExitCode {

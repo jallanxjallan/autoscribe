@@ -159,6 +159,12 @@ written in one transaction before any network call.
   SQLite sync state, Git, local files, and the remote pipeline.
 - `apply(decision)` — in: one explicit reconciliation decision; out: updated
   state and audit record.
+- `authored_catalog(server, instructions, plans)` — compares durable, locally
+  authored plans and instructions with the active server catalog and selects
+  missing or outdated records for restoration. Define Plan snapshots and
+  Dispatch Run invoke this reconciliation synchronously. Repeated calls are
+  idempotent and server absence does not imply local deletion. There is still
+  no daemon, timer, startup hook, or other background scheduler.
 
 Reconciliation reports ambiguity; it does not silently invent state.
 
