@@ -5,9 +5,9 @@
  *
  * The active Library vault is the source of instruction files. Every explicit
  * instruction Markdown file is listed, whether or not Git considers it dirty.
- * Git supplies local state. Feeder IPC supplies authoritative Redis state and
- * performs instruction synchronization. Library never invokes `asc` directly,
- * keeping the UI independent of the current Python transport implementation.
+ * Git supplies local state. The service supplies authoritative server state
+ * and performs instruction synchronization. Library never invokes `asc`
+ * directly, keeping the UI behind the service boundary.
  */
 module.exports = async function libraryState(params = {}) {
   const app = params.app || globalThis.app;
@@ -19,7 +19,18 @@ module.exports = async function libraryState(params = {}) {
   const { spawn } = nodeRequire("node:child_process");
 
   const vaultRoot = path.resolve(app.vault.adapter.getBasePath?.() || app.vault.adapter.basePath);
-  const { callFeeder } = nodeRequire(path.join(vaultRoot, "_control", "scripts", "lib", "feeder-ipc.js"));
+  const service = nodeRequire(path.join(vaultRoot, "_control", "scripts", "lib", "dispatch-service.js"));
+
+  async function callService(command, input = null) {
+    const executable = service.serviceCommand(app);
+    const response = await service.run(executable.command, [...executable.prefix, command], {
+      cwd: vaultRoot,
+      input: input == null ? "" : JSON.stringify(input),
+    });
+    const output = JSON.parse(String(response.stdout || "{}").trim() || "{}");
+    if (!output.ok) throw new Error(output.error || `${command} failed`);
+    return output;
+  }
 
   function notify(message, timeout = 5000) {
     const text = String(message || "");
@@ -188,9 +199,9 @@ module.exports = async function libraryState(params = {}) {
     return map;
   }
 
-  function readRedisInstructions() {
-    const snapshot = callFeeder(app, "pipeline.snapshot", { kind: "control" });
-    return redisInstructionMap(snapshot);
+  async function readServerInstructions() {
+    const snapshot = await callService("define-plan-snapshot");
+    return redisInstructionMap(snapshot.server);
   }
 
   function gitLabel(status) {
@@ -224,7 +235,7 @@ module.exports = async function libraryState(params = {}) {
       };
     });
 
-    const redis = readRedisInstructions();
+    const redis = await readServerInstructions();
     rows.forEach((row) => {
       const remote = redis.get(row.identity) || null;
       row.remote = remote ? "present" : "missing";
@@ -237,17 +248,16 @@ module.exports = async function libraryState(params = {}) {
 
   async function uploadInstructions(rows) {
     if (!rows.length) throw new Error("No instruction files selected.");
-    const instructionSets = rows.map((row) => ({
-      slug: row.identity,
-      path: path.resolve(vaultRoot, row.relativePath),
-      source_path: row.relativePath,
-    }));
-    const result = callFeeder(app, "instructions.sync", { instruction_sets: instructionSets });
+    const result = await callService("instructions-sync", {
+      version: 1,
+      root: vaultRoot,
+      paths: rows.map((row) => row.relativePath),
+    });
     return { records: rows, result };
   }
 
   // Dashboard and other read-only Library views consume the same snapshot as
-  // the modal instead of duplicating Git, frontmatter, or Feeder logic.
+  // the modal instead of duplicating Git, frontmatter, or service logic.
   if (params.mode === "snapshot") return readInstructionRows();
 
 
@@ -498,7 +508,7 @@ module.exports = async function libraryState(params = {}) {
         const doneMessage = `Upload completed for ${outcome.records.length} selected instruction(s).`;
         output.textContent = [
           doneMessage,
-          Array.isArray(outcome.result) ? `\nFeeder results:\n${outcome.result.map((item) => `${item.slug}: ${item.status}`).join("\n")}` : "",
+          Array.isArray(outcome.result?.items) ? `\nService results:\n${outcome.result.items.map((item) => `${item.slug}: ${item.status}`).join("\n")}` : "",
         ].filter(Boolean).join("\n");
         notify(doneMessage, 7000);
         console.info(`[Library State] ${doneMessage}`);

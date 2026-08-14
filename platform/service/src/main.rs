@@ -110,6 +110,25 @@ struct PlanSaveInput {
     instructions: Vec<serde_json::Value>,
 }
 
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct InstructionSyncInput {
+    version: u32,
+    root: PathBuf,
+    paths: Vec<PathBuf>,
+}
+
+#[derive(Serialize)]
+struct InstructionSyncOutput {
+    ok: bool,
+    operation: &'static str,
+    scanned: usize,
+    selected: usize,
+    uploaded: usize,
+    hashes_compared: usize,
+    items: Vec<instruction_sync::SyncItem>,
+}
+
 #[derive(Serialize)]
 struct PlanSaveOutput {
     ok: bool,
@@ -167,6 +186,7 @@ fn main() -> ExitCode {
         Some("dispatch-transmit") => return dispatch_transmit(),
         Some("define-plan-snapshot") => return define_plan_snapshot(),
         Some("plan-save") => return plan_save(),
+        Some("instructions-sync") => return command_output("instructions.sync", instructions_sync_from_stdin()),
         Some("git-files") => return command_output("git.files", git_files_from_stdin()),
         Some("responses-snapshot") => return command_output("responses.snapshot", responses_snapshot_from_stdin()),
         Some("response-decide") => return command_output("response.decide", response_decide_from_stdin()),
@@ -200,6 +220,44 @@ fn upload_instructions()->Result<serde_json::Value,Box<dyn std::error::Error>>{
     Ok(serde_json::json!({"ok":true,"operation":"instructions.upload","root":root,"dry_run":dry_run,
         "scanned":plan.items.len(),"current":current,"uploaded":if dry_run{0}else{uploaded},"would_upload":uploaded,
         "hashes_compared":plan.hashes_compared,"items":plan.items}))
+}
+
+fn instructions_sync_from_stdin() -> Result<InstructionSyncOutput, Box<dyn std::error::Error>> {
+    let input: InstructionSyncInput = read_json_stdin()?;
+    if input.version != 1 { return Err("unsupported instruction sync version".into()); }
+    let root = input.root.canonicalize()?;
+    let selected = input.paths.into_iter()
+        .map(|path| path.to_string_lossy().replace('\\', "/"))
+        .collect::<std::collections::BTreeSet<_>>();
+    if selected.is_empty() { return Err("instruction sync requires selected paths".into()); }
+    let all = instruction_sync::scan(&root)?;
+    let scanned = all.len();
+    let local = all.into_iter()
+        .filter(|item| selected.contains(&item.relative_path))
+        .collect::<Vec<_>>();
+    if local.len() != selected.len() {
+        let resolved = local.iter().map(|item| item.relative_path.clone()).collect::<std::collections::BTreeSet<_>>();
+        let missing = selected.difference(&resolved).cloned().collect::<Vec<_>>();
+        return Err(format!("selected instruction paths were not found: {}", missing.join(", ")).into());
+    }
+    let manifest: serde_json::Value = serde_json::from_slice(&run_asc_capture(
+        &asc_command(), ["control", "instruction-manifest"], &[],
+    )?)?;
+    let plan = instruction_sync::plan(local, &manifest)?;
+    let uploaded = plan.upload.len();
+    if !plan.upload.is_empty() {
+        let records = plan.upload.iter().map(instruction_sync::upload_record).collect::<Vec<_>>();
+        run_asc(&asc_command(), ["upload", "instructions"], &ndjson(&records)?)?;
+    }
+    Ok(InstructionSyncOutput {
+        ok: true,
+        operation: "instructions.sync",
+        scanned,
+        selected: selected.len(),
+        uploaded,
+        hashes_compared: plan.hashes_compared,
+        items: plan.items,
+    })
 }
 
 fn git_files_from_stdin() -> Result<serde_json::Value, Box<dyn std::error::Error>> {
