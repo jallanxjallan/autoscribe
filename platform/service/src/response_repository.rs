@@ -34,11 +34,11 @@ pub fn pending(db: &Database) -> ServiceResult<Vec<Value>> {
         value["dispatch_identity"]=dispatch.into();value["ledger_commit"]=commit.into();value["source_blob"]=blob.into();Ok(value)}).collect()
 }
 
-pub fn require_pending(db:&Database,result:&str,source:&str)->ServiceResult<(String,String,String,String,Option<String>,Option<String>,Option<String>)> {
+pub fn require_pending(db:&Database,result:&str,source:&str)->ServiceResult<(String,String,String,String,Option<String>,Option<String>,Option<String>,Option<String>)> {
     db.connection().query_row(
-        "SELECT state,dispatch_identity,ledger_commit,source_blob,intended_outcome,source_path,writeback_commit FROM response_records
+        "SELECT state,dispatch_identity,ledger_commit,source_blob,intended_outcome,source_path,writeback_commit,forensic_commit FROM response_records
          WHERE result_identity=?1 AND source_identity=?2 AND state IN ('pending','written')",(result,source),
-        |row|Ok((row.get(0)?,row.get(1)?,row.get(2)?,row.get(3)?,row.get(4)?,row.get(5)?,row.get(6)?)),
+        |row|Ok((row.get(0)?,row.get(1)?,row.get(2)?,row.get(3)?,row.get(4)?,row.get(5)?,row.get(6)?,row.get(7)?)),
     ).map_err(|_|ServiceError::Conflict(format!("pending response not found: {result}")))
 }
 
@@ -49,11 +49,15 @@ pub fn mark_written(db:&Database,result:&str,outcome:&str,path:Option<&str>,comm
     if changed==1{Ok(())}else{Err(ServiceError::Conflict(format!("response is not pending: {result}")))}
 }
 
-pub fn decide(db:&Database,result:&str,outcome:&str,path:Option<&str>,commit:Option<&str>)->ServiceResult<()> {
+pub fn mark_forensic(db:&Database,result:&str,commit:&str)->ServiceResult<()> {
     let changed=db.connection().execute(
-        "UPDATE response_records SET state=?2,source_path=?3,writeback_commit=?4,updated_at=CURRENT_TIMESTAMP
-         WHERE result_identity=?1 AND state='written'",(result,outcome,path,commit)).map_err(storage)?;
+        "UPDATE response_records SET forensic_commit=?2,updated_at=CURRENT_TIMESTAMP
+         WHERE result_identity=?1 AND state='written'",(result,commit)).map_err(storage)?;
     if changed==1{Ok(())}else{Err(ServiceError::Conflict(format!("response is not pending: {result}")))}
+}
+pub fn complete(db:&Database,result:&str)->ServiceResult<()> {
+    let changed=db.connection().execute("DELETE FROM response_records WHERE result_identity=?1 AND state='written'",[result]).map_err(storage)?;
+    if changed==1{Ok(())}else{Err(ServiceError::Conflict(format!("response is not awaiting completion: {result}")))}
 }
 fn required<'a>(record:&'a Value,field:&str)->ServiceResult<&'a str>{record.get(field).and_then(Value::as_str).map(str::trim).filter(|v|!v.is_empty()).ok_or_else(||ServiceError::InvalidInput(format!("response requires {field}")))}
 fn storage(error:rusqlite::Error)->ServiceError{ServiceError::Storage(error.to_string())}

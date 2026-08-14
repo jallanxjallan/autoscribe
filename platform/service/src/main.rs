@@ -155,6 +155,10 @@ struct ResponseDecideInput { version:u32, database_path:PathBuf, repository_path
 #[derive(Serialize)]
 struct ResponseDecideOutput { ok:bool, operation:&'static str, result_identity:String,
     outcome:String, commit:Option<String> }
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct DispatchFinalizeInput { version:u32, database_path:PathBuf, repository_path:PathBuf,
+    dispatch_identity:String, outcome:String, reason:Option<String> }
 
 fn main() -> ExitCode {
     match env::args().nth(1).as_deref() {
@@ -166,6 +170,7 @@ fn main() -> ExitCode {
         Some("git-files") => return command_output("git.files", git_files_from_stdin()),
         Some("responses-snapshot") => return command_output("responses.snapshot", responses_snapshot_from_stdin()),
         Some("response-decide") => return command_output("response.decide", response_decide_from_stdin()),
+        Some("dispatch-finalize") => return command_output("dispatch.finalize", dispatch_finalize_from_stdin()),
         _ => {}
     }
     let config = env::args_os()
@@ -258,12 +263,29 @@ fn responses_snapshot_from_stdin()->Result<ResponsesSnapshotOutput,Box<dyn std::
     response_repository::store_pending(&db,&records)?;
     Ok(ResponsesSnapshotOutput{ok:true,operation:"responses.snapshot",responses:response_repository::pending(&db)?})
 }
+fn dispatch_finalize_from_stdin()->Result<serde_json::Value,Box<dyn std::error::Error>>{
+    let input:DispatchFinalizeInput=read_json_stdin()?;
+    if input.version!=1{return Err("unsupported dispatch finalize version".into());}
+    let db=open_database(&input.database_path)?;let repository=input.repository_path.canonicalize()?;
+    db::ensure_terminal_ready(&db,&input.dispatch_identity)?;
+    let event=git::append_dispatch_terminal_event(&repository,&input.dispatch_identity,&input.outcome,input.reason.as_deref())?;
+    db::clear_terminal_dispatch(&db,&input.dispatch_identity)?;
+    Ok(serde_json::json!({"ok":true,"operation":"dispatch.finalize","dispatch":input.dispatch_identity,"outcome":input.outcome,"forensic_commit":event.0}))
+}
 fn response_decide_from_stdin()->Result<ResponseDecideOutput,Box<dyn std::error::Error>>{
     let input:ResponseDecideInput=read_json_stdin()?;
     if input.version!=1||!matches!(input.outcome.as_str(),"accepted"|"declined"){return Err("response decision requires version 1 and accepted or declined outcome".into());}
-    let db=open_database(&input.database_path)?;let (state,_,_,source_blob,stored_outcome,stored_path,stored_commit)=response_repository::require_pending(&db,&input.result_identity,&input.source_identity)?;
-    if state=="written"{if stored_outcome.as_deref()!=Some(input.outcome.as_str()){return Err("response already written with another outcome".into());}run_asc(&asc_command(),["export","update-exports",input.result_identity.as_str()],&[])?;response_repository::decide(&db,&input.result_identity,&input.outcome,stored_path.as_deref(),stored_commit.as_deref())?;return Ok(ResponseDecideOutput{ok:true,operation:"response.decide",result_identity:input.result_identity,outcome:input.outcome,commit:stored_commit});}
-    let repository=input.repository_path.canonicalize()?;let mut commit=None;
+    let db=open_database(&input.database_path)?;
+    let (state,dispatch,_,source_blob,stored_outcome,_stored_path,stored_commit,stored_forensic)=response_repository::require_pending(&db,&input.result_identity,&input.source_identity)?;
+    let repository=input.repository_path.canonicalize()?;
+    if state=="written"{
+        if stored_outcome.as_deref()!=Some(input.outcome.as_str()){return Err("response already written with another outcome".into());}
+        if stored_forensic.is_none(){let event=git::append_response_event(&repository,&dispatch,&input.result_identity,&input.source_identity,&input.outcome,stored_commit.as_deref())?;response_repository::mark_forensic(&db,&input.result_identity,&event.0)?;}
+        run_asc(&asc_command(),["export","update-exports",input.result_identity.as_str()],&[])?;
+        response_repository::complete(&db,&input.result_identity)?;
+        return Ok(ResponseDecideOutput{ok:true,operation:"response.decide",result_identity:input.result_identity,outcome:input.outcome,commit:stored_commit});
+    }
+    let mut commit=None;
     let source_path=if input.outcome=="accepted"{let relative=input.source_path.as_ref().ok_or("accepted response requires source_path")?;let replacement=input.replacement_text.as_ref().ok_or("accepted response requires replacement_text")?;
         let statuses=git::inspect(&repository,&[relative.clone()])?;if statuses.first().is_none_or(|status|!status.tracked||status.dirty){return Err(format!("response target must be tracked and clean: {}",relative.display()).into());}
         if git::worktree_blob(&repository,relative)?!=source_blob{return Err(format!("source changed since dispatch: {}",relative.display()).into());}
@@ -271,8 +293,10 @@ fn response_decide_from_stdin()->Result<ResponseDecideOutput,Box<dyn std::error:
         match git::commit(&repository,CommitRequest{paths:vec![relative.clone()],message:format!("Accept AutoScribe response {}",input.source_identity),purpose:CommitPurpose::DispatchWriteback}){Ok(value)=>commit=Some(value.0),Err(error)=>{let _=std::fs::write(&target,original);return Err(error.into());}}
         Some(relative.to_string_lossy().replace('\\',"/"))}else{None};
     response_repository::mark_written(&db,&input.result_identity,&input.outcome,source_path.as_deref(),commit.as_deref())?;
+    let event=git::append_response_event(&repository,&dispatch,&input.result_identity,&input.source_identity,&input.outcome,commit.as_deref())?;
+    response_repository::mark_forensic(&db,&input.result_identity,&event.0)?;
     run_asc(&asc_command(),["export","update-exports",input.result_identity.as_str()],&[])?;
-    response_repository::decide(&db,&input.result_identity,&input.outcome,source_path.as_deref(),commit.as_deref())?;
+    response_repository::complete(&db,&input.result_identity)?;
     Ok(ResponseDecideOutput{ok:true,operation:"response.decide",result_identity:input.result_identity,outcome:input.outcome,commit})
 }
 fn read_json_stdin<T:for<'de>Deserialize<'de>>()->Result<T,Box<dyn std::error::Error>>{let mut raw=String::new();io::stdin().read_to_string(&mut raw)?;Ok(serde_json::from_str(&raw)?)}

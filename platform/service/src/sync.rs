@@ -71,7 +71,7 @@ pub fn run(
         let outcome = transport.upload(&payload.dispatch_id, &payload.bytes)?;
         match outcome {
             UploadOutcome::Acknowledged => {
-                set_outbox_state(db, &payload.dispatch_id, "acknowledged", None)?;
+                delete_outbox(db, &payload.dispatch_id)?;
                 uploads_sent += 1;
             }
             UploadOutcome::NotSent(reason) => {
@@ -170,7 +170,7 @@ pub fn record_upload_outcome(
     outcome: UploadOutcome,
 ) -> ServiceResult<()> {
     match outcome {
-        UploadOutcome::Acknowledged => set_outbox_state(db, identity, "acknowledged", None),
+        UploadOutcome::Acknowledged => delete_outbox(db, identity),
         UploadOutcome::NotSent(reason) => set_outbox_state(db, identity, "pending", Some(&reason)),
         UploadOutcome::Uncertain(reason) => {
             set_outbox_state(db, identity, "uncertain", Some(&reason))
@@ -227,6 +227,12 @@ fn set_outbox_state(
              last_error = ?3, acknowledged_at = ?4 WHERE dispatch_identity = ?1",
             params![identity.0, state, error, acknowledged_at],
         )
+        .map_err(storage)?;
+    Ok(())
+}
+
+fn delete_outbox(db: &Database, identity: &DispatchId) -> ServiceResult<()> {
+    db.connection().execute("DELETE FROM sync_outbox WHERE dispatch_identity = ?1", [&identity.0])
         .map_err(storage)?;
     Ok(())
 }

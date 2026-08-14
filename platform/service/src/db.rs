@@ -105,6 +105,7 @@ pub fn migrate(db: &Database) -> ServiceResult<()> {
                 intended_outcome TEXT CHECK (intended_outcome IN ('accepted', 'declined')),
                 source_path TEXT,
                 writeback_commit TEXT,
+                forensic_commit TEXT,
                 updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
             );
 
@@ -114,7 +115,15 @@ pub fn migrate(db: &Database) -> ServiceResult<()> {
                 ON sync_inbox(dispatch_identity);
             ",
         )
-        .map_err(storage)
+        .map_err(storage)?;
+    let has_forensic = db.connection().prepare("PRAGMA table_info(response_records)").map_err(storage)?
+        .query_map([], |row| row.get::<_, String>(1)).map_err(storage)?
+        .collect::<Result<Vec<_>, _>>().map_err(storage)?
+        .iter().any(|name| name == "forensic_commit");
+    if !has_forensic {
+        db.connection().execute("ALTER TABLE response_records ADD COLUMN forensic_commit TEXT", []).map_err(storage)?;
+    }
+    Ok(())
 }
 
 pub fn record_inflight(
@@ -141,6 +150,25 @@ pub fn record_inflight(
         ).map_err(storage)?;
     }
     transaction.commit().map_err(storage)
+}
+
+pub fn clear_terminal_dispatch(db: &Database, dispatch: &str) -> ServiceResult<()> {
+    ensure_terminal_ready(db, dispatch)?;
+    let transaction = db.connection().unchecked_transaction().map_err(storage)?;
+    transaction.execute("DELETE FROM sync_inbox WHERE dispatch_identity=?1", [dispatch]).map_err(storage)?;
+    transaction.execute("DELETE FROM sync_outbox WHERE dispatch_identity=?1", [dispatch]).map_err(storage)?;
+    transaction.execute("DELETE FROM inflight_sources WHERE dispatch_identity=?1", [dispatch]).map_err(storage)?;
+    transaction.execute("DELETE FROM inflight_dispatches WHERE dispatch_identity=?1", [dispatch]).map_err(storage)?;
+    transaction.commit().map_err(storage)
+}
+pub fn ensure_terminal_ready(db: &Database, dispatch: &str) -> ServiceResult<()> {
+    let active: i64 = db.connection().query_row(
+        "SELECT count(*) FROM response_records WHERE dispatch_identity=?1", [dispatch], |row| row.get(0),
+    ).map_err(storage)?;
+    if active != 0 {
+        return Err(ServiceError::Conflict(format!("dispatch still has active responses: {dispatch}")));
+    }
+    Ok(())
 }
 
 fn storage(error: rusqlite::Error) -> ServiceError {

@@ -165,6 +165,61 @@ pub fn append_inflight_snapshot(
     Err(ServiceError::Conflict("inflight ledger remained busy after retries".into()))
 }
 
+pub fn append_response_event(
+    repo: &Path,
+    dispatch: &str,
+    result: &str,
+    source: &str,
+    outcome: &str,
+    writeback: Option<&str>,
+) -> ServiceResult<CommitId> {
+    let repo = repository_root(repo)?;
+    let dispatch = one_line("dispatch identity", dispatch)?;
+    let result = one_line("result identity", result)?;
+    let source = one_line("source identity", source)?;
+    if !matches!(outcome, "accepted" | "declined") {
+        return Err(ServiceError::InvalidInput("response outcome must be accepted or declined".into()));
+    }
+    for _ in 0..4 {
+        let old = optional_revision(&repo, INFLIGHT_REF)?.ok_or_else(|| {
+            ServiceError::Conflict("inflight ledger does not exist".into())
+        })?;
+        let tree = text(&git(&repo, ["show", "-s", "--format=%T", old.as_str()])?)
+            .trim().to_string();
+        let mut message = format!(
+            "AUTOSCRIBE RESPONSE {outcome}\n\nDispatch: {dispatch}\nResult: {result}\nSource: {source}\nOutcome: {outcome}"
+        );
+        if let Some(writeback) = writeback {
+            message.push_str(&format!("\nWriteback-Commit: {}", one_line("writeback commit", writeback)?));
+        }
+        let commit = commit_tree(&repo, &tree, Some(&old), &message)?;
+        let update = git_status_output(&repo, [
+            "update-ref", "-m", "AutoScribe response event", INFLIGHT_REF,
+            commit.as_str(), old.as_str(),
+        ])?;
+        if update.status.success() { return Ok(CommitId(commit)); }
+    }
+    Err(ServiceError::Conflict("inflight ledger remained busy after retries".into()))
+}
+
+pub fn append_dispatch_terminal_event(repo: &Path, dispatch: &str, outcome: &str, reason: Option<&str>) -> ServiceResult<CommitId> {
+    let repo = repository_root(repo)?;
+    let dispatch = one_line("dispatch identity", dispatch)?;
+    if !matches!(outcome, "completed" | "failed" | "cancelled") {
+        return Err(ServiceError::InvalidInput("terminal outcome must be completed, failed, or cancelled".into()));
+    }
+    for _ in 0..4 {
+        let old = optional_revision(&repo, INFLIGHT_REF)?.ok_or_else(|| ServiceError::Conflict("inflight ledger does not exist".into()))?;
+        let tree = text(&git(&repo, ["show", "-s", "--format=%T", old.as_str()])?).trim().to_string();
+        let mut message = format!("AUTOSCRIBE DISPATCH {outcome}\n\nDispatch: {dispatch}\nOutcome: {outcome}");
+        if let Some(reason) = reason { message.push_str(&format!("\nReason: {}", one_line("terminal reason", reason)?)); }
+        let commit = commit_tree(&repo, &tree, Some(&old), &message)?;
+        let update = git_status_output(&repo, ["update-ref", "-m", "AutoScribe terminal dispatch", INFLIGHT_REF, commit.as_str(), old.as_str()])?;
+        if update.status.success() { return Ok(CommitId(commit)); }
+    }
+    Err(ServiceError::Conflict("inflight ledger remained busy after retries".into()))
+}
+
 pub fn last_commit(repo: &Path, path: &Path) -> ServiceResult<Option<(String, String, i64)>> {
     let repo = repository_root(repo)?;
     let path = safe_relative_path(path)?;
