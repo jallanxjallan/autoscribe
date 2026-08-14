@@ -2,7 +2,6 @@ import sys
 from collections.abc import Iterable
 from typing import TextIO
 
-from asc.enqueue.custody import ensure_no_pending_export
 from asc.enqueue.job import activate_job, create_job, deactivate_job
 from asc.enqueue.reader import EnqueueRecord, iter_enqueue_records
 from asc.enqueue.report import EnqueuedCall, EnqueueReport
@@ -36,7 +35,6 @@ def enqueue_record(record: EnqueueRecord) -> EnqueuedCall:
     """Compile runtimes for one uploaded call and register its job."""
 
     call = record.call
-    ensure_no_pending_export(record.source_identity)
     call_key = record.call_key
     runtimes = ()
     job = None

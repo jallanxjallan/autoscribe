@@ -136,8 +136,7 @@ async function renderDispatchRun({ app, container }) {
   const { getFileManifest, appendClipboardCandidates } = loadControl("scripts/lib/file-manifest.js");
   const { notify } = loadControl("scripts/lib/notify.js");
   const { clearPipelineMetadata } = loadControl("scripts/lib/git-transport.js");
-  const { prepareDispatch } = loadControl("scripts/lib/dispatch-service.js");
-  const { callFeederAsync } = loadControl("scripts/lib/feeder-ipc.js");
+  const { runDispatch, run, serviceCommand } = loadControl("scripts/lib/dispatch-service.js");
 
   const session = getFileManifest(app);
   const heading = container.createEl("h2", { text: "Dispatch candidate files" });
@@ -217,7 +216,13 @@ async function renderDispatchRun({ app, container }) {
 
   await addClipboardSelection();
 
-  const planRows = await callFeederAsync(app, "plans.list", {});
+  const executable = serviceCommand(app);
+  const snapshotResult = await run(executable.command, [...executable.prefix, "define-plan-snapshot"], { cwd: vaultRoot });
+  const snapshot = JSON.parse(String(snapshotResult.stdout || "{}").trim() || "{}");
+  if (!snapshot.ok) throw new Error(snapshot.error || "Could not load plans from the service");
+  const plansByIdentity = new Map(Object.values(snapshot.server?.registries?.plans || {}).map((plan) => [String(plan.record_identity || plan.slug || ""), plan]));
+  for (const plan of snapshot.authored_plans || []) plansByIdentity.set(String(plan.record_identity || plan.slug || ""), plan);
+  const planRows = [...plansByIdentity.values()].filter((plan) => String(plan.record_identity || plan.slug || "").trim());
   if (!Array.isArray(planRows) || !planRows.length) {
     container.createEl("p", { text: "No plans are available." });
     return;
@@ -229,16 +234,11 @@ async function renderDispatchRun({ app, container }) {
   form.style.maxWidth = "42em";
   form.createEl("label", { text: "Plan" });
   const select = form.createEl("select");
-  const plansBySlug = new Map();
   for (const plan of planRows) {
     const slug = String(plan.record_identity || plan.slug || "").trim();
     if (!slug) continue;
-    plansBySlug.set(slug, plan);
     select.createEl("option", { text: String(plan.payload?.title || plan.title || plan.payload?.label || plan.label || plan.name || slug), value: slug });
   }
-
-  form.createEl("label", { text: "Commit message (optional)" });
-  const message = form.createEl("input", { attr: { type: "text", placeholder: "Defaults to DISPATCH <plan>: <timestamp>" } });
 
   const combineRow = form.createEl("label");
   combineRow.style.display = "flex";
@@ -257,30 +257,13 @@ async function renderDispatchRun({ app, container }) {
   });
 
   const runButton = form.createEl("button", { text: "Dispatch Run", cls: "mod-cta" });
-  const copyDispatchIdButton = form.createEl("button", { text: "Copy Dispatch ID" });
-  copyDispatchIdButton.style.display = "none";
-  let preparedDispatchId = "";
-  copyDispatchIdButton.addEventListener("click", async () => {
-    if (!preparedDispatchId) return;
-    try {
-      await navigator.clipboard.writeText(preparedDispatchId);
-      copyDispatchIdButton.setText("Copied Dispatch ID");
-      notify(`Copied dispatch ID: ${preparedDispatchId}`);
-    } catch (error) {
-      const detail = String(error?.message || error || "Clipboard write failed");
-      notify(`Could not copy dispatch ID: ${detail}`);
-    }
-  });
   const result = container.createEl("pre");
   result.style.whiteSpace = "pre-wrap";
 
   runButton.addEventListener("click", async () => {
-    notify("Preparing dispatch…");
+    notify("Running dispatch…");
     runButton.disabled = true;
-    preparedDispatchId = "";
-    copyDispatchIdButton.style.display = "none";
-    copyDispatchIdButton.setText("Copy Dispatch ID");
-    result.setText("Resolving transclusions, converting selected files, and preparing dispatch…");
+    result.setText("Resolving transclusions and handing the dispatch to the service…");
     try {
       const selection = selectedPaths();
       if (!selection.length) {
@@ -292,33 +275,26 @@ async function renderDispatchRun({ app, container }) {
         throw new Error("Enter a basename for the combined record.");
       }
       if (combine.checked) {
-        throw new Error("Combined dispatch is not yet available through the Rust adapter.");
+        throw new Error("Combined dispatch is not yet available through the service.");
       }
       clearPipelineMetadata(app, selection);
-      const planRecord = plansBySlug.get(select.value) || {};
-      const transport = await prepareDispatch(app, {
+      const transport = await runDispatch(app, {
         paths: selection,
         plan: select.value,
-        planVersion: planRecord.content_hash || planRecord.revision || planRecord.version || select.value,
-        message: message.value.trim(),
       });
       session.candidates.clear();
       renderCandidates("manifest cleared after dispatch");
-      preparedDispatchId = String(transport.dispatch || "").trim();
-      copyDispatchIdButton.style.display = preparedDispatchId ? "" : "none";
       result.setText(
-        `Dispatch prepared by Rust and queued in SQLite.\n` +
-        `Branch: ${transport.branch}\n` +
-        `Run: ${transport.dispatch}\n` +
-        `Records: ${transport.count}\n` +
-        `Flattened in place: ${flattened.length}\n` +
-        `Payload: ${transport.payload_sha256}`
+        `Dispatch uploaded and enqueued by the service.\n` +
+        `Plan: ${transport.plan}\n` +
+        `Records: ${transport.records}\n` +
+        `Flattened in place: ${flattened.length}`
       );
     } catch (error) {
-      console.error("Dispatch Run handoff failed before feeder launch", error);
+      console.error("Dispatch Run failed", error);
       const detail = String(error?.message || error || "Unknown dispatch error");
-      result.setText(`Dispatch preparation failed.\n${detail}`);
-      notify(`Dispatch preparation failed: ${detail}`);
+      result.setText(`Dispatch failed.\n${detail}`);
+      notify(`Dispatch failed: ${detail}`);
     } finally {
       runButton.disabled = false;
     }
