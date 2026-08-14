@@ -10,6 +10,19 @@ pub struct CommitId(pub String);
 pub struct ResultId(pub String);
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ExternalFileRequest {
+    pub target: String,
+    pub files: Vec<PathBuf>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ExternalFileReceipt {
+    pub target: String,
+    pub reference: String,
+    pub commit: CommitId,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ServiceConfig {
     pub database_path: PathBuf,
     pub repository_path: PathBuf,

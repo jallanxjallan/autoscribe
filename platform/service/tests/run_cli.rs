@@ -30,11 +30,33 @@ fn dispatch_run_converts_uploads_and_enqueues_in_one_service_call() {
     assert_eq!(response["records"], 1);
     assert_eq!(
         fs::read_to_string(root.join("asc.log")).unwrap(),
-        "export list-pending --ndjson\nupload calls\nenqueue\n"
+        "export list-pending --ndjson\nupload calls\nenqueue\nrun status\n"
     );
     let input = fs::read_to_string(root.join("asc.log.input")).unwrap();
     assert!(input.contains("\"type\":\"call\""));
     assert!(input.contains("\"directive\":\"Use this\""));
+    fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn dispatch_starts_runtime_daemons_when_status_is_unhealthy() {
+    let root = temp("start-daemons");
+    fs::write(root.join("One.md"), "---\nslug: cnt.one\n---\nBody\n").unwrap();
+    git(&root, ["init", "--quiet", "--initial-branch=main"]);
+    git(&root, ["config", "user.email", "tests@autoscribe.local"]);
+    git(&root, ["config", "user.name", "AutoScribe Tests"]);
+    git(&root, ["add", "One.md"]);
+    git(&root, ["commit", "--quiet", "-m", "Initial"]);
+    let pandoc = root.join("pandoc");
+    fs::write(&pandoc, "#!/bin/sh\nprintf '%s\\n' '{\"record_type\":\"content\",\"record_identity\":\"cnt.one\",\"payload\":{\"content\":\"Body\"}}'\n").unwrap();
+    executable(&pandoc);
+    let asc = fake_asc_with_status(&root, "  worker=not-running");
+    let output = invoke(&root, &pandoc, &asc);
+    assert!(output.status.success(), "{}", String::from_utf8_lossy(&output.stdout));
+    assert_eq!(
+        fs::read_to_string(root.join("asc.log")).unwrap(),
+        "export list-pending --ndjson\nupload calls\nenqueue\nrun status\nrun start\n"
+    );
     fs::remove_dir_all(root).unwrap();
 }
 
@@ -94,12 +116,16 @@ fn invoke(root: &Path, pandoc: &Path, asc: &Path) -> std::process::Output {
     child.wait_with_output().unwrap()
 }
 fn fake_asc(root: &Path) -> PathBuf {
+    fake_asc_with_status(root, "  worker=running pid=123")
+}
+fn fake_asc_with_status(root: &Path, status: &str) -> PathBuf {
     let path = root.join("asc");
     fs::write(
         &path,
         format!(
-            "#!/bin/sh\nprintf '%s\\n' \"$*\" >> '{}'\nif [ \"$1 $2\" = \"export list-pending\" ]; then exit 0; fi\ncat >> '{}.input'\n",
+            "#!/bin/sh\nprintf '%s\\n' \"$*\" >> '{}'\nif [ \"$1 $2\" = \"export list-pending\" ]; then exit 0; fi\nif [ \"$1 $2\" = \"run status\" ]; then printf '%s\\n' '{}'; exit 0; fi\ncat >> '{}.input'\n",
             root.join("asc.log").display(),
+            status,
             root.join("asc.log").display()
         ),
     )

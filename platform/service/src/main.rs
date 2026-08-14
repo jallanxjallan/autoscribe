@@ -500,6 +500,7 @@ fn run_dispatch_from_stdin() -> Result<DispatchRunOutput, Box<dyn std::error::Er
     )?;
     run_asc(&asc, ["upload", "calls"], &ndjson(&calls)?)?;
     run_asc(&asc, ["enqueue"], &ndjson(&enqueue)?)?;
+    ensure_runtime_daemons(&asc)?;
     Ok(DispatchRunOutput {
         ok: true,
         operation: "dispatch.run",
@@ -763,6 +764,7 @@ fn transmit_from_args() -> Result<DispatchTransmitOutput, Box<dyn std::error::Er
         publish_transmit_failure(&sink, &dispatch, &reason)?;
         return Err(reason.into());
     }
+    ensure_runtime_daemons(&asc)?;
     sync::record_upload_outcome(&db, &dispatch, UploadOutcome::Acknowledged)?;
     events::publish(
         &sink,
@@ -791,6 +793,25 @@ fn asc_command() -> PathBuf {
     env::var_os("ASC_BIN")
         .map(PathBuf::from)
         .unwrap_or_else(|| PathBuf::from("/home/jeremy/Python3.13Env/bin/asc"))
+}
+
+fn ensure_runtime_daemons(asc: &Path) -> Result<(), AscFailure> {
+    let status = run_asc_capture(asc, ["run", "status"], &[]);
+    let needs_start = match status {
+        Ok(output) => {
+            let text = String::from_utf8_lossy(&output);
+            text.lines().any(|line| {
+                line.contains("=not-running")
+                    || line.contains("=stale")
+                    || line.contains("=crashed")
+            })
+        }
+        Err(_) => true,
+    };
+    if needs_start {
+        run_asc(asc, ["run", "start"], &[])?;
+    }
+    Ok(())
 }
 
 fn ndjson(records: &[serde_json::Value]) -> Result<Vec<u8>, serde_json::Error> {

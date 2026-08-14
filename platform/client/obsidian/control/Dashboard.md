@@ -125,7 +125,7 @@ async function renderState() {
     if (!system.pipeline) {
       pipelineCard.createEl("p", { text: system.errors.pipeline || "Pipeline state unavailable", cls: "dashboard-bad" });
     } else {
-      const { counts, feeder_error: feederError, handoffs } = system.pipeline;
+      const { counts, handoffs } = system.pipeline;
       const active = (counts.unclaimed || 0) + (counts.waiting || 0) + (counts.response_pending || 0);
       line(pipelineCard, "Active runs", active, active ? "dashboard-warn" : "dashboard-good");
       line(pipelineCard, "Unclaimed", counts.unclaimed || 0);
@@ -133,9 +133,6 @@ async function renderState() {
       line(pipelineCard, "Responses ready", counts.response_pending || 0,
         counts.response_pending ? "dashboard-good" : "");
       line(pipelineCard, "Recent handoffs", handoffs.length);
-      line(pipelineCard, "Feeder", feederError ? "Unavailable" : "Connected",
-        feederError ? "dashboard-bad" : "dashboard-good");
-      if (feederError) pipelineCard.createEl("p", { text: feederError, cls: "dashboard-muted" });
     }
     addLink(pipelineCard, "Open diagnostics", "_control/panels/System Status.md");
   } catch (error) {
@@ -154,6 +151,61 @@ async function renderState() {
 
 refresh.onclick = renderState;
 await renderState();
+
+function isEditorialFlagFile(file) {
+  return !file.path
+    .split("/")
+    .slice(0, -1)
+    .some((part) => part.startsWith("_"));
+}
+
+async function countEditorialFlags() {
+  let count = 0;
+
+  for (const file of app.vault.getMarkdownFiles().filter(isEditorialFlagFile)) {
+    const lines = (await app.vault.cachedRead(file)).split(/\r?\n/);
+    let inFrontmatter = lines[0]?.trim() === "---";
+    let fenceMarker = null;
+
+    for (let index = 0; index < lines.length; index += 1) {
+      const line = lines[index];
+      const trimmed = line.trim();
+
+      if (inFrontmatter) {
+        if (index > 0 && trimmed === "---") inFrontmatter = false;
+        continue;
+      }
+
+      const fence = trimmed.match(/^(```+|~~~+)/)?.[1] || null;
+      if (fence) {
+        if (!fenceMarker) fenceMarker = fence[0];
+        else if (fence[0] === fenceMarker) fenceMarker = null;
+        continue;
+      }
+      if (fenceMarker) continue;
+
+      if (/^\s*>\s*\\?\[![^\]]+\](?:[+-])?/i.test(line)) count += 1;
+      if (/\*\*TK\s*[\s\S]*?\*\*/i.test(line)) count += 1;
+      count += [...line.matchAll(/==(.+?)==/g)].length;
+    }
+  }
+
+  return count;
+}
+
+function countEditorialNotes() {
+  const folder = app.vault.getAbstractFileByPath("Editorial Notes");
+  return folder?.children?.filter((file) => file.extension === "md").length || 0;
+}
+
+const editing = section("Editing status");
+const editingGrid = editing.createEl("div", { cls: "dashboard-grid" });
+const editorialFlags = card(editingGrid, "Editorial Flags");
+line(editorialFlags, "Items", await countEditorialFlags());
+addLink(editorialFlags, "Open Editorial Flags", "_control/queries/Editorial Flags.md");
+const editorialNotes = card(editingGrid, "Editorial Notes");
+line(editorialNotes, "Items", countEditorialNotes());
+addLink(editorialNotes, "Open Editorial Notes", "_control/queries/Editorial Notes.md");
 
 const workflow = section("Operations");
 const actions = workflow.createEl("div", { cls: "dashboard-actions" });

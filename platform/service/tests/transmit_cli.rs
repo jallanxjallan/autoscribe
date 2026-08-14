@@ -20,7 +20,7 @@ fn transmit_streams_saved_records_and_acknowledges_only_after_both_commands() {
     fs::write(
         &fake,
         format!(
-            "#!/bin/sh\nprintf '%s\\n' \"$*\" >> '{}'\ncat >> '{}'.input\n",
+            "#!/bin/sh\nprintf '%s\\n' \"$*\" >> '{}'\nif [ \"$1 $2\" = \"run status\" ]; then printf '%s\\n' '  worker=running pid=123'; exit 0; fi\ncat >> '{}'.input\n",
             log.display(),
             log.display()
         ),
@@ -41,7 +41,7 @@ fn transmit_streams_saved_records_and_acknowledges_only_after_both_commands() {
     );
     let response: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
     assert_eq!(response["state"], "acknowledged");
-    assert_eq!(fs::read_to_string(&log).unwrap(), "upload calls\nenqueue\n");
+    assert_eq!(fs::read_to_string(&log).unwrap(), "upload calls\nenqueue\nrun status\n");
     let db = Database::open_path(&database).unwrap();
     db::migrate(&db).unwrap();
     assert!(sync::pending_payloads(&db).unwrap().is_empty());
