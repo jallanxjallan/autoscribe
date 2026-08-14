@@ -7,7 +7,7 @@ const controlVaultRoot = runtimeApp.vault.adapter.getBasePath?.() || runtimeApp.
 const loadControl = (relativePath) => nodeRequire(pathMod.join(controlVaultRoot, "_control", ...relativePath.split("/")));
 
 const path = require("node:path");
-const { callFeederAsync } = loadControl("scripts/lib/feeder-ipc.js");
+const { gitFiles } = loadControl("scripts/lib/git-service.js");
 const { readClipboardSelection } = loadControl("scripts/lib/clipboard-selection.js");
 const { notify } = loadControl("scripts/lib/notify.js");
 
@@ -225,7 +225,7 @@ async function renderCommitFiles({ app, container }) {
 
     try {
       const parsed = await readClipboardSelection(app);
-      const result = await callFeederAsync(app, "git.resolve_selection", { items: parsed });
+      const result = await gitFiles(app, "inspect", { items: parsed });
       const normalized = normalizedResponse(result, parsed);
       state.parsed = parsed;
       state.items = normalized.items;
@@ -263,18 +263,10 @@ async function renderCommitFiles({ app, container }) {
       updateControls();
       notify(`Committing ${items.length} file(s)…`);
 
-      const result = await callFeederAsync(app, "git.commit_selection", {
+      const result = await gitFiles(app, "commit", {
         message,
-        commit_type: commitType,
-        tag_type: commitType,
-        state: fileState,
-        items: items.map((item) => ({
-          index: item.index,
-          source_row: item.source_row,
-          path: item.path,
-          slug: item.slug || "",
-          title: item.title || "",
-        })),
+        purpose: commitType,
+        paths: items.map((item) => item.path),
       });
 
       const hash = String(result?.commit?.hash || result?.commit || "").slice(0, 8) || "unknown";

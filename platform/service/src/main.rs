@@ -1,11 +1,12 @@
 use autoscribe_service::{
     Service,
     db::{self, Database},
-    dispatch,
+    dispatch, git,
     events::{self, NoticeSink},
-    pandoc, plan_repository,
+    pandoc, plan_repository, response_repository,
     sync::{self, UploadOutcome},
-    types::{DispatchId, DispatchSource, PandocJob, PlanId, PrepareSavedDispatchRequest},
+    types::{CommitPurpose, CommitRequest, DispatchId, DispatchSource, LedgerSnapshotRequest,
+        LedgerSource, PandocJob, PlanId, PrepareSavedDispatchRequest},
 };
 use serde::{Deserialize, Serialize};
 use std::{
@@ -42,13 +43,14 @@ struct DispatchPrepareOutput {
     ok: bool,
     operation: &'static str,
     dispatch: String,
-    source_revision: String,
-    source_branch: String,
-    branch: String,
-    dispatch_commit: String,
+    inflight_ref: String,
+    inflight_commit: String,
     payload_sha256: String,
-    committed_paths: Vec<PathBuf>,
+    source_blobs: Vec<SourceBlobOutput>,
 }
+
+#[derive(Serialize)]
+struct SourceBlobOutput { path: PathBuf, blob: String }
 
 #[derive(Serialize)]
 struct ErrorOutput {
@@ -79,6 +81,7 @@ struct DispatchTransmitOutput {
 #[serde(deny_unknown_fields)]
 struct DispatchRunInput {
     version: u32,
+    database_path: PathBuf,
     repository_path: PathBuf,
     pandoc_binary: PathBuf,
     pandoc_filter: PathBuf,
@@ -94,6 +97,8 @@ struct DispatchRunOutput {
     plan: String,
     records: usize,
     calls: Vec<String>,
+    dispatch: String,
+    inflight_commit: String,
 }
 
 #[derive(Deserialize)]
@@ -122,6 +127,35 @@ struct DefinePlanSnapshotOutput {
     authored_instructions: Vec<serde_json::Value>,
 }
 
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct GitFilesInput {
+    version: u32,
+    repository_path: PathBuf,
+    action: String,
+    #[serde(default)] paths: Vec<PathBuf>,
+    path: Option<PathBuf>,
+    message: Option<String>,
+    purpose: Option<String>,
+    revision: Option<String>,
+    id: Option<String>,
+    #[serde(default)] items: Vec<serde_json::Value>,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ResponsesSnapshotInput { version:u32, database_path:PathBuf, repository_path:PathBuf }
+#[derive(Serialize)]
+struct ResponsesSnapshotOutput { ok:bool, operation:&'static str, responses:Vec<serde_json::Value> }
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ResponseDecideInput { version:u32, database_path:PathBuf, repository_path:PathBuf,
+    result_identity:String, source_identity:String, source_path:Option<PathBuf>, outcome:String,
+    replacement_text:Option<String> }
+#[derive(Serialize)]
+struct ResponseDecideOutput { ok:bool, operation:&'static str, result_identity:String,
+    outcome:String, commit:Option<String> }
+
 fn main() -> ExitCode {
     match env::args().nth(1).as_deref() {
         Some("dispatch-prepare") => return dispatch_prepare(),
@@ -129,6 +163,9 @@ fn main() -> ExitCode {
         Some("dispatch-transmit") => return dispatch_transmit(),
         Some("define-plan-snapshot") => return define_plan_snapshot(),
         Some("plan-save") => return plan_save(),
+        Some("git-files") => return command_output("git.files", git_files_from_stdin()),
+        Some("responses-snapshot") => return command_output("responses.snapshot", responses_snapshot_from_stdin()),
+        Some("response-decide") => return command_output("response.decide", response_decide_from_stdin()),
         _ => {}
     }
     let config = env::args_os()
@@ -143,6 +180,106 @@ fn main() -> ExitCode {
         }
     }
 }
+
+fn git_files_from_stdin() -> Result<serde_json::Value, Box<dyn std::error::Error>> {
+    let mut raw = String::new();
+    io::stdin().read_to_string(&mut raw)?;
+    let input: GitFilesInput = serde_json::from_str(&raw)?;
+    if input.version != 1 { return Err("unsupported Git files version".into()); }
+    let repo = input.repository_path.canonicalize()?;
+    let output = match input.action.as_str() {
+        "inspect" => {
+            let items = if input.items.is_empty() {
+                input.paths.iter().map(|path| serde_json::json!({"path":path})).collect()
+            } else { input.items }
+            ;
+            let mut rows = Vec::new();
+            for mut item in items {
+                let Some(object) = item.as_object_mut() else { return Err("Git inspect items must be objects".into()); };
+                let path = object.get("path").and_then(serde_json::Value::as_str).unwrap_or("").trim();
+                if path.is_empty() {
+                    object.insert("committable".into(), false.into());
+                    object.insert("repo_state".into(), "unknown".into());
+                    object.insert("error".into(), "selection row has no filepath".into());
+                } else {
+                    let status = git::status_code(&repo, Path::new(path))?;
+                    let latest = git::last_commit(&repo, Path::new(path))?;
+                    let state = if status.starts_with("??") { "untracked" } else if status.is_empty() {
+                        if latest.is_some() { "clean" } else { "untracked" }
+                    } else if status.contains('U') { "conflicted" } else { "modified" };
+                    object.insert("repo_state".into(), state.into());
+                    object.insert("git_status".into(), status.into());
+                    object.insert("committable".into(), (state != "clean" && state != "conflicted").into());
+                    object.insert("error".into(), if state == "clean" { "file has no uncommitted changes".into() } else if state == "conflicted" { "file has unresolved merge conflicts".into() } else { "".into() });
+                    if let Some((hash, subject, timestamp)) = latest {
+                        object.insert("latest_commit".into(), serde_json::json!({"hash":hash,"subject":subject,"timestamp":timestamp}));
+                    }
+                }
+                rows.push(item);
+            }
+            let committable = rows.iter().filter(|row| row["committable"] == true).count();
+            serde_json::json!({"ok":true,"operation":"git.files","items":rows,
+                "summary":{"count":rows.len(),"committable":committable,"blocked":rows.len()-committable}})
+        }
+        "commit" => {
+            let purpose = match input.purpose.as_deref() { Some("lock") => CommitPurpose::Lock, _ => CommitPurpose::Version };
+            let commit = git::commit(&repo, CommitRequest { paths: input.paths.clone(), message: input.message.ok_or("commit message required")?, purpose })?;
+            serde_json::json!({"ok":true,"operation":"git.files","commit":{"hash":commit.0},"count":input.paths.len(),"files":input.paths})
+        }
+        "history" => {
+            let path = input.path.ok_or("history path required")?;
+            let head = git::head(&repo)?.0;
+            let latest = git::last_commit(&repo, &path)?.map(|row| row.0).unwrap_or_default();
+            let rows = git::file_history(&repo, &path)?.into_iter().map(|(hash,date,author,subject)| serde_json::json!({
+                "hash":hash,"date":date,"author":author,"subject":subject,"refs":[],"transport_refs":[],
+                "kind":if subject.starts_with("AutoScribe") {"AutoScribe"} else {"Commit"},"change":"Recorded","added":0,"deleted":0,
+                "is_head":hash==head,"is_current_file_version":hash==latest
+            })).collect::<Vec<_>>();
+            serde_json::json!({"ok":true,"operation":"git.files","items":rows})
+        }
+        "stash-list" => serde_json::json!({"ok":true,"operation":"git.files","items":git::list_file_stashes(&repo, input.path.as_deref())?}),
+        "stash-create" => serde_json::json!({"ok":true,"operation":"git.files","item":git::stash_file(&repo, &input.path.ok_or("stash path required")?)?}),
+        "stash-restore" => serde_json::json!({"ok":true,"operation":"git.files","item":git::restore_file_stash(&repo, &input.path.ok_or("stash path required")?, &input.id.ok_or("stash id required")?)?}),
+        "stash-drop" => serde_json::json!({"ok":true,"operation":"git.files","item":git::drop_file_stash(&repo, &input.path.ok_or("stash path required")?, &input.id.ok_or("stash id required")?)?}),
+        "restore-version" => {
+            let (source, safety_tag) = git::restore_file_to_index(&repo, &input.path.ok_or("restore path required")?, &input.revision.ok_or("revision required")?)?;
+            serde_json::json!({"ok":true,"operation":"git.files","source":source,"safety_tag":safety_tag})
+        }
+        _ => return Err(format!("unknown Git files action: {}", input.action).into()),
+    };
+    Ok(output)
+}
+
+fn responses_snapshot_from_stdin()->Result<ResponsesSnapshotOutput,Box<dyn std::error::Error>>{
+    let input:ResponsesSnapshotInput=read_json_stdin()?;
+    if input.version!=1{return Err("unsupported responses snapshot version".into());}
+    let _=input.repository_path.canonicalize()?;let db=open_database(&input.database_path)?;
+    let records=normalize_response_records(&run_asc_capture(&asc_command(),["export","extract-pending"],&[])?)?;
+    response_repository::store_pending(&db,&records)?;
+    Ok(ResponsesSnapshotOutput{ok:true,operation:"responses.snapshot",responses:response_repository::pending(&db)?})
+}
+fn response_decide_from_stdin()->Result<ResponseDecideOutput,Box<dyn std::error::Error>>{
+    let input:ResponseDecideInput=read_json_stdin()?;
+    if input.version!=1||!matches!(input.outcome.as_str(),"accepted"|"declined"){return Err("response decision requires version 1 and accepted or declined outcome".into());}
+    let db=open_database(&input.database_path)?;let (state,_,_,source_blob,stored_outcome,stored_path,stored_commit)=response_repository::require_pending(&db,&input.result_identity,&input.source_identity)?;
+    if state=="written"{if stored_outcome.as_deref()!=Some(input.outcome.as_str()){return Err("response already written with another outcome".into());}run_asc(&asc_command(),["export","update-exports",input.result_identity.as_str()],&[])?;response_repository::decide(&db,&input.result_identity,&input.outcome,stored_path.as_deref(),stored_commit.as_deref())?;return Ok(ResponseDecideOutput{ok:true,operation:"response.decide",result_identity:input.result_identity,outcome:input.outcome,commit:stored_commit});}
+    let repository=input.repository_path.canonicalize()?;let mut commit=None;
+    let source_path=if input.outcome=="accepted"{let relative=input.source_path.as_ref().ok_or("accepted response requires source_path")?;let replacement=input.replacement_text.as_ref().ok_or("accepted response requires replacement_text")?;
+        let statuses=git::inspect(&repository,&[relative.clone()])?;if statuses.first().is_none_or(|status|!status.tracked||status.dirty){return Err(format!("response target must be tracked and clean: {}",relative.display()).into());}
+        if git::worktree_blob(&repository,relative)?!=source_blob{return Err(format!("source changed since dispatch: {}",relative.display()).into());}
+        let target=repository.join(relative);let original=std::fs::read_to_string(&target)?;require_markdown_slug(&original,&input.source_identity)?;require_markdown_slug(replacement,&input.source_identity)?;std::fs::write(&target,replacement)?;
+        match git::commit(&repository,CommitRequest{paths:vec![relative.clone()],message:format!("Accept AutoScribe response {}",input.source_identity),purpose:CommitPurpose::DispatchWriteback}){Ok(value)=>commit=Some(value.0),Err(error)=>{let _=std::fs::write(&target,original);return Err(error.into());}}
+        Some(relative.to_string_lossy().replace('\\',"/"))}else{None};
+    response_repository::mark_written(&db,&input.result_identity,&input.outcome,source_path.as_deref(),commit.as_deref())?;
+    run_asc(&asc_command(),["export","update-exports",input.result_identity.as_str()],&[])?;
+    response_repository::decide(&db,&input.result_identity,&input.outcome,source_path.as_deref(),commit.as_deref())?;
+    Ok(ResponseDecideOutput{ok:true,operation:"response.decide",result_identity:input.result_identity,outcome:input.outcome,commit})
+}
+fn read_json_stdin<T:for<'de>Deserialize<'de>>()->Result<T,Box<dyn std::error::Error>>{let mut raw=String::new();io::stdin().read_to_string(&mut raw)?;Ok(serde_json::from_str(&raw)?)}
+fn open_database(path:&Path)->Result<Database,Box<dyn std::error::Error>>{if let Some(parent)=path.parent(){std::fs::create_dir_all(parent)?;}let db=Database::open_path(path)?;db::migrate(&db)?;Ok(db)}
+fn normalize_response_records(bytes:&[u8])->Result<Vec<serde_json::Value>,Box<dyn std::error::Error>>{let text=std::str::from_utf8(bytes)?;let mut records=Vec::new();for(index,line)in text.lines().filter(|line|!line.trim().is_empty()).enumerate(){let raw:serde_json::Value=serde_json::from_str(line)?;let first=|keys:&[&str]|keys.iter().find_map(|key|raw.get(*key).and_then(serde_json::Value::as_str)).map(str::trim).filter(|v|!v.is_empty()).unwrap_or("").to_string();let source=first(&["record_identity","source_identity","prompt_slug","slug"]);let call=first(&["call_identity","call","identity"]);let result=first(&["result_identity","response_identity","identity","call_identity"]);let content=response_content(&raw).unwrap_or_default();if source.is_empty()||call.is_empty()||result.is_empty()||content.trim().is_empty(){return Err(format!("pending response {} lacks source, call, result, or content",index+1).into());}records.push(serde_json::json!({"source_identity":source,"call_identity":call,"result_identity":result,"content":content,"raw":raw}));}Ok(records)}
+fn response_content(value:&serde_json::Value)->Option<String>{if let Some(object)=value.as_object(){for key in["record_content","result_content","content","body","text"]{if let Some(found)=object.get(key).and_then(response_content){if !found.trim().is_empty(){return Some(found);}}}}value.as_str().map(str::to_string)}
+fn require_markdown_slug(text:&str,expected:&str)->Result<(),Box<dyn std::error::Error>>{let mut lines=text.lines();if lines.next().map(str::trim)!=Some("---"){return Err("Markdown target requires frontmatter".into());}for line in lines{let clean=line.trim();if clean=="---"{break;}if let Some(value)=clean.strip_prefix("slug:"){let actual=value.trim().trim_matches(['\'','"']);return if actual==expected{Ok(())}else{Err(format!("slug mismatch: expected {expected}, found {actual}").into())};}}Err(format!("slug mismatch: expected {expected}, found no slug").into())}
 
 fn dispatch_run() -> ExitCode {
     match run_dispatch_from_stdin() {
@@ -185,10 +322,14 @@ fn run_dispatch_from_stdin() -> Result<DispatchRunOutput, Box<dyn std::error::Er
         return Err("dispatch run requires absolute Pandoc executable and filter paths".into());
     }
     let repository = input.repository_path.canonicalize()?;
+    if let Some(parent) = input.database_path.parent() { std::fs::create_dir_all(parent)?; }
+    let database = Database::open_path(&input.database_path)?;
+    db::migrate(&database)?;
     let mut paths = input.paths;
     paths.sort();
     paths.dedup();
     let mut jobs = Vec::new();
+    let mut ledger_sources = Vec::new();
     for relative in paths {
         if relative.is_absolute()
             || relative
@@ -209,6 +350,7 @@ fn run_dispatch_from_stdin() -> Result<DispatchRunOutput, Box<dyn std::error::Er
             )
             .into());
         }
+        ledger_sources.push((relative.clone(), std::fs::read(&source)?));
         jobs.push(PandocJob {
             identity: relative.to_string_lossy().replace('\\', "/"),
             working_directory: repository.clone(),
@@ -297,6 +439,25 @@ fn run_dispatch_from_stdin() -> Result<DispatchRunOutput, Box<dyn std::error::Er
         )
         .into());
     }
+    let dispatch = format!(
+        "run-{}-{}",
+        std::process::id(),
+        std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH)?.as_nanos()
+    );
+    let sources = identities.iter().zip(ledger_sources.into_iter())
+        .map(|(slug, (path, bytes))| LedgerSource { slug: slug.clone(), path, bytes })
+        .collect::<Vec<_>>();
+    let ledger = git::append_inflight_snapshot(&repository, &LedgerSnapshotRequest {
+        dispatch: DispatchId(dispatch.clone()),
+        plan: PlanId(input.plan.clone()),
+        sources: sources.clone(),
+    })?;
+    let source_rows = sources.iter().zip(ledger.blobs.iter()).map(|(source, (path, blob))| {
+        (source.slug.clone(), path.to_string_lossy().into_owned(), blob.clone())
+    }).collect::<Vec<_>>();
+    db::record_inflight(
+        &database, &dispatch, &input.plan, &ledger.reference, &ledger.commit.0, &source_rows,
+    )?;
     run_asc(&asc, ["upload", "calls"], &ndjson(&calls)?)?;
     run_asc(&asc, ["enqueue"], &ndjson(&enqueue)?)?;
     Ok(DispatchRunOutput {
@@ -305,6 +466,8 @@ fn run_dispatch_from_stdin() -> Result<DispatchRunOutput, Box<dyn std::error::Er
         plan: input.plan,
         records: identities.len(),
         calls: identities,
+        dispatch,
+        inflight_commit: ledger.commit.0,
     })
 }
 
@@ -734,11 +897,9 @@ fn prepare_from_stdin() -> Result<DispatchPrepareOutput, Box<dyn std::error::Err
         ok: true,
         operation: "dispatch.prepare",
         dispatch: prepared.dispatch.0,
-        source_revision: prepared.source_revision.0,
-        source_branch: prepared.source_branch,
-        branch: prepared.branch.name,
-        dispatch_commit: prepared.branch.commit.0,
+        inflight_ref: prepared.ledger.reference,
+        inflight_commit: prepared.ledger.commit.0,
         payload_sha256: prepared.payload_sha256,
-        committed_paths: prepared.committed_paths,
+        source_blobs: prepared.ledger.blobs.into_iter().map(|(path, blob)| SourceBlobOutput { path, blob }).collect(),
     })
 }

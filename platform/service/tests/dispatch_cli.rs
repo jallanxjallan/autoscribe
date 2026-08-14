@@ -57,7 +57,8 @@ fn dispatch_prepare_command_returns_stable_json() {
     let response: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
     assert_eq!(response["ok"], true);
     assert_eq!(response["operation"], "dispatch.prepare");
-    assert_eq!(response["branch"], "autoscribe/run/run-cli-test");
+    assert_eq!(response["inflight_ref"], "refs/heads/autoscribe/inflight");
+    assert!(response["inflight_commit"].as_str().unwrap().len() >= 40);
     assert!(root.join("service.sqlite").is_file());
     fs::remove_dir_all(root).unwrap();
 }

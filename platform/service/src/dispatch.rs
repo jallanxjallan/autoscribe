@@ -37,7 +37,6 @@ pub fn prepare(
         .map(|record| record.path.clone())
         .collect::<Vec<_>>();
     let states = git::inspect(repo, &paths)?;
-    let mut dirty_paths = Vec::new();
     for state in states {
         if !state.tracked {
             return Err(ServiceError::InvalidInput(format!(
@@ -45,35 +44,23 @@ pub fn prepare(
                 state.path.display()
             )));
         }
-        if state.dirty {
-            dirty_paths.push(state.path);
-        }
     }
-
-    if !dirty_paths.is_empty() {
-        git::commit(
-            repo,
-            CommitRequest {
-                paths: dirty_paths.clone(),
-                message: request.commit_message.clone(),
-                purpose: CommitPurpose::Lock,
-            },
-        )?;
-    }
-
-    let source_revision = git::head(repo)?;
-    let source_branch = git::current_branch(repo)?;
-    let branch = git::create_dispatch_branch(
-        repo,
-        &CreateDispatchBranchRequest {
-            dispatch: request.dispatch.clone(),
-            source_revision: source_revision.0.clone(),
-            source_branch: source_branch.clone(),
-            plan: request.plan,
-            plan_version: request.plan_version,
-            records: request.records,
-            payload_sha256: actual_hash.clone(),
-        },
+    let sources = request.records.iter().map(|record| {
+        let bytes = std::fs::read(repo.join(&record.path)).map_err(|error| {
+            ServiceError::Io(format!("could not read {}: {error}", record.path.display()))
+        })?;
+        Ok(LedgerSource { slug: record.slug.clone(), path: record.path.clone(), bytes })
+    }).collect::<ServiceResult<Vec<_>>>()?;
+    let ledger = git::append_inflight_snapshot(repo, &LedgerSnapshotRequest {
+        dispatch: request.dispatch.clone(),
+        plan: request.plan.clone(),
+        sources,
+    })?;
+    let source_rows = request.records.iter().zip(ledger.blobs.iter()).map(|(record, (path, blob))| {
+        (record.slug.clone(), path.to_string_lossy().into_owned(), blob.clone())
+    }).collect::<Vec<_>>();
+    crate::db::record_inflight(
+        db, &request.dispatch.0, &request.plan.0, &ledger.reference, &ledger.commit.0, &source_rows,
     )?;
 
     sync::enqueue(
@@ -90,20 +77,14 @@ pub fn prepare(
         Notice {
             kind: NoticeKind::Completed,
             operation: "dispatch.prepare".into(),
-            message: format!(
-                "Prepared dispatch {} on {}",
-                request.dispatch.0, branch.name
-            ),
+            message: format!("Prepared dispatch {} in {}", request.dispatch.0, ledger.reference),
         },
     )?;
 
     Ok(PreparedDispatch {
         dispatch: request.dispatch,
-        source_revision,
-        source_branch,
-        branch,
+        ledger,
         payload_sha256: actual_hash,
-        committed_paths: dirty_paths,
     })
 }
 

@@ -1,8 +1,8 @@
 use autoscribe_service::{
     ServiceError, git,
     types::{
-        CommitPurpose, CommitRequest, CreateDispatchBranchRequest, DispatchId, DispatchSource,
-        PlanId, RestoreRequest, TagRequest, VersionRequest,
+        CommitPurpose, CommitRequest, DispatchId, LedgerSnapshotRequest, LedgerSource, PlanId,
+        RestoreRequest, VersionRequest,
     },
 };
 use std::{
@@ -101,57 +101,47 @@ fn explicit_commit_leaves_unselected_working_changes_uncommitted() {
 }
 
 #[test]
-fn dispatch_branch_is_reproducible_idempotent_and_does_not_switch_user_branch() {
+fn inflight_ledger_snapshots_worktree_bytes_without_switching_or_touching_index() {
     let repo = TestRepo::new();
-    let source = output(&repo.0, ["rev-parse", "HEAD"]);
-    let request = dispatch_request(&source, "hash-one");
+    fs::write(repo.0.join("one.md"), "---\nslug: cnt.one\n---\nDraft changed\n").unwrap();
+    let branch_before = output(&repo.0, ["branch", "--show-current"]);
+    let status_before = output(&repo.0, ["status", "--porcelain=v1"]);
 
-    let created = git::create_dispatch_branch(&repo.0, &request).unwrap();
-    assert_eq!(created.name, "autoscribe/run/dispatch-01");
-    assert_eq!(output(&repo.0, ["branch", "--show-current"]), "main");
-    assert_eq!(
-        output(
-            &repo.0,
-            ["rev-parse", format!("{}^", created.commit.0).as_str()]
-        ),
-        source
-    );
-    let message = output(
-        &repo.0,
-        ["show", "-s", "--format=%B", created.commit.0.as_str()],
-    );
-    assert!(message.contains("Payload-SHA256: hash-one"));
-    assert!(message.contains("Record: cnt.one\tone.md"));
+    let snapshot = git::append_inflight_snapshot(&repo.0, &LedgerSnapshotRequest {
+        dispatch: DispatchId("dispatch-ledger-01".into()),
+        plan: PlanId("plan.copy".into()),
+        sources: vec![LedgerSource {
+            slug: "cnt.one".into(),
+            path: "one.md".into(),
+            bytes: fs::read(repo.0.join("one.md")).unwrap(),
+        }],
+    }).unwrap();
 
-    assert_eq!(
-        git::create_dispatch_branch(&repo.0, &request).unwrap(),
-        created
-    );
-    assert!(matches!(
-        git::create_dispatch_branch(&repo.0, &dispatch_request(&source, "hash-two")),
-        Err(ServiceError::Conflict(_))
-    ));
+    assert_eq!(snapshot.reference, "refs/heads/autoscribe/inflight");
+    assert_eq!(output(&repo.0, ["branch", "--show-current"]), branch_before);
+    assert_eq!(output(&repo.0, ["status", "--porcelain=v1"]), status_before);
+    assert!(output(&repo.0, ["show", format!("{}:one.md", snapshot.commit.0).as_str()])
+        .contains("Draft changed"));
+    assert!(output(&repo.0, ["show", "HEAD:one.md"]).contains("One"));
+
+    fs::write(repo.0.join("two.md"), "---\nslug: cnt.two\n---\nSecond draft\n").unwrap();
+    let second = git::append_inflight_snapshot(&repo.0, &LedgerSnapshotRequest {
+        dispatch: DispatchId("dispatch-ledger-02".into()),
+        plan: PlanId("plan.copy".into()),
+        sources: vec![LedgerSource {
+            slug: "cnt.two".into(),
+            path: "two.md".into(),
+            bytes: fs::read(repo.0.join("two.md")).unwrap(),
+        }],
+    }).unwrap();
+    assert_eq!(output(&repo.0, ["rev-parse", format!("{}^", second.commit.0).as_str()]), snapshot.commit.0);
+    assert!(output(&repo.0, ["show", format!("{}:one.md", second.commit.0).as_str()]).contains("Draft changed"));
 }
 
 #[test]
-fn tags_are_idempotent_and_restore_requires_exact_confirmation() {
+fn restore_requires_exact_confirmation() {
     let repo = TestRepo::new();
     let source = output(&repo.0, ["rev-parse", "HEAD"]);
-    let branch =
-        git::create_dispatch_branch(&repo.0, &dispatch_request(&source, "hash-one")).unwrap();
-    let tag_request = TagRequest {
-        commit: branch.commit,
-        plan: PlanId("plan.copy.v1".into()),
-        dispatch: DispatchId("dispatch-01".into()),
-    };
-    assert_eq!(
-        git::tag_dispatch(&repo.0, tag_request.clone()).unwrap(),
-        "autoscribe/dispatch/dispatch-01"
-    );
-    assert_eq!(
-        git::tag_dispatch(&repo.0, tag_request).unwrap(),
-        "autoscribe/dispatch/dispatch-01"
-    );
 
     fs::write(repo.0.join("one.md"), "replacement\n").unwrap();
     git::commit(
@@ -193,21 +183,6 @@ fn tags_are_idempotent_and_restore_requires_exact_confirmation() {
             .unwrap()
             .contains("slug: cnt.one")
     );
-}
-
-fn dispatch_request(source: &str, hash: &str) -> CreateDispatchBranchRequest {
-    CreateDispatchBranchRequest {
-        dispatch: DispatchId("dispatch-01".into()),
-        source_revision: source.into(),
-        source_branch: "main".into(),
-        plan: PlanId("plan.copy".into()),
-        plan_version: "v1".into(),
-        records: vec![DispatchSource {
-            slug: "cnt.one".into(),
-            path: "one.md".into(),
-        }],
-        payload_sha256: hash.into(),
-    }
 }
 
 fn run<I, S>(repo: &Path, args: I)

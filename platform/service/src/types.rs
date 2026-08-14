@@ -49,6 +49,27 @@ pub enum CommitPurpose {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+pub struct LedgerSource {
+    pub slug: String,
+    pub path: PathBuf,
+    pub bytes: Vec<u8>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct LedgerSnapshotRequest {
+    pub dispatch: DispatchId,
+    pub plan: PlanId,
+    pub sources: Vec<LedgerSource>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct LedgerSnapshot {
+    pub reference: String,
+    pub commit: CommitId,
+    pub blobs: Vec<(PathBuf, String)>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Notice {
     pub kind: NoticeKind,
     pub operation: String,
@@ -107,12 +128,6 @@ pub struct CommitRequest {
     pub purpose: CommitPurpose,
 }
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct TagRequest {
-    pub commit: CommitId,
-    pub plan: PlanId,
-    pub dispatch: DispatchId,
-}
-#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct VersionRequest {
     pub path: PathBuf,
     pub revision: String,
@@ -128,21 +143,6 @@ pub struct DispatchSource {
     pub path: PathBuf,
 }
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct CreateDispatchBranchRequest {
-    pub dispatch: DispatchId,
-    pub source_revision: String,
-    pub source_branch: String,
-    pub plan: PlanId,
-    pub plan_version: String,
-    pub records: Vec<DispatchSource>,
-    pub payload_sha256: String,
-}
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct DispatchBranch {
-    pub name: String,
-    pub commit: CommitId,
-}
-#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PrepareSavedDispatchRequest {
     pub dispatch: DispatchId,
     pub plan: PlanId,
@@ -155,11 +155,8 @@ pub struct PrepareSavedDispatchRequest {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PreparedDispatch {
     pub dispatch: DispatchId,
-    pub source_revision: CommitId,
-    pub source_branch: String,
-    pub branch: DispatchBranch,
+    pub ledger: LedgerSnapshot,
     pub payload_sha256: String,
-    pub committed_paths: Vec<PathBuf>,
 }
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct SyncRequest {

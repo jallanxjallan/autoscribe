@@ -52,15 +52,15 @@ fn database() -> Database {
 }
 
 #[test]
-fn all_clean_dispatch_uses_head_without_creating_source_commit() {
+fn all_clean_dispatch_appends_inflight_ledger_without_moving_head() {
     let repo = TestRepo::new();
     let db = database();
     let before = output(&repo.0, ["rev-parse", "HEAD"]);
 
     let prepared = dispatch::prepare(&db, &repo.0, request("clean-dispatch")).unwrap();
 
-    assert_eq!(prepared.source_revision.0, before);
-    assert!(prepared.committed_paths.is_empty());
+    assert_eq!(output(&repo.0, ["rev-parse", "HEAD"]), before);
+    assert_eq!(prepared.ledger.reference, "refs/heads/autoscribe/inflight");
     assert_eq!(output(&repo.0, ["branch", "--show-current"]), "main");
     assert_eq!(sync::pending_payloads(&db).unwrap().len(), 1);
     let notices = events::list_since(&NoticeSink::new(&db), 0).unwrap();
@@ -68,18 +68,21 @@ fn all_clean_dispatch_uses_head_without_creating_source_commit() {
 }
 
 #[test]
-fn mixed_dispatch_commits_only_dirty_selected_files_and_preserves_other_work() {
+fn mixed_dispatch_snapshots_dirty_selected_files_and_preserves_user_work() {
     let repo = TestRepo::new();
     let db = database();
     fs::write(repo.0.join("one.md"), "One changed\n").unwrap();
     fs::write(repo.0.join("unselected.md"), "leave me alone\n").unwrap();
+    let head_before = output(&repo.0, ["rev-parse", "HEAD"]);
 
     let prepared = dispatch::prepare(&db, &repo.0, request("mixed-dispatch")).unwrap();
 
-    assert_eq!(prepared.committed_paths, vec![PathBuf::from("one.md")]);
-    assert_eq!(output(&repo.0, ["show", "HEAD:one.md"]), "One changed");
+    assert_eq!(output(&repo.0, ["rev-parse", "HEAD"]), head_before);
+    assert_eq!(output(&repo.0, ["show", "HEAD:one.md"]), "One");
+    assert_eq!(output(&repo.0, ["show", format!("{}:one.md", prepared.ledger.commit.0).as_str()]), "One changed");
     assert_eq!(output(&repo.0, ["show", "HEAD:two.md"]), "Two");
     assert!(repo.0.join("unselected.md").is_file());
+    assert_eq!(output(&repo.0, ["branch", "--show-current"]), "main");
     assert!(
         output(&repo.0, ["status", "--porcelain=v1", "--", "unselected.md"])
             .ends_with("unselected.md")

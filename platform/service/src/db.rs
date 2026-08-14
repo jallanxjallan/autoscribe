@@ -77,6 +77,37 @@ pub fn migrate(db: &Database) -> ServiceResult<()> {
                 updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
             );
 
+            CREATE TABLE IF NOT EXISTS inflight_dispatches (
+                dispatch_identity TEXT PRIMARY KEY,
+                plan_identity TEXT NOT NULL,
+                ledger_ref TEXT NOT NULL,
+                ledger_commit TEXT NOT NULL UNIQUE,
+                created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+            );
+
+            CREATE TABLE IF NOT EXISTS inflight_sources (
+                dispatch_identity TEXT NOT NULL REFERENCES inflight_dispatches(dispatch_identity),
+                source_slug TEXT NOT NULL,
+                source_path TEXT NOT NULL,
+                blob_hash TEXT NOT NULL,
+                PRIMARY KEY (dispatch_identity, source_path)
+            );
+
+            CREATE TABLE IF NOT EXISTS response_records (
+                result_identity TEXT PRIMARY KEY,
+                source_identity TEXT NOT NULL,
+                call_identity TEXT NOT NULL,
+                dispatch_identity TEXT NOT NULL,
+                ledger_commit TEXT NOT NULL,
+                source_blob TEXT NOT NULL,
+                record_json TEXT NOT NULL,
+                state TEXT NOT NULL CHECK (state IN ('pending', 'written', 'accepted', 'declined')),
+                intended_outcome TEXT CHECK (intended_outcome IN ('accepted', 'declined')),
+                source_path TEXT,
+                writeback_commit TEXT,
+                updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+            );
+
             CREATE INDEX IF NOT EXISTS sync_outbox_state
                 ON sync_outbox(state, created_at);
             CREATE INDEX IF NOT EXISTS sync_inbox_dispatch
@@ -84,6 +115,32 @@ pub fn migrate(db: &Database) -> ServiceResult<()> {
             ",
         )
         .map_err(storage)
+}
+
+pub fn record_inflight(
+    db: &Database,
+    dispatch: &str,
+    plan: &str,
+    ledger_ref: &str,
+    ledger_commit: &str,
+    sources: &[(String, String, String)],
+) -> ServiceResult<()> {
+    let transaction = db.connection().unchecked_transaction().map_err(storage)?;
+    transaction.execute(
+        "INSERT INTO inflight_dispatches
+         (dispatch_identity, plan_identity, ledger_ref, ledger_commit)
+         VALUES (?1, ?2, ?3, ?4)",
+        (dispatch, plan, ledger_ref, ledger_commit),
+    ).map_err(storage)?;
+    for (slug, path, blob) in sources {
+        transaction.execute(
+            "INSERT INTO inflight_sources
+             (dispatch_identity, source_slug, source_path, blob_hash)
+             VALUES (?1, ?2, ?3, ?4)",
+            (dispatch, slug, path, blob),
+        ).map_err(storage)?;
+    }
+    transaction.commit().map_err(storage)
 }
 
 fn storage(error: rusqlite::Error) -> ServiceError {

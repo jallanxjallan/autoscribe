@@ -7,7 +7,7 @@ const load = (p) => nodeRequire(pathMod.join(root, "_control", ...p.split("/")))
 const { el, clear, button } = load("scripts/lib/dom.js");
 const { getFileManifest, appendClipboardCandidates } = load("scripts/lib/file-manifest.js");
 const { liveState } = load("scripts/lib/file-git-history.js");
-const { callFeederAsync } = load("scripts/lib/feeder-ipc.js");
+const { gitFiles } = load("scripts/lib/git-service.js");
 const { notify } = load("scripts/lib/notify.js");
 
 async function renderFileState({ app, container }) {
@@ -34,12 +34,12 @@ async function renderFileState({ app, container }) {
       tr.append(el("td",{},row.checkbox),el("td",{},link),el("td",{text:row.git.status}),el("td",{text:row.git.latest_commit?`${row.git.latest_commit.hash.slice(0,8)} · ${row.git.latest_commit.subject}`:"—"})); table.append(tr); }
     host.append(table); commitBtn.disabled=!selected().length;
   }
-  async function refresh(note="") { state.rows=[]; for(const item of manifest.candidates.values()){ try{ state.rows.push({item,git:liveState(app,item.path),checkbox:el("input",{type:"checkbox"})}); }catch(e){ state.rows.push({item,git:{status:`ERROR: ${e.message}`,latest_commit:null},checkbox:el("input",{type:"checkbox"})}); } }
+  async function refresh(note="") { state.rows=[]; for(const item of manifest.candidates.values()){ try{ state.rows.push({item,git:await liveState(app,item.path),checkbox:el("input",{type:"checkbox"})}); }catch(e){ state.rows.push({item,git:{status:`ERROR: ${e.message}`,latest_commit:null},checkbox:el("input",{type:"checkbox"})}); } }
     for(const r of state.rows){ r.checkbox.checked=Boolean(r.item.selected); r.checkbox.onchange=()=>{r.item.selected=r.checkbox.checked;render();}; }
     status.textContent=state.rows.length?`${state.rows.length} manifest file(s); Git read live${note?` · ${note}`:""}.`:`The Dispatch Run manifest is empty.`; render(); }
   async function doCommit(){ try{ const items=selected(); if(!items.length) throw new Error("Select at least one file."); if(!msg.value.trim()) throw new Error("Enter a commit description."); notify(`Committing ${items.length} file(s)…`); state.busy=true; commitBtn.disabled=true;
-      const resolved=await callFeederAsync(app,"git.resolve_selection",{items}); const rows=resolved.items||resolved.files||[]; const blocked=rows.filter(x=>x.error||x.problem||x.committable===false); if(blocked.length) throw new Error("One or more selected files cannot be committed.");
-      const kind=type.value; const result=await callFeederAsync(app,"git.commit_selection",{message:msg.value.trim(),commit_type:kind,tag_type:kind,state:kind==="lock"?"locked":"versioned",items:rows});
+      const resolved=await gitFiles(app,"inspect",{items}); const rows=resolved.items||[]; const blocked=rows.filter(x=>x.error||x.problem||x.committable===false); if(blocked.length) throw new Error("One or more selected files cannot be committed.");
+      const kind=type.value; const result=await gitFiles(app,"commit",{message:msg.value.trim(),purpose:kind,paths:rows.map(row=>row.path)});
       notify(`Committed ${result.count||rows.length} file(s): ${String(result.commit?.hash||result.commit||"").slice(0,8)}`); msg.value=""; await refresh();
     }catch(e){notify(`Commit failed: ${e.message}`,10000);}finally{state.busy=false;commitBtn.disabled=!selected().length;} }
   try { const n=appendClipboardCandidates(app,manifest,await navigator.clipboard.readText()); await refresh(n ? `${n} added from clipboard` : "clipboard loaded"); } catch(e) { await refresh(`clipboard unavailable: ${e.message}`); }

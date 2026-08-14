@@ -11,6 +11,11 @@ use std::{
 fn dispatch_run_converts_uploads_and_enqueues_in_one_service_call() {
     let root = temp("success");
     fs::write(root.join("One.md"), "---\nslug: cnt.one\n---\nBody\n").unwrap();
+    git(&root, ["init", "--quiet", "--initial-branch=main"]);
+    git(&root, ["config", "user.email", "tests@autoscribe.local"]);
+    git(&root, ["config", "user.name", "AutoScribe Tests"]);
+    git(&root, ["add", "One.md"]);
+    git(&root, ["commit", "--quiet", "-m", "Initial"]);
     let pandoc = root.join("pandoc");
     fs::write(&pandoc, "#!/bin/sh\nprintf '%s\\n' '{\"record_type\":\"content\",\"record_identity\":\"cnt.one\",\"payload\":{\"slug\":\"cnt.one\",\"content\":\"Body\"},\"directive\":\"Use this\"}'\n").unwrap();
     executable(&pandoc);
@@ -69,7 +74,7 @@ fn pending_response_blocks_dispatch_before_upload_and_enqueue() {
 }
 
 fn invoke(root: &Path, pandoc: &Path, asc: &Path) -> std::process::Output {
-    let request = json!({"version":1,"repository_path":root,"pandoc_binary":pandoc,
+    let request = json!({"version":1,"database_path":root.join("service.sqlite"),"repository_path":root,"pandoc_binary":pandoc,
         "pandoc_filter":root.join("filter.lua"),"pandoc_parallelism":2,"plan":"plan.test","paths":["One.md"]});
     fs::write(root.join("filter.lua"), "-- fixture\n").unwrap();
     let mut child = Command::new(env!("CARGO_BIN_EXE_svc"))
@@ -116,4 +121,8 @@ fn executable(path: &Path) {
     let mut p = fs::metadata(path).unwrap().permissions();
     p.set_mode(0o755);
     fs::set_permissions(path, p).unwrap();
+}
+fn git<I, S>(repo: &Path, args: I)
+where I: IntoIterator<Item = S>, S: AsRef<std::ffi::OsStr> {
+    assert!(Command::new("/usr/bin/git").args(args).current_dir(repo).status().unwrap().success());
 }

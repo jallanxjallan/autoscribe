@@ -4,12 +4,13 @@ use std::{
     fs,
     path::{Component, Path, PathBuf},
     process::{Command, Output},
+    io::Write,
     time::{SystemTime, UNIX_EPOCH},
 };
+use serde::{Deserialize, Serialize};
 
 const GIT: &str = "/usr/bin/git";
-const RUN_PREFIX: &str = "autoscribe/run/";
-const DISPATCH_TAG_PREFIX: &str = "autoscribe/dispatch/";
+const INFLIGHT_REF: &str = "refs/heads/autoscribe/inflight";
 
 pub fn head(repo: &Path) -> ServiceResult<CommitId> {
     let repo = repository_root(repo)?;
@@ -98,73 +99,193 @@ pub fn commit(repo: &Path, request: CommitRequest) -> ServiceResult<CommitId> {
     Ok(CommitId(revision(&repo, "HEAD")?))
 }
 
-pub fn create_dispatch_branch(
+/// Append an immutable source snapshot to the AutoScribe ledger without
+/// changing HEAD, the user's index, or the working tree.
+pub fn append_inflight_snapshot(
     repo: &Path,
-    request: &CreateDispatchBranchRequest,
-) -> ServiceResult<DispatchBranch> {
+    request: &LedgerSnapshotRequest,
+) -> ServiceResult<LedgerSnapshot> {
     let repo = repository_root(repo)?;
     let dispatch = ref_component("dispatch identity", &request.dispatch.0)?;
-    let branch = format!("{RUN_PREFIX}{dispatch}");
-    let source_revision = revision(&repo, &request.source_revision)?;
-    validate_dispatch_request(request)?;
-    let message = dispatch_message(request, &source_revision)?;
-
-    if let Some(commit) = optional_revision(&repo, &format!("refs/heads/{branch}"))? {
-        let existing_message = text(&git(&repo, ["show", "-s", "--format=%B", commit.as_str()])?);
-        let parent = revision(&repo, &format!("{commit}^"))?;
-        if existing_message.trim_end() == message.trim_end() && parent == source_revision {
-            return Ok(DispatchBranch {
-                name: branch,
-                commit: CommitId(commit),
-            });
-        }
-        return Err(ServiceError::Conflict(format!(
-            "dispatch branch already exists with different metadata: {branch}"
-        )));
+    let plan = one_line("plan identity", &request.plan.0)?;
+    if request.sources.is_empty() {
+        return Err(ServiceError::InvalidInput("ledger snapshot requires source files".into()));
     }
 
-    let worktree = DispatchWorktree::create(&repo, &source_revision)?;
-    git(&worktree.path, ["switch", "--quiet", "-c", branch.as_str()])?;
-    let (subject, body) = message
-        .split_once("\n\n")
-        .ok_or_else(|| ServiceError::InvalidInput("dispatch message is incomplete".into()))?;
-    git(
-        &worktree.path,
-        ["commit", "--allow-empty", "-m", subject, "-m", body],
-    )?;
-    let commit = revision(&worktree.path, "HEAD")?;
-    Ok(DispatchBranch {
-        name: branch,
-        commit: CommitId(commit),
-    })
+    for _ in 0..4 {
+        let old = optional_revision(&repo, INFLIGHT_REF)?;
+        let base = old.clone().unwrap_or(revision(&repo, "HEAD")?);
+        let temporary_index = temporary_index_path();
+        let result = (|| {
+            git_with_env(&repo, ["read-tree", base.as_str()], &temporary_index)?;
+            let mut blobs = Vec::new();
+            for source in &request.sources {
+                let path = safe_relative_path(&source.path)?;
+                let blob = hash_bytes(&repo, &source.bytes)?;
+                git_with_env(
+                    &repo,
+                    ["update-index", "--add", "--cacheinfo", "100644", blob.as_str(), path.as_str()],
+                    &temporary_index,
+                )?;
+                blobs.push((PathBuf::from(path), blob));
+            }
+            let tree = text(&git_with_env(&repo, ["write-tree"], &temporary_index)?)
+                .trim().to_string();
+            let mut message = format!(
+                "AUTOSCRIBE INFLIGHT {dispatch}\n\nDispatch: {dispatch}\nPlan: {plan}"
+            );
+            for source in &request.sources {
+                message.push_str(&format!(
+                    "\nRecord: {}\t{}",
+                    one_line("record slug", &source.slug)?,
+                    safe_relative_path(&source.path)?
+                ));
+            }
+            let commit = commit_tree(&repo, &tree, old.as_deref(), &message)?;
+            let expected = old.as_deref().unwrap_or("0000000000000000000000000000000000000000");
+            let update = git_status_output(
+                &repo,
+                ["update-ref", "-m", "AutoScribe inflight ledger", INFLIGHT_REF, commit.as_str(), expected],
+            )?;
+            if !update.status.success() {
+                return Err(ServiceError::Conflict("inflight ledger advanced concurrently".into()));
+            }
+            Ok(LedgerSnapshot {
+                reference: INFLIGHT_REF.into(),
+                commit: CommitId(commit),
+                blobs,
+            })
+        })();
+        let _ = fs::remove_file(&temporary_index);
+        match result {
+            Err(ServiceError::Conflict(message)) if message.contains("advanced concurrently") => continue,
+            other => return other,
+        }
+    }
+    Err(ServiceError::Conflict("inflight ledger remained busy after retries".into()))
 }
 
-pub fn tag_dispatch(repo: &Path, request: TagRequest) -> ServiceResult<String> {
+pub fn last_commit(repo: &Path, path: &Path) -> ServiceResult<Option<(String, String, i64)>> {
     let repo = repository_root(repo)?;
-    let dispatch = ref_component("dispatch identity", &request.dispatch.0)?;
-    let commit = revision(&repo, &request.commit.0)?;
-    let tag = format!("{DISPATCH_TAG_PREFIX}{dispatch}");
-    if let Some(existing) = optional_revision(&repo, &format!("refs/tags/{tag}^{{}}"))? {
-        if existing == commit {
-            return Ok(tag);
-        }
-        return Err(ServiceError::Conflict(format!(
-            "dispatch tag already points to another commit: {tag}"
-        )));
-    }
-    let plan = one_line("plan identity", &request.plan.0)?;
-    git(
+    let path = safe_relative_path(path)?;
+    let output = git_status_output(
         &repo,
-        [
-            "tag",
-            "-a",
-            tag.as_str(),
-            commit.as_str(),
-            "-m",
-            format!("AutoScribe dispatch {dispatch}\nPlan: {plan}").as_str(),
-        ],
+        ["log", "-1", "--format=%H%x1f%s%x1f%ct", "--", path.as_str()],
     )?;
-    Ok(tag)
+    if !output.status.success() || text(&output).trim().is_empty() { return Ok(None); }
+    let value = text(&output);
+    let mut parts = value.trim().splitn(3, '\u{1f}');
+    let hash = parts.next().unwrap_or_default().to_string();
+    let subject = parts.next().unwrap_or_default().to_string();
+    let timestamp = parts.next().unwrap_or("0").parse().unwrap_or(0);
+    Ok(Some((hash, subject, timestamp)))
+}
+
+pub fn status_code(repo: &Path, path: &Path) -> ServiceResult<String> {
+    let repo = repository_root(repo)?;
+    let path = safe_relative_path(path)?;
+    Ok(text(&git(&repo, ["status", "--porcelain=v1", "--", path.as_str()])?)
+        .trim().to_string())
+}
+
+pub fn worktree_blob(repo: &Path, path: &Path) -> ServiceResult<String> {
+    let repo = repository_root(repo)?;
+    let path = safe_relative_path(path)?;
+    let bytes = fs::read(repo.join(path)).map_err(io)?;
+    hash_bytes(&repo, &bytes)
+}
+
+pub fn file_history(repo: &Path, path: &Path) -> ServiceResult<Vec<(String, String, String, String)>> {
+    let repo = repository_root(repo)?;
+    let path = safe_relative_path(path)?;
+    let output = git(&repo, ["log", "--all", "--follow", "--date=iso-strict", "--format=%H%x1f%ad%x1f%an%x1f%s", "--", path.as_str()])?;
+    Ok(text(&output).lines().filter_map(|line| {
+        let mut p = line.splitn(4, '\u{1f}');
+        Some((p.next()?.into(), p.next()?.into(), p.next()?.into(), p.next()?.into()))
+    }).collect())
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct FileStash {
+    pub id: String,
+    pub vault_path: String,
+    pub repo_path: String,
+    pub blob: String,
+    pub reference: String,
+    pub head: String,
+    pub created_at: String,
+}
+
+#[derive(Default, Serialize, Deserialize)]
+struct StashManifest { version: u32, items: Vec<FileStash> }
+
+pub fn list_file_stashes(repo: &Path, path: Option<&Path>) -> ServiceResult<Vec<FileStash>> {
+    let repo = repository_root(repo)?;
+    let wanted = path.map(safe_relative_path).transpose()?;
+    let mut items = read_stash_manifest(&repo)?.items;
+    if let Some(wanted) = wanted { items.retain(|item| item.repo_path == wanted); }
+    items.sort_by(|a, b| b.created_at.cmp(&a.created_at));
+    Ok(items)
+}
+
+pub fn stash_file(repo: &Path, path: &Path) -> ServiceResult<FileStash> {
+    let repo = repository_root(repo)?;
+    let path = safe_relative_path(path)?;
+    let bytes = fs::read(repo.join(&path)).map_err(io)?;
+    let blob = hash_bytes(&repo, &bytes)?;
+    let now = SystemTime::now().duration_since(UNIX_EPOCH).unwrap_or_default();
+    let id = format!("{}-{}", now.as_secs(), &blob[..8]);
+    let reference = format!("refs/autoscribe/file-stashes/{id}");
+    git(&repo, ["update-ref", reference.as_str(), blob.as_str()])?;
+    let item = FileStash {
+        id, vault_path: path.clone(), repo_path: path, blob, reference,
+        head: revision(&repo, "HEAD")?, created_at: now.as_secs().to_string(),
+    };
+    let mut manifest = read_stash_manifest(&repo)?;
+    manifest.items.push(item.clone());
+    write_stash_manifest(&repo, &manifest)?;
+    Ok(item)
+}
+
+pub fn restore_file_stash(repo: &Path, path: &Path, id: &str) -> ServiceResult<FileStash> {
+    let repo = repository_root(repo)?;
+    let path = safe_relative_path(path)?;
+    let item = read_stash_manifest(&repo)?.items.into_iter()
+        .find(|item| item.id == id && item.repo_path == path)
+        .ok_or_else(|| ServiceError::InvalidInput("file stash does not exist".into()))?;
+    let bytes = git(&repo, ["cat-file", "blob", item.blob.as_str()])?.stdout;
+    fs::write(repo.join(&path), bytes).map_err(io)?;
+    git(&repo, ["add", "--", path.as_str()])?;
+    Ok(item)
+}
+
+pub fn drop_file_stash(repo: &Path, path: &Path, id: &str) -> ServiceResult<FileStash> {
+    let repo = repository_root(repo)?;
+    let path = safe_relative_path(path)?;
+    let mut manifest = read_stash_manifest(&repo)?;
+    let position = manifest.items.iter().position(|item| item.id == id && item.repo_path == path)
+        .ok_or_else(|| ServiceError::InvalidInput("file stash does not exist".into()))?;
+    let item = manifest.items.remove(position);
+    git(&repo, ["update-ref", "-d", item.reference.as_str()])?;
+    write_stash_manifest(&repo, &manifest)?;
+    Ok(item)
+}
+
+pub fn restore_file_to_index(repo: &Path, path: &Path, source: &str) -> ServiceResult<(String, String)> {
+    let repo = repository_root(repo)?;
+    let path = safe_relative_path(path)?;
+    if !status_code(&repo, Path::new(&path))?.is_empty() {
+        return Err(ServiceError::Conflict("file has uncommitted changes".into()));
+    }
+    let source = revision(&repo, source)?;
+    let head = revision(&repo, "HEAD")?;
+    let stamp = SystemTime::now().duration_since(UNIX_EPOCH).unwrap_or_default().as_secs();
+    let safety = format!("refs/tags/autoscribe/file-restore/{stamp}-{}", &head[..8]);
+    git(&repo, ["update-ref", safety.as_str(), head.as_str()])?;
+    let bytes = git(&repo, ["show", format!("{source}:{path}").as_str()])?.stdout;
+    fs::write(repo.join(&path), bytes).map_err(io)?;
+    git(&repo, ["add", "--", path.as_str()])?;
+    Ok((source, safety.trim_start_matches("refs/tags/").to_string()))
 }
 
 pub fn read_version(repo: &Path, request: VersionRequest) -> ServiceResult<Vec<u8>> {
@@ -193,61 +314,6 @@ pub fn restore_version(repo: &Path, request: RestoreRequest) -> ServiceResult<Co
             purpose: CommitPurpose::Restore,
         },
     )
-}
-
-fn validate_dispatch_request(request: &CreateDispatchBranchRequest) -> ServiceResult<()> {
-    one_line("source branch", &request.source_branch)?;
-    one_line("plan identity", &request.plan.0)?;
-    one_line("plan version", &request.plan_version)?;
-    one_line("payload SHA-256", &request.payload_sha256)?;
-    if request.records.is_empty() {
-        return Err(ServiceError::InvalidInput(
-            "dispatch branch requires at least one source record".into(),
-        ));
-    }
-    for record in &request.records {
-        one_line("record slug", &record.slug)?;
-        safe_relative_path(&record.path)?;
-    }
-    Ok(())
-}
-
-fn dispatch_message(
-    request: &CreateDispatchBranchRequest,
-    source_revision: &str,
-) -> ServiceResult<String> {
-    let mut lines = vec![
-        format!(
-            "Dispatch: {}",
-            one_line("dispatch identity", &request.dispatch.0)?
-        ),
-        format!("Source-Revision: {source_revision}"),
-        format!(
-            "Source-Branch: {}",
-            one_line("source branch", &request.source_branch)?
-        ),
-        format!("Plan: {}", one_line("plan identity", &request.plan.0)?),
-        format!(
-            "Plan-Version: {}",
-            one_line("plan version", &request.plan_version)?
-        ),
-        format!(
-            "Payload-SHA256: {}",
-            one_line("payload SHA-256", &request.payload_sha256)?
-        ),
-    ];
-    for record in &request.records {
-        lines.push(format!(
-            "Record: {}\t{}",
-            one_line("record slug", &record.slug)?,
-            safe_relative_path(&record.path)?
-        ));
-    }
-    Ok(format!(
-        "AUTOSCRIBE DISPATCH {}\n\n{}",
-        request.dispatch.0,
-        lines.join("\n")
-    ))
 }
 
 fn repository_root(repo: &Path) -> ServiceResult<PathBuf> {
@@ -392,6 +458,63 @@ where
         .map_err(io)
 }
 
+fn temporary_index_path() -> PathBuf {
+    let nanos = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default().as_nanos();
+    std::env::temp_dir().join(format!("autoscribe-index-{}-{nanos}", std::process::id()))
+}
+
+fn git_with_env<I, S>(repo: &Path, args: I, index: &Path) -> ServiceResult<Output>
+where I: IntoIterator<Item = S>, S: AsRef<OsStr> {
+    let output = Command::new(GIT).args(args).current_dir(repo)
+        .env("GIT_INDEX_FILE", index).output().map_err(io)?;
+    if output.status.success() { Ok(output) } else { Err(command_error(&output)) }
+}
+
+fn hash_bytes(repo: &Path, bytes: &[u8]) -> ServiceResult<String> {
+    let mut child = Command::new(GIT).args(["hash-object", "-w", "--stdin"])
+        .current_dir(repo).stdin(std::process::Stdio::piped()).stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped()).spawn().map_err(io)?;
+    child.stdin.take().ok_or_else(|| ServiceError::Io("Git stdin unavailable".into()))?
+        .write_all(bytes).map_err(io)?;
+    let output = child.wait_with_output().map_err(io)?;
+    if !output.status.success() { return Err(command_error(&output)); }
+    Ok(text(&output).trim().to_string())
+}
+
+fn commit_tree(repo: &Path, tree: &str, parent: Option<&str>, message: &str) -> ServiceResult<String> {
+    let mut command = Command::new(GIT);
+    command.arg("commit-tree").arg(tree);
+    if let Some(parent) = parent { command.args(["-p", parent]); }
+    let mut child = command.current_dir(repo).stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::piped()).stderr(std::process::Stdio::piped())
+        .spawn().map_err(io)?;
+    child.stdin.take().ok_or_else(|| ServiceError::Io("Git stdin unavailable".into()))?
+        .write_all(message.as_bytes()).map_err(io)?;
+    let output = child.wait_with_output().map_err(io)?;
+    if !output.status.success() { return Err(command_error(&output)); }
+    Ok(text(&output).trim().to_string())
+}
+
+fn stash_manifest_path(repo: &Path) -> ServiceResult<PathBuf> {
+    let raw = text(&git(repo, ["rev-parse", "--git-dir"])?).trim().to_string();
+    let directory = PathBuf::from(raw);
+    Ok(if directory.is_absolute() { directory } else { repo.join(directory) }
+        .join("autoscribe-file-stashes.json"))
+}
+
+fn read_stash_manifest(repo: &Path) -> ServiceResult<StashManifest> {
+    let path = stash_manifest_path(repo)?;
+    if !path.exists() { return Ok(StashManifest { version: 1, items: Vec::new() }); }
+    let bytes = fs::read(path).map_err(io)?;
+    serde_json::from_slice(&bytes).map_err(|error| ServiceError::Io(error.to_string()))
+}
+
+fn write_stash_manifest(repo: &Path, manifest: &StashManifest) -> ServiceResult<()> {
+    let bytes = serde_json::to_vec_pretty(manifest).map_err(|error| ServiceError::Io(error.to_string()))?;
+    fs::write(stash_manifest_path(repo)?, bytes).map_err(io)
+}
+
 fn command_error(output: &Output) -> ServiceError {
     let detail = String::from_utf8_lossy(&output.stderr).trim().to_string();
     ServiceError::Io(if detail.is_empty() {
@@ -407,56 +530,4 @@ fn text(output: &Output) -> String {
 
 fn io(error: impl std::fmt::Display) -> ServiceError {
     ServiceError::Io(error.to_string())
-}
-
-struct DispatchWorktree {
-    repo: PathBuf,
-    path: PathBuf,
-}
-
-impl DispatchWorktree {
-    fn create(repo: &Path, revision: &str) -> ServiceResult<Self> {
-        let unique = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .unwrap_or_default()
-            .as_nanos();
-        let path = std::env::temp_dir().join(format!(
-            "autoscribe-dispatch-worktree-{}-{unique}",
-            std::process::id()
-        ));
-        if path.exists() {
-            return Err(ServiceError::Conflict(format!(
-                "temporary worktree path already exists: {}",
-                path.display()
-            )));
-        }
-        git(
-            repo,
-            [
-                "worktree",
-                "add",
-                "--quiet",
-                "--detach",
-                path.to_string_lossy().as_ref(),
-                revision,
-            ],
-        )?;
-        Ok(Self {
-            repo: repo.to_path_buf(),
-            path,
-        })
-    }
-}
-
-impl Drop for DispatchWorktree {
-    fn drop(&mut self) {
-        let _ = Command::new(GIT)
-            .args(["worktree", "remove", "--force"])
-            .arg(&self.path)
-            .current_dir(&self.repo)
-            .output();
-        if self.path.starts_with(std::env::temp_dir()) {
-            let _ = fs::remove_dir_all(&self.path);
-        }
-    }
 }
