@@ -21,6 +21,8 @@ SNAPSHOT_FIELDS = {
         "title",
         "label",
         "content_sha256",
+        "source_modified_ns",
+        "source_size",
     ),
     "plan": (
         "record_identity",

@@ -1,5 +1,6 @@
 from collections.abc import Mapping
 from typing import Any
+import hashlib
 
 from pydantic import ValidationError
 
@@ -26,6 +27,9 @@ def ingest_instruction(record: Mapping[str, Any]) -> IngestedItem:
                 "slug": slug,
                 "title": title,
                 "content": content,
+                "content_sha256": hashlib.sha256(content.strip().encode("utf-8")).hexdigest(),
+                "source_modified_ns": int(extra.get("source_modified_ns") or 0),
+                "source_size": int(extra.get("source_size") or 0),
                 "extra_json": extra,
             }
         )

@@ -1,7 +1,7 @@
 use autoscribe_service::{
     Service,
     db::{self, Database},
-    dispatch, git,
+    dispatch, git, instruction_sync,
     events::{self, NoticeSink},
     pandoc, plan_repository, response_repository,
     sync::{self, UploadOutcome},
@@ -171,6 +171,7 @@ fn main() -> ExitCode {
         Some("responses-snapshot") => return command_output("responses.snapshot", responses_snapshot_from_stdin()),
         Some("response-decide") => return command_output("response.decide", response_decide_from_stdin()),
         Some("dispatch-finalize") => return command_output("dispatch.finalize", dispatch_finalize_from_stdin()),
+        Some("upload-instructions") => return command_output("instructions.upload", upload_instructions()),
         _ => {}
     }
     let config = env::args_os()
@@ -184,6 +185,21 @@ fn main() -> ExitCode {
             ExitCode::FAILURE
         }
     }
+}
+
+fn upload_instructions()->Result<serde_json::Value,Box<dyn std::error::Error>>{
+    let arguments=env::args_os().skip(2).collect::<Vec<_>>();
+    let dry_run=arguments.iter().any(|value|value=="--dry-run");
+    let root=arguments.iter().find(|value|*value!="--dry-run").map(PathBuf::from)
+        .unwrap_or(std::env::current_dir()?.join("instructions"));
+    let root=root.canonicalize()?;
+    let manifest:serde_json::Value=serde_json::from_slice(&run_asc_capture(&asc_command(),["control","instruction-manifest"],&[])?)?;
+    let plan=instruction_sync::plan(instruction_sync::scan(&root)?,&manifest)?;
+    let uploaded=plan.upload.len();let current=plan.items.len()-uploaded;
+    if !dry_run&&!plan.upload.is_empty(){let records=plan.upload.iter().map(instruction_sync::upload_record).collect::<Vec<_>>();run_asc(&asc_command(),["upload","instructions"],&ndjson(&records)?)?;}
+    Ok(serde_json::json!({"ok":true,"operation":"instructions.upload","root":root,"dry_run":dry_run,
+        "scanned":plan.items.len(),"current":current,"uploaded":if dry_run{0}else{uploaded},"would_upload":uploaded,
+        "hashes_compared":plan.hashes_compared,"items":plan.items}))
 }
 
 fn git_files_from_stdin() -> Result<serde_json::Value, Box<dyn std::error::Error>> {

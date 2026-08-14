@@ -42,6 +42,9 @@ class Instruction(RedisModel):
     slug: str
     title: str
     content: str
+    content_sha256: str = ""
+    source_modified_ns: int = 0
+    source_size: int = 0
     extra_json: str = "{}"
 
     @field_validator("identity", "slug", "title", mode="before")
@@ -53,6 +56,24 @@ class Instruction(RedisModel):
     @classmethod
     def validate_content(cls, value: object) -> str:
         return _required_text(value, "content")
+
+    @field_validator("content_sha256", mode="before")
+    @classmethod
+    def validate_content_sha256(cls, value: object) -> str:
+        text = str(value or "").strip().lower()
+        if not text:
+            return ""
+        if len(text) != 64 or any(ch not in "0123456789abcdef" for ch in text):
+            raise ValueError("content_sha256 must be a lowercase SHA-256 hex digest")
+        return text
+
+    @field_validator("source_modified_ns", "source_size", mode="before")
+    @classmethod
+    def validate_source_metadata(cls, value: object, info) -> int:
+        number = int(value or 0)
+        if number < 0:
+            raise ValueError(f"{info.field_name} must not be negative")
+        return number
 
     @field_validator("extra_json", mode="before")
     @classmethod

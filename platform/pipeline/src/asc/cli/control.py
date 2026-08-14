@@ -37,5 +37,20 @@ def list_control() -> None:
         typer.echo(slug)
 
 
+@app.command("instruction-manifest")
+def instruction_manifest() -> None:
+    """Emit only lightweight instruction synchronization metadata."""
+    try:
+        snapshot = build_control_snapshot()
+        typer.echo(json.dumps({
+            "schema_version": 1,
+            "type": "autoscribe.instruction-manifest",
+            "instructions": snapshot.get("registries", {}).get("instructions", {}),
+        }, sort_keys=True))
+    except Exception as exc:
+        typer.echo(f"[control:instruction-manifest] error: {exc}", err=True)
+        raise typer.Exit(code=1) from exc
+
+
 if __name__ == "__main__":
     app()

@@ -8,6 +8,7 @@ pub mod dispatch;
 pub mod error;
 pub mod events;
 pub mod git;
+pub mod instruction_sync;
 pub mod pandoc;
 pub mod payloads;
 pub mod plan_repository;
