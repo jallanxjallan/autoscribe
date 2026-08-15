@@ -8,6 +8,8 @@ module.exports = async function define_plan(params = {}) {
   const base = app.vault.adapter.getBasePath?.() || app.vault.adapter.basePath;
   const load = (relativePath) => nodeRequire(path.join(base, "_control", ...relativePath.split("/")));
   const { openWorkflowModal } = load("scripts/lib/workflow-modal.js");
-  const { renderCreatePlan } = load("scripts/ui/define-plan.js");
+  const implementation = path.join(base, "_control", "scripts", "ui", "define-plan.js");
+  try { delete nodeRequire.cache[nodeRequire.resolve(implementation)]; } catch (_) {}
+  const { renderCreatePlan } = nodeRequire(implementation);
   return openWorkflowModal({ app, title: "Define Plan", render: (container) => renderCreatePlan({ app, container }) });
 };

@@ -12,6 +12,7 @@ const vaultRoot = app.vault.adapter.getBasePath?.() || app.vault.adapter.basePat
 const loadControl = (relativePath) => nodeRequire(pathMod.join(vaultRoot, "_control", ...relativePath.split("/")));
 const { openFileInMain } = loadControl("scripts/lib/workspace.js");
 const { readSystemState } = loadControl("scripts/lib/system-state.js");
+const { collectAnnotations } = loadControl("scripts/lib/annotations.js");
 
 let notify = (message) => new Notice(message);
 try {
@@ -39,11 +40,17 @@ style.textContent = `
 `;
 
 function section(title) {
-  return dashboard.createEl("section", { cls: "dashboard-section" }).createEl("h2", { text: title }).parentElement;
+  return dashboard
+    .createEl("section", { cls: "dashboard-section" })
+    .createEl("h2", { text: title })
+    .parentElement;
 }
 
 function card(parent, title) {
-  const el = parent.createEl("div", { cls: "dashboard-card" });
+  const el = parent.createEl("div", {
+    cls: "dashboard-card",
+  });
+
   el.createEl("h3", { text: title });
   return el;
 }
@@ -55,13 +62,22 @@ function line(parent, label, value, cls = "") {
 }
 
 async function openInMain(path) {
-  try { await openFileInMain(app, path, { mode: "preview" }); }
-  catch (error) { notify(error?.message || String(error), 10000); }
+  try {
+    await openFileInMain(app, path, {
+      mode: "preview",
+    });
+  } catch (error) {
+    notify(error?.message || String(error), 10000);
+  }
 }
 
 function addLink(parent, label, path) {
   const row = parent.createEl("div");
-  const anchor = row.createEl("a", { text: label, href: "#" });
+  const anchor = row.createEl("a", {
+    text: label,
+    href: "#",
+  });
+
   anchor.onclick = async (event) => {
     event.preventDefault();
     await openInMain(path);
@@ -69,18 +85,35 @@ function addLink(parent, label, path) {
 }
 
 function addCommand(parent, label, macroPath) {
-  const button = parent.createEl("button", { text: label });
+  const button = parent.createEl("button", {
+    text: label,
+  });
+
   button.onclick = async () => {
     button.disabled = true;
     notify(`Opening ${label}…`);
+
     try {
-      const implementation = pathMod.join(vaultRoot, "_control", ...macroPath.split("/"));
-      try { delete nodeRequire.cache[nodeRequire.resolve(implementation)]; } catch (_) {}
+      const implementation = pathMod.join(
+        vaultRoot,
+        "_control",
+        ...macroPath.split("/")
+      );
+
+      try {
+        delete nodeRequire.cache[
+          nodeRequire.resolve(implementation)
+        ];
+      } catch (_) {}
+
       const run = nodeRequire(implementation);
       await run({ app });
     } catch (error) {
       console.error(`${label} failed:`, error);
-      notify(`${label} failed: ${error?.message || error}`, 10000);
+      notify(
+        `${label} failed: ${error?.message || error}`,
+        10000
+      );
     } finally {
       button.disabled = false;
     }
@@ -88,193 +121,438 @@ function addCommand(parent, label, macroPath) {
 }
 
 function nextPaint() {
-  return new Promise((resolve) => requestAnimationFrame(() => resolve()));
+  return new Promise((resolve) =>
+    requestAnimationFrame(() => resolve())
+  );
 }
 
 const stateSection = section("System state");
-const toolbar = stateSection.createEl("div", { cls: "dashboard-toolbar" });
-const refresh = toolbar.createEl("button", { text: "Refresh state" });
-refresh.type = "button";
-const statusLink = toolbar.createEl("button", { text: "Open full System Status" });
-statusLink.type = "button";
-statusLink.onclick = () => openInMain("_control/panels/System Status.md");
-const refreshStatus = toolbar.createSpan({ cls: "dashboard-muted dashboard-refresh-status" });
-const stateGrid = stateSection.createEl("div", { cls: "dashboard-grid" });
+const toolbar = stateSection.createEl("div", {
+  cls: "dashboard-toolbar",
+});
 
-async function renderState({ announce = false } = {}) {
+const refresh = toolbar.createEl("button", {
+  text: "Refresh state",
+});
+refresh.type = "button";
+
+const statusLink = toolbar.createEl("button", {
+  text: "Open full System Status",
+});
+statusLink.type = "button";
+statusLink.onclick = () =>
+  openInMain("_control/panels/System Status.md");
+
+const refreshStatus = toolbar.createSpan({
+  cls: "dashboard-muted dashboard-refresh-status",
+});
+
+const stateGrid = stateSection.createEl("div", {
+  cls: "dashboard-grid",
+});
+
+async function renderState({
+  announce = false,
+} = {}) {
   if (refresh.disabled) return;
+
   refresh.disabled = true;
   refresh.setText("Refreshing…");
-  refreshStatus.setText("Reading current Git and pipeline state…");
+  refreshStatus.setText(
+    "Reading current Git and pipeline state…"
+  );
   stateGrid.empty();
 
   const gitCard = card(stateGrid, "Git");
-  line(gitCard, "Status", "Loading…", "dashboard-muted");
+  line(
+    gitCard,
+    "Status",
+    "Loading…",
+    "dashboard-muted"
+  );
 
   const pipelineCard = card(stateGrid, "Pipeline");
-  line(pipelineCard, "Status", "Loading…", "dashboard-muted");
+  line(
+    pipelineCard,
+    "Status",
+    "Loading…",
+    "dashboard-muted"
+  );
 
   let completed = false;
+
   try {
     // readSystemState is synchronous. Yield once so Obsidian can paint the
     // loading state before Git and pipeline commands begin.
     await nextPaint();
+
     const system = readSystemState(app);
-    if (!system.git) throw new Error(system.errors.git || "Git state unavailable");
+
+    if (!system.git) {
+      throw new Error(
+        system.errors.git ||
+          "Git state unavailable"
+      );
+    }
+
     const state = system.git;
+
     gitCard.empty();
     gitCard.createEl("h3", { text: "Git" });
-    const dirty = state.staged + state.modified + state.untracked;
-    line(gitCard, "Status", dirty ? `${dirty} changed file${dirty === 1 ? "" : "s"}` : "Clean", dirty ? "dashboard-warn" : "dashboard-good");
+
+    const dirty =
+      state.staged +
+      state.modified +
+      state.untracked;
+
+    line(
+      gitCard,
+      "Status",
+      dirty
+        ? `${dirty} changed file${
+            dirty === 1 ? "" : "s"
+          }`
+        : "Clean",
+      dirty
+        ? "dashboard-warn"
+        : "dashboard-good"
+    );
+
     line(gitCard, "Branch", state.branch);
     line(gitCard, "Staged", state.staged);
     line(gitCard, "Modified", state.modified);
     line(gitCard, "Untracked", state.untracked);
-    if (state.conflicted) line(gitCard, "Conflicts", state.conflicted, "dashboard-bad");
-    line(gitCard, "Remote", state.ahead == null ? "No upstream" : `${state.ahead} ahead / ${state.behind} behind`);
-    line(gitCard, "Latest", state.latest || "No commits");
+
+    if (state.conflicted) {
+      line(
+        gitCard,
+        "Conflicts",
+        state.conflicted,
+        "dashboard-bad"
+      );
+    }
+
+    line(
+      gitCard,
+      "Remote",
+      state.ahead == null
+        ? "No upstream"
+        : `${state.ahead} ahead / ${state.behind} behind`
+    );
+
+    line(
+      gitCard,
+      "Latest",
+      state.latest || "No commits"
+    );
 
     pipelineCard.empty();
-    pipelineCard.createEl("h3", { text: "Pipeline" });
+    pipelineCard.createEl("h3", {
+      text: "Pipeline",
+    });
+
     if (!system.pipeline) {
-      pipelineCard.createEl("p", { text: system.errors.pipeline || "Pipeline state unavailable", cls: "dashboard-bad" });
+      pipelineCard.createEl("p", {
+        text:
+          system.errors.pipeline ||
+          "Pipeline state unavailable",
+        cls: "dashboard-bad",
+      });
     } else {
       const { counts, handoffs } = system.pipeline;
-      const active = (counts.unclaimed || 0) + (counts.waiting || 0) + (counts.response_pending || 0);
-      line(pipelineCard, "Active runs", active, active ? "dashboard-warn" : "dashboard-good");
-      line(pipelineCard, "Unclaimed", counts.unclaimed || 0);
-      line(pipelineCard, "Processing", counts.waiting || 0);
-      line(pipelineCard, "Responses ready", counts.response_pending || 0,
-        counts.response_pending ? "dashboard-good" : "");
-      line(pipelineCard, "Recent handoffs", handoffs.length);
+
+      const active =
+        (counts.unclaimed || 0) +
+        (counts.waiting || 0) +
+        (counts.response_pending || 0);
+
+      line(
+        pipelineCard,
+        "Active runs",
+        active,
+        active
+          ? "dashboard-warn"
+          : "dashboard-good"
+      );
+
+      line(
+        pipelineCard,
+        "Unclaimed",
+        counts.unclaimed || 0
+      );
+
+      line(
+        pipelineCard,
+        "Processing",
+        counts.waiting || 0
+      );
+
+      line(
+        pipelineCard,
+        "Responses ready",
+        counts.response_pending || 0,
+        counts.response_pending
+          ? "dashboard-good"
+          : ""
+      );
+
+      line(
+        pipelineCard,
+        "Recent handoffs",
+        handoffs.length
+      );
     }
-    addLink(pipelineCard, "Open diagnostics", "_control/panels/System Status.md");
+
+    addLink(
+      pipelineCard,
+      "Open diagnostics",
+      "_control/panels/System Status.md"
+    );
+
     completed = true;
-    const refreshedAt = new Date(system.refreshed_at);
-    refreshStatus.setText(`Updated ${refreshedAt.toLocaleTimeString()}`);
-    if (announce) notify("System state refreshed.");
+
+    const refreshedAt = new Date(
+      system.refreshed_at
+    );
+
+    refreshStatus.setText(
+      `Updated ${refreshedAt.toLocaleTimeString()}`
+    );
+
+    if (announce) {
+      notify("System state refreshed.");
+    }
   } catch (error) {
-    const message = error?.message || String(error);
+    const message =
+      error?.message || String(error);
+
     gitCard.empty();
     gitCard.createEl("h3", { text: "Git" });
-    gitCard.createEl("p", { text: message, cls: "dashboard-bad" });
+    gitCard.createEl("p", {
+      text: message,
+      cls: "dashboard-bad",
+    });
+
     pipelineCard.empty();
-    pipelineCard.createEl("h3", { text: "Pipeline" });
-    pipelineCard.createEl("p", { text: "State refresh did not complete.", cls: "dashboard-bad" });
-    addLink(pipelineCard, "Open diagnostics", "_control/panels/System Status.md");
+    pipelineCard.createEl("h3", {
+      text: "Pipeline",
+    });
+
+    pipelineCard.createEl("p", {
+      text: "State refresh did not complete.",
+      cls: "dashboard-bad",
+    });
+
+    addLink(
+      pipelineCard,
+      "Open diagnostics",
+      "_control/panels/System Status.md"
+    );
+
     refreshStatus.setText("Refresh failed");
-    if (announce) notify(`State refresh failed: ${message}`, 10000);
+
+    if (announce) {
+      notify(
+        `State refresh failed: ${message}`,
+        10000
+      );
+    }
   } finally {
     refresh.disabled = false;
     refresh.setText("Refresh state");
-    if (!completed && !refreshStatus.getText?.()) refreshStatus.setText("Refresh failed");
-  }
-}
 
-refresh.addEventListener("click", () => renderState({ announce: true }));
-await renderState();
-
-function isEditorialFlagFile(file) {
-  return !file.path
-    .split("/")
-    .slice(0, -1)
-    .some((part) => part.startsWith("_"));
-}
-
-async function countEditorialFlags() {
-  let count = 0;
-
-  for (const file of app.vault.getMarkdownFiles().filter(isEditorialFlagFile)) {
-    const lines = (await app.vault.cachedRead(file)).split(/\r?\n/);
-    let inFrontmatter = lines[0]?.trim() === "---";
-    let fenceMarker = null;
-
-    for (let index = 0; index < lines.length; index += 1) {
-      const line = lines[index];
-      const trimmed = line.trim();
-
-      if (inFrontmatter) {
-        if (index > 0 && trimmed === "---") inFrontmatter = false;
-        continue;
-      }
-
-      const fence = trimmed.match(/^(```+|~~~+)/)?.[1] || null;
-      if (fence) {
-        if (!fenceMarker) fenceMarker = fence[0];
-        else if (fence[0] === fenceMarker) fenceMarker = null;
-        continue;
-      }
-      if (fenceMarker) continue;
-
-      if (/^\s*>\s*\\?\[![^\]]+\](?:[+-])?/i.test(line)) count += 1;
-      if (/\*\*TK\s*[\s\S]*?\*\*/i.test(line)) count += 1;
-      count += [...line.matchAll(/==(.+?)==/g)].length;
+    if (
+      !completed &&
+      !refreshStatus.getText?.()
+    ) {
+      refreshStatus.setText("Refresh failed");
     }
   }
-
-  return count;
 }
 
+refresh.addEventListener("click", () =>
+  renderState({ announce: true })
+);
+
+await renderState();
+
 function countEditorialNotes() {
-  const folder = app.vault.getAbstractFileByPath("Editorial Notes");
-  return folder?.children?.filter((file) => file.extension === "md").length || 0;
+  const folder =
+    app.vault.getAbstractFileByPath(
+      "Editorial Notes"
+    );
+
+  return (
+    folder?.children?.filter(
+      (file) => file.extension === "md"
+    ).length || 0
+  );
 }
 
 const editing = section("Editing status");
-const editingGrid = editing.createEl("div", { cls: "dashboard-grid" });
-const editorialFlags = card(editingGrid, "Editorial Flags");
-line(editorialFlags, "Items", await countEditorialFlags());
-addLink(editorialFlags, "Open Editorial Flags", "_control/queries/Editorial Flags.md");
-const editorialNotes = card(editingGrid, "Editorial Notes");
-line(editorialNotes, "Items", countEditorialNotes());
-addLink(editorialNotes, "Open Editorial Notes", "_control/queries/Editorial Notes.md");
+const editingGrid = editing.createEl("div", {
+  cls: "dashboard-grid",
+});
+
+const annotations = card(
+  editingGrid,
+  "Annotations"
+);
+
+line(
+  annotations,
+  "Items",
+  (await collectAnnotations(app)).length
+);
+
+addCommand(
+  annotations,
+  "List Annotations",
+  "macros/list-annotations.js"
+);
+
+const editorialNotes = card(
+  editingGrid,
+  "Editorial Notes"
+);
+
+line(
+  editorialNotes,
+  "Items",
+  countEditorialNotes()
+);
+
+addLink(
+  editorialNotes,
+  "Open Editorial Notes",
+  "_control/queries/Editorial Notes.md"
+);
 
 const workflow = section("Operations");
-const actions = workflow.createEl("div", { cls: "dashboard-actions" });
+const actions = workflow.createEl("div", {
+  cls: "dashboard-actions",
+});
+
 for (const [label, macro] of [
-  ["Create Note", "macros/autoscribe-create-note.js"],
-  ["Stage Files", "macros/autoscribe-stage-files.js"],
-  ["Define Plan", "macros/autoscribe-define-plan.js"],
-  ["Dispatch Run", "macros/autoscribe-dispatch-run.js"],
-  ["Write Responses", "macros/autoscribe-write-responses.js"],
-  ["Plan History", "macros/autoscribe-plan-history.js"],
-  ["File State", "macros/autoscribe-file-state.js"],
-  ["File History", "macros/autoscribe-file-history.js"],
-]) addCommand(actions, label, macro);
+  ["Create Note", "macros/create-note.js"],
+  ["Stage Files", "macros/stage-files.js"],
+  ["Define Plan", "macros/define-plan.js"],
+  ["Dispatch Run", "macros/dispatch-run.js"],
+  [
+    "Write Responses",
+    "macros/write-responses.js",
+  ],
+  ["Plan History", "macros/plan-history.js"],
+  ["File State", "macros/file-state.js"],
+  ["File History", "macros/file-history.js"],
+]) {
+  addCommand(actions, label, macro);
+}
 
 function normalizePath(path) {
-  return path.replace(/^\/+|\/+$/g, "").toLowerCase();
+  return path
+    .replace(/^\/+|\/+$/g, "")
+    .toLowerCase();
 }
 
 function resolveFolderPath(requestedPath) {
-  const exact = app.vault.getAbstractFileByPath(requestedPath);
-  if (exact?.children) return exact.path;
+  const exact =
+    app.vault.getAbstractFileByPath(
+      requestedPath
+    );
+
+  if (exact?.children) {
+    return exact.path;
+  }
+
   const wanted = normalizePath(requestedPath);
-  return app.vault.getAllLoadedFiles().find((item) => item?.children && normalizePath(item.path) === wanted)?.path ?? null;
+
+  return (
+    app.vault
+      .getAllLoadedFiles()
+      .find(
+        (item) =>
+          item?.children &&
+          normalizePath(item.path) === wanted
+      )?.path ?? null
+  );
 }
 
-const deprecatedDashboardFiles = new Set(["content index", "content status"]);
+const deprecatedDashboardFiles = new Set([
+  "content index",
+  "content status",
+]);
 
-function addFolder(parent, title, requestedPath) {
+function addFolder(
+  parent,
+  title,
+  requestedPath
+) {
   const box = card(parent, title);
-  const folderPath = resolveFolderPath(requestedPath);
+  const folderPath =
+    resolveFolderPath(requestedPath);
+
   if (!folderPath) {
-    box.createEl("p", { text: `Folder not found: ${requestedPath}`, cls: "dashboard-muted" });
+    box.createEl("p", {
+      text: `Folder not found: ${requestedPath}`,
+      cls: "dashboard-muted",
+    });
     return;
   }
-  const files = app.vault.getFiles()
-    .filter((file) => file.parent?.path === folderPath)
-    .filter((file) => !deprecatedDashboardFiles.has(file.basename.toLowerCase()))
-    .sort((a, b) => a.basename.localeCompare(b.basename, undefined, { numeric: true, sensitivity: "base" }));
+
+  const files = app.vault
+    .getFiles()
+    .filter(
+      (file) =>
+        file.parent?.path === folderPath
+    )
+    .filter(
+      (file) =>
+        !deprecatedDashboardFiles.has(
+          file.basename.toLowerCase()
+        )
+    )
+    .sort((a, b) =>
+      a.basename.localeCompare(
+        b.basename,
+        undefined,
+        {
+          numeric: true,
+          sensitivity: "base",
+        }
+      )
+    );
+
   if (!files.length) {
-    box.createEl("p", { text: "No files found.", cls: "dashboard-muted" });
+    box.createEl("p", {
+      text: "No files found.",
+      cls: "dashboard-muted",
+    });
     return;
   }
-  for (const file of files) addLink(box, file.basename, file.path);
+
+  for (const file of files) {
+    addLink(box, file.basename, file.path);
+  }
 }
 
 const resources = section("Vault resources");
-const resourceGrid = resources.createEl("div", { cls: "dashboard-grid" });
-addFolder(resourceGrid, "Queries", "_control/queries");
-addFolder(resourceGrid, "Views", "views");
+const resourceGrid = resources.createEl(
+  "div",
+  {
+    cls: "dashboard-grid",
+  }
+);
+
+addFolder(
+  resourceGrid,
+  "Queries",
+  "_control/queries"
+);
+
+addFolder(
+  resourceGrid,
+  "Views",
+  "views"
+);
 ```

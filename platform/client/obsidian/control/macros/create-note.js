@@ -1,7 +1,7 @@
 "use strict";
 
 /*
- * QuickAdd user script for creating a typed note from an existing template.
+ * QuickAdd user script for creating a note from an existing template.
  * Uses only the app object, browser DOM, and existing vault-local helpers.
  */
 
@@ -60,7 +60,7 @@ const NOTE_GROUPS = [
 ];
 
 
-module.exports = async function createTypedNote(params = {}) {
+module.exports = async function createNote(params = {}) {
   const app = params.app || globalThis.app;
   if (!app?.vault || !app?.workspace) {
     throw new Error("Obsidian app object unavailable.");
@@ -79,7 +79,7 @@ module.exports = async function createTypedNote(params = {}) {
   const { normalizeVaultPath, ensureFolder } = load("lib/vault-files.js");
   const { applyTemplateToFile } = load("templates/apply-template-tools.js");
 
-  const selection = await openTypedNoteDialog({ titleCaseStem, kebabCase });
+  const selection = await openCreateNoteDialog({ titleCaseStem, kebabCase });
   if (!selection) return;
 
   const title = titleCaseStem(selection.rawTitle);
@@ -133,12 +133,12 @@ module.exports = async function createTypedNote(params = {}) {
       }
     }
 
-    console.error("Create Typed Note failed:", error);
-    notify(`Create Typed Note failed: ${error?.message || String(error)}`, 9000);
+    console.error("Create Note failed:", error);
+    notify(`Create Note failed: ${error?.message || String(error)}`, 9000);
   }
 };
 
-function openTypedNoteDialog({ titleCaseStem, kebabCase }) {
+function openCreateNoteDialog({ titleCaseStem, kebabCase }) {
   return new Promise((resolve) => {
     let finished = false;
 
@@ -194,11 +194,11 @@ function openTypedNoteDialog({ titleCaseStem, kebabCase }) {
     dialog.className = "typed-note-dialog modal";
     dialog.setAttribute("role", "dialog");
     dialog.setAttribute("aria-modal", "true");
-    dialog.setAttribute("aria-label", "Create Typed Note");
+    dialog.setAttribute("aria-label", "Create Note");
     overlay.appendChild(dialog);
 
     const heading = document.createElement("h2");
-    heading.textContent = "Create Typed Note";
+    heading.textContent = "Create Note";
     dialog.appendChild(heading);
 
     const intro = document.createElement("p");
