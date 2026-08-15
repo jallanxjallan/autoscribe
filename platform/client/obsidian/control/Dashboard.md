@@ -23,7 +23,7 @@ try {
 const dashboard = dv.container;
 const style = dashboard.createEl("style");
 style.textContent = `
-  .autoscribe-dashboard .dashboard-toolbar { display:flex; gap:.6rem; flex-wrap:wrap; margin:.6rem 0 1rem; }
+  .autoscribe-dashboard .dashboard-toolbar { display:flex; gap:.6rem; flex-wrap:wrap; align-items:center; margin:.6rem 0 1rem; }
   .autoscribe-dashboard .dashboard-grid { display:grid; grid-template-columns:repeat(auto-fit,minmax(16rem,1fr)); gap:.75rem; margin:.5rem 0 1.2rem; }
   .autoscribe-dashboard .dashboard-card { border:1px solid var(--background-modifier-border); border-radius:8px; padding:.75rem .9rem; background:var(--background-secondary); }
   .autoscribe-dashboard .dashboard-card h3 { margin:0 0 .45rem; font-size:1rem; }
@@ -35,6 +35,7 @@ style.textContent = `
   .autoscribe-dashboard .dashboard-actions { display:grid; grid-template-columns:repeat(auto-fit,minmax(13rem,1fr)); gap:.5rem; margin:.5rem 0 1.2rem; }
   .autoscribe-dashboard .dashboard-actions button { width:100%; min-height:2.4rem; text-align:left; }
   .autoscribe-dashboard .dashboard-section { margin-top:1.35rem; }
+  .autoscribe-dashboard .dashboard-refresh-status { font-size:.85rem; }
 `;
 
 function section(title) {
@@ -86,16 +87,25 @@ function addCommand(parent, label, macroPath) {
   };
 }
 
+function nextPaint() {
+  return new Promise((resolve) => requestAnimationFrame(() => resolve()));
+}
+
 const stateSection = section("System state");
 const toolbar = stateSection.createEl("div", { cls: "dashboard-toolbar" });
 const refresh = toolbar.createEl("button", { text: "Refresh state" });
+refresh.type = "button";
 const statusLink = toolbar.createEl("button", { text: "Open full System Status" });
+statusLink.type = "button";
 statusLink.onclick = () => openInMain("_control/panels/System Status.md");
+const refreshStatus = toolbar.createSpan({ cls: "dashboard-muted dashboard-refresh-status" });
 const stateGrid = stateSection.createEl("div", { cls: "dashboard-grid" });
 
-async function renderState() {
+async function renderState({ announce = false } = {}) {
+  if (refresh.disabled) return;
   refresh.disabled = true;
   refresh.setText("Refreshing…");
+  refreshStatus.setText("Reading current Git and pipeline state…");
   stateGrid.empty();
 
   const gitCard = card(stateGrid, "Git");
@@ -104,7 +114,11 @@ async function renderState() {
   const pipelineCard = card(stateGrid, "Pipeline");
   line(pipelineCard, "Status", "Loading…", "dashboard-muted");
 
+  let completed = false;
   try {
+    // readSystemState is synchronous. Yield once so Obsidian can paint the
+    // loading state before Git and pipeline commands begin.
+    await nextPaint();
     const system = readSystemState(app);
     if (!system.git) throw new Error(system.errors.git || "Git state unavailable");
     const state = system.git;
@@ -135,21 +149,29 @@ async function renderState() {
       line(pipelineCard, "Recent handoffs", handoffs.length);
     }
     addLink(pipelineCard, "Open diagnostics", "_control/panels/System Status.md");
+    completed = true;
+    const refreshedAt = new Date(system.refreshed_at);
+    refreshStatus.setText(`Updated ${refreshedAt.toLocaleTimeString()}`);
+    if (announce) notify("System state refreshed.");
   } catch (error) {
+    const message = error?.message || String(error);
     gitCard.empty();
     gitCard.createEl("h3", { text: "Git" });
-    gitCard.createEl("p", { text: error?.message || String(error), cls: "dashboard-bad" });
+    gitCard.createEl("p", { text: message, cls: "dashboard-bad" });
     pipelineCard.empty();
     pipelineCard.createEl("h3", { text: "Pipeline" });
     pipelineCard.createEl("p", { text: "State refresh did not complete.", cls: "dashboard-bad" });
     addLink(pipelineCard, "Open diagnostics", "_control/panels/System Status.md");
+    refreshStatus.setText("Refresh failed");
+    if (announce) notify(`State refresh failed: ${message}`, 10000);
   } finally {
     refresh.disabled = false;
     refresh.setText("Refresh state");
+    if (!completed && !refreshStatus.getText?.()) refreshStatus.setText("Refresh failed");
   }
 }
 
-refresh.onclick = renderState;
+refresh.addEventListener("click", () => renderState({ announce: true }));
 await renderState();
 
 function isEditorialFlagFile(file) {
