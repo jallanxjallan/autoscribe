@@ -6,6 +6,14 @@ const ANNOTATION_TYPES = Object.freeze([
   { id: "directive", label: "Directive", description: "Fenced instruction" },
 ]);
 
+const INLINE_KEYS = Object.freeze([
+  { id: "comment", label: "Comment" },
+  { id: "query", label: "Query" },
+  { id: "rewrite", label: "Rewrite" },
+  { id: "verify", label: "Verify" },
+  { id: "defer", label: "Defer" },
+]);
+
 const PREVIEW_LIMIT = 120;
 
 function asText(value, fallback = "") {
@@ -40,14 +48,28 @@ function extractBlock(line) {
 }
 
 function extractInlines(line) {
-  return [...line.matchAll(/==(.+?)==/g)]
-    .map((match) => match[1].trim())
-    .filter(Boolean)
-    .map((text) => ({
-      annotation: "inline",
-      type: "Inline",
-      text: truncateAtWord(text),
-    }));
+  return [...line.matchAll(/\[==(.+?)==\]\{([A-Za-z][\w-]*)="((?:\\.|[^"\\])*)"\}/g)]
+    .map((match) => {
+      const selectedText = match[1].trim();
+      const key = match[2];
+      let message = match[3];
+
+      try {
+        message = JSON.parse(`"${message}"`);
+      } catch {
+        // Keep the raw value if a hand-written attribute is not JSON-escaped.
+      }
+
+      return {
+        annotation: "inline",
+        type: "Inline",
+        key,
+        message,
+        selectedText,
+        text: truncateAtWord(`${key}: ${message} — ${selectedText}`),
+      };
+    })
+    .filter((item) => item.selectedText && item.message.trim());
 }
 
 function parseLine(line) {
@@ -162,10 +184,19 @@ function block(text, message) {
   ].filter(Boolean).join("\n");
 }
 
-function inline(text) {
+function inline(text, { key, message }) {
   const span = String(text || "");
   if (!span.trim()) throw new Error("Select the text to annotate inline.");
-  return `==${span}==`;
+
+  const attribute = String(key || "").trim();
+  if (!INLINE_KEYS.some((item) => item.id === attribute)) {
+    throw new Error(`Unsupported inline key: ${attribute}`);
+  }
+
+  const value = String(message || "").trim();
+  if (!value) throw new Error("An inline annotation message is required.");
+
+  return `[==${span}==]{${attribute}=${JSON.stringify(value)}}`;
 }
 
 function directive(instruction) {
@@ -176,6 +207,7 @@ function directive(instruction) {
 
 module.exports = {
   ANNOTATION_TYPES,
+  INLINE_KEYS,
   PREVIEW_LIMIT,
   isExcludedFolder,
   extractBlock,

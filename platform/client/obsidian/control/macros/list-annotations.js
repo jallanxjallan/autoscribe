@@ -7,15 +7,21 @@ function loadAnnotations(app) {
     app.vault.adapter.getBasePath?.() ||
     app.vault.adapter.basePath;
 
-  return require(
-    path.join(
-      vaultRoot,
-      "_control",
-      "scripts",
-      "lib",
-      "annotations.js"
-    )
+  const modulePath = path.join(
+    vaultRoot,
+    "_control",
+    "scripts",
+    "lib",
+    "annotate.js"
   );
+  const electronRequire = globalThis.window?.require;
+
+  if (electronRequire?.cache && electronRequire?.resolve) {
+    delete electronRequire.cache[electronRequire.resolve(modulePath)];
+    return electronRequire(modulePath);
+  }
+
+  return require(modulePath);
 }
 
 function compareText(a, b) {
@@ -33,10 +39,15 @@ function compareAnnotations(a, b) {
   );
 }
 
+const TYPE_ORDER = Object.freeze(["Block", "Inline", "Directive"]);
+
 function compareTypes(a, b) {
-  if (a === "Defer" && b !== "Defer") return 1;
-  if (b === "Defer" && a !== "Defer") return -1;
-  return compareText(a, b);
+  const aIndex = TYPE_ORDER.indexOf(a);
+  const bIndex = TYPE_ORDER.indexOf(b);
+  if (aIndex < 0 && bIndex < 0) return compareText(a, b);
+  if (aIndex < 0) return 1;
+  if (bIndex < 0) return -1;
+  return aIndex - bIndex;
 }
 
 async function openAtLine(app, item) {
