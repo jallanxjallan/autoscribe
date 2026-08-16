@@ -141,7 +141,7 @@ const statusLink = toolbar.createEl("button", {
 });
 statusLink.type = "button";
 statusLink.onclick = () =>
-  openInMain("_control/panels/System Status.md");
+  openInMain("_control/System Status.md");
 
 const refreshStatus = toolbar.createSpan({
   cls: "dashboard-muted dashboard-refresh-status",
@@ -182,11 +182,9 @@ async function renderState({
   let completed = false;
 
   try {
-    // readSystemState is synchronous. Yield once so Obsidian can paint the
-    // loading state before Git and pipeline commands begin.
     await nextPaint();
 
-    const system = readSystemState(app);
+    const system = await readSystemState(app);
 
     if (!system.git) {
       throw new Error(
@@ -306,7 +304,7 @@ async function renderState({
     addLink(
       pipelineCard,
       "Open diagnostics",
-      "_control/panels/System Status.md"
+      "_control/System Status.md"
     );
 
     completed = true;
@@ -346,7 +344,7 @@ async function renderState({
     addLink(
       pipelineCard,
       "Open diagnostics",
-      "_control/panels/System Status.md"
+      "_control/System Status.md"
     );
 
     refreshStatus.setText("Refresh failed");
@@ -435,14 +433,13 @@ const actions = workflow.createEl("div", {
 
 for (const [label, macro] of [
   ["Create Note", "macros/create-note.js"],
-  ["Stage Files", "macros/stage-files.js"],
+  ["Commit Files", "macros/commit-files.js"],
   ["Define Plan", "macros/define-plan.js"],
   ["Dispatch Run", "macros/dispatch-run.js"],
   [
     "Write Responses",
     "macros/write-responses.js",
   ],
-  ["Plan History", "macros/plan-history.js"],
   ["File State", "macros/file-state.js"],
   ["File History", "macros/file-history.js"],
 ]) {

@@ -63,7 +63,8 @@ fn dispatch_starts_runtime_daemons_when_status_is_unhealthy() {
 #[test]
 fn conversion_failure_prevents_upload_and_enqueue() {
     let root = temp("failure");
-    fs::write(root.join("One.md"), "Body\n").unwrap();
+    fs::write(root.join("One.md"), "---\nslug: cnt.one\n---\nBody\n").unwrap();
+    initialize_repo(&root);
     let pandoc = root.join("pandoc");
     fs::write(&pandoc, "#!/bin/sh\necho bad >&2\nexit 9\n").unwrap();
     executable(&pandoc);
@@ -77,12 +78,13 @@ fn conversion_failure_prevents_upload_and_enqueue() {
 #[test]
 fn pending_response_blocks_dispatch_before_upload_and_enqueue() {
     let root = temp("pending");
-    fs::write(root.join("One.md"), "Body\n").unwrap();
+    fs::write(root.join("One.md"), "---\nslug: cnt.one\n---\nBody\n").unwrap();
+    initialize_repo(&root);
     let pandoc = root.join("pandoc");
     fs::write(&pandoc, "#!/bin/sh\nprintf '%s\\n' '{\"record_type\":\"content\",\"record_identity\":\"cnt.one\",\"payload\":{\"content\":\"Body\"}}'\n").unwrap();
     executable(&pandoc);
     let asc = root.join("asc");
-    fs::write(&asc, format!("#!/bin/sh\nprintf '%s\\n' \"$*\" >> '{}'\nif [ \"$1 $2\" = \"control snapshot\" ]; then printf '%s\\n' '{{\"registries\":{{\"instructions\":{{}},\"plans\":{{}}}}}}'; exit 0; fi\nif [ \"$1 $2\" = \"export list-pending\" ]; then printf '%s\\n' '{{\"record_identity\":\"cnt.one\",\"call_identity\":\"call.one\",\"result_identity\":\"result.one\"}}'; fi\n", root.join("asc.log").display())).unwrap();
+    fs::write(&asc, format!("#!/bin/sh\nprintf '%s\\n' \"$*\" >> '{}'\nif [ \"$1 $2\" = \"control snapshot\" ]; then printf '%s\\n' '{{\"registries\":{{\"instructions\":{{}},\"plans\":{{\"plan.test\":{{\"record_identity\":\"plan.test\"}}}}}}}}'; exit 0; fi\nif [ \"$1 $2\" = \"export list-pending\" ]; then printf '%s\\n' '{{\"record_identity\":\"cnt.one\",\"call_identity\":\"call.one\",\"result_identity\":\"result.one\"}}'; fi\n", root.join("asc.log").display())).unwrap();
     executable(&asc);
     let output = invoke(&root, &pandoc, &asc);
     assert!(!output.status.success());
@@ -96,12 +98,16 @@ fn pending_response_blocks_dispatch_before_upload_and_enqueue() {
 }
 
 fn invoke(root: &Path, pandoc: &Path, asc: &Path) -> std::process::Output {
-    let request = json!({"version":1,"database_path":root.join("service.sqlite"),"repository_path":root,"pandoc_binary":pandoc,
-        "pandoc_filter":root.join("filter.lua"),"pandoc_parallelism":2,"plan":"plan.test","paths":["One.md"]});
+    let request = json!({"version":1,"plan":"plan.test","documents":["cnt.one"]});
     fs::write(root.join("filter.lua"), "-- fixture\n").unwrap();
     let mut child = Command::new(env!("CARGO_BIN_EXE_svc"))
         .arg("dispatch-run")
         .env("ASC_BIN", asc)
+        .env("AUTOSCRIBE_DATABASE", root.join("service.sqlite"))
+        .env("AUTOSCRIBE_PANDOC_FILTER", root.join("filter.lua"))
+        .env("AUTOSCRIBE_PANDOC_PARALLELISM", "2")
+        .env("PANDOC_BIN", pandoc)
+        .current_dir(root)
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
@@ -123,7 +129,7 @@ fn fake_asc_with_status(root: &Path, status: &str) -> PathBuf {
     fs::write(
         &path,
         format!(
-            "#!/bin/sh\nprintf '%s\\n' \"$*\" >> '{}'\nif [ \"$1 $2\" = \"control snapshot\" ]; then printf '%s\\n' '{{\"registries\":{{\"instructions\":{{}},\"plans\":{{}}}}}}'; exit 0; fi\nif [ \"$1 $2\" = \"export list-pending\" ]; then exit 0; fi\nif [ \"$1 $2\" = \"run status\" ]; then printf '%s\\n' '{}'; exit 0; fi\ncat >> '{}.input'\n",
+            "#!/bin/sh\nprintf '%s\\n' \"$*\" >> '{}'\nif [ \"$1 $2\" = \"control snapshot\" ]; then printf '%s\\n' '{{\"registries\":{{\"instructions\":{{}},\"plans\":{{\"plan.test\":{{\"record_identity\":\"plan.test\"}}}}}}}}'; exit 0; fi\nif [ \"$1 $2\" = \"export list-pending\" ]; then exit 0; fi\nif [ \"$1 $2\" = \"run status\" ]; then printf '%s\\n' '{}'; exit 0; fi\ncat >> '{}.input'\n",
             root.join("asc.log").display(),
             status,
             root.join("asc.log").display()
@@ -147,6 +153,13 @@ fn executable(path: &Path) {
     let mut p = fs::metadata(path).unwrap().permissions();
     p.set_mode(0o755);
     fs::set_permissions(path, p).unwrap();
+}
+fn initialize_repo(root: &Path) {
+    git(root, ["init", "--quiet", "--initial-branch=main"]);
+    git(root, ["config", "user.email", "tests@autoscribe.local"]);
+    git(root, ["config", "user.name", "AutoScribe Tests"]);
+    git(root, ["add", "One.md"]);
+    git(root, ["commit", "--quiet", "-m", "Initial"]);
 }
 fn git<I, S>(repo: &Path, args: I)
 where I: IntoIterator<Item = S>, S: AsRef<std::ffi::OsStr> {

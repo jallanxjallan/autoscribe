@@ -15,10 +15,10 @@ function renderSystemStatus({ app, container }) {
   const refresh = container.createEl("button", { text: "Refresh" });
   const output = container.createEl("div");
 
-  function draw(notifyUser = false) {
+  async function draw(notifyUser = false) {
     if (notifyUser) notify("Refreshing System Status…");
     output.empty();
-    const state = readSystemState(app);
+    const state = await readSystemState(app);
     const summary = output.createEl("div");
     if (state.git) summary.createEl("p", { text: `Git: ${state.git.branch}; ${state.git.staged + state.git.modified + state.git.untracked} changed file(s)` });
     else summary.createEl("p", { text: `Git unavailable: ${state.errors.git}` });
@@ -43,8 +43,8 @@ function renderSystemStatus({ app, container }) {
     if (notifyUser) notify(`System Status refreshed: ${handoffs.length} recent handoff(s) shown.`);
   }
 
-  refresh.addEventListener("click", () => draw(true));
-  draw(false);
+  refresh.addEventListener("click", () => void draw(true));
+  await draw(false);
 }
 
 await renderSystemStatus({ app, dv, container: dv.container });

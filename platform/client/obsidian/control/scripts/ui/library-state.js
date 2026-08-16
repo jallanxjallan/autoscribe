@@ -4,10 +4,9 @@
  * Shared Library State implementation.
  *
  * The active Library vault is the source of instruction files. Every explicit
- * instruction Markdown file is listed, whether or not Git considers it dirty.
- * Git supplies local state. The service supplies authoritative server state
- * and performs instruction synchronization. Library never invokes `asc`
- * directly, keeping the UI behind the service boundary.
+ * instruction Markdown file is listed. The service supplies authoritative
+ * server state and performs instruction synchronization. The UI neither
+ * invokes `asc` nor inspects Git directly.
  */
 module.exports = async function libraryState(params = {}) {
   const app = params.app || globalThis.app;
@@ -16,17 +15,12 @@ module.exports = async function libraryState(params = {}) {
   const nodeRequire = typeof require === "function" ? require : window.require;
   const fs = nodeRequire("node:fs");
   const path = nodeRequire("node:path");
-  const { spawn } = nodeRequire("node:child_process");
 
   const vaultRoot = path.resolve(app.vault.adapter.getBasePath?.() || app.vault.adapter.basePath);
   const service = nodeRequire(path.join(vaultRoot, "_control", "scripts", "lib", "dispatch-service.js"));
 
   async function callService(command, input = null) {
-    const executable = service.serviceCommand(app);
-    const response = await service.run(executable.command, [...executable.prefix, command], {
-      cwd: vaultRoot,
-      input: input == null ? "" : JSON.stringify(input),
-    });
+    const response = await service.serviceCall(app, command, input || { version: 1 });
     const output = JSON.parse(String(response.stdout || "{}").trim() || "{}");
     if (!output.ok) throw new Error(output.error || `${command} failed`);
     return output;
@@ -75,31 +69,6 @@ module.exports = async function libraryState(params = {}) {
     console.log(text);
   }
 
-  function run(command, args, { input = null } = {}) {
-    return new Promise((resolve, reject) => {
-      const child = spawn(command, args, {
-        cwd: vaultRoot,
-        shell: false,
-        stdio: ["pipe", "pipe", "pipe"],
-      });
-      const stdout = [];
-      const stderr = [];
-      child.stdout.setEncoding("utf8");
-      child.stderr.setEncoding("utf8");
-      child.stdout.on("data", (chunk) => stdout.push(chunk));
-      child.stderr.on("data", (chunk) => stderr.push(chunk));
-      child.once("error", reject);
-      child.once("close", (status) => {
-        const out = stdout.join("");
-        const err = stderr.join("");
-        if (status !== 0) return reject(new Error(err.trim() || out.trim() || `${command} exited with status ${status}`));
-        resolve({ stdout: out, stderr: err });
-      });
-      if (input == null) child.stdin.end();
-      else child.stdin.end(input);
-    });
-  }
-
   function normalizeRelative(filePath) {
     return String(filePath || "").replace(/\\/g, "/").replace(/^\.\//, "");
   }
@@ -108,27 +77,6 @@ module.exports = async function libraryState(params = {}) {
     const normalized = normalizeRelative(relativePath);
     const parts = normalized.split("/").filter(Boolean);
     return parts.includes(".obsidian") || parts.includes(".git") || normalized.toLowerCase().endsWith(".json");
-  }
-
-  async function readGitState() {
-    const { stdout } = await run("git", ["status", "--porcelain=v1", "-z", "--untracked-files=all"]);
-    const chunks = stdout.split("\0").filter(Boolean);
-    const state = new Map();
-
-    for (let index = 0; index < chunks.length; index += 1) {
-      const entry = chunks[index];
-      if (entry.length < 4) continue;
-      const status = entry.slice(0, 2);
-      const relativePath = normalizeRelative(entry.slice(3));
-      let originalPath = null;
-      if (status.includes("R") || status.includes("C")) {
-        originalPath = normalizeRelative(chunks[index + 1] || "");
-        index += 1;
-      }
-      if (ignoredPath(relativePath)) continue;
-      state.set(relativePath, { status, originalPath });
-    }
-    return state;
   }
 
   function parseFrontmatter(text) {
@@ -141,6 +89,7 @@ module.exports = async function libraryState(params = {}) {
     };
     return {
       slug: value("slug"),
+      record: value("record"),
       type: value("type"),
       kind: value("kind"),
       scope: value("scope"),
@@ -157,7 +106,7 @@ module.exports = async function libraryState(params = {}) {
     if (!fs.existsSync(absolutePath) || !fs.statSync(absolutePath).isFile()) return null;
     const parsed = parseFrontmatter(fs.readFileSync(absolutePath, "utf8"));
     if (!parsed?.slug || !parsed.body.trim()) return null;
-    if (parsed.type !== "instruction" && parsed.kind !== "instruction") return null;
+    if (![parsed.record, parsed.type, parsed.kind].includes("instruction")) return null;
     return {
       identity: parsed.slug,
       title: path.basename(absolutePath, path.extname(absolutePath)),
@@ -204,36 +153,13 @@ module.exports = async function libraryState(params = {}) {
     return redisInstructionMap(snapshot.server);
   }
 
-  function gitLabel(status) {
-    if (!status) return "clean";
-    const compact = status.trim();
-    if (!compact) return "clean";
-    if (status.includes("?")) return "untracked";
-    if (status.includes("A")) return "added";
-    if (status.includes("D")) return "deleted";
-    if (status.includes("R")) return "renamed";
-    if (status.includes("M")) return "modified";
-    return compact;
-  }
-
   async function readInstructionRows() {
-    const git = await readGitState();
     const records = walkMarkdown(vaultRoot)
       .map((relativePath) => instructionRecordFromPath(relativePath))
       .filter(Boolean)
       .sort((a, b) => a.relativePath.localeCompare(b.relativePath));
 
-    const rows = records.map((record) => {
-      const gitInfo = git.get(record.relativePath) || null;
-      return {
-        ...record,
-        gitStatus: gitInfo?.status || "",
-        gitState: gitLabel(gitInfo?.status || ""),
-        originalPath: gitInfo?.originalPath || null,
-        remote: "checking",
-        remoteDetail: "",
-      };
-    });
+    const rows = records.map((record) => ({ ...record, remote: "checking", remoteDetail: "" }));
 
     const redis = await readServerInstructions();
     rows.forEach((row) => {
@@ -256,8 +182,7 @@ module.exports = async function libraryState(params = {}) {
     return { records: rows, result };
   }
 
-  // Dashboard and other read-only Library views consume the same snapshot as
-  // the modal instead of duplicating Git, frontmatter, or service logic.
+  // Dashboard and other read-only Library views consume the same snapshot.
   if (params.mode === "snapshot") return readInstructionRows();
 
 
@@ -338,19 +263,18 @@ module.exports = async function libraryState(params = {}) {
     let boxes = [];
 
     function uploadNeeded(row) {
-      return row.gitState !== "clean" || row.remote === "missing";
+      return row.remote === "missing";
     }
 
     function updateSummary() {
       const selected = boxes.filter((box) => box?.checked).length;
-      const dirty = rows.filter((row) => row.gitState !== "clean").length;
       const missing = rows.filter((row) => row.remote === "missing").length;
-      summary.textContent = `${rows.length} instruction(s) · ${dirty} locally changed · ${missing} Redis missing · ${selected} selected`;
+      summary.textContent = `${rows.length} instruction(s) · ${missing} server missing · ${selected} selected`;
       uploadButton.disabled = selected === 0;
     }
 
     function stateText(row) {
-      return `${row.gitState} / ${row.remote}`;
+      return row.remote;
     }
 
     function renderRows() {

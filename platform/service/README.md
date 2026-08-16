@@ -1,89 +1,60 @@
-# AutoScribe Service Scaffold
+# AutoScribe client service
 
-This package fixes the boundary between AutoScribe frontends and the
-client-side Rust service before implementation begins. Obsidian is the first
-frontend. Electron may come later, but is not assumed anywhere in the service
-contract. The package compiles, but every
-operation that would touch durable state, Git, files, or the network returns
-`ServiceError::NotImplemented`.
+This crate is the client-side policy boundary. Rust owns SQLite, Git, document
+resolution, Pandoc conversion, pipeline calls, and writeback. Obsidian is a
+thin adapter: it sends slugs or file choices and renders returned manifests.
 
-The central rule is simple: Rust owns state and policy. A frontend displays the
-state supplied by Rust, collects an explicit user choice, and sends a command.
-The frontend never constructs dispatch payloads, decides whether a retry is
-safe, or infers the state of a run.
+## Dispatch Run
 
-Obsidian is the first consumer. Its JavaScript macros should become thin
-adapters that open panels, collect choices, invoke the service, and render the
-returned views and notices. The Rust API must remain usable from a CLI, tests,
-or a future Electron client without changing domain behavior.
+Run from the vault repository and send JSON on standard input:
 
-## Important design decisions already represented
-
-- SQLite is the authority for client-side service state.
-- A dispatch is saved before transmission.
-- Dispatch preparation accepts exact client-produced payload bytes, verifies
-  their SHA-256, commits only dirty selected files, creates no source commit for
-  an all-clean selection, creates the immutable run branch, and durably queues
-  the same bytes in SQLite before any transport attempt.
-- A retry reuses the original dispatch identity and the exact saved payload.
-- After polling, a dispatch becomes `Succeeded` or `Uncertain`; an uncertain
-  dispatch waits for an explicit retry or cancel command.
-- Git is the overwrite guardrail and preserves editorial second-guessing.
-- Every dispatch has an immutable `autoscribe/run/<dispatch-id>` branch rooted
-  at the exact selected source revision. Its metadata commit records the source
-  branch, plan version, selected path/slug pairs, and canonical payload hash.
-  The service creates it in a temporary worktree without switching the user's
-  active branch, and refuses collisions with different metadata.
-- SQLite holds the offline-capable sync store, including a durable outbox for
-  runs that have not yet reached the pipeline and locally retained downloaded
-  data. The daemon synchronizes periodically, and a frontend may request an
-  immediate synchronization.
-- A definitely unsent run remains pending and retryable. A run whose remote
-  acceptance is unknown becomes uncertain and waits for an explicit decision.
-- There is no automatic filesystem-watching daemon for document conversion.
-  Dispatch and write-response commands invoke synchronization explicitly.
-- Plans, models, engine metadata, instructions, runs, responses, and notices
-  are exposed through Rust query functions.
-- Pandoc is the sole parser and constructor for Markdown document boundaries.
-  Independent Pandoc operations run as bounded parallel batches.
-- Every significant action emits an immediate accepted notice and eventually a
-  completion or failure notice.
-
-## Package map
-
-See `CONTRACTS.md` for every module and function, including its inputs and
-outputs. Public request/response types live in `src/types.rs`. The orchestration
-facade is `src/service.rs`; every frontend adapter should depend on that facade
-rather than calling storage or domain modules directly.
-
-`adapters/obsidian/README.md` maps the existing Obsidian surfaces to this
-service boundary and states which decisions JavaScript is forbidden to make.
-
-## Compile the scaffold
-
-```sh
-cargo check
-cargo test
+```json
+{"version":1,"plan":"plan.example","documents":["doc.one","doc.two"]}
 ```
 
-The client-side service executable is `svc`. To transmit one already prepared
-dispatch from the default SQLite store:
-
 ```sh
-svc dispatch-transmit run-identity
+svc dispatch-run
 ```
 
-The tests confirm that the package is wired correctly and that unimplemented
-operations fail explicitly rather than pretending to succeed.
+Only the plan slug and document slugs cross the frontend boundary. Rust finds
+each unique Markdown file by its top-level `slug`, validates the plan, invokes
+Pandoc, appends the immutable inflight ledger snapshot, records SQLite lineage,
+uploads calls, and enqueues the plan. Other frontmatter is filter policy, not
+dispatch-script policy.
 
-## Suggested implementation order
+## Write Responses
 
-1. `db` migrations and repositories
-2. `events` notice persistence and subscription
-3. `git` and offline synchronization
-4. `catalog`, `plans`, and payload assembly
-5. `dispatch` plus exact-payload retry
-6. `results` and guarded writeback
-7. `reconcile` and dashboard queries
-8. Obsidian adapter transport and CLI entry points
-9. Other frontend adapters, without domain changes
+Send `{"version":1}` to `svc write-responses`. The command emits one NDJSON
+`writeback-result` per pending response. For each target Rust:
+
+1. verifies that the current file still has the expected slug;
+2. commits the target alone when it is dirty, as a writeback checkpoint;
+3. preserves current frontmatter and replaces the body;
+4. sets top-level `status: needs-review` and `producer: ai`;
+5. commits the target alone as the writeback;
+6. records the response event and acknowledges the export.
+
+A failed item is reported without preventing independent responses from being
+attempted. Re-running resumes a writeback that reached Git before its
+SQLite/export acknowledgement.
+
+## Other frontend operations
+
+- `system-snapshot` returns Git and pipeline counts.
+- `git-files` owns inspect, commit, history, per-file stash, and restore.
+- `define-plan-snapshot`, `plan-save`, and `instructions-sync` own authored
+  catalog operations.
+
+Repository-scoped commands derive the repository from their working directory.
+
+## Build and test outside the source tree
+
+```sh
+export AUTOSCRIBE_CARGO_TARGET_DIR="$HOME/.cache/autoscribe/cargo/service"
+export CARGO_TARGET_DIR="$AUTOSCRIBE_CARGO_TARGET_DIR"
+cargo test --manifest-path platform/service/Cargo.toml
+cargo build --release --manifest-path platform/service/Cargo.toml --bin svc
+```
+
+The Obsidian adapter uses the same default target and honors
+`AUTOSCRIBE_CARGO_TARGET_DIR`, `AUTOSCRIBE_ROOT`, and `SVC_BIN`.

@@ -4,7 +4,7 @@ const fs = require("node:fs");
 const path = require("node:path");
 const os = require("node:os");
 const { spawnSync } = require("node:child_process");
-const { vaultRoot, statInfo, relpath, gitFileState } = require("./vault-state.js");
+const { vaultRoot, statInfo, relpath } = require("./vault-state.js");
 
 
 function getNodeRequire() {
@@ -318,7 +318,6 @@ function readInstructionFile(root, file, source) {
   if (!slug || !/^ins\./.test(slug)) return null;
   const kind = 'instruction';
   const stat = statInfo(file);
-  const git = gitFileState(root, file);
   const rel = relpath(root, file);
   return {
     kind,
@@ -331,11 +330,11 @@ function readInstructionFile(root, file, source) {
     exists: stat.exists,
     size: stat.size,
     mtime: stat.mtime,
-    repo_state: git.repo_state,
-    git_status: git.git_status,
-    git_commit: git.git_commit,
-    short_commit: git.short_commit,
-    has_prior_commit: git.has_prior_commit,
+    repo_state: 'service-managed',
+    git_status: '',
+    git_commit: null,
+    short_commit: null,
+    has_prior_commit: null,
   };
 }
 

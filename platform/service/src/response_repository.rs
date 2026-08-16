@@ -27,11 +27,13 @@ pub fn store_pending(db: &Database, records: &[Value]) -> ServiceResult<()> {
 
 pub fn pending(db: &Database) -> ServiceResult<Vec<Value>> {
     let mut statement=db.connection().prepare(
-        "SELECT record_json,dispatch_identity,ledger_commit,source_blob FROM response_records
-         WHERE state IN ('pending','written') ORDER BY updated_at,result_identity").map_err(storage)?;
-    let rows=statement.query_map([],|row|Ok((row.get::<_,String>(0)?,row.get::<_,String>(1)?,row.get::<_,String>(2)?,row.get::<_,String>(3)?))).map_err(storage)?;
-    rows.map(|row|{let (raw,dispatch,commit,blob)=row.map_err(storage)?;let mut value:Value=serde_json::from_str(&raw).map_err(json)?;
-        value["dispatch_identity"]=dispatch.into();value["ledger_commit"]=commit.into();value["source_blob"]=blob.into();Ok(value)}).collect()
+        "SELECT r.record_json,r.dispatch_identity,r.ledger_commit,r.source_blob,s.source_path
+         FROM response_records r
+         JOIN inflight_sources s ON s.dispatch_identity=r.dispatch_identity AND s.source_slug=r.source_identity
+         WHERE r.state IN ('pending','written') ORDER BY r.updated_at,r.result_identity").map_err(storage)?;
+    let rows=statement.query_map([],|row|Ok((row.get::<_,String>(0)?,row.get::<_,String>(1)?,row.get::<_,String>(2)?,row.get::<_,String>(3)?,row.get::<_,String>(4)?))).map_err(storage)?;
+    rows.map(|row|{let (raw,dispatch,commit,blob,path)=row.map_err(storage)?;let mut value:Value=serde_json::from_str(&raw).map_err(json)?;
+        value["dispatch_identity"]=dispatch.into();value["ledger_commit"]=commit.into();value["source_blob"]=blob.into();value["source_path"]=path.into();Ok(value)}).collect()
 }
 
 pub fn require_pending(db:&Database,result:&str,source:&str)->ServiceResult<(String,String,String,String,Option<String>,Option<String>,Option<String>,Option<String>)> {

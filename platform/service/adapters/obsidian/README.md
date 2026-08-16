@@ -1,12 +1,12 @@
 # Obsidian Adapter Contract
 
 Obsidian is the first AutoScribe frontend. This directory records the boundary;
-it intentionally contains no JavaScript implementation yet.
+the implementation lives in the separate control package.
 
 The adapter may:
 
 - open a modal or dashboard panel;
-- collect file, plan, and user-decision selections;
+- collect file and plan selections;
 - invoke one Rust service command or query;
 - display typed views, notices, warnings, links, and errors;
 - launch long-running service work without keeping a modal open.
@@ -29,13 +29,12 @@ The adapter must not:
 | --- | --- | --- |
 | Library State | catalog and instruction queries; upload command | local/server state and notices |
 | Define Plan | plan list/get/save and catalog queries | titles, validation, saved identity |
-| Dispatch Run | file/plan validation then dispatch command | accepted notice and dispatch identity |
-| Write Responses | pending-result query then write command | conflicts or committed wikilinks |
+| Dispatch Run | plan slug and document-slug manifest | dispatch receipt |
+| Write Responses | one automatic write command | NDJSON checkpoint/writeback outcome manifest |
 | File State | file-state query | Git, sync, dispatch, response state |
 | File History | history query plus guarded restore command | versions, runs, writebacks, stash state |
 | System Status | overview and reconciliation queries | pending, uncertain, failed, recovery choices |
 
-The transport is deliberately undecided. A CLI/subprocess protocol is the
-natural first choice for existing Obsidian macros. Unix sockets or another IPC
-transport can be introduced later without altering commands, queries, or domain
-state transitions.
+The adapter invokes the `svc` subprocess in the vault working directory. Cargo
+output is resolved outside the source tree. This transport does not move Git or
+writeback policy into JavaScript.

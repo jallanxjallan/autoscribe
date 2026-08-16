@@ -57,6 +57,7 @@ pub enum NoticeKind {
 pub enum CommitPurpose {
     Version,
     Lock,
+    WritebackCheckpoint,
     DispatchWriteback,
     Restore,
 }
@@ -149,27 +150,6 @@ pub struct VersionRequest {
 pub struct RestoreRequest {
     pub version: VersionRequest,
     pub confirmation: String,
-}
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct DispatchSource {
-    pub slug: String,
-    pub path: PathBuf,
-}
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct PrepareSavedDispatchRequest {
-    pub dispatch: DispatchId,
-    pub plan: PlanId,
-    pub plan_version: String,
-    pub records: Vec<DispatchSource>,
-    pub payload: Vec<u8>,
-    pub payload_sha256: String,
-    pub commit_message: String,
-}
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct PreparedDispatch {
-    pub dispatch: DispatchId,
-    pub ledger: LedgerSnapshot,
-    pub payload_sha256: String,
 }
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct SyncRequest {

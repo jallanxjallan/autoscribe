@@ -8,9 +8,14 @@ use std::{
     time::{SystemTime, UNIX_EPOCH},
 };
 use serde::{Deserialize, Serialize};
+use serde_json::json;
 
 const GIT: &str = "/usr/bin/git";
 const INFLIGHT_REF: &str = "refs/heads/autoscribe/inflight";
+
+pub fn root(path: &Path) -> ServiceResult<PathBuf> {
+    repository_root(path)
+}
 
 pub fn head(repo: &Path) -> ServiceResult<CommitId> {
     let repo = repository_root(repo)?;
@@ -28,6 +33,42 @@ pub fn current_branch(repo: &Path) -> ServiceResult<String> {
         ));
     }
     Ok(branch)
+}
+
+pub fn summary(repo: &Path) -> ServiceResult<serde_json::Value> {
+    let repo = repository_root(repo)?;
+    let branch = text(&git(&repo, ["branch", "--show-current"])?).trim().to_string();
+    let branch_label = if branch.is_empty() {
+        "detached HEAD".to_string()
+    } else {
+        branch
+    };
+    let porcelain = text(&git(&repo, ["status", "--porcelain=v1"])?);
+    let mut staged = 0;
+    let mut modified = 0;
+    let mut untracked = 0;
+    let mut conflicted = 0;
+    for line in porcelain.lines().filter(|line| line.len() >= 2) {
+        let code = &line[..2];
+        if code == "??" { untracked += 1; continue; }
+        if code.as_bytes()[0] != b' ' { staged += 1; }
+        if code.as_bytes()[1] != b' ' { modified += 1; }
+        if matches!(code, "DD" | "AU" | "UD" | "UA" | "DU" | "AA" | "UU") { conflicted += 1; }
+    }
+    let latest_output = git_status_output(&repo, ["log", "-1", "--format=%h%x09%cr%x09%s"])?;
+    let latest = if latest_output.status.success() {
+        text(&latest_output).trim().to_string()
+    } else {
+        String::new()
+    };
+    let upstream = git_status_output(&repo, ["rev-list", "--left-right", "--count", "@{upstream}...HEAD"])?;
+    let (behind, ahead) = if upstream.status.success() {
+        let values = text(&upstream).split_whitespace().filter_map(|value| value.parse::<u64>().ok()).collect::<Vec<_>>();
+        (values.first().copied(), values.get(1).copied())
+    } else { (None, None) };
+    Ok(json!({"root":repo,"branch":branch_label,
+        "latest":latest,"ahead":ahead,"behind":behind,"staged":staged,"modified":modified,
+        "untracked":untracked,"conflicted":conflicted}))
 }
 
 pub fn inspect(repo: &Path, paths: &[PathBuf]) -> ServiceResult<Vec<FileStatus>> {
@@ -49,6 +90,7 @@ pub fn inspect(repo: &Path, paths: &[PathBuf]) -> ServiceResult<Vec<FileStatus>>
 
 pub fn commit(repo: &Path, request: CommitRequest) -> ServiceResult<CommitId> {
     let repo = repository_root(repo)?;
+    let allow_empty = request.purpose == CommitPurpose::DispatchWriteback;
     if request.paths.is_empty() {
         return Err(ServiceError::InvalidInput(
             "commit requires at least one path".into(),
@@ -73,12 +115,12 @@ pub fn commit(repo: &Path, request: CommitRequest) -> ServiceResult<CommitId> {
     ];
     changed.extend(paths.iter().cloned());
     let status = git_status(&repo, changed)?;
-    if status.success() {
+    if status.success() && !allow_empty {
         return Err(ServiceError::Conflict(
             "selected paths have no changes to commit".into(),
         ));
     }
-    if status.code() != Some(1) {
+    if !status.success() && status.code() != Some(1) {
         return Err(ServiceError::Io(
             "could not inspect staged Git changes".into(),
         ));
@@ -94,6 +136,9 @@ pub fn commit(repo: &Path, request: CommitRequest) -> ServiceResult<CommitId> {
         purpose,
         "--".into(),
     ];
+    if allow_empty {
+        args.insert(2, "--allow-empty".into());
+    }
     args.extend(paths);
     git(&repo, args)?;
     Ok(CommitId(revision(&repo, "HEAD")?))
@@ -467,6 +512,7 @@ fn purpose_name(purpose: &CommitPurpose) -> &'static str {
     match purpose {
         CommitPurpose::Version => "version",
         CommitPurpose::Lock => "lock",
+        CommitPurpose::WritebackCheckpoint => "writeback-checkpoint",
         CommitPurpose::DispatchWriteback => "dispatch-writeback",
         CommitPurpose::Restore => "restore",
     }

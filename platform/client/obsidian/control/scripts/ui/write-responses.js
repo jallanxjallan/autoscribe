@@ -1,16 +1,96 @@
 "use strict";
-const nodeRequire=typeof require==="function"?require:window.require,path=nodeRequire("node:path"),os=nodeRequire("node:os");
-async function renderWriteResponses({app,container}){
- const root=app.vault.adapter.getBasePath?.()||app.vault.adapter.basePath,load=relative=>nodeRequire(path.join(root,"_control",...relative.split("/")));
- const {element:el,renderDiff}=load("scripts/lib/diff-view.js"),{notify}=load("scripts/lib/notify.js"),transport=load("scripts/lib/dispatch-service.js");
- const database=process.env.AUTOSCRIBE_DATABASE||path.join(os.homedir(),".local/share/autoscribe/service.sqlite"),state={busy:false,responses:[],selected:"",error:"",notice:"Retrieving pending responses…"};
- async function service(command,input){const executable=transport.serviceCommand(app),result=await transport.run(executable.command,[...executable.prefix,command],{cwd:root,input:JSON.stringify(input)}),output=JSON.parse(String(result.stdout||"{}").trim()||"{}");if(!output.ok)throw new Error(output.error||`${command} failed`);return output;}
- function sourceFile(identity){return app.vault.getMarkdownFiles().find(file=>String(app.metadataCache.getFileCache(file)?.frontmatter?.slug||"").trim()===identity)||null;}
- function split(text){const match=String(text).match(/^(---\r?\n[\s\S]*?\r?\n---\r?\n?)([\s\S]*)$/);if(!match)throw new Error("Source file has no frontmatter to preserve");return{frontmatter:match[1],body:match[2]};}
- function responseBody(text){return String(text||"").replace(/^---\r?\n[\s\S]*?\r?\n---\r?\n?/,"").replace(/^\s+/,"");}
- function acceptedText(source,response){const parts=split(source);let frontmatter=parts.frontmatter;if(/^action\s*:/m.test(frontmatter))frontmatter=frontmatter.replace(/^action\s*:.*$/m,"action: human-review");else frontmatter=frontmatter.replace(/---\r?\n?$/,"action: human-review\n---\n");return frontmatter+responseBody(response);}
- async function decide(outcome,records){if(state.busy||!records.length)return;state.busy=true;state.error="";render();let completed=0;try{for(const record of records){const file=sourceFile(record.source_identity);if(!file)throw new Error(`Current vault file not found for ${record.source_identity}`);const source=await app.vault.read(file);await service("response-decide",{version:1,database_path:database,repository_path:root,result_identity:record.result_identity,source_identity:record.source_identity,source_path:outcome==="accepted"?file.path:null,outcome,replacement_text:outcome==="accepted"?acceptedText(source,record.content):null});completed++;}state.responses=state.responses.filter(item=>!records.some(done=>done.result_identity===item.result_identity));state.selected=state.responses[0]?.result_identity||"";state.notice=`${completed} response${completed===1?"":"s"} ${outcome}.`;notify(state.notice);}catch(error){state.error=`${completed} completed before failure: ${error.message||error}`;notify(`Response decision failed: ${state.error}`,10000);}finally{state.busy=false;render();}}
- function render(){container.replaceChildren();container.appendChild(el("p",{},"Accept preserves raw frontmatter, replaces the Markdown body, commits the file, and acknowledges the server result. Decline acknowledges the result without changing the file."));const toolbar=el("div",{style:"display:flex;gap:.5em;flex-wrap:wrap;margin-bottom:.8em;"});const select=el("select",{disabled:state.busy||!state.responses.length});for(const record of state.responses){const file=sourceFile(record.source_identity),option=el("option",{value:record.result_identity},`${record.source_identity} — ${file?.path||"missing file"}`);if(record.result_identity===state.selected)option.selected=true;select.appendChild(option);}select.onchange=()=>{state.selected=select.value;render();};toolbar.append(select,el("button",{disabled:state.busy||!state.responses.length,onclick:()=>decide("accepted",state.responses)},"Accept All"),el("button",{disabled:state.busy||!state.responses.length,onclick:()=>decide("declined",state.responses)},"Decline All"));container.appendChild(toolbar);if(state.error)container.appendChild(el("pre",{style:"white-space:pre-wrap"},state.error));if(state.notice)container.appendChild(el("p",{},state.notice));if(!state.responses.length)return;const record=state.responses.find(item=>item.result_identity===state.selected)||state.responses[0],file=sourceFile(record.source_identity);if(!file){container.appendChild(el("p",{},`Missing current file for ${record.source_identity}`));return;}app.vault.read(file).then(source=>{if(!container.isConnected)return;const parts=split(source),response=responseBody(record.content);renderDiff(container,{source_path:file.path,source_body:parts.body,response_body:response});const actions=el("div",{style:"display:flex;gap:.75em;margin-top:1em;"});actions.append(el("button",{disabled:state.busy,onclick:()=>decide("accepted",[record])},"Accept overwrite"),el("button",{disabled:state.busy,onclick:()=>decide("declined",[record])},"Decline overwrite"));container.appendChild(actions);}).catch(error=>{state.error=error.message||String(error);});}
- render();try{const output=await service("responses-snapshot",{version:1,database_path:database,repository_path:root});state.responses=output.responses||[];state.selected=state.responses[0]?.result_identity||"";state.notice=state.responses.length?`${state.responses.length} pending response${state.responses.length===1?"":"s"}.`:"No downloaded responses await a decision.";}catch(error){state.error=error.message||String(error);state.notice="Result retrieval failed.";}render();
+
+const nodeRequire = typeof require === "function" ? require : window.require;
+const path = nodeRequire("node:path");
+
+async function renderWriteResponses({ app, container }) {
+  const root = app.vault.adapter.getBasePath?.() || app.vault.adapter.basePath;
+  const load = (relative) => nodeRequire(path.join(root, "_control", ...relative.split("/")));
+  const { notify } = load("scripts/lib/notify.js");
+  const transport = load("scripts/lib/dispatch-service.js");
+  const state = { busy: false, rows: [], error: "", message: "" };
+
+  function parseNdjson(text) {
+    return String(text || "").split(/\r?\n/).map((line) => line.trim()).filter(Boolean)
+      .map((line, index) => {
+        try { return JSON.parse(line); }
+        catch (error) { throw new Error(`Invalid writeback manifest on line ${index + 1}: ${error.message}`); }
+      });
+  }
+
+  function short(value) {
+    const text = String(value || "");
+    return text ? text.slice(0, 8) : "—";
+  }
+
+  function render() {
+    container.replaceChildren();
+    container.createEl("h2", { text: "Write Responses" });
+    container.createEl("p", {
+      text: "Rust checkpoints dirty targets, overwrites pending responses, marks them needs-review / ai, and commits each writeback.",
+    });
+    const toolbar = container.createEl("div");
+    toolbar.style.cssText = "display:flex;gap:.6rem;align-items:center;margin:.6rem 0 1rem";
+    const runButton = toolbar.createEl("button", { text: state.busy ? "Writing…" : "Write Responses", cls: "mod-cta" });
+    runButton.disabled = state.busy;
+    runButton.onclick = runWritebacks;
+    toolbar.createSpan({ text: state.message });
+    if (state.error) {
+      const error = container.createEl("pre", { text: state.error });
+      error.style.whiteSpace = "pre-wrap";
+    }
+    if (!state.rows.length) return;
+    const table = container.createEl("table");
+    table.style.width = "100%";
+    const head = table.createEl("tr");
+    for (const label of ["Document", "Path", "Outcome", "Checkpoint", "Writeback commit", "Properties"]) {
+      head.createEl("th", { text: label });
+    }
+    for (const row of state.rows) {
+      const tr = table.createEl("tr");
+      tr.createEl("td", { text: row.source_identity || "—" });
+      const pathCell = tr.createEl("td");
+      if (row.path) {
+        const link = pathCell.createEl("a", { text: row.path, href: "#" });
+        link.onclick = (event) => { event.preventDefault(); app.workspace.openLinkText(row.path, "", false); };
+      } else pathCell.setText("—");
+      const outcome = row.status === "committed" ? "Committed" : `Failed: ${row.error || "unknown error"}`;
+      tr.createEl("td", { text: outcome });
+      tr.createEl("td", { text: short(row.checkpoint_commit) });
+      tr.createEl("td", { text: short(row.commit) });
+      tr.createEl("td", { text: row.status === "committed" ? "status: needs-review · producer: ai" : "—" });
+    }
+  }
+
+  async function runWritebacks() {
+    if (state.busy) return;
+    state.busy = true;
+    state.error = "";
+    state.message = "Retrieving and writing pending responses…";
+    render();
+    notify("Writing pending responses…");
+    try {
+      const response = await transport.serviceCall(app, "write-responses", { version: 1 });
+      state.rows = parseNdjson(response.stdout).filter((row) => row.type === "writeback-result");
+      const committed = state.rows.filter((row) => row.status === "committed").length;
+      const failed = state.rows.length - committed;
+      state.message = state.rows.length
+        ? `${committed} committed${failed ? `; ${failed} failed` : ""}.`
+        : "No pending responses.";
+      notify(`Write Responses complete: ${state.message}`, failed ? 10000 : 6000);
+    } catch (error) {
+      state.rows = [];
+      state.error = error.message || String(error);
+      state.message = "Write Responses failed.";
+      notify(`${state.message} ${state.error}`, 10000);
+    } finally {
+      state.busy = false;
+      render();
+    }
+  }
+
+  render();
+  await runWritebacks();
 }
-module.exports={renderWriteResponses};
+
+module.exports = { renderWriteResponses };

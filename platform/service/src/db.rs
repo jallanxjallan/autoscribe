@@ -171,6 +171,16 @@ pub fn ensure_terminal_ready(db: &Database, dispatch: &str) -> ServiceResult<()>
     Ok(())
 }
 
+pub fn system_counts(db: &Database) -> ServiceResult<serde_json::Value> {
+    let scalar = |sql: &str| db.connection().query_row(sql, [], |row| row.get::<_, i64>(0)).map_err(storage);
+    Ok(serde_json::json!({
+        "active_dispatches":scalar("SELECT count(*) FROM inflight_dispatches")?,
+        "pending_responses":scalar("SELECT count(*) FROM response_records")?,
+        "pending_uploads":scalar("SELECT count(*) FROM sync_outbox WHERE state='pending'")?,
+        "uncertain_uploads":scalar("SELECT count(*) FROM sync_outbox WHERE state='uncertain'")?
+    }))
+}
+
 fn storage(error: rusqlite::Error) -> ServiceError {
     ServiceError::Storage(error.to_string())
 }

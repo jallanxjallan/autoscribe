@@ -1,12 +1,156 @@
 "use strict";
-const crypto=require("node:crypto"),fs=require("node:fs"),os=require("node:os"),path=require("node:path");
-const {spawn}=require("node:child_process");
-function vaultRoot(app){const root=app?.vault?.adapter?.getBasePath?.()||app?.vault?.adapter?.basePath;if(!root)throw new Error("Obsidian vault adapter does not expose its base path");return path.resolve(root);}
-function autoscribeRoot(app){if(process.env.AUTOSCRIBE_ROOT)return path.resolve(process.env.AUTOSCRIBE_ROOT);return path.resolve(fs.realpathSync(path.join(vaultRoot(app),"_control")),"../../../..");}
-function serviceCommand(app){const root=autoscribeRoot(app),explicit=process.env.SVC_BIN,release=path.join(root,"platform/service/target/release/svc"),debug=path.join(root,"platform/service/target/debug/svc");if(explicit)return{command:explicit,prefix:[]};const manifest=path.join(root,"platform/service/Cargo.toml"),source=path.join(root,"platform/service/src/main.rs");for(const candidate of [release,debug]){if(fs.existsSync(candidate)&&fs.statSync(candidate).mtimeMs>=fs.statSync(source).mtimeMs)return{command:candidate,prefix:[]};}const cargo=path.join(os.homedir(),".cargo/bin/cargo");return{command:fs.existsSync(cargo)?cargo:"cargo",prefix:["run","--quiet","--manifest-path",manifest,"--bin","svc","--"]};}
-function run(command,args,{cwd,input=""}={}){return new Promise((resolve,reject)=>{const child=spawn(command,args,{cwd,env:process.env,shell:false,stdio:["pipe","pipe","pipe"]});let stdout="",stderr="";child.stdout.on("data",c=>stdout+=c);child.stderr.on("data",c=>stderr+=c);child.once("error",reject);child.once("close",status=>status===0?resolve({stdout,stderr}):reject(new Error((stderr||stdout||`exit status ${status}`).trim())));child.stdin.end(input);});}
-async function convertOne(app,relativePath){const root=vaultRoot(app),source=path.resolve(root,relativePath);if(path.relative(root,source).startsWith(".."))throw new Error(`Dispatch path is outside vault: ${relativePath}`);const filter=path.join(autoscribeRoot(app),"platform/pandoc/filters/emit/emit_ndjson.lua"),pandoc=process.env.PANDOC_BIN||"/usr/bin/pandoc";const result=await run(pandoc,[source,"--from=markdown+yaml_metadata_block+fenced_divs",`--lua-filter=${filter}`,"--to=native","--output=/dev/null"],{cwd:root});const line=result.stdout.split(/\r?\n/).find(v=>v.trim().startsWith("{"));if(!line)throw new Error(`Pandoc emitted no NDJSON record for ${relativePath}`);const record=JSON.parse(line),slug=String(record.record_identity||"").trim();if(!slug)throw new Error(`Pandoc record is missing record_identity: ${relativePath}`);return{relativePath,slug,record};}
-function canonicalPayload(converted,plan){const calls=converted.map(({relativePath,slug,record})=>({type:"call",identity:slug,content:String(record.payload?.content||""),extra:{filename_hint:path.basename(relativePath),source_path:relativePath,metadata:Object.fromEntries(Object.entries(record.payload||{}).filter(([key])=>key!=="content"))}}));const enqueue=converted.map(({slug,record})=>{const row={call:slug,plan};if(typeof record.directive==="string"&&record.directive.trim())row.directive=record.directive.trim();return row;});return JSON.stringify({version:1,calls,enqueue})+"\n";}
-async function prepareDispatch(app,{paths,plan,planVersion,message}){const root=vaultRoot(app),selected=[...new Set(paths.map(String))].sort();if(!selected.length)throw new Error("Dispatch requires selected files");const converted=await Promise.all(selected.map(p=>convertOne(app,p))),payload=canonicalPayload(converted,plan),dispatch=`run-${crypto.randomUUID()}`;const request={version:1,database_path:process.env.AUTOSCRIBE_DATABASE||path.join(os.homedir(),".local/share/autoscribe/service.sqlite"),repository_path:root,dispatch,plan,plan_version:String(planVersion||plan),records:converted.map(({relativePath,slug})=>({slug,path:relativePath})),payload,payload_sha256:crypto.createHash("sha256").update(payload).digest("hex"),commit_message:String(message||"").trim()||`DISPATCH SOURCE ${plan}: ${dispatch}`};const executable=serviceCommand(app),response=await run(executable.command,[...executable.prefix,"dispatch-prepare"],{cwd:root,input:JSON.stringify(request)}),output=JSON.parse(response.stdout.trim()||"{}");if(!output.ok)throw new Error(output.error||"Rust dispatch preparation failed");return{...output,count:converted.length};}
-async function runDispatch(app,{paths,plan}){const root=vaultRoot(app),selected=[...new Set(paths.map(String))].sort();if(!selected.length)throw new Error("Dispatch requires selected files");const packageRoot=autoscribeRoot(app),request={version:1,database_path:process.env.AUTOSCRIBE_DATABASE||path.join(os.homedir(),".local/share/autoscribe/service.sqlite"),repository_path:root,pandoc_binary:path.resolve(process.env.PANDOC_BIN||"/usr/bin/pandoc"),pandoc_filter:path.join(packageRoot,"platform/pandoc/filters/emit/emit_ndjson.lua"),pandoc_parallelism:Math.max(2,Number(process.env.AUTOSCRIBE_PANDOC_PARALLELISM)||os.cpus().length),plan:String(plan||"").trim(),paths:selected};const executable=serviceCommand(app),response=await run(executable.command,[...executable.prefix,"dispatch-run"],{cwd:root,input:JSON.stringify(request)}),output=JSON.parse(response.stdout.trim()||"{}");if(!output.ok)throw new Error(output.error||"Rust dispatch run failed");return output;}
-module.exports={canonicalPayload,prepareDispatch,runDispatch,run,serviceCommand};
+
+const fs = require("node:fs");
+const os = require("node:os");
+const path = require("node:path");
+const { spawn } = require("node:child_process");
+
+function vaultRoot(app) {
+  const root = app?.vault?.adapter?.getBasePath?.() || app?.vault?.adapter?.basePath;
+  if (!root) throw new Error("Obsidian vault adapter does not expose its base path");
+  return path.resolve(root);
+}
+
+function autoscribeRoot(app) {
+  if (process.env.AUTOSCRIBE_ROOT) return path.resolve(process.env.AUTOSCRIBE_ROOT);
+  let candidate = fs.realpathSync(path.join(vaultRoot(app), "_control"));
+  for (let depth = 0; depth < 8; depth += 1) {
+    if (fs.existsSync(path.join(candidate, "platform", "service", "Cargo.toml"))) return candidate;
+    const parent = path.dirname(candidate);
+    if (parent === candidate) break;
+    candidate = parent;
+  }
+  throw new Error("Could not locate the AutoScribe source root; set AUTOSCRIBE_ROOT");
+}
+
+function cargoTargetDir() {
+  return path.resolve(
+    process.env.AUTOSCRIBE_CARGO_TARGET_DIR ||
+    path.join(os.homedir(), ".cache", "autoscribe", "cargo", "service")
+  );
+}
+
+function newestServiceSourceMtime(serviceRoot) {
+  let newest = 0;
+  const visit = (directory) => {
+    for (const entry of fs.readdirSync(directory, { withFileTypes: true })) {
+      const file = path.join(directory, entry.name);
+      if (entry.isDirectory()) visit(file);
+      else if (entry.isFile() && entry.name.endsWith(".rs")) {
+        newest = Math.max(newest, fs.statSync(file).mtimeMs);
+      }
+    }
+  };
+  visit(path.join(serviceRoot, "src"));
+  for (const name of ["Cargo.toml", "Cargo.lock"]) {
+    const file = path.join(serviceRoot, name);
+    if (fs.existsSync(file)) newest = Math.max(newest, fs.statSync(file).mtimeMs);
+  }
+  return newest;
+}
+
+function serviceCommand(app) {
+  const root = autoscribeRoot(app);
+  const explicit = process.env.SVC_BIN;
+  if (explicit) return { command: explicit, prefix: [] };
+
+  const target = cargoTargetDir();
+  const serviceRoot = path.join(root, "platform", "service");
+  const sourceMtime = newestServiceSourceMtime(serviceRoot);
+  for (const profile of ["release", "debug"]) {
+    const candidate = path.join(target, profile, "svc");
+    if (!fs.existsSync(candidate)) continue;
+    if (fs.statSync(candidate).mtimeMs >= sourceMtime) {
+      return { command: candidate, prefix: [] };
+    }
+  }
+
+  const cargo = path.join(os.homedir(), ".cargo", "bin", "cargo");
+  const executable = fs.existsSync(cargo) ? cargo : "cargo";
+  const manifest = path.join(serviceRoot, "Cargo.toml");
+  return {
+    command: "/usr/bin/env",
+    prefix: [
+      `CARGO_TARGET_DIR=${target}`,
+      executable,
+      "run",
+      "--quiet",
+      "--manifest-path",
+      manifest,
+      "--bin",
+      "svc",
+      "--",
+    ],
+  };
+}
+
+function run(command, args, { cwd, input = "", env = {} } = {}) {
+  return new Promise((resolve, reject) => {
+    const child = spawn(command, args, {
+      cwd,
+      env: { ...process.env, ...env },
+      shell: false,
+      stdio: ["pipe", "pipe", "pipe"],
+    });
+    let stdout = "";
+    let stderr = "";
+    child.stdout.on("data", (chunk) => { stdout += chunk; });
+    child.stderr.on("data", (chunk) => { stderr += chunk; });
+    child.once("error", reject);
+    child.once("close", (status) => {
+      if (status === 0) resolve({ stdout, stderr });
+      else reject(new Error((stderr || stdout || `exit status ${status}`).trim()));
+    });
+    child.stdin.end(input);
+  });
+}
+
+function serviceEnvironment(app) {
+  const root = autoscribeRoot(app);
+  return {
+    AUTOSCRIBE_DATABASE:
+      process.env.AUTOSCRIBE_DATABASE ||
+      path.join(os.homedir(), ".local", "share", "autoscribe", "service.sqlite"),
+    AUTOSCRIBE_PANDOC_FILTER:
+      process.env.AUTOSCRIBE_PANDOC_FILTER ||
+      path.join(root, "platform", "pandoc", "filters", "emit", "emit_ndjson.lua"),
+    AUTOSCRIBE_PANDOC_PARALLELISM: String(
+      Math.max(2, Number(process.env.AUTOSCRIBE_PANDOC_PARALLELISM) || os.cpus().length)
+    ),
+    PANDOC_BIN: path.resolve(process.env.PANDOC_BIN || "/usr/bin/pandoc"),
+  };
+}
+
+async function serviceCall(app, command, input) {
+  const root = vaultRoot(app);
+  const executable = serviceCommand(app);
+  return run(executable.command, [...executable.prefix, command], {
+    cwd: root,
+    input: JSON.stringify(input),
+    env: serviceEnvironment(app),
+  });
+}
+
+async function runDispatch(app, { documents, plan }) {
+  const selected = [...new Set((documents || []).map(String).map((value) => value.trim()).filter(Boolean))].sort();
+  if (!selected.length) throw new Error("Dispatch requires document slugs");
+  const response = await serviceCall(app, "dispatch-run", {
+    version: 1,
+    plan: String(plan || "").trim(),
+    documents: selected,
+  });
+  const output = JSON.parse(response.stdout.trim() || "{}");
+  if (!output.ok) throw new Error(output.error || "Rust dispatch run failed");
+  return output;
+}
+
+module.exports = {
+  autoscribeRoot,
+  cargoTargetDir,
+  run,
+  runDispatch,
+  serviceCall,
+  serviceCommand,
+  serviceEnvironment,
+  vaultRoot,
+};

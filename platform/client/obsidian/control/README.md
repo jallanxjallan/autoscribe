@@ -8,6 +8,11 @@ This package supports Obsidian Desktop only. It assumes:
 - the vault adapter exposes a local filesystem path; and
 - Node modules and local command-line tools are available inside Obsidian Desktop.
 
+Rust owns every Git operation. Dispatch Run sends only plan/document slugs;
+Write Responses renders the service's NDJSON outcome manifest. If a writeback
+target is dirty, the service checkpoints it before replacing and committing it.
+Obsidian does not inspect or invoke Git directly.
+
 There is no cross-client runtime, browser-only storage path, or alternative UI adapter in this package. A future client should use its own frontend package and call the service boundary independently.
 
 ## Layout
@@ -21,3 +26,7 @@ There is no cross-client runtime, browser-only storage path, or alternative UI a
 - `templates/` and `templater/`: vault note templates and Templater helpers.
 
 Restart Obsidian or reload QuickAdd/Dataview after replacing `_control`, because Node may retain previously loaded modules for the life of the Obsidian process.
+
+Service builds default to `~/.cache/autoscribe/cargo/service`. Override source
+discovery with `AUTOSCRIBE_ROOT`, the target with
+`AUTOSCRIBE_CARGO_TARGET_DIR`, or the executable with `SVC_BIN`.

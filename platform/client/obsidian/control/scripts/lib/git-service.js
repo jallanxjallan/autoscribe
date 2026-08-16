@@ -1,5 +1,5 @@
 "use strict";
-const { run, serviceCommand } = require("./dispatch-service.js");
+const { serviceCall } = require("./dispatch-service.js");
 
 function vaultRoot(app) {
   const root = app?.vault?.adapter?.getBasePath?.() || app?.vault?.adapter?.basePath;
@@ -8,13 +8,8 @@ function vaultRoot(app) {
 }
 
 async function gitFiles(app, action, request = {}) {
-  const root = vaultRoot(app);
-  const executable = serviceCommand(app);
-  const input = { version: 1, repository_path: root, action, ...request };
-  const response = await run(executable.command, [...executable.prefix, "git-files"], {
-    cwd: root,
-    input: JSON.stringify(input),
-  });
+  const input = { version: 1, action, ...request };
+  const response = await serviceCall(app, "git-files", input);
   const output = JSON.parse(response.stdout.trim() || "{}");
   if (!output.ok) throw new Error(output.error || `Rust Git operation failed: ${action}`);
   return output;
