@@ -1,6 +1,6 @@
 "use strict";
 
-const nodeRequire = require;
+const nodeRequire = typeof require === "function" ? require : window.require;
 const pathMod = nodeRequire("node:path");
 const os = nodeRequire("node:os");
 const { spawnSync } = nodeRequire("node:child_process");
@@ -147,6 +147,9 @@ async function renderCreatePlan({ app, container }) {
   const controlVaultRoot = app.vault.adapter.getBasePath?.() || app.vault.adapter.basePath;
   const loadControl = (relativePath) => {
     const implementation = pathMod.join(controlVaultRoot, "_control", ...relativePath.split("/"));
+    if (relativePath === "scripts/lib/control-loader.js") {
+      try { delete nodeRequire.cache[nodeRequire.resolve(implementation)]; } catch (_) {}
+    }
     return nodeRequire(implementation);
   };
   const { notify } = loadControl("scripts/lib/notify.js");

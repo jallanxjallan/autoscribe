@@ -6,7 +6,7 @@ module.exports = async function createEditorialNote(params = {}) {
   const app = params.app || globalThis.app;
   if (!app?.vault || !app?.workspace) throw new Error("Obsidian app object unavailable.");
 
-  const nodeRequire = require;
+  const nodeRequire = typeof require === "function" ? require : window.require;
   const path = nodeRequire("node:path");
   const base = app.vault.adapter.getBasePath?.() || app.vault.adapter.basePath;
   if (!base) throw new Error("Could not determine vault base path.");

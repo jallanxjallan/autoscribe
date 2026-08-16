@@ -1,5 +1,7 @@
 function nodeRequire(name) {
-  return require(name);
+  if (typeof require === "function") return require(name);
+  if (typeof window !== "undefined" && window.require) return window.require(name);
+  throw new Error(`Node module unavailable: ${name}`);
 }
 
 function getVaultBasePath(app) {

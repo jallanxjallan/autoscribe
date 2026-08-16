@@ -1,6 +1,6 @@
 "use strict";
 
-const nodeRequire = require;
+const nodeRequire = typeof require === "function" ? require : window.require;
 const pathMod = nodeRequire("node:path");
 
 const TRANSCLUSION_RE = /!\[\[([^\]]+)\]\]/g;

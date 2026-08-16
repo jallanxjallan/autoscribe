@@ -14,6 +14,13 @@ function loadAnnotations(app) {
     "lib",
     "annotate.js"
   );
+  const electronRequire = globalThis.window?.require;
+
+  if (electronRequire?.cache && electronRequire?.resolve) {
+    delete electronRequire.cache[electronRequire.resolve(modulePath)];
+    return electronRequire(modulePath);
+  }
+
   return require(modulePath);
 }
 

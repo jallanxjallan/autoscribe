@@ -14,6 +14,9 @@ const INLINE_KEYS = Object.freeze([
   { id: "defer", label: "Defer" },
 ]);
 
+// Block callouts and inline highlights use the same editorial keys.
+const ANNOTATION_KEYS = INLINE_KEYS;
+
 const PREVIEW_LIMIT = 120;
 
 function asText(value, fallback = "") {
@@ -37,13 +40,34 @@ function isExcludedFolder(filePath) {
     .some((part) => part.startsWith("_"));
 }
 
-function extractBlock(line) {
-  const match = line.match(/^\s*>\s*\\?\[!block\](?:[+-])?\s+(.+)$/i);
+function annotationKey(value) {
+  const normalized = String(value || "").trim().toLowerCase();
+  return ANNOTATION_KEYS.find(
+    (item) => item.id === normalized || item.label.toLowerCase() === normalized
+  ) || null;
+}
+
+function extractBlock(line, quotedLines = []) {
+  const match = line.match(/^\s*>\s*\\?\[!([^\]]+)\](?:[+-])?\s*(.*)$/i);
   if (!match) return null;
+
+  const key = annotationKey(match[1]);
+  if (!key) return null;
+
+  const message = match[2].trim();
+  const selectedText = quotedLines
+    .map((quoted) => String(quoted).replace(/^\s*>\s?/, ""))
+    .join("\n")
+    .trim();
+  const detail = [message, selectedText].filter(Boolean).join(" — ");
+
   return {
     annotation: "block",
     type: "Block",
-    text: truncateAtWord(match[1]),
+    key: key.id,
+    message,
+    selectedText,
+    text: truncateAtWord(`${key.label}${detail ? `: ${detail}` : ""}`),
   };
 }
 
@@ -51,7 +75,8 @@ function extractInlines(line) {
   return [...line.matchAll(/\[==(.+?)==\]\{([A-Za-z][\w-]*)="((?:\\.|[^"\\])*)"\}/g)]
     .map((match) => {
       const selectedText = match[1].trim();
-      const key = match[2];
+      const key = annotationKey(match[2]);
+      if (!key) return null;
       let message = match[3];
 
       try {
@@ -63,13 +88,13 @@ function extractInlines(line) {
       return {
         annotation: "inline",
         type: "Inline",
-        key,
+        key: key.id,
         message,
         selectedText,
-        text: truncateAtWord(`${key}: ${message} — ${selectedText}`),
+        text: truncateAtWord(`${key.label}: ${message} — ${selectedText}`),
       };
     })
-    .filter((item) => item.selectedText && item.message.trim());
+    .filter((item) => item && item.selectedText && item.message.trim());
 }
 
 function parseLine(line) {
@@ -132,7 +157,21 @@ async function collectAnnotations(app) {
         continue;
       }
 
-      for (const item of parseLine(line)) {
+      const quotedLines = [];
+      for (
+        let bodyIndex = index + 1;
+        bodyIndex < lines.length && /^\s*>/.test(lines[bodyIndex]);
+        bodyIndex += 1
+      ) {
+        quotedLines.push(lines[bodyIndex]);
+      }
+      const block = extractBlock(line, quotedLines);
+
+      const items = [];
+      if (block) items.push(block);
+      items.push(...extractInlines(line));
+
+      for (const item of items) {
         annotations.push({
           ...item,
           path: file.path,
@@ -174,12 +213,15 @@ function quoteLines(text) {
   return String(text).split("\n").map((line) => `> ${line}`.trimEnd()).join("\n");
 }
 
-function block(text, message) {
+function block(text, { key, message }) {
+  const selectedKey = annotationKey(key);
+  if (!selectedKey) throw new Error(`Unsupported block key: ${key}`);
+
   const firstLine = String(message || "").trim();
   if (!firstLine) throw new Error("A block annotation message is required.");
 
   return [
-    `> [!block] ${firstLine}`,
+    `> [!${selectedKey.label}] ${firstLine}`,
     quoteLines(text),
   ].filter(Boolean).join("\n");
 }
@@ -188,15 +230,13 @@ function inline(text, { key, message }) {
   const span = String(text || "");
   if (!span.trim()) throw new Error("Select the text to annotate inline.");
 
-  const attribute = String(key || "").trim();
-  if (!INLINE_KEYS.some((item) => item.id === attribute)) {
-    throw new Error(`Unsupported inline key: ${attribute}`);
-  }
+  const selectedKey = annotationKey(key);
+  if (!selectedKey) throw new Error(`Unsupported inline key: ${key}`);
 
   const value = String(message || "").trim();
   if (!value) throw new Error("An inline annotation message is required.");
 
-  return `[==${span}==]{${attribute}=${JSON.stringify(value)}}`;
+  return `[==${span}==]{${selectedKey.id}=${JSON.stringify(value)}}`;
 }
 
 function directive(instruction) {
@@ -207,6 +247,7 @@ function directive(instruction) {
 
 module.exports = {
   ANNOTATION_TYPES,
+  ANNOTATION_KEYS,
   INLINE_KEYS,
   PREVIEW_LIMIT,
   isExcludedFolder,

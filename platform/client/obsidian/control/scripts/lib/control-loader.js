@@ -9,7 +9,8 @@ const { vaultRoot, statInfo, relpath, gitFileState } = require("./vault-state.js
 
 function getNodeRequire() {
   if (typeof require === "function") return require;
-  throw new Error("Obsidian Desktop Node access is unavailable.");
+  if (typeof window !== "undefined" && typeof window.require === "function") return window.require;
+  throw new Error("Node require is unavailable in this Obsidian context.");
 }
 
 function getVaultBasePath(app) {

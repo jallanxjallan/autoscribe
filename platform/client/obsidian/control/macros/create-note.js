@@ -2,7 +2,7 @@
 
 /*
  * QuickAdd user script for creating a note from an existing template.
- * Uses the Obsidian app, its DOM, and vault-local helpers.
+ * Uses only the app object, browser DOM, and existing vault-local helpers.
  */
 
 const NOTE_GROUPS = [
@@ -66,7 +66,7 @@ module.exports = async function createNote(params = {}) {
     throw new Error("Obsidian app object unavailable.");
   }
 
-  const nodeRequire = require;
+  const nodeRequire = typeof require === "function" ? require : window.require;
   const path = nodeRequire("node:path");
   const base = app.vault.adapter.getBasePath?.() || app.vault.adapter.basePath;
   if (!base) throw new Error("Could not determine vault base path.");

@@ -9,9 +9,7 @@ scope:
 position:
 stage: draft
 status: empty
-action: ai-draft
 origin: human
 producer: human
 synopsis:
-period:
 ---

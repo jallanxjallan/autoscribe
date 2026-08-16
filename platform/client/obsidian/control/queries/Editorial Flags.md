@@ -3,7 +3,7 @@
 ````dataviewjs
 const PREVIEW_LIMIT = 120;
 
-const nodeRequire = require;
+const nodeRequire = typeof require === "function" ? require : window.require;
 const pathMod = nodeRequire("node:path");
 const vaultBasePath = app.vault.adapter.getBasePath?.() || app.vault.adapter.basePath;
 const queryPath = app.workspace.getActiveFile()?.path || "";
