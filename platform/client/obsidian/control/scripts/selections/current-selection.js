@@ -12,8 +12,8 @@ function vaultRoot(app) {
 }
 
 function sessionToken() {
-  if (typeof process !== "undefined" && process?.pid) return `pid-${process.pid}`;
-  return "browser-session";
+  if (!process?.pid) throw new Error("Obsidian Desktop process id is unavailable.");
+  return `pid-${process.pid}`;
 }
 
 function vaultKey(app) {

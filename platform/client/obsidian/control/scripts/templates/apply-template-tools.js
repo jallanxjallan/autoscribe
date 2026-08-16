@@ -81,18 +81,11 @@ async function loadTemplate({ app, templatePath, title, slugPrefix } = {}) {
 
   let parsed = {};
   if (split.hasFrontmatter && split.frontmatter.trim()) {
-    try {
-      const { parseYaml } = require("obsidian");
-      parsed = parseYaml(split.frontmatter) || {};
-    } catch (error) {
-      const cached = app.metadataCache.getFileCache(templateFile)?.frontmatter;
-      if (!cached) {
-        throw new Error(
-          `Could not parse frontmatter from template ${templatePath}: ${error?.message || String(error)}`
-        );
-      }
-      parsed = { ...cached };
+    const cached = app.metadataCache.getFileCache(templateFile)?.frontmatter;
+    if (!cached) {
+      throw new Error(`Obsidian has not indexed the template frontmatter: ${templatePath}`);
     }
+    parsed = { ...cached };
   }
 
   const renderedFrontmatter = renderValue(parsed, { title, slugPrefix });

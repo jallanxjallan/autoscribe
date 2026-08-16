@@ -1,5 +1,5 @@
 "use strict";
-const nodeRequire=typeof require==="function"?require:window.require,path=nodeRequire("node:path"),os=nodeRequire("node:os");
+const nodeRequire=require,path=nodeRequire("node:path"),os=nodeRequire("node:os");
 async function renderWriteResponses({app,container}){
  const root=app.vault.adapter.getBasePath?.()||app.vault.adapter.basePath,load=relative=>nodeRequire(path.join(root,"_control",...relative.split("/")));
  const {element:el,renderDiff}=load("scripts/lib/diff-view.js"),{notify}=load("scripts/lib/notify.js"),transport=load("scripts/lib/dispatch-service.js");

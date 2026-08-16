@@ -6,13 +6,13 @@ cssclasses:
 # Dashboard
 
 ```dataviewjs
-const nodeRequire = typeof require === "function" ? require : window.require;
+const nodeRequire = require;
 const pathMod = nodeRequire("node:path");
 const vaultRoot = app.vault.adapter.getBasePath?.() || app.vault.adapter.basePath;
 const loadControl = (relativePath) => nodeRequire(pathMod.join(vaultRoot, "_control", ...relativePath.split("/")));
 const { openFileInMain } = loadControl("scripts/lib/workspace.js");
 const { readSystemState } = loadControl("scripts/lib/system-state.js");
-const { collectAnnotations } = loadControl("scripts/lib/annotations.js");
+const { collectAnnotations } = loadControl("scripts/lib/annotate.js");
 
 let notify = (message) => new Notice(message);
 try {
@@ -100,12 +100,6 @@ function addCommand(parent, label, macroPath) {
         ...macroPath.split("/")
       );
 
-      try {
-        delete nodeRequire.cache[
-          nodeRequire.resolve(implementation)
-        ];
-      } catch (_) {}
-
       const run = nodeRequire(implementation);
       await run({ app });
     } catch (error) {
@@ -141,7 +135,7 @@ const statusLink = toolbar.createEl("button", {
 });
 statusLink.type = "button";
 statusLink.onclick = () =>
-  openInMain("_control/panels/System Status.md");
+  openInMain("_control/System Status.md");
 
 const refreshStatus = toolbar.createSpan({
   cls: "dashboard-muted dashboard-refresh-status",
@@ -306,7 +300,7 @@ async function renderState({
     addLink(
       pipelineCard,
       "Open diagnostics",
-      "_control/panels/System Status.md"
+      "_control/System Status.md"
     );
 
     completed = true;
@@ -346,7 +340,7 @@ async function renderState({
     addLink(
       pipelineCard,
       "Open diagnostics",
-      "_control/panels/System Status.md"
+      "_control/System Status.md"
     );
 
     refreshStatus.setText("Refresh failed");
@@ -478,11 +472,6 @@ function resolveFolderPath(requestedPath) {
   );
 }
 
-const deprecatedDashboardFiles = new Set([
-  "content index",
-  "content status",
-]);
-
 function addFolder(
   parent,
   title,
@@ -505,12 +494,6 @@ function addFolder(
     .filter(
       (file) =>
         file.parent?.path === folderPath
-    )
-    .filter(
-      (file) =>
-        !deprecatedDashboardFiles.has(
-          file.basename.toLowerCase()
-        )
     )
     .sort((a, b) =>
       a.basename.localeCompare(

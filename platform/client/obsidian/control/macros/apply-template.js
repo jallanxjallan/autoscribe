@@ -7,7 +7,7 @@ async function applyTemplate(params = {}) {
 
   if (!app) throw new Error("Obsidian app object unavailable.");
 
-  const nodeRequire = typeof require === "function" ? require : window.require;
+  const nodeRequire = require;
   const path = nodeRequire("node:path");
   const base = app.vault.adapter.getBasePath?.() || app.vault.adapter.basePath;
   if (!base) throw new Error("Could not determine vault base path.");

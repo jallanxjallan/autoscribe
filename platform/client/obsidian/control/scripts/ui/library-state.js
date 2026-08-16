@@ -13,7 +13,7 @@ module.exports = async function libraryState(params = {}) {
   const app = params.app || globalThis.app;
   if (!app?.vault || !app?.workspace) throw new Error("Obsidian app object unavailable.");
 
-  const nodeRequire = typeof require === "function" ? require : window.require;
+  const nodeRequire = require;
   const fs = nodeRequire("node:fs");
   const path = nodeRequire("node:path");
   const { spawn } = nodeRequire("node:child_process");
@@ -38,9 +38,6 @@ module.exports = async function libraryState(params = {}) {
       globalThis?.Notice,
       globalThis?.window?.Notice,
     ];
-    try {
-      candidates.push(nodeRequire("obsidian")?.Notice);
-    } catch (_) {}
     for (const NoticeClass of candidates) {
       try {
         if (typeof NoticeClass === "function") {

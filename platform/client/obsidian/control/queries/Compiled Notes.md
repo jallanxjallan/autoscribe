@@ -3,10 +3,7 @@
 ````dataviewjs
 
 
-const nodeRequire =
-    typeof require === "function"
-        ? require
-        : window.require;
+const nodeRequire = require;
 
 const pathMod = nodeRequire("path");
 const vaultBasePath =

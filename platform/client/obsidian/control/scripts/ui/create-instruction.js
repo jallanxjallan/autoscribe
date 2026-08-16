@@ -57,11 +57,7 @@ module.exports = async function createInstruction(params = {}) {
 
 function notice(message, timeout = 5000) {
   const text = String(message || "");
-  const nodeRequire = typeof require === "function" ? require : globalThis.window?.require;
   const candidates = [globalThis?.Notice, globalThis?.window?.Notice];
-  try {
-    if (typeof nodeRequire === "function") candidates.push(nodeRequire("obsidian")?.Notice);
-  } catch (_) {}
   for (const NoticeClass of candidates) {
     try {
       if (typeof NoticeClass === "function") {

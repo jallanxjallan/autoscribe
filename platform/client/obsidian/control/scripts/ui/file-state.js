@@ -1,5 +1,5 @@
 "use strict";
-const nodeRequire = typeof require === "function" ? require : window.require;
+const nodeRequire = require;
 const pathMod = nodeRequire("node:path");
 const runtimeApp = globalThis.app;
 const root = runtimeApp.vault.adapter.getBasePath?.() || runtimeApp.vault.adapter.basePath;
