@@ -37,121 +37,17 @@ async function requiredPrompt(api, label) {
   return value.trim() || null;
 }
 
-function frontmatterEndLine(editor) {
-  if (editor.getLine(0).trim() !== "---") return -1;
+function cursorIsInFrontmatter(editor, cursor) {
+  if (editor.getLine(0).trim() !== "---") return false;
 
   for (let line = 1; line < editor.lineCount(); line += 1) {
-    if (editor.getLine(line).trim() === "---") return line;
+    if (editor.getLine(line).trim() === "---") return cursor.line <= line;
   }
 
-  return -1;
+  return true;
 }
 
-function directiveContext(editor) {
-  const cursor = editor.getCursor() || { line: 0, ch: 0 };
-  const offset = editor.posToOffset(cursor);
-  const endLine = frontmatterEndLine(editor);
-
-  return {
-    cursor,
-    endLine,
-    isDirective: offset === 0 || (endLine >= 0 && cursor.line <= endLine),
-  };
-}
-
-function directiveInsertion(editor, context) {
-  if (context.endLine < 0) {
-    return {
-      range: { from: context.cursor, to: context.cursor },
-      prefix: "",
-      suffix: "\n\n",
-    };
-  }
-
-  const nextLine = context.endLine + 1;
-  if (nextLine < editor.lineCount()) {
-    const point = { line: nextLine, ch: 0 };
-    return {
-      range: { from: point, to: point },
-      prefix: "",
-      suffix: "\n\n",
-    };
-  }
-
-  const point = {
-    line: context.endLine,
-    ch: editor.getLine(context.endLine).length,
-  };
-  return {
-    range: { from: point, to: point },
-    prefix: "\n\n",
-    suffix: "",
-  };
-}
-
-function promptDirective() {
-  return new Promise((resolve) => {
-    let finished = false;
-    const overlay = document.body.createDiv({ cls: "modal-container mod-dim" });
-    const background = overlay.createDiv({ cls: "modal-bg" });
-    const modal = overlay.createDiv({ cls: "modal" });
-    const closeButton = modal.createDiv({ cls: "modal-close-button" });
-    const content = modal.createDiv({ cls: "modal-content" });
-
-    modal.setAttribute("role", "dialog");
-    modal.setAttribute("aria-modal", "true");
-    modal.setAttribute("aria-label", "Directive instruction");
-    closeButton.setAttribute("aria-label", "Cancel");
-
-    content.createEl("h2", { text: "Directive" });
-    const textarea = content.createEl("textarea", {
-      attr: {
-        rows: "10",
-        placeholder: "Enter the directive. Enter creates a new line.",
-      },
-    });
-    textarea.style.width = "100%";
-    textarea.style.resize = "vertical";
-
-    const buttons = content.createDiv();
-    buttons.style.cssText = "display:flex;justify-content:flex-end;gap:.5rem;margin-top:1rem";
-    const cancelButton = buttons.createEl("button", { text: "Cancel" });
-    const saveButton = buttons.createEl("button", { text: "Set Directive", cls: "mod-cta" });
-
-    function close(value) {
-      if (finished) return;
-      finished = true;
-      document.removeEventListener("keydown", onKeyDown, true);
-      overlay.remove();
-      resolve(value);
-    }
-
-    function save() {
-      const value = textarea.value.trim();
-      if (!value) {
-        textarea.focus();
-        return;
-      }
-      close(value);
-    }
-
-    function onKeyDown(event) {
-      if (event.key !== "Escape") return;
-      event.preventDefault();
-      event.stopPropagation();
-      close(null);
-    }
-
-    background.addEventListener("click", () => close(null));
-    closeButton.addEventListener("click", () => close(null));
-    cancelButton.addEventListener("click", () => close(null));
-    saveButton.addEventListener("click", save);
-    document.addEventListener("keydown", onKeyDown, true);
-    requestAnimationFrame(() => textarea.focus());
-  });
-}
-
-async function annotateText({ app, quickAddApi, directivePrompt = promptDirective }) {
+async function annotateText({ app, quickAddApi }) {
   if (!quickAddApi?.suggester || !quickAddApi?.inputPrompt) {
     throw new Error("Annotate Text must be run as a QuickAdd macro.");
   }
@@ -180,28 +76,24 @@ async function annotateText({ app, quickAddApi, directivePrompt = promptDirectiv
     range = selectedRange;
     replacement = annotations.inline(selectedText, { key, message });
   } else {
-    const context = directiveContext(editor);
-
-    if (context.isDirective) {
-      const instruction = await directivePrompt();
-      if (!instruction?.trim()) return;
-
-      const insertion = directiveInsertion(editor, context);
-      range = insertion.range;
-      replacement = `${insertion.prefix}${annotations.directive(instruction)}${insertion.suffix}`;
-    } else {
-      const cursorLine = editor.getLine(context.cursor.line);
-      if (!cursorLine.trim()) {
-        new Notice("Place the cursor in a paragraph, at the start of the note, or in its frontmatter.");
-        return;
-      }
-
-      const message = await requiredPrompt(quickAddApi, "Block message");
-      if (!message) return;
-
-      range = annotations.paragraphRange(editor);
-      replacement = annotations.block(editor.getRange(range.from, range.to), message);
+    const cursor = editor.getCursor() || { line: 0, ch: 0 };
+    const cursorLine = editor.getLine(cursor.line);
+    if (!cursorLine.trim() || cursorIsInFrontmatter(editor, cursor)) {
+      new Notice("Place the cursor in a paragraph to add a block annotation.");
+      return;
     }
+
+    const key = await choose(quickAddApi, annotations.INLINE_KEYS, "Block key");
+    if (!key) return;
+
+    const message = await requiredPrompt(quickAddApi, "Block message");
+    if (!message) return;
+
+    range = annotations.paragraphRange(editor);
+    replacement = annotations.block(
+      editor.getRange(range.from, range.to),
+      { key, message }
+    );
   }
 
   editor.replaceRange(replacement, range.from, range.to);
@@ -211,5 +103,3 @@ async function annotateText({ app, quickAddApi, directivePrompt = promptDirectiv
 }
 
 module.exports = annotateText;
-module.exports.directiveContext = directiveContext;
-module.exports.directiveInsertion = directiveInsertion;
