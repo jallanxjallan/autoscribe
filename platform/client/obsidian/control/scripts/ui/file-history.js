@@ -7,6 +7,8 @@ const {el,clear,button}=load("scripts/lib/dom.js");
 const {getFileManifest,appendClipboardCandidates}=load("scripts/lib/file-manifest.js");
 const {history,restoreVersion,listFileStashes,stashCurrent,restoreFileStash,dropFileStash}=load("scripts/lib/file-git-history.js");
 const {notify}=load("scripts/lib/notify.js");
+const {loadConfig}=load("scripts/lib/config-loader.js");
+const ui=()=>loadConfig("ui");
 
 function refSummary(item){
  const exact=item.refs||[]; const transport=item.transport_refs||[]; const parts=[];
@@ -48,7 +50,7 @@ async function renderFileHistory({app,container}){
    status.textContent="Reading this file’s complete Git history across all refs…";
    try{rows=await history(app,file);status.textContent=`${rows.length} distinct file version${rows.length===1?"":"s"} found for ${file}${note?` · ${note}`:""}.`;if(notifyUser)notify(`File history refreshed: ${rows.length} version(s).`);}catch(e){status.textContent=e.message;if(notifyUser)notify(`History refresh failed: ${e.message}`,10000);return;}
    if(!rows.length){host.append(el("p",{text:"Git has no recorded version of this file."}));return;}
-   const table=el("table");table.style.width="100%";const h=el("tr");for(const x of ["Version","When / who","What happened","Change","Git context","Action"])h.append(el("th",{text:x}));table.append(h);
+   const table=el("table");table.style.width="100%";const h=el("tr");for(const x of (ui().file_history_columns || []))h.append(el("th",{text:x}));table.append(h);
    for(const item of rows){
      const b=button(item.is_current_file_version?"Current version":"Replace HEAD file",async()=>restore(item,file));b.disabled=item.is_current_file_version;
      const version=el("div");version.append(el("strong",{text:item.kind}),el("br"),el("code",{text:item.hash.slice(0,10)}));if(item.is_current_file_version)version.append(el("br"),el("span",{text:"Current file version"}));

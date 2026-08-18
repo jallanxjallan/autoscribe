@@ -1,8 +1,6 @@
 # Editorial Notes
 
 ````dataviewjs
-const FOLDER = "Editorial Notes";
-
 const nodeRequire = typeof require === "function" ? require : window.require;
 const pathMod = nodeRequire("node:path");
 const vaultBasePath = app.vault.adapter.getBasePath?.() || app.vault.adapter.basePath;
@@ -18,10 +16,15 @@ const loadControl = (relativePath) => nodeRequire(
   pathMod.join(vaultBasePath, ...controlRoot.split("/").filter(Boolean), ...relativePath.split("/"))
 );
 const { createInternalLink } = loadControl("scripts/lib/internal-link.js");
+const { loadConfig } = loadControl("scripts/lib/config-loader.js");
+const recordsConfig = loadConfig("records");
+const queryConfig = loadConfig("queries").editorial_notes || {};
+const uiConfig = loadConfig("ui");
+const FOLDER = String(recordsConfig.editorial_note?.folder || "Editorial Notes");
 
 const toolbar = dv.container.createDiv();
 toolbar.style.marginBottom = "1rem";
-const createButton = toolbar.createEl("button", { text: "New Editorial Note", cls: "mod-cta" });
+const createButton = toolbar.createEl("button", { text: String(queryConfig.create_label || "New Editorial Note"), cls: "mod-cta" });
 createButton.onclick = async () => {
   createButton.disabled = true;
   try {
@@ -47,7 +50,7 @@ if (!files.length) {
 } else {
   const table = dv.container.createEl("table");
   const head = table.createEl("thead").createEl("tr");
-  for (const label of ["Note", "Action", "Targets", "Status"]) head.createEl("th", { text: label });
+  for (const label of Object.values(queryConfig.columns || {})) head.createEl("th", { text: String(label) });
   const body = table.createEl("tbody");
 
   for (const file of files) {
@@ -55,15 +58,15 @@ if (!files.length) {
     const row = body.createEl("tr");
     const noteCell = row.createEl("td");
     createInternalLink(noteCell, app, file.path, file.basename);
-    row.createEl("td", { text: String(frontmatter.action || "—") });
+    row.createEl("td", { text: String(frontmatter[String(queryConfig.action_property || "action")] || String(uiConfig.missing_value || "—")) });
 
     const targetCell = row.createEl("td");
-    const targets = Array.isArray(frontmatter.targets)
-      ? frontmatter.targets
-      : frontmatter.targets ? [frontmatter.targets] : [];
+    const targets = Array.isArray(frontmatter[String(queryConfig.targets_property || "targets")])
+      ? frontmatter[String(queryConfig.targets_property || "targets")]
+      : frontmatter[String(queryConfig.targets_property || "targets")] ? [frontmatter[String(queryConfig.targets_property || "targets")]] : [];
 
     if (!targets.length) {
-      targetCell.setText("—");
+      targetCell.setText(String(uiConfig.missing_value || "—"));
     } else {
       targets.forEach((target, index) => {
         const raw = String(target?.path || target || "").replace(/^\[\[|\]\]$/g, "");
@@ -72,7 +75,7 @@ if (!files.length) {
       });
     }
 
-    row.createEl("td", { text: String(frontmatter.status || "—") });
+    row.createEl("td", { text: String(frontmatter[String(queryConfig.status_property || "status")] || String(uiConfig.missing_value || "—")) });
   }
 }
 ````

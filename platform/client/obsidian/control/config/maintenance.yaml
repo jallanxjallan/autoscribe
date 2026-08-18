@@ -1,0 +1,14 @@
+# TREE MAINTENANCE
+# ----------------
+# Files listed here are known superseded Control files. The installer extracts
+# the new tree first, then scripts/remove-deprecated.js removes these paths from
+# the installed control root. Add to this list when a later refactor retires a
+# file; remove an entry only if that path becomes live again.
+#
+# Paths are relative to control/. Absolute paths and `..` are rejected by the
+# removal script as a safety guard.
+deprecated_files:
+  # Old duplicate annotation implementation, superseded by lib/annotate.js.
+  - scripts/lib/annotations.js
+  # Old Dataview query, superseded by the List Annotations macro.
+  - queries/Editorial Flags.md

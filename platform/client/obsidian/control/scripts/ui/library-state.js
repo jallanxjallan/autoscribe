@@ -17,10 +17,16 @@ module.exports = async function libraryState(params = {}) {
   const path = nodeRequire("node:path");
 
   const vaultRoot = path.resolve(app.vault.adapter.getBasePath?.() || app.vault.adapter.basePath);
-  const service = nodeRequire(path.join(vaultRoot, "_control", "scripts", "lib", "dispatch-service.js"));
+  const controlLib = path.join(vaultRoot, "_control", "scripts", "lib");
+  const service = nodeRequire(path.join(controlLib, "dispatch-service.js"));
+  const { loadConfig } = nodeRequire(path.join(controlLib, "config-loader.js"));
+  const protocol = loadConfig("protocol");
+  const pathConfig = loadConfig("paths");
 
-  async function callService(command, input = null) {
-    const response = await service.serviceCall(app, command, input || { version: 1 });
+  async function callService(spec, input = null) {
+    const command = String(spec?.command || "");
+    const requestVersion = Number(spec?.request_version);
+    const response = await service.serviceCall(app, command, input || { version: requestVersion });
     const output = JSON.parse(String(response.stdout || "{}").trim() || "{}");
     if (!output.ok) throw new Error(output.error || `${command} failed`);
     return output;
@@ -121,7 +127,7 @@ module.exports = async function libraryState(params = {}) {
   function walkMarkdown(dir, prefix = "") {
     const found = [];
     for (const entry of fs.readdirSync(dir, { withFileTypes: true })) {
-      if (entry.name === ".git" || entry.name === ".obsidian") continue;
+      if ((pathConfig.skip_dirs || []).map(String).includes(entry.name)) continue;
       const relativePath = normalizeRelative(path.posix.join(prefix, entry.name));
       const absolutePath = path.join(dir, entry.name);
       if (entry.isDirectory()) found.push(...walkMarkdown(absolutePath, relativePath));
@@ -149,7 +155,7 @@ module.exports = async function libraryState(params = {}) {
   }
 
   async function readServerInstructions() {
-    const snapshot = await callService("define-plan-snapshot");
+    const snapshot = await callService(protocol.service_operations?.define_plan_snapshot || protocol.define_plan_snapshot);
     return redisInstructionMap(snapshot.server);
   }
 
@@ -174,8 +180,9 @@ module.exports = async function libraryState(params = {}) {
 
   async function uploadInstructions(rows) {
     if (!rows.length) throw new Error("No instruction files selected.");
-    const result = await callService("instructions-sync", {
-      version: 1,
+    const syncSpec = protocol.service_operations?.instructions_sync || {};
+    const result = await callService(syncSpec, {
+      version: Number(syncSpec.request_version),
       root: vaultRoot,
       paths: rows.map((row) => row.relativePath),
     });

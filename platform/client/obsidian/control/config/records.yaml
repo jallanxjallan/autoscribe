@@ -1,0 +1,213 @@
+# NOTE / RECORD DEFINITIONS
+# -------------------------
+# Create Note builds its menu directly from this file. Each entry also owns the
+# defaults applied by Apply Template. Consequently, after editing a value here,
+# newly created notes should immediately use it without editing JavaScript.
+#
+# `group.folder` is the destination folder in the active project vault.
+# `template` is relative to that vault; _control is expected to be the symlink
+# or directory exposing this control tree.
+# `prefix` is the slug prefix.
+# `defaults` are merged into template frontmatter before per-call overrides.
+
+groups:
+  content:
+    label: Content
+    folder: Content
+    initially_open: true
+    choices:
+      passage:
+        label: Passage
+        prefix: psg
+        template: _control/templates/content/passage.md
+        defaults:
+          record: passage
+          component: body
+          topic: []
+          source: []
+          claims: []
+          scope: null
+          position: null
+          # Legacy template values. `draft` and `empty` are outside the new
+          # canonical stage/status lists in vocabulary.yaml. Change them here
+          # when you are ready; the code will follow.
+          stage: draft
+          status: empty
+          origin: human
+          producer: human
+          synopsis: null
+      image:
+        label: Image
+        prefix: img
+        template: _control/templates/content/image.md
+        defaults:
+          record: image
+          component: image
+          topic: []
+          source: []
+          scope: null
+          position: null
+          stage: draft
+          status: empty
+          action: human-source
+          origin: human
+          producer: human
+          assets: []
+      opener:
+        label: Opener
+        prefix: opn
+        template: _control/templates/content/opener.md
+        defaults:
+          record: opener
+          component: section
+          level: null
+          topic: []
+          source: []
+          claims: []
+          scope: null
+          position: 0
+          stage: draft
+          status: empty
+          action: ai-draft
+          origin: human
+          producer: human
+
+  materials:
+    label: Materials
+    folder: Materials
+    initially_open: true
+    choices:
+      topic:
+        label: Topic
+        prefix: tpc
+        template: _control/templates/materials/topic.md
+        defaults:
+          record: topic
+          component: research
+          topic: []
+          source: []
+          scope: null
+          position: null
+          class: topic
+          # Legacy values preserved exactly from the old template. Both are
+          # outside the new canonical vocabulary and are intentionally left for
+          # your manual schema pass.
+          stage: research
+          status: active
+          action: human-research
+          origin: human
+          producer: human
+          tags: []
+      finding:
+        label: Finding
+        prefix: fnd
+        template: _control/templates/materials/finding.md
+        defaults:
+          record: finding
+          component: research
+          class: finding
+          topic: []
+          source: []
+          scope: null
+          position: null
+          # Legacy values preserved for your manual schema pass.
+          stage: research
+          status: imported
+          action: human-verify
+          origin: human
+          producer: human
+          verification_status: pending
+          source_status: unchecked
+          source_topic_file: null
+          source_topic_title: null
+          source_topic_tag: null
+          source_heading: null
+          source_index: null
+          input_sha256: null
+          tags:
+            - finding
+          assets: []
+          created: null
+          updated: null
+
+  instructions:
+    label: Instructions
+    folder: Instructions
+    initially_open: false
+    choices:
+      role:
+        label: Role
+        prefix: rol
+        template: _control/templates/instructions/role.md
+        defaults:
+          record: instruction
+          component: role
+          class: role
+          scope: null
+          action: defer
+          origin: human
+          producer: human
+          dependencies: {}
+          tags: []
+      context:
+        label: Context
+        prefix: ctx
+        template: _control/templates/instructions/context.md
+        defaults:
+          record: instruction
+          component: context
+          class: context
+          scope: null
+          action: defer
+          origin: human
+          producer: human
+          dependencies: {}
+          tags: []
+      reference:
+        label: Reference
+        prefix: ref
+        template: _control/templates/instructions/reference.md
+        defaults:
+          record: instruction
+          component: reference
+          class: reference
+          scope: null
+          action: defer
+          origin: human
+          producer: human
+          dependencies: {}
+          tags: []
+      instruction:
+        label: Instruction
+        prefix: ins
+        template: _control/templates/instructions/instruction.md
+        defaults:
+          record: instruction
+          component: specific
+          class: instruction
+          scope: null
+          action: defer
+          origin: human
+          producer: human
+          role: []
+          context: []
+          specifics: []
+          tags: []
+
+
+editorial_note:
+  # Used by Create Editorial Note. These values were previously hard-coded in
+  # the macro. `open` is not in vocabulary.yaml/status; that mismatch is
+  # preserved so you can resolve it deliberately.
+  folder: Editorial Notes
+  defaults:
+    record: editorial-note
+    action: review
+    status: open
+  dialog:
+    title: New Editorial Note
+    title_placeholder: Compare regional expansion passages
+    action_default: compare
+    # Used if the Action box is deliberately left blank.
+    blank_action_fallback: review
+    clipboard_default: true

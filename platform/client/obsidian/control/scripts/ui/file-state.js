@@ -9,6 +9,9 @@ const { getFileManifest, appendClipboardCandidates } = load("scripts/lib/file-ma
 const { liveState } = load("scripts/lib/file-git-history.js");
 const { gitFiles } = load("scripts/lib/git-service.js");
 const { notify } = load("scripts/lib/notify.js");
+const { loadConfig } = load("scripts/lib/config-loader.js");
+const ui = () => loadConfig("ui");
+const workflow = () => loadConfig("workflow");
 
 async function renderFileState({ app, container }) {
   clear(container);
@@ -24,14 +27,14 @@ async function renderFileState({ app, container }) {
   const host=el("div");
   const commit=el("div"); commit.style.display="grid"; commit.style.gap=".6rem"; commit.style.marginTop="1rem";
   const msg=el("input", { placeholder:"Commit description" });
-  const type=el("select"); type.append(el("option",{value:"version",text:"Version"}),el("option",{value:"lock",text:"Lock"}));
+  const type=el("select"); for (const [value, mode] of Object.entries(workflow().commit?.modes || {})) type.append(el("option",{value,text:String(mode.label || value)}));
   const commitBtn=button("Commit selected files", doCommit); commitBtn.classList.add("mod-cta");
   commit.append(msg,type,commitBtn); container.append(title,toolbar,status,host,commit);
 
   function selected(){ return state.rows.filter(r=>r.checkbox.checked).map(r=>r.item); }
-  function render(){ host.replaceChildren(); const table=el("table"); table.style.width="100%"; const h=el("tr"); for(const x of ["","File","Git state","Latest commit"] ) h.append(el("th",{text:x})); table.append(h);
+  function render(){ host.replaceChildren(); const table=el("table"); table.style.width="100%"; const h=el("tr"); for(const x of (ui().file_state_columns || [])) h.append(el("th",{text:x})); table.append(h);
     for(const row of state.rows){ const tr=el("tr"); const link=el("a",{href:row.item.path,text:row.item.title}); link.onclick=async e=>{e.preventDefault(); const file=app.vault.getAbstractFileByPath(row.item.path); if(!file)return; const leaf=app.workspace.getLeaf("tab"); await leaf.openFile(file,{active:true}); app.workspace.revealLeaf(leaf);};
-      tr.append(el("td",{},row.checkbox),el("td",{},link),el("td",{text:row.git.status}),el("td",{text:row.git.latest_commit?`${row.git.latest_commit.hash.slice(0,8)} · ${row.git.latest_commit.subject}`:"—"})); table.append(tr); }
+      tr.append(el("td",{},row.checkbox),el("td",{},link),el("td",{text:row.git.status}),el("td",{text:row.git.latest_commit?`${row.git.latest_commit.hash.slice(0,8)} · ${row.git.latest_commit.subject}`:String(ui().missing_value || "—")})); table.append(tr); }
     host.append(table); commitBtn.disabled=!selected().length;
   }
   async function refresh(note="") { state.rows=[]; for(const item of manifest.candidates.values()){ try{ state.rows.push({item,git:await liveState(app,item.path),checkbox:el("input",{type:"checkbox"})}); }catch(e){ state.rows.push({item,git:{status:`ERROR: ${e.message}`,latest_commit:null},checkbox:el("input",{type:"checkbox"})}); } }

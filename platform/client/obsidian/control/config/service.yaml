@@ -1,0 +1,58 @@
+# LOCAL RUST SERVICE DISCOVERY / BUILD
+# ------------------------------------
+# These values describe where Control finds/builds the local Rust service.
+# They were previously spread through dispatch-service.js and Define Plan.
+#
+# Environment variable NAMES are configurable too. Existing AutoScribe names
+# are preserved for compatibility; rename only if you also update your shell.
+
+environment:
+  source_root: AUTOSCRIBE_ROOT
+  cargo_target_dir: AUTOSCRIBE_CARGO_TARGET_DIR
+  service_binary: SVC_BIN
+  database: AUTOSCRIBE_DATABASE
+  pandoc_filter: AUTOSCRIBE_PANDOC_FILTER
+  pandoc_parallelism: AUTOSCRIBE_PANDOC_PARALLELISM
+  pandoc_bin: PANDOC_BIN
+
+# Source-tree discovery: walk upward up to root_search_depth looking for the
+# marker, then derive service_relative_path from that root.
+source_root_marker: platform/service/Cargo.toml
+root_search_depth: 8
+service_relative_path: platform/service
+source_dir: src
+source_extension: .rs
+cargo_manifest: Cargo.toml
+
+# Files whose timestamps/content identify the Rust source/build context.
+source_manifest_files:
+  - Cargo.toml
+  - Cargo.lock
+
+build_profiles:
+  - release
+  - debug
+
+# Build/run toolchain. Placeholders in cargo_run_args are expanded by the JS
+# service launcher; keep their braces intact.
+service_binary_name: svc
+cargo_target_default: $HOME/.cache/autoscribe/cargo/service
+cargo_binary: $HOME/.cargo/bin/cargo
+cargo_fallback_command: cargo
+env_command: /usr/bin/env
+cargo_target_runtime_env: CARGO_TARGET_DIR
+
+cargo_run_args:
+  - run
+  - --quiet
+  - --manifest-path
+  - "{manifest}"
+  - --bin
+  - "{binary}"
+  - --
+
+# Runtime defaults used only when the matching environment variable is absent.
+database_default: $HOME/.local/share/autoscribe/service.sqlite
+pandoc_filter_relative: platform/pandoc/filters/emit/emit_ndjson.lua
+pandoc_parallelism_min: 2
+pandoc_bin_default: /usr/bin/pandoc

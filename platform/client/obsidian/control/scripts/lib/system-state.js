@@ -1,11 +1,13 @@
 "use strict";
 
 const { serviceCall } = require("./dispatch-service.js");
+const { loadConfig } = require("./config-loader.js");
 
 async function readSystemState(app) {
   const state = { refreshed_at: new Date().toISOString(), git: null, pipeline: null, errors: {} };
   try {
-    const response = await serviceCall(app, "system-snapshot", { version: 1 });
+    const spec = loadConfig("protocol").service_operations?.system_snapshot || {};
+    const response = await serviceCall(app, String(spec.command), { version: Number(spec.request_version) });
     const output = JSON.parse(String(response.stdout || "{}").trim() || "{}");
     if (!output.ok) throw new Error(output.error || "System snapshot failed");
     state.git = output.git || null;

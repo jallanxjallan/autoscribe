@@ -1,3 +1,4 @@
+const { loadConfig } = require("./config-loader.js");
 function createTopicIndexLogic({ app, dv, pathMod, vaultBasePath, queryPath, config, rg }) {
   if (!app) throw new Error("createTopicIndexLogic requires app.");
   if (!dv) throw new Error("createTopicIndexLogic requires dv.");
@@ -78,7 +79,7 @@ function createTopicIndexLogic({ app, dv, pathMod, vaultBasePath, queryPath, con
     return normalizePath(path)
       .split("/")
       .slice(0, -1)
-      .some(part => part.startsWith("_"));
+      .some(part => part.startsWith(String(loadConfig("paths").excluded_folder_prefix || "_")));
   }
 
   function isExcludedPath(path) {
@@ -302,35 +303,27 @@ function createTopicIndexLogic({ app, dv, pathMod, vaultBasePath, queryPath, con
     const entityRows = uniqueEntityRows(rows);
 
     return {
-      ordering: "kind-title",
+      ordering: String(loadConfig("queries").topic_index?.ordering || "kind-title"),
       slug_prefixes: config.slugPrefixes,
       displayed_count: entityRows.length,
-      topic_count: entityRows.filter(row => row.slug_prefix === "tpc").length,
-      finding_count: entityRows.filter(row => row.slug_prefix === "fnd").length,
+      topic_count: entityRows.filter(row => row.slug_prefix === String(loadConfig("queries").topic_index?.topic_prefix || "tpc")).length,
+      finding_count: entityRows.filter(row => row.slug_prefix === String(loadConfig("queries").topic_index?.finding_prefix || "fnd")).length,
     };
   }
 
   function groupRows(displayedRows) {
     const entityRows = uniqueEntityRows(displayedRows);
 
-    const groups = [
-      {
-        key: "tpc",
-        title: "Topics",
-        rows: entityRows.filter(row => row.slug_prefix === "tpc"),
-      },
-      {
-        key: "fnd",
-        title: "Findings",
-        rows: entityRows.filter(row => row.slug_prefix === "fnd"),
-      },
-    ];
+    const groupConfig = loadConfig("ui").topic_index_groups || {};
+    const groups = Object.entries(groupConfig)
+      .filter(([key]) => key !== "other")
+      .map(([key, title]) => ({ key, title: String(title), rows: entityRows.filter(row => row.slug_prefix === key) }));
 
     const known = new Set(groups.flatMap(group => group.rows.map(row => row.selection_key)));
     const otherRows = entityRows.filter(row => !known.has(row.selection_key));
 
     if (otherRows.length) {
-      groups.push({ key: "other", title: "Other", rows: otherRows });
+      groups.push({ key: "other", title: String(groupConfig.other || "Other"), rows: otherRows });
     }
 
     return groups.filter(group => group.rows.length);
@@ -343,12 +336,12 @@ function createTopicIndexLogic({ app, dv, pathMod, vaultBasePath, queryPath, con
   }
 
   function rgBookmarkPaths(bookmarkId) {
+    const bookmarkGlobs = loadConfig("queries").topic_index?.bookmark_globs || [];
+    const runtimeDir = String(loadConfig("paths").runtime_dir || ".autoscribe");
+    const globArgs = bookmarkGlobs.flatMap((pattern) => ["--glob", String(pattern).replace("{runtime_dir}", runtimeDir)]);
     const lines = rg.rgLines([
       "--files-with-matches",
-      "--glob", "*.md",
-      "--glob", "!.obsidian/**",
-      "--glob", "!.trash/**",
-      "--glob", "!.autoscribe/**",
+      ...globArgs,
       bookmarkId,
       ".",
     ], { cwd: vaultBasePath });

@@ -1,6 +1,18 @@
 "use strict";
 
 const { makeSlug } = require("../lib/slug");
+const { loadConfig } = require("../lib/config-loader");
+
+
+function configDefaultsForTemplate(templatePath) {
+  const groups = loadConfig("records").groups || {};
+  for (const group of Object.values(groups)) {
+    for (const choice of Object.values(group.choices || {})) {
+      if (String(choice.template || "") === String(templatePath || "")) return { ...(choice.defaults || {}) };
+    }
+  }
+  return {};
+}
 
 function splitFrontmatter(markdown) {
   const text = String(markdown || "").replace(/\r\n/g, "\n");
@@ -159,7 +171,9 @@ async function applyTemplateToFile({
     slugPrefix,
   });
 
-  const updates = { ...template.frontmatter, ...frontmatterOverrides };
+  const configDefaults = configDefaultsForTemplate(templatePath);
+  const updates = { ...template.frontmatter, ...configDefaults, ...frontmatterOverrides };
+  if (!updates.slug && slugPrefix) updates.slug = makeSlug(slugPrefix, file.basename);
 
   await app.fileManager.processFrontMatter(file, (frontmatter) => {
     mergeFrontmatter(frontmatter, updates);

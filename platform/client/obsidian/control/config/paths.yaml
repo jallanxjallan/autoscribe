@@ -1,0 +1,72 @@
+# FILESYSTEM / COMMAND PATHS
+# --------------------------
+# Runtime locations and directory names live here. These are intentionally kept
+# separate from record vocabulary so you can reorganize the machine without
+# touching JavaScript.
+#
+# `control_mount` is the name exposed inside each Obsidian vault. It is also the
+# bootstrap name used to find this config loader, so changing it requires first
+# changing/recreating the vault symlink before the new value can be read.
+
+control_root: /home/jeremy/Work/Loom/platform/client/obsidian/control
+control_mount: _control
+# This is the value found in the source tree at refactor time. It still points
+# at the pre-Loom location. Change it here when you decide the new Library path;
+# Control will then follow the config rather than another hard-coded path.
+library_vault: $HOME/Work/AutoScribe/instructions
+
+# Vault-relative runtime/state directories. Renaming these changes where Control
+# reads/writes transient state; it does not migrate an existing directory.
+runtime_dir: .autoscribe
+selection_dir: selections
+workflow_dir: workflow
+query_dir: queries
+template_dir: templates
+
+# Folders beginning with this prefix are ignored by content/annotation scans.
+excluded_folder_prefix: _
+
+skip_dirs:
+  - .git
+  - .obsidian
+  - node_modules
+  - .trash
+
+# Shell/command discovery. Candidate order is preference order.
+shell_candidates:
+  - /bin/zsh
+  - /bin/bash
+preferred_shell: /usr/bin/zsh
+rg_command: rg
+asc_command: asc
+asc_candidate_paths:
+  # `$HOME` is expanded by control-loader.js. Environment ASC_BIN still wins.
+  - $HOME/Python3.13Env/bin/asc
+  - $HOME/.local/bin/asc
+  - /usr/local/bin/asc
+  - /usr/bin/asc
+
+# Compatibility locations retained from older Control layouts. Remove only after
+# you know no project vault still relies on them.
+legacy_query_root: _autoscribe
+
+# Environment-variable NAMES, not their values.
+environment:
+  library_vault: AUTOSCRIBE_LIBRARY_VAULT
+  asc_bin: ASC_BIN
+  rg_primary: OBSIDIAN_RG_BIN
+  rg_secondary: RG_BIN
+
+current_selection_tmp: autoscribe/obsidian/current-selection
+
+clipboard_selection_library_candidates:
+  # Vault-relative candidates used by Add Active File. Keep only paths that are
+  # intentionally supported by the current layout.
+  - _control/scripts/lib/clipboard-selection.js
+
+dashboard_candidates:
+  - _control/Dashboard.md
+  - Dashboard.md
+
+legacy_state_root: $HOME/.local/share/autoscribe/obsidian/vaults
+system_status_dir: system-status

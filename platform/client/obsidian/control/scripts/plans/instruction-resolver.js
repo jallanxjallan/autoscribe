@@ -4,12 +4,11 @@ const path = require("node:path");
 const { getFrontmatterEntry } = require("../lib/frontmatter.js");
 const { normalizeWikiTarget } = require("../lib/wikilinks.js");
 const { vaultRoot } = require("../lib/vault-state.js");
+const { loadConfig } = require("../lib/config-loader.js");
 
-const PROPERTY_SPECS = [
-  { property: "role", payload: "role", prefix: "rol." },
-  { property: "context", payload: "context", prefix: "ctx." },
-  { property: "specifics", payload: "specifics", prefix: "spc." },
-];
+function propertySpecs() {
+  return Object.entries(loadConfig("instructions").resolver_properties || {}).map(([property, item]) => ({ property, ...item }));
+}
 
 function links(value) {
   const values = Array.isArray(value) ? value : value == null || value === "" ? [] : [value];
@@ -57,7 +56,7 @@ function resolveInstructionStack(app, instruction) {
 
   const groups = {};
   const ordered = [];
-  for (const spec of PROPERTY_SPECS) {
+  for (const spec of propertySpecs()) {
     const resolved = links(getFrontmatterEntry(app, taskFile, spec.property))
       .map((target) => resolveLink(app, taskFile, target, spec));
     groups[spec.payload] = uniqueComponents(resolved);
@@ -81,7 +80,7 @@ function resolveInstructionStack(app, instruction) {
 }
 
 module.exports = {
-  PROPERTY_SPECS,
+  PROPERTY_SPECS: propertySpecs(),
   links,
   resolveInstructionStack,
 };

@@ -1,8 +1,14 @@
 const { runCommandSync } = require("./shell");
 
-const DEFAULT_RG = process.env.OBSIDIAN_RG_BIN || process.env.RG_BIN || "rg";
+const { loadConfig } = require("./config-loader");
+function defaultRg() {
+  const cfg = loadConfig("paths");
+  return process.env[String(cfg.environment?.rg_primary || "OBSIDIAN_RG_BIN")]
+    || process.env[String(cfg.environment?.rg_secondary || "RG_BIN")]
+    || String(cfg.rg_command || "rg");
+}
 
-function rgAvailable(rg = DEFAULT_RG) {
+function rgAvailable(rg = defaultRg()) {
   try {
     const result = runCommandSync(rg, ["--version"], { check: false });
     return result.status === 0;
@@ -12,11 +18,11 @@ function rgAvailable(rg = DEFAULT_RG) {
 }
 
 function runRg(args, options = {}) {
-  const rg = options.rg || DEFAULT_RG;
+  const rg = options.rg || defaultRg();
   return runCommandSync(rg, args, {
     cwd: options.cwd,
     check: options.check ?? false,
-    maxBuffer: options.maxBuffer ?? 20 * 1024 * 1024,
+    maxBuffer: options.maxBuffer ?? Number(loadConfig("workflow").control_loader?.rg_max_buffer_bytes || 20971520),
   });
 }
 
@@ -27,7 +33,7 @@ function rgLines(args, options = {}) {
     .filter(Boolean);
 }
 
-function findSlugLines({ root, prefixes = [], rg = DEFAULT_RG } = {}) {
+function findSlugLines({ root, prefixes = [], rg = defaultRg() } = {}) {
   if (!root) throw new Error("findSlugLines requires root.");
 
   const pattern = prefixes.length > 0
@@ -43,7 +49,7 @@ function findSlugLines({ root, prefixes = [], rg = DEFAULT_RG } = {}) {
   ], { cwd: root, rg });
 }
 
-function buildSlugPathMap({ root, prefixes = [], rg = DEFAULT_RG } = {}) {
+function buildSlugPathMap({ root, prefixes = [], rg = defaultRg() } = {}) {
   const map = new Map();
   const duplicates = new Map();
 
@@ -76,7 +82,7 @@ function escapeRegex(text) {
 }
 
 module.exports = {
-  DEFAULT_RG,
+  DEFAULT_RG: defaultRg(),
   rgAvailable,
   runRg,
   rgLines,

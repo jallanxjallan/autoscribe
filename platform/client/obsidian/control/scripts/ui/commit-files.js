@@ -10,6 +10,9 @@ const path = require("node:path");
 const { gitFiles } = loadControl("scripts/lib/git-service.js");
 const { readClipboardSelection } = loadControl("scripts/lib/clipboard-selection.js");
 const { notify } = loadControl("scripts/lib/notify.js");
+const { loadConfig } = loadControl("scripts/lib/config-loader.js");
+function workflowConfig() { return loadConfig("workflow"); }
+function uiConfig() { return loadConfig("ui"); }
 
 function element(tag, attrs = {}, text = null) {
   const node = document.createElement(tag);
@@ -27,7 +30,7 @@ function clear(node) {
   node.replaceChildren();
 }
 
-function text(value, fallback = "—") {
+function text(value, fallback = String(uiConfig().missing_value || "—")) {
   const result = String(value ?? "").trim();
   return result || fallback;
 }
@@ -37,7 +40,7 @@ function displayTitle(item) {
 }
 
 function shortCommit(commit) {
-  if (!commit?.hash) return "—";
+  if (!commit?.hash) return String(uiConfig().missing_value || "—");
   const subject = String(commit.subject || "").trim();
   return `${String(commit.hash).slice(0, 8)}${subject ? ` · ${subject}` : ""}`;
 }
@@ -54,7 +57,7 @@ function isCommittable(item) {
   if (item.committable === false) return false;
   if (itemProblem(item)) return false;
   if (!String(item.path || "").trim()) return false;
-  return !["missing", "outside repository", "ambiguous", "unknown"].includes(itemState(item).toLowerCase());
+  return !(workflowConfig().commit?.blocked_states || []).includes(itemState(item).toLowerCase());
 }
 
 function normalizedResponse(result, parsed) {
@@ -89,7 +92,7 @@ async function renderCommitFiles({ app, container }) {
     items: [],
     summary: {},
     error: "",
-    commitType: "version",
+    commitType: Object.keys(workflowConfig().commit?.modes || {})[0] || "version",
   };
 
   const toolbar = element("div", { className: "commit-files-toolbar" });
@@ -119,10 +122,9 @@ async function renderCommitFiles({ app, container }) {
   typeBox.style.gridTemplateColumns = "repeat(2, minmax(0, 1fr))";
   typeBox.style.gap = "0.75rem";
 
-  for (const [value, label, detail] of [
-    ["version", "Version", 'Tag commit as version; set file state to "versioned"'],
-    ["lock", "Lock", 'Tag commit as lock; set file state to "locked"'],
-  ]) {
+  for (const [value, mode] of Object.entries(workflowConfig().commit?.modes || {})) {
+    const label = String(mode.label || value);
+    const detail = String(mode.description || "");
     const choice = element("label", { className: "commit-files-type" });
     choice.style.display = "flex";
     choice.style.gap = "0.65rem";
@@ -182,7 +184,7 @@ async function renderCommitFiles({ app, container }) {
     const table = element("table", { className: "commit-files-table" });
     table.style.width = "100%";
     const head = element("tr");
-    for (const label of ["#", "File", "Path", "Slug", "State", "Git state", "Latest commit", "Problem"]) {
+    for (const label of (uiConfig().commit_files_columns || [])) {
       head.append(element("th", {}, label));
     }
     table.append(head);

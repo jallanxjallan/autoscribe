@@ -2,18 +2,16 @@
 
 const { makeContentIndexModel } = require("./content-index-model.js");
 const { setTriState } = require("./dom.js");
+const { loadConfig } = require("./config-loader.js");
 
 function makeContentIndexView({ app, dv, nodeRequire, queryPath, vaultName, config, renderSelectionQuery }) {
-  const queryTitle = config.queryTitle || "Content Index";
-  const namespace = config.namespace || "content-index";
-  const bridgeName = config.bridgeName || "__contentIndexSelection";
-  const showTagColumn = config.showTagColumn !== false;
-  const visibleFilterKeys = new Set(config.visibleFilterKeys || [
-    "slug_prefix",
-    "class",
-    "tag_values",
-    "layout_component",
-  ]);
+  const queryDefaults = loadConfig("queries").content_index || {};
+  const uiConfig = loadConfig("ui");
+  const queryTitle = config.queryTitle || queryDefaults.query_title;
+  const namespace = config.namespace || queryDefaults.namespace;
+  const bridgeName = config.bridgeName || queryDefaults.bridge_name;
+  const showTagColumn = config.showTagColumn ?? queryDefaults.show_tag_column;
+  const visibleFilterKeys = new Set(config.visibleFilterKeys || queryDefaults.visible_filter_keys || []);
 
   const modelBuilder = makeContentIndexModel({ app, dv, queryPath, config });
 
@@ -75,9 +73,10 @@ function makeContentIndexView({ app, dv, nodeRequire, queryPath, vaultName, conf
 
     const thead = table.createEl("thead");
     const headRow = thead.createEl("tr");
-    const headings = ["", "Title", "Class"];
-    if (showTagColumn) headings.push("Tags");
-    headings.push("Layout component");
+    const columns = uiConfig.content_index_columns || {};
+    const headings = [String(columns.select ?? ""), String(columns.title || "Title"), String(columns.class || "Class")];
+    if (showTagColumn) headings.push(String(columns.tags || "Tags"));
+    headings.push(String(columns.layout_component || "Layout component"));
     headings.forEach(text => headRow.createEl("th", { text }));
 
     const tbody = table.createEl("tbody");

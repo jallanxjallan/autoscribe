@@ -3,10 +3,9 @@
 const path = require("node:path");
 
 module.exports = async ({ app }) => {
-  const candidates = [
-    "_control/Dashboard.md",
-    "Dashboard.md",
-  ];
+  const root = app.vault.adapter.getBasePath?.() || app.vault.adapter.basePath;
+  const { loadConfig } = require(path.join(root, "_control", "scripts", "lib", "config-loader.js"));
+  const candidates = loadConfig("paths").dashboard_candidates || [];
 
   const file = candidates
     .map((path) => app.vault.getAbstractFileByPath(path))
@@ -17,7 +16,6 @@ module.exports = async ({ app }) => {
     return;
   }
 
-  const root = app.vault.adapter.getBasePath?.() || app.vault.adapter.basePath;
   const { openFileInMain } = require(path.join(root, "_control", "scripts", "lib", "workspace.js"));
   await openFileInMain(app, file, { mode: "preview" });
 };

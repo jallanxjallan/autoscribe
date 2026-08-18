@@ -1,5 +1,7 @@
 "use strict";
 
+const { loadConfig } = require("./config-loader.js");
+
 function asText(value, fallback = "") {
   if (value === null || value === undefined) return fallback;
   if (Array.isArray(value)) return value.map(v => String(v)).join(", ");
@@ -42,7 +44,7 @@ function pathSegments(path) {
 function isUnderscoreFolder(path) {
   return pathSegments(path)
     .slice(0, -1)
-    .some(part => part.startsWith("_"));
+    .some(part => part.startsWith(String(loadConfig("paths").excluded_folder_prefix || "_")));
 }
 
 function isExcludedPath(path, excludePaths = []) {

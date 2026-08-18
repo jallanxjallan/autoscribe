@@ -21,17 +21,9 @@ function getVaultRoot(app) {
 function loadClipboardSelectionLibrary(app) {
   const vaultRoot = getVaultRoot(app);
 
-  const candidates = [
-    path.join(vaultRoot, "_control", "lib", "clipboard-selection.js"),
-    path.join(
-      vaultRoot,
-      "_control",
-      "scripts",
-      "lib",
-      "clipboard-selection.js"
-    ),
-    path.join(vaultRoot, "scripts", "lib", "clipboard-selection.js"),
-  ];
+  const configLoader = require(path.join(vaultRoot, "_control", "scripts", "lib", "config-loader.js"));
+  const candidates = (configLoader.loadConfig("paths").clipboard_selection_library_candidates || [])
+    .map((relative) => path.join(vaultRoot, ...String(relative).split("/")));
 
   const libraryPath = candidates.find((candidate) =>
     fs.existsSync(candidate)

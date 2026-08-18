@@ -1,0 +1,68 @@
+# UI / QUERY PRESENTATION
+# -----------------------
+# Labels, ordering and display fallbacks. These are safe places to refine the
+# control surface without altering processing logic.
+
+missing_value: "—"
+
+# Status/query field labels. Mapping keys are internal filter ids; values are UI
+# labels and can be changed freely.
+status_filter_fields:
+  prefix: Prefix
+  folder: Folder
+  status: Status
+  stage: Stage
+  class: Class
+
+# Sort ids and labels offered by status/query views.
+status_sort_modes:
+  slug: Slug
+  filename: Filename
+  folder: Folder
+  prefix: Prefix
+  last_modified: Last modified
+
+# Table headings below are ordered lists because the renderer uses column order.
+file_state_columns:
+  - ""
+  - File
+  - Git state
+  - Latest commit
+
+file_history_columns:
+  - Version
+  - When / who
+  - What happened
+  - Change
+  - Git context
+  - Action
+
+write_response_columns:
+  - Document
+  - Path
+  - Outcome
+  - Checkpoint
+  - Writeback commit
+  - Properties
+
+commit_files_columns:
+  - "#"
+  - File
+  - Path
+  - Slug
+  - State
+  - Git state
+  - Latest commit
+  - Problem
+
+content_index_columns:
+  select: ""
+  title: Title
+  class: Class
+  tags: Tags
+  layout_component: Layout component
+
+topic_index_groups:
+  tpc: Topics
+  fnd: Findings
+  other: Other

@@ -10,6 +10,8 @@ async function renderDispatchRun({ app, container }) {
   const { getFileManifest, appendClipboardCandidates } = loadControl("scripts/lib/file-manifest.js");
   const { notify } = loadControl("scripts/lib/notify.js");
   const { runDispatch, serviceCall } = loadControl("scripts/lib/dispatch-service.js");
+  const { loadConfig } = loadControl("scripts/lib/config-loader.js");
+  const protocol = loadConfig("protocol");
 
   const session = getFileManifest(app);
   const heading = container.createEl("h2", { text: "Dispatch candidate files" });
@@ -104,7 +106,8 @@ async function renderDispatchRun({ app, container }) {
 
   await addClipboardSelection();
 
-  const snapshotResult = await serviceCall(app, "define-plan-snapshot", { version: 1 });
+  const snapshotSpec = protocol.service_operations?.define_plan_snapshot || protocol.define_plan_snapshot || {};
+  const snapshotResult = await serviceCall(app, String(snapshotSpec.command), { version: Number(snapshotSpec.request_version) });
   const snapshot = JSON.parse(String(snapshotResult.stdout || "{}").trim() || "{}");
   if (!snapshot.ok) throw new Error(snapshot.error || "Could not load plans from the service");
   const plansByIdentity = new Map(Object.values(snapshot.server?.registries?.plans || {}).map((plan) => [String(plan.record_identity || plan.slug || ""), plan]));

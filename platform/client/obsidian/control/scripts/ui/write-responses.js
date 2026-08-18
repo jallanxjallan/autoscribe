@@ -8,6 +8,10 @@ async function renderWriteResponses({ app, container }) {
   const load = (relative) => nodeRequire(path.join(root, "_control", ...relative.split("/")));
   const { notify } = load("scripts/lib/notify.js");
   const transport = load("scripts/lib/dispatch-service.js");
+  const { loadConfig } = load("scripts/lib/config-loader.js");
+  const ui = () => loadConfig("ui");
+  const workflow = () => loadConfig("workflow");
+  const protocol = () => loadConfig("protocol");
   const state = { busy: false, rows: [], error: "", message: "" };
 
   function parseNdjson(text) {
@@ -20,14 +24,14 @@ async function renderWriteResponses({ app, container }) {
 
   function short(value) {
     const text = String(value || "");
-    return text ? text.slice(0, 8) : "—";
+    return text ? text.slice(0, 8) : String(ui().missing_value || "—");
   }
 
   function render() {
     container.replaceChildren();
     container.createEl("h2", { text: "Write Responses" });
     container.createEl("p", {
-      text: "Rust checkpoints dirty targets, overwrites pending responses, marks them needs-review / ai, and commits each writeback.",
+      text: `Rust checkpoints dirty targets, overwrites pending responses, marks them ${workflow().writeback?.status} / ${workflow().writeback?.producer}, and commits each writeback.`,
     });
     const toolbar = container.createEl("div");
     toolbar.style.cssText = "display:flex;gap:.6rem;align-items:center;margin:.6rem 0 1rem";
@@ -43,22 +47,22 @@ async function renderWriteResponses({ app, container }) {
     const table = container.createEl("table");
     table.style.width = "100%";
     const head = table.createEl("tr");
-    for (const label of ["Document", "Path", "Outcome", "Checkpoint", "Writeback commit", "Properties"]) {
+    for (const label of (ui().write_response_columns || [])) {
       head.createEl("th", { text: label });
     }
     for (const row of state.rows) {
       const tr = table.createEl("tr");
-      tr.createEl("td", { text: row.source_identity || "—" });
+      tr.createEl("td", { text: row.source_identity || String(ui().missing_value || "—") });
       const pathCell = tr.createEl("td");
       if (row.path) {
         const link = pathCell.createEl("a", { text: row.path, href: "#" });
         link.onclick = (event) => { event.preventDefault(); app.workspace.openLinkText(row.path, "", false); };
-      } else pathCell.setText("—");
-      const outcome = row.status === "committed" ? "Committed" : `Failed: ${row.error || "unknown error"}`;
+      } else pathCell.setText(String(ui().missing_value || "—"));
+      const outcome = row.status === protocol().writeback?.success_status ? "Committed" : `Failed: ${row.error || "unknown error"}`;
       tr.createEl("td", { text: outcome });
       tr.createEl("td", { text: short(row.checkpoint_commit) });
       tr.createEl("td", { text: short(row.commit) });
-      tr.createEl("td", { text: row.status === "committed" ? "status: needs-review · producer: ai" : "—" });
+      tr.createEl("td", { text: row.status === protocol().writeback?.success_status ? `status: ${workflow().writeback?.status} · producer: ${workflow().writeback?.producer}` : String(ui().missing_value || "—") });
     }
   }
 
@@ -70,9 +74,9 @@ async function renderWriteResponses({ app, container }) {
     render();
     notify("Writing pending responses…");
     try {
-      const response = await transport.serviceCall(app, "write-responses", { version: 1 });
-      state.rows = parseNdjson(response.stdout).filter((row) => row.type === "writeback-result");
-      const committed = state.rows.filter((row) => row.status === "committed").length;
+      const response = await transport.serviceCall(app, String(protocol().writeback?.command), { version: Number(protocol().writeback?.request_version || 1) });
+      state.rows = parseNdjson(response.stdout).filter((row) => row.type === protocol().writeback?.result_type);
+      const committed = state.rows.filter((row) => row.status === protocol().writeback?.success_status).length;
       const failed = state.rows.length - committed;
       state.message = state.rows.length
         ? `${committed} committed${failed ? `; ${failed} failed` : ""}.`

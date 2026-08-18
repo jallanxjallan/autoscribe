@@ -1,0 +1,41 @@
+# EDITORIAL ANNOTATIONS
+# ---------------------
+# One place for annotation keys, display order and renderer/parser limits.
+# `keys` are written into inline/block annotation attributes, so changing an id
+# changes future markup. Labels are presentation only.
+
+keys:
+  comment:
+    label: Comment
+  query:
+    label: Query
+  rewrite:
+    label: Rewrite
+  verify:
+    label: Verify
+  defer:
+    label: Defer
+
+types:
+  block:
+    label: Block
+    description: Callout on the current paragraph
+    order: 10
+  inline:
+    label: Inline
+    description: Highlight the selected text
+    order: 20
+  directive:
+    # Directive insertion is a separate macro; the annotation collector still
+    # recognizes directives so List Annotations can display them.
+    label: Directive
+    description: Fenced instruction
+    order: 30
+
+roles:
+  # Semantic roles used by the parser/renderer. Values point to keys in `types`.
+  block: block
+  inline: inline
+  directive: directive
+
+preview_limit: 120

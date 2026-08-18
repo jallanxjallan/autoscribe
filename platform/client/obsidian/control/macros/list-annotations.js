@@ -39,11 +39,9 @@ function compareAnnotations(a, b) {
   );
 }
 
-const TYPE_ORDER = Object.freeze(["Block", "Inline", "Directive"]);
-
-function compareTypes(a, b) {
-  const aIndex = TYPE_ORDER.indexOf(a);
-  const bIndex = TYPE_ORDER.indexOf(b);
+function compareTypes(a, b, typeOrder = []) {
+  const aIndex = typeOrder.indexOf(a);
+  const bIndex = typeOrder.indexOf(b);
   if (aIndex < 0 && bIndex < 0) return compareText(a, b);
   if (aIndex < 0) return 1;
   if (bIndex < 0) return -1;
@@ -104,7 +102,7 @@ function createInternalLink(
   });
 }
 
-function showAnnotationList(app, found) {
+function showAnnotationList(app, found, typeOrder = []) {
   const container = document.body.createDiv({
     cls: "modal-container mod-dim",
   });
@@ -163,7 +161,7 @@ function showAnnotationList(app, found) {
   }
 
   const types = [...grouped.keys()].sort(
-    compareTypes
+    (a, b) => compareTypes(a, b, typeOrder)
   );
 
   for (const type of types) {
@@ -222,5 +220,5 @@ module.exports = async ({ app }) => {
     return;
   }
 
-  showAnnotationList(app, found);
+  showAnnotationList(app, found, annotations.ANNOTATION_TYPES.map((item) => item.label));
 };

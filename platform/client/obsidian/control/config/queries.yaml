@@ -1,0 +1,52 @@
+# QUERY DEFINITIONS
+# -----------------
+# Query-specific property names, headings and display labels. The DataviewJS
+# blocks still contain query behaviour, but schema/display choices live here.
+
+compiled_notes:
+  runtime_title: Compiled Notes query
+  refresh_label: Refresh from clipboard
+  no_results: No Markdown files resolved from the clipboard selection.
+
+compiled_synopses:
+  # This title is preserved exactly from the current query even though it says
+  # "Compiled Notes". Change it here if you want the UI to say Synopses.
+  runtime_title: Compiled Notes query
+  refresh_label: Refresh from clipboard
+  synopsis_property: synopsis
+  section_property: section
+  position_property: position
+  unsectioned_label: Unsectioned
+  no_results: No resolved clipboard files contain a synopsis.
+
+editorial_notes:
+  create_label: New Editorial Note
+  columns:
+    note: Note
+    action: Action
+    targets: Targets
+    status: Status
+  action_property: action
+  targets_property: targets
+  status_property: status
+
+content_index:
+  query_title: Content Index
+  namespace: content-index
+  bridge_name: __contentIndexSelection
+  show_tag_column: true
+  visible_filter_keys:
+    - slug_prefix
+    - class
+    - tag_values
+    - layout_component
+
+topic_index:
+  ordering: kind-title
+  topic_prefix: tpc
+  finding_prefix: fnd
+  bookmark_globs:
+    - "*.md"
+    - "!.obsidian/**"
+    - "!.trash/**"
+    - "!{runtime_dir}/**"

@@ -4,6 +4,9 @@ const fs = require("node:fs");
 const os = require("node:os");
 const path = require("node:path");
 const { spawn } = require("node:child_process");
+const { loadConfig } = require("./config-loader");
+function serviceConfig() { return loadConfig("service"); }
+function expandHome(value) { return String(value || "").replace(/^\$HOME(?=\/|$)/, os.homedir()); }
 
 function vaultRoot(app) {
   const root = app?.vault?.adapter?.getBasePath?.() || app?.vault?.adapter?.basePath;
@@ -12,22 +15,25 @@ function vaultRoot(app) {
 }
 
 function autoscribeRoot(app) {
-  if (process.env.AUTOSCRIBE_ROOT) return path.resolve(process.env.AUTOSCRIBE_ROOT);
-  let candidate = fs.realpathSync(path.join(vaultRoot(app), "_control"));
-  for (let depth = 0; depth < 8; depth += 1) {
-    if (fs.existsSync(path.join(candidate, "platform", "service", "Cargo.toml"))) return candidate;
+  const cfg = serviceConfig();
+  const envName = String(cfg.environment?.source_root || "AUTOSCRIBE_ROOT");
+  if (process.env[envName]) return path.resolve(process.env[envName]);
+  const controlMount = String(loadConfig("paths").control_mount || "_control");
+  let candidate = fs.realpathSync(path.join(vaultRoot(app), controlMount));
+  const marker = String(cfg.source_root_marker || "platform/service/Cargo.toml");
+  for (let depth = 0; depth < Number(cfg.root_search_depth || 8); depth += 1) {
+    if (fs.existsSync(path.join(candidate, ...marker.split("/")))) return candidate;
     const parent = path.dirname(candidate);
     if (parent === candidate) break;
     candidate = parent;
   }
-  throw new Error("Could not locate the AutoScribe source root; set AUTOSCRIBE_ROOT");
+  throw new Error(`Could not locate the source root; set ${envName}`);
 }
 
 function cargoTargetDir() {
-  return path.resolve(
-    process.env.AUTOSCRIBE_CARGO_TARGET_DIR ||
-    path.join(os.homedir(), ".cache", "autoscribe", "cargo", "service")
-  );
+  const cfg = serviceConfig();
+  const envName = String(cfg.environment?.cargo_target_dir || "AUTOSCRIBE_CARGO_TARGET_DIR");
+  return path.resolve(process.env[envName] || expandHome(cfg.cargo_target_default));
 }
 
 function newestServiceSourceMtime(serviceRoot) {
@@ -36,13 +42,13 @@ function newestServiceSourceMtime(serviceRoot) {
     for (const entry of fs.readdirSync(directory, { withFileTypes: true })) {
       const file = path.join(directory, entry.name);
       if (entry.isDirectory()) visit(file);
-      else if (entry.isFile() && entry.name.endsWith(".rs")) {
+      else if (entry.isFile() && entry.name.endsWith(String(serviceConfig().source_extension || ".rs"))) {
         newest = Math.max(newest, fs.statSync(file).mtimeMs);
       }
     }
   };
-  visit(path.join(serviceRoot, "src"));
-  for (const name of ["Cargo.toml", "Cargo.lock"]) {
+  visit(path.join(serviceRoot, String(serviceConfig().source_dir || "src")));
+  for (const name of (serviceConfig().source_manifest_files || [])) {
     const file = path.join(serviceRoot, name);
     if (fs.existsSync(file)) newest = Math.max(newest, fs.statSync(file).mtimeMs);
   }
@@ -51,36 +57,30 @@ function newestServiceSourceMtime(serviceRoot) {
 
 function serviceCommand(app) {
   const root = autoscribeRoot(app);
-  const explicit = process.env.SVC_BIN;
+  const cfg = serviceConfig();
+  const explicit = process.env[String(cfg.environment?.service_binary || "SVC_BIN")];
   if (explicit) return { command: explicit, prefix: [] };
 
   const target = cargoTargetDir();
-  const serviceRoot = path.join(root, "platform", "service");
+  const serviceRoot = path.join(root, ...String(cfg.service_relative_path || "platform/service").split("/"));
   const sourceMtime = newestServiceSourceMtime(serviceRoot);
-  for (const profile of ["release", "debug"]) {
-    const candidate = path.join(target, profile, "svc");
+  for (const profile of (cfg.build_profiles || [])) {
+    const candidate = path.join(target, profile, String(cfg.service_binary_name || "svc"));
     if (!fs.existsSync(candidate)) continue;
     if (fs.statSync(candidate).mtimeMs >= sourceMtime) {
       return { command: candidate, prefix: [] };
     }
   }
 
-  const cargo = path.join(os.homedir(), ".cargo", "bin", "cargo");
-  const executable = fs.existsSync(cargo) ? cargo : "cargo";
-  const manifest = path.join(serviceRoot, "Cargo.toml");
+  const cargo = expandHome(cfg.cargo_binary);
+  const executable = fs.existsSync(cargo) ? cargo : String(cfg.cargo_fallback_command || "cargo");
+  const manifest = path.join(serviceRoot, String(cfg.cargo_manifest || "Cargo.toml"));
+  const args = (cfg.cargo_run_args || []).map((arg) => String(arg)
+    .replace("{manifest}", manifest)
+    .replace("{binary}", String(cfg.service_binary_name || "svc")));
   return {
-    command: "/usr/bin/env",
-    prefix: [
-      `CARGO_TARGET_DIR=${target}`,
-      executable,
-      "run",
-      "--quiet",
-      "--manifest-path",
-      manifest,
-      "--bin",
-      "svc",
-      "--",
-    ],
+    command: String(cfg.env_command || "/usr/bin/env"),
+    prefix: [`${String(cfg.cargo_target_runtime_env || "CARGO_TARGET_DIR")}=${target}`, executable, ...args],
   };
 }
 
@@ -107,17 +107,17 @@ function run(command, args, { cwd, input = "", env = {} } = {}) {
 
 function serviceEnvironment(app) {
   const root = autoscribeRoot(app);
+  const cfg = serviceConfig();
+  const env = cfg.environment || {};
+  const databaseName = String(env.database || "AUTOSCRIBE_DATABASE");
+  const filterName = String(env.pandoc_filter || "AUTOSCRIBE_PANDOC_FILTER");
+  const parallelName = String(env.pandoc_parallelism || "AUTOSCRIBE_PANDOC_PARALLELISM");
+  const pandocName = String(env.pandoc_bin || "PANDOC_BIN");
   return {
-    AUTOSCRIBE_DATABASE:
-      process.env.AUTOSCRIBE_DATABASE ||
-      path.join(os.homedir(), ".local", "share", "autoscribe", "service.sqlite"),
-    AUTOSCRIBE_PANDOC_FILTER:
-      process.env.AUTOSCRIBE_PANDOC_FILTER ||
-      path.join(root, "platform", "pandoc", "filters", "emit", "emit_ndjson.lua"),
-    AUTOSCRIBE_PANDOC_PARALLELISM: String(
-      Math.max(2, Number(process.env.AUTOSCRIBE_PANDOC_PARALLELISM) || os.cpus().length)
-    ),
-    PANDOC_BIN: path.resolve(process.env.PANDOC_BIN || "/usr/bin/pandoc"),
+    [databaseName]: process.env[databaseName] || expandHome(cfg.database_default),
+    [filterName]: process.env[filterName] || path.join(root, ...String(cfg.pandoc_filter_relative).split("/")),
+    [parallelName]: String(Math.max(Number(cfg.pandoc_parallelism_min || 2), Number(process.env[parallelName]) || os.cpus().length)),
+    [pandocName]: path.resolve(process.env[pandocName] || String(cfg.pandoc_bin_default || "/usr/bin/pandoc")),
   };
 }
 
@@ -134,8 +134,9 @@ async function serviceCall(app, command, input) {
 async function runDispatch(app, { documents, plan }) {
   const selected = [...new Set((documents || []).map(String).map((value) => value.trim()).filter(Boolean))].sort();
   if (!selected.length) throw new Error("Dispatch requires document slugs");
-  const response = await serviceCall(app, "dispatch-run", {
-    version: 1,
+  const protocol = loadConfig("protocol").dispatch || {};
+  const response = await serviceCall(app, String(protocol.command || "dispatch-run"), {
+    version: Number(protocol.request_version || 1),
     plan: String(plan || "").trim(),
     documents: selected,
   });

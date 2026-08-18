@@ -36,6 +36,8 @@ const runtime = createQueryRuntime({
     queryTitle: "Compiled Notes query"
 });
 const { loader } = runtime;
+const { loadConfig } = loader.requireControl("scripts/lib/config-loader.js");
+const queryConfig = loadConfig("queries").compiled_notes || {};
 
 const {
     parseTabDelimitedSelection,
@@ -151,7 +153,7 @@ const controls = queryContainer.createDiv({
     cls: "compiled-notes-controls"
 });
 const refreshButton = controls.createEl("button", {
-    text: "Refresh from clipboard"
+    text: String(queryConfig.refresh_label || "Refresh from clipboard")
 });
 const output = queryContainer.createDiv({
     cls: "compiled-notes-output"
@@ -180,7 +182,7 @@ async function renderClipboard() {
 
         if (!sections.length) {
             output.createEl("p", {
-                text: "No Markdown files resolved from the clipboard selection."
+                text: String(queryConfig.no_results || "No Markdown files resolved from the clipboard selection.")
             });
             return;
         }

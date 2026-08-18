@@ -2,26 +2,13 @@ const { buildSlugIndex } = require("./slug");
 const { getFrontmatterValue } = require("./frontmatter");
 const { formatRelativeTime } = require("./time");
 const { publicSlugRecords } = require("./query-paths");
+const { loadConfig } = require("./config-loader");
+function missingValue() { return String(loadConfig("ui").missing_value || "—"); }
+function statusFilterFields() { return Object.entries(loadConfig("ui").status_filter_fields || {}).map(([key,title]) => ({ key, title })); }
+function statusSortModes() { return Object.entries(loadConfig("ui").status_sort_modes || {}); }
+function legacyRoot() { return String(loadConfig("paths").legacy_query_root || "_autoscribe"); }
 
-const MISSING = "—";
-
-const STATUS_FILTER_FIELDS = [
-  { key: "prefix", title: "Prefix" },
-  { key: "folder", title: "Folder" },
-  { key: "status", title: "Status" },
-  { key: "stage", title: "Stage" },
-  { key: "class", title: "Class" },
-];
-
-const STATUS_SORT_MODES = [
-  ["slug", "Slug"],
-  ["filename", "Filename"],
-  ["folder", "Folder"],
-  ["prefix", "Prefix"],
-  ["last_modified", "Last modified"],
-];
-
-function asStatusRow(app, record, { missing = MISSING } = {}) {
+function asStatusRow(app, record, { missing = missingValue() } = {}) {
   return {
     ...record,
     prefix: record.prefix || missing,
@@ -41,7 +28,7 @@ function pathSegments(vaultPath) {
 }
 
 function normalizeRoot(root) {
-  return String(root || "_autoscribe").replace(/^\/+|\/+$/g, "");
+  return String(root || legacyRoot()).replace(/^\/+|\/+$/g, "");
 }
 
 function isInsideRoot(vaultPath, root) {
@@ -49,7 +36,7 @@ function isInsideRoot(vaultPath, root) {
   return segments[0] === root;
 }
 
-function rootRelativeFolder(vaultPath, root, { rootLabel = MISSING } = {}) {
+function rootRelativeFolder(vaultPath, root, { rootLabel = missingValue() } = {}) {
   const segments = pathSegments(vaultPath);
 
   if (segments[0] !== root) return rootLabel;
@@ -60,7 +47,7 @@ function rootRelativeFolder(vaultPath, root, { rootLabel = MISSING } = {}) {
   return folderSegments.join("/");
 }
 
-function autoscribeSlugRecords(records, { root = "_autoscribe", rootLabel = MISSING } = {}) {
+function autoscribeSlugRecords(records, { root = legacyRoot(), rootLabel = missingValue() } = {}) {
   const normalizedRoot = normalizeRoot(root);
 
   return records
@@ -96,7 +83,7 @@ function scopedSlugIndex(slugIndex, records) {
   };
 }
 
-function buildRowsFromRecords(app, slugIndex, records, { missing = MISSING } = {}) {
+function buildRowsFromRecords(app, slugIndex, records, { missing = missingValue() } = {}) {
   const scopedIndex = scopedSlugIndex(slugIndex, records);
   const rows = records.map((record) => asStatusRow(app, record, { missing }));
 
@@ -106,7 +93,7 @@ function buildRowsFromRecords(app, slugIndex, records, { missing = MISSING } = {
   };
 }
 
-function buildPublicStatusRows(app, { prefixes = [], excludePaths = [], missing = MISSING } = {}) {
+function buildPublicStatusRows(app, { prefixes = [], excludePaths = [], missing = missingValue() } = {}) {
   const slugIndex = buildSlugIndex(app, {
     prefixes,
     excludePaths,
@@ -119,7 +106,7 @@ function buildPublicStatusRows(app, { prefixes = [], excludePaths = [], missing 
 
 function buildAutoscribeStatusRows(
   app,
-  { prefixes = [], excludePaths = [], root = "_autoscribe", missing = MISSING } = {}
+  { prefixes = [], excludePaths = [], root = legacyRoot(), missing = missingValue() } = {}
 ) {
   const slugIndex = buildSlugIndex(app, {
     prefixes,
@@ -236,16 +223,21 @@ function renderDuplicateSlugWarning(parent, duplicateSlugs) {
   );
 }
 
-function isAllowedContentPrefix(prefix, { instructionPrefix = "spc", slugPrefixes = [] } = {}) {
+function isAllowedContentPrefix(prefix, { instructionPrefix = null, slugPrefixes = [] } = {}) {
+  if (instructionPrefix == null) {
+    const { loadConfig } = require("./config-loader");
+    const raw = String(loadConfig("instructions").resolver_properties?.specifics?.prefix || "spc.");
+    instructionPrefix = raw.replace(/\.$/, "");
+  }
   if (prefix === instructionPrefix) return false;
   if (!Array.isArray(slugPrefixes) || slugPrefixes.length === 0) return true;
   return slugPrefixes.includes(prefix);
 }
 
 module.exports = {
-  MISSING,
-  STATUS_FILTER_FIELDS,
-  STATUS_SORT_MODES,
+  MISSING: missingValue(),
+  STATUS_FILTER_FIELDS: statusFilterFields(),
+  STATUS_SORT_MODES: statusSortModes(),
   asStatusRow,
   buildPublicStatusRows,
   buildAutoscribeStatusRows,

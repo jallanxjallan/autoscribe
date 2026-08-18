@@ -4,6 +4,11 @@ const fs = require("node:fs");
 const os = require("node:os");
 const path = require("node:path");
 const { spawnSync, spawn } = require("node:child_process");
+const { loadConfig } = require("./config-loader.js");
+function feederConfig() { return loadConfig("feeder"); }
+function pathsConfig() { return loadConfig("paths"); }
+function expandHome(value) { return String(value || "").replace(/^\$HOME(?=\/|$)/, os.homedir()); }
+function ipcArgs(vault) { return (feederConfig().ipc_args || []).map((arg) => String(arg).replace("{vault}", vault)); }
 
 function vaultRoot(app) {
   const root = app?.vault?.adapter?.basePath;
@@ -12,14 +17,12 @@ function vaultRoot(app) {
 }
 
 function candidateCommands() {
+  const cfg = feederConfig();
+  const env = cfg.environment || {};
   return [
-    process.env.OBSIDIAN_FEEDER_BIN,
-    process.env.OBS_BIN,
-    path.join(os.homedir(), "Python3.13Env", "bin", "obs"),
-    path.join(os.homedir(), ".local", "bin", "obs"),
-    "/usr/local/bin/obs",
-    "/usr/bin/obs",
-    "obs",
+    process.env[String(env.primary_bin || "OBSIDIAN_FEEDER_BIN")],
+    process.env[String(env.secondary_bin || "OBS_BIN")],
+    ...(cfg.candidate_commands || []).map(expandHome),
   ].filter(Boolean);
 }
 
@@ -27,18 +30,18 @@ function resolveCommand() {
   for (const command of candidateCommands()) {
     if (command === "obs" || fs.existsSync(command)) return command;
   }
-  throw new Error("Could not locate feeder command; set OBSIDIAN_FEEDER_BIN");
+  throw new Error(`Could not locate feeder command; set ${String(feederConfig().environment?.primary_bin || "OBSIDIAN_FEEDER_BIN")}`);
 }
 
 function callFeeder(app, operation, payload = {}) {
   const request = { ...payload, operation, vault: payload.vault || vaultRoot(app) };
   const command = resolveCommand();
-  const result = spawnSync(command, ["--vault", request.vault, "ipc"], {
+  const result = spawnSync(command, ipcArgs(request.vault), {
     cwd: request.vault,
     input: JSON.stringify(request),
     encoding: "utf8",
     shell: false,
-    maxBuffer: 32 * 1024 * 1024,
+    maxBuffer: Number(feederConfig().max_buffer_bytes || 33554432),
   });
   const stdout = String(result.stdout || "").trim();
   const stderr = String(result.stderr || "").trim();
@@ -59,7 +62,7 @@ function callFeederAsync(app, operation, payload = {}) {
   const command = resolveCommand();
 
   return new Promise((resolve, reject) => {
-    const child = spawn(command, ["--vault", request.vault, "ipc"], {
+    const child = spawn(command, ipcArgs(request.vault), {
       cwd: request.vault,
       encoding: "utf8",
       shell: false,
@@ -69,7 +72,7 @@ function callFeederAsync(app, operation, payload = {}) {
     const stdout = [];
     const stderr = [];
     let stdoutBytes = 0;
-    const maxBuffer = 32 * 1024 * 1024;
+    const maxBuffer = Number(feederConfig().max_buffer_bytes || 33554432);
 
     child.stdout.setEncoding("utf8");
     child.stderr.setEncoding("utf8");
@@ -108,7 +111,7 @@ function handoffFeeder(app, operation, payload = {}) {
   const vault = payload.vault || vaultRoot(app);
   const request = { ...payload, operation, vault };
   const command = resolveCommand();
-  const statusDir = path.join(vault, ".autoscribe", "system-status");
+  const statusDir = path.join(vault, String(pathsConfig().runtime_dir || ".autoscribe"), String(pathsConfig().system_status_dir || "system-status"));
   fs.mkdirSync(statusDir, { recursive: true });
   const stamp = new Date().toISOString().replace(/[:.]/g, "-");
   const requestPath = path.join(statusDir, `${stamp}-${operation.replace(/[^a-z0-9_.-]/gi, "_")}.request.json`);
@@ -118,7 +121,7 @@ function handoffFeeder(app, operation, payload = {}) {
   const input = fs.openSync(requestPath, "r");
   const stdout = fs.openSync(stdoutPath, "a");
   const stderr = fs.openSync(stderrPath, "a");
-  const child = spawn(command, ["--vault", vault, "ipc"], {
+  const child = spawn(command, ipcArgs(vault), {
     cwd: vault,
     detached: true,
     stdio: [input, stdout, stderr],

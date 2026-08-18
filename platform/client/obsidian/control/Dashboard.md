@@ -13,6 +13,9 @@ const loadControl = (relativePath) => nodeRequire(pathMod.join(vaultRoot, "_cont
 const { openFileInMain } = loadControl("scripts/lib/workspace.js");
 const { readSystemState } = loadControl("scripts/lib/system-state.js");
 const { collectAnnotations } = loadControl("scripts/lib/annotate.js");
+const { loadConfig } = loadControl("scripts/lib/config-loader.js");
+const dashboardConfig = () => loadConfig("dashboard");
+const recordsConfig = () => loadConfig("records");
 
 let notify = (message) => new Notice(message);
 try {
@@ -141,7 +144,7 @@ const statusLink = toolbar.createEl("button", {
 });
 statusLink.type = "button";
 statusLink.onclick = () =>
-  openInMain("_control/System Status.md");
+  openInMain(String(dashboardConfig().paths?.system_status));
 
 const refreshStatus = toolbar.createSpan({
   cls: "dashboard-muted dashboard-refresh-status",
@@ -301,12 +304,6 @@ async function renderState({
       );
     }
 
-    addLink(
-      pipelineCard,
-      "Open diagnostics",
-      "_control/System Status.md"
-    );
-
     completed = true;
 
     const refreshedAt = new Date(
@@ -341,12 +338,6 @@ async function renderState({
       cls: "dashboard-bad",
     });
 
-    addLink(
-      pipelineCard,
-      "Open diagnostics",
-      "_control/System Status.md"
-    );
-
     refreshStatus.setText("Refresh failed");
 
     if (announce) {
@@ -377,7 +368,7 @@ await renderState();
 function countEditorialNotes() {
   const folder =
     app.vault.getAbstractFileByPath(
-      "Editorial Notes"
+      String(recordsConfig().editorial_note?.folder)
     );
 
   return (
@@ -423,7 +414,7 @@ line(
 addLink(
   editorialNotes,
   "Open Editorial Notes",
-  "_control/queries/Editorial Notes.md"
+  String(dashboardConfig().paths?.editorial_notes_query)
 );
 
 const workflow = section("Operations");
@@ -431,19 +422,8 @@ const actions = workflow.createEl("div", {
   cls: "dashboard-actions",
 });
 
-for (const [label, macro] of [
-  ["Create Note", "macros/create-note.js"],
-  ["Commit Files", "macros/commit-files.js"],
-  ["Define Plan", "macros/define-plan.js"],
-  ["Dispatch Run", "macros/dispatch-run.js"],
-  [
-    "Write Responses",
-    "macros/write-responses.js",
-  ],
-  ["File State", "macros/file-state.js"],
-  ["File History", "macros/file-history.js"],
-]) {
-  addCommand(actions, label, macro);
+for (const action of Object.values(dashboardConfig().actions || {})) {
+  addCommand(actions, String(action.label), String(action.macro));
 }
 
 function normalizePath(path) {
@@ -475,10 +455,7 @@ function resolveFolderPath(requestedPath) {
   );
 }
 
-const deprecatedDashboardFiles = new Set([
-  "content index",
-  "content status",
-]);
+const deprecatedDashboardFiles = new Set(dashboardConfig().deprecated_dashboard_files || []);
 
 function addFolder(
   parent,
@@ -541,15 +518,7 @@ const resourceGrid = resources.createEl(
   }
 );
 
-addFolder(
-  resourceGrid,
-  "Queries",
-  "_control/queries"
-);
-
-addFolder(
-  resourceGrid,
-  "Views",
-  "views"
-);
+for (const resource of Object.values(dashboardConfig().resource_folders || {})) {
+  addFolder(resourceGrid, String(resource.label), String(resource.path));
+}
 ```

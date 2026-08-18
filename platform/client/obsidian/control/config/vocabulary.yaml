@@ -1,0 +1,48 @@
+# CONTROLLED VOCABULARIES
+# -----------------------
+# These are values stored in note frontmatter and therefore become part of the
+# long-lived data model. Edit deliberately. Renaming an existing value does NOT
+# migrate old notes; it only changes what new/config-driven operations use.
+#
+# Design rule currently agreed: stage and status should not share word stems.
+
+stage:
+  # Condition of the text itself, independent of what should happen next.
+  - raw
+  - rough
+  - revised
+  - final
+
+status:
+  # Next operational disposition for the file/text.
+  - write
+  - rewrite
+  - edit
+  - cleanup
+  - polish
+  - review
+  - verify
+  - hold
+  - done
+
+action:
+  # Existing action values found in the current control/templates. These have
+  # intentionally NOT been normalized yet. Refine this list manually once you
+  # decide exactly what `action` means relative to `status`.
+  - human-source
+  - ai-draft
+  - defer
+  - human-verify
+  - human-research
+  # Values used by Create Editorial Note. Keep, rename or merge when you settle
+  # the boundary between editorial-note actions and file status.
+  - compare
+  - review
+origin:
+  # Current provenance vocabulary found in templates.
+  - human
+
+producer:
+  # Current producer vocabulary used by templates and writeback handling.
+  - human
+  - ai

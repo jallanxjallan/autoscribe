@@ -1,6 +1,7 @@
 "use strict";
 
 const path = require("node:path");
+const { loadConfig } = require("./config-loader");
 
 function getVaultBasePath(app) {
   const adapter = app?.vault?.adapter;
@@ -28,15 +29,15 @@ function getAutoscribeDir(app) {
   if (!base) {
     throw new Error("Could not resolve active vault root for .autoscribe directory.");
   }
-  return path.join(base, ".autoscribe");
+  return path.join(base, String(loadConfig("paths").runtime_dir || ".autoscribe"));
 }
 
 function getSelectionsDir(app) {
-  return path.join(getAutoscribeDir(app), "selections");
+  return path.join(getAutoscribeDir(app), String(loadConfig("paths").selection_dir || "selections"));
 }
 
 function getWorkflowDir(app, kind = "") {
-  const dir = path.join(getAutoscribeDir(app), "workflow");
+  const dir = path.join(getAutoscribeDir(app), String(loadConfig("paths").workflow_dir || "workflow"));
   return kind ? path.join(dir, String(kind).replace(/^\/+|\/+$/g, "")) : dir;
 }
 

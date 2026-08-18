@@ -1,5 +1,9 @@
 const fs = require('fs');
 const path = require('path');
+const os = require('os');
+const { loadConfig } = require('./config-loader.js');
+function pathsConfig() { return loadConfig('paths'); }
+function expandHome(value) { return String(value || '').replace(/^\$HOME(?=\/|$)/, os.homedir()); }
 
 function vaultRoot(app) {
   const root = app?.vault?.adapter?.getBasePath?.() || app?.vault?.adapter?.basePath;
@@ -8,11 +12,11 @@ function vaultRoot(app) {
 }
 
 function autoscribeRoot() {
-  return path.join(process.env.HOME || '', '.local/share/autoscribe/obsidian/vaults');
+  return path.resolve(expandHome(pathsConfig().legacy_state_root));
 }
 
 function autoscribeVaultDir(app) {
-  return path.join(vaultRoot(app), '.autoscribe');
+  return path.join(vaultRoot(app), String(pathsConfig().runtime_dir || '.autoscribe'));
 }
 
 function safeReadJson(file, fallback = null) {
@@ -39,11 +43,11 @@ function relpath(root, file) {
 }
 
 function workflowDir(app, name) {
-  return path.join(autoscribeVaultDir(app), 'workflow', name);
+  return path.join(autoscribeVaultDir(app), String(pathsConfig().workflow_dir || 'workflow'), name);
 }
 
 function selectionsDir(app) {
-  return path.join(autoscribeVaultDir(app), 'selections');
+  return path.join(autoscribeVaultDir(app), String(pathsConfig().selection_dir || 'selections'));
 }
 
 module.exports = {

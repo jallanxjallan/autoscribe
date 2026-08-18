@@ -2,15 +2,23 @@
 
 const nodeRequire = typeof require === "function" ? require : window.require;
 const pathMod = nodeRequire("node:path");
-const os = nodeRequire("node:os");
 const { spawnSync } = nodeRequire("node:child_process");
+const { loadConfig } = require("../lib/config-loader");
 
-const ZSH = "/usr/bin/zsh";
-const STEP_KINDS = ["llm", "script", "rag"];
-const SCOPES = ["standing", "role", "context", "task"];
-const PREFIXES = { standing: "std", role: "rol", context: "cxt", task: "tsk" };
-const STATUS_KEY = "autoscribe.define-plan.status";
-const CROCKFORD = "0123456789ABCDEFGHJKMNPQRSTVWXYZ";
+function workflowConfig() { return loadConfig("workflow"); }
+function pathsConfig() { return loadConfig("paths"); }
+function instructionConfig() { return loadConfig("instructions"); }
+function serviceConfig() { return loadConfig("service"); }
+function protocolConfig() { return loadConfig("protocol"); }
+function expandHome(value) { return String(value || "").replace(/^\$HOME(?=\/|$)/, process.env.HOME || ""); }
+function scopeFromPrefix(prefix) {
+  return Object.entries(instructionConfig().plan_scopes || {}).find(([, item]) => String(item.prefix) === String(prefix))?.[0] || "";
+}
+function stepKinds() { return workflowConfig().step_kinds || []; }
+function scopes() { return Object.keys(instructionConfig().plan_scopes || {}); }
+function prefixes() { return Object.fromEntries(Object.entries(instructionConfig().plan_scopes || {}).map(([k,v]) => [k, v.prefix])); }
+function statusKey() { return String(workflowConfig().define_plan?.status_storage_key || "autoscribe.define-plan.status"); }
+function crockford() { return String(workflowConfig().define_plan?.id_alphabet || "0123456789ABCDEFGHJKMNPQRSTVWXYZ"); }
 
 function el(tag, attrs = {}, children = []) {
   const node = document.createElement(tag);
@@ -26,12 +34,14 @@ function el(tag, attrs = {}, children = []) {
   return node;
 }
 
-function ascSnapshot(group, cwd) {
-  const result = spawnSync(ZSH, ["-lic", `asc ${group} snapshot`], {
-    cwd, encoding: "utf8", timeout: 30000, maxBuffer: 16 * 1024 * 1024,
+function ascSnapshot(name, cwd) {
+  const spec = protocolConfig().asc_snapshots?.[name] || {};
+  const command = [pathsConfig().asc_command, spec.command, spec.subcommand].map(String).filter(Boolean).join(" ");
+  const result = spawnSync(String(pathsConfig().preferred_shell), ["-lic", command], {
+    cwd, encoding: "utf8", timeout: Number(workflowConfig().define_plan?.snapshot_timeout_ms), maxBuffer: Number(workflowConfig().define_plan?.snapshot_max_buffer_bytes),
   });
   if (result.error || result.status !== 0) {
-    throw new Error(String(result.stderr || result.error?.message || `asc ${group} snapshot failed`).trim());
+    throw new Error(String(result.stderr || result.error?.message || `${spec.label} failed`).trim());
   }
   return JSON.parse(String(result.stdout || "{}"));
 }
@@ -78,7 +88,7 @@ function encodeTime(time, length) {
   let value = BigInt(time);
   let out = "";
   for (let index = 0; index < length; index += 1) {
-    out = CROCKFORD[Number(value % 32n)] + out;
+    out = crockford()[Number(value % 32n)] + out;
     value /= 32n;
   }
   return out;
@@ -159,11 +169,11 @@ async function renderCreatePlan({ app, container }) {
   const { makeSlug } = loadControl("scripts/lib/slug.js");
   const root = vaultRoot(app);
   const control = ascSnapshot("control", root);
-  const service = await serviceCall(app, "define-plan-snapshot");
+  const service = await serviceCall(app, String((protocolConfig().service_operations?.define_plan_snapshot || protocolConfig().define_plan_snapshot || {}).command));
   const serverRegistries = service.server?.registries || {};
   const serverInstructions = Object.values(serverRegistries.instructions || {}).map((record) => ({
     ...record, slug: record.slug || record.record_identity, source: "server",
-    scope: record.scope || ({ std: "standing", rol: "role", cxt: "context", tsk: "task" })[String(record.slug || record.record_identity || "").split(".")[0]],
+    scope: record.scope || scopeFromPrefix(String(record.slug || record.record_identity || "").split(".")[0]),
   }));
   const authoredInstructions = service.authored_instructions.map((record) => ({
     ...record.extra, slug: record.identity, record_identity: record.identity,
@@ -201,8 +211,8 @@ async function renderCreatePlan({ app, container }) {
   function setStatus(message) {
     status.textContent = message || "";
     try {
-      if (message) sessionStorage.setItem(STATUS_KEY, message);
-      else sessionStorage.removeItem(STATUS_KEY);
+      if (message) sessionStorage.setItem(statusKey(), message);
+      else sessionStorage.removeItem(statusKey());
     } catch {}
   }
 
@@ -237,7 +247,7 @@ async function renderCreatePlan({ app, container }) {
   async function createInstruction(scope, step, field) {
     const draft = await instructionEditor(scope);
     if (!draft) return;
-    const slug = makeSlug(PREFIXES[scope], draft.title);
+    const slug = makeSlug(prefixes()[scope], draft.title);
     const record = { slug, record_identity: slug, title: draft.title, label: draft.title,
       scope, content: draft.content, authored: true, source: "service" };
     instructionDrafts.set(slug, record);
@@ -302,9 +312,9 @@ async function renderCreatePlan({ app, container }) {
     stepsBox.innerHTML = "";
     steps.forEach((step, index) => {
       const card = el("div"); card.style.cssText = "border:1px solid var(--background-modifier-border);padding:.75rem;margin:.75rem 0;border-radius:8px";
-      const stepLabel = el("input", { type: "text", value: step.label || `Step ${index + 1}` }); stepLabel.style.width = "100%";
+      const stepLabel = el("input", { type: "text", value: step.label || `${workflowConfig().define_plan?.step_label_prefix || "Step"} ${index + 1}` }); stepLabel.style.width = "100%";
       stepLabel.addEventListener("input", () => { step.label = stepLabel.value; });
-      const kind = el("select"); STEP_KINDS.forEach((value) => kind.appendChild(el("option", { value, text: value })));
+      const kind = el("select"); stepKinds().forEach((value) => kind.appendChild(el("option", { value, text: value })));
       kind.value = step.kind; kind.addEventListener("change", () => { step.kind = kind.value; redraw(); });
       card.append(el("h3", { text: `Step ${index + 1}` }), stepLabel, kind);
       if (step.kind === "llm") {
@@ -319,7 +329,7 @@ async function renderCreatePlan({ app, container }) {
       } else {
         card.append(choice(catalogs.ragProfiles, step.rag_profile, (v) => { step.rag_profile = v; }, "RAG profile"));
       }
-      const args = el("textarea"); args.style.width = "100%"; args.value = step.argsJson || "{}";
+      const args = el("textarea"); args.style.width = "100%"; args.value = step.argsJson || String(workflowConfig().define_plan?.default_args_json || "{}");
       args.addEventListener("input", () => { step.argsJson = args.value; }); card.append(args);
       const remove = el("button", { text: "Delete Step" }); remove.addEventListener("click", () => { steps.splice(index, 1); redraw(); notify(`Deleted step ${index + 1}.`); }); card.append(remove);
       stepsBox.appendChild(card);
@@ -351,8 +361,8 @@ async function renderCreatePlan({ app, container }) {
   const add = el("button", { text: "Add Step" });
   add.addEventListener("click", () => {
     steps.push({
-      kind: "llm", label: `Step ${steps.length + 1}`, argsJson: "{}",
-      standingSlugs: byScope(catalogs.instructions, "standing").map(id),
+      kind: String(workflowConfig().define_plan?.default_step_kind || "llm"), label: `${workflowConfig().define_plan?.step_label_prefix || "Step"} ${steps.length + 1}`, argsJson: String(workflowConfig().define_plan?.default_args_json || "{}"),
+      standingSlugs: byScope(catalogs.instructions, String(workflowConfig().define_plan?.default_scope || "standing")).map(id),
     });
     redraw();
     notify(`Added step ${steps.length}.`);
@@ -377,8 +387,11 @@ async function renderCreatePlan({ app, container }) {
         type: "instruction", identity: draft.slug, content: draft.content,
         extra: { title: draft.title, scope: draft.scope },
       }));
-      await serviceCall(app, "plan-save", { version: 1,
-        database_path: process.env.AUTOSCRIBE_DATABASE || pathMod.join(os.homedir(), ".local/share/autoscribe/service.sqlite"),
+      const svc = serviceConfig();
+      const dbEnv = String(svc.environment?.database || "AUTOSCRIBE_DATABASE");
+      const saveProtocol = protocolConfig().plan_save || {};
+      await serviceCall(app, String(saveProtocol.command || "plan-save"), { version: Number(saveProtocol.request_version || 1),
+        database_path: process.env[dbEnv] || expandHome(svc.database_default),
         plan: record, instructions });
       loaded = record;
       planMap.set(planSlug(record), record); plans = [...planMap.values()]; instructionDrafts.clear();
@@ -398,7 +411,7 @@ async function renderCreatePlan({ app, container }) {
   refreshSelect();
   container.append(planLabel, planSelect, pickerButtons, nameLabel, name, typeLabel, type, descriptionLabel, description, stepsBox, actionButtons, status);
   redraw();
-  try { status.textContent = sessionStorage.getItem(STATUS_KEY) || ""; } catch {}
+  try { status.textContent = sessionStorage.getItem(statusKey()) || ""; } catch {}
 }
 
 module.exports = { renderCreatePlan };

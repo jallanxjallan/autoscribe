@@ -1,10 +1,11 @@
 "use strict";
 
-const SESSION_KEY = "__autoscribeDispatchRunSessions";
+const { loadConfig } = require("./config-loader");
+function sessionKey() { return String(loadConfig("protocol").session_keys?.dispatch_run || "__autoscribeDispatchRunSessions"); }
 
 function registry() {
-  if (!globalThis[SESSION_KEY]) globalThis[SESSION_KEY] = new Map();
-  return globalThis[SESSION_KEY];
+  if (!globalThis[sessionKey()]) globalThis[sessionKey()] = new Map();
+  return globalThis[sessionKey()];
 }
 
 function vaultKey(app) {

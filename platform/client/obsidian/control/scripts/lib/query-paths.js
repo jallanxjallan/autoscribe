@@ -1,3 +1,4 @@
+const { loadConfig } = require("./config-loader.js");
 function splitVaultPath(filePath) {
   return String(filePath || "")
     .split("/")
@@ -14,7 +15,7 @@ function getFolderPath(filePath, rootLabel = ".") {
 function hasPrivateFolderSegment(filePath) {
   const parts = splitVaultPath(filePath);
   const folders = parts.slice(0, -1);
-  return folders.some(part => part.startsWith("_"));
+  return folders.some(part => part.startsWith(String(loadConfig("paths").excluded_folder_prefix || "_")));
 }
 
 function isPublicVaultPath(filePath) {

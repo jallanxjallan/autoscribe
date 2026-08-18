@@ -2,16 +2,16 @@
 
 const { buildManifest } = require("./operation-manifest");
 const { getVaultBasePath } = require("./query-runtime");
-
-const REGISTRY_KEY = Symbol.for("autoscribe.current-selection.by-vault");
+const { loadConfig } = require("./config-loader");
+function registryKey() { return Symbol.for(String(loadConfig("protocol").session_keys?.current_selection_registry || "autoscribe.current-selection.by-vault")); }
 
 function registry(app) {
   if (!app || typeof app !== "object") {
     throw new Error("Current selection requires the active Obsidian app.");
   }
 
-  if (!app[REGISTRY_KEY]) {
-    Object.defineProperty(app, REGISTRY_KEY, {
+  if (!app[registryKey()]) {
+    Object.defineProperty(app, registryKey(), {
       value: new Map(),
       configurable: true,
       enumerable: false,
@@ -19,7 +19,7 @@ function registry(app) {
     });
   }
 
-  return app[REGISTRY_KEY];
+  return app[registryKey()];
 }
 
 function vaultKey(app) {

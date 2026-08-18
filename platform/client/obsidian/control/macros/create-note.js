@@ -5,60 +5,6 @@
  * Uses only the app object, browser DOM, and existing vault-local helpers.
  */
 
-const NOTE_GROUPS = [
-  {
-    label: "Content",
-    folder: "Content",
-    initiallyOpen: true,
-    choices: [
-      {
-        label: "Passage",
-        record: "passage",
-        component: "body",
-        prefix: "psg",
-        template: "_control/templates/content/passage.md",
-      },
-      {
-        label: "Image",
-        record: "image",
-        component: "image",
-        prefix: "img",
-        template: "_control/templates/content/image.md",
-        assets: [],
-      },
-      {
-        label: "Opener",
-        record: "opener",
-        component: "section",
-        prefix: "opn",
-        template: "_control/templates/content/opener.md",
-        level: null,
-        position: 0,
-      },
-    ],
-  },
-  {
-    label: "Materials",
-    folder: "Materials",
-    initiallyOpen: true,
-    choices: [
-      { label: "Topic", class: "topic", prefix: "tpc", template: "_control/templates/materials/topic.md" },
-      { label: "Finding", class: "finding", prefix: "fnd", template: "_control/templates/materials/finding.md" },
-    ],
-  },
-  {
-    label: "Instructions",
-    folder: "Instructions",
-    initiallyOpen: false,
-    choices: [
-      { label: "Role", class: "role", prefix: "rol", template: "_control/templates/instructions/role.md" },
-      { label: "Context", class: "context", prefix: "ctx", template: "_control/templates/instructions/context.md" },
-      { label: "Reference", class: "reference", prefix: "ref", template: "_control/templates/instructions/reference.md" },
-      { label: "Instruction", class: "instruction", prefix: "ins", template: "_control/templates/instructions/instruction.md" },
-    ],
-  },
-];
-
 
 module.exports = async function createNote(params = {}) {
   const app = params.app || globalThis.app;
@@ -78,8 +24,15 @@ module.exports = async function createNote(params = {}) {
   const { titleCaseStem, kebabCase } = load("lib/text.js");
   const { normalizeVaultPath, ensureFolder } = load("lib/vault-files.js");
   const { applyTemplateToFile } = load("templates/apply-template-tools.js");
+  const { loadConfig } = load("lib/config-loader.js");
+  const recordConfig = loadConfig("records");
+  const noteGroups = Object.entries(recordConfig.groups || {}).map(([id, group]) => ({
+    id, ...group,
+    initiallyOpen: Boolean(group.initially_open),
+    choices: Object.entries(group.choices || {}).map(([choiceId, choice]) => ({ id: choiceId, ...choice })),
+  }));
 
-  const selection = await openCreateNoteDialog({ titleCaseStem, kebabCase });
+  const selection = await openCreateNoteDialog({ titleCaseStem, kebabCase, noteGroups });
   if (!selection) return;
 
   const title = titleCaseStem(selection.rawTitle);
@@ -110,16 +63,7 @@ module.exports = async function createNote(params = {}) {
       targetPath: file.path,
       templatePath: selection.choice.template,
       slugPrefix: selection.choice.prefix,
-      frontmatterOverrides: Object.fromEntries(
-        Object.entries({
-          record: selection.choice.record,
-          component: selection.choice.component,
-          class: selection.choice.class,
-          level: selection.choice.level,
-          position: selection.choice.position,
-          assets: selection.choice.assets,
-        }).filter(([, value]) => value !== undefined)
-      ),
+      frontmatterOverrides: { ...(selection.choice.defaults || {}) },
     });
 
     await app.workspace.getLeaf(false).openFile(file, { active: true });
@@ -138,7 +82,7 @@ module.exports = async function createNote(params = {}) {
   }
 };
 
-function openCreateNoteDialog({ titleCaseStem, kebabCase }) {
+function openCreateNoteDialog({ titleCaseStem, kebabCase, noteGroups }) {
   return new Promise((resolve) => {
     let finished = false;
 
@@ -258,7 +202,7 @@ function openCreateNoteDialog({ titleCaseStem, kebabCase }) {
       }
     }
 
-    for (const group of NOTE_GROUPS) {
+    for (const group of noteGroups) {
       const details = document.createElement("details");
       details.className = "typed-note-group";
       details.open = Boolean(group.initiallyOpen);

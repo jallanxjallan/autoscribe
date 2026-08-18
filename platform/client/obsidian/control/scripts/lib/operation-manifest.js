@@ -4,6 +4,7 @@ const fs = require("node:fs");
 const path = require("node:path");
 const crypto = require("node:crypto");
 const { sanitizeForPath } = require("./text");
+const { loadConfig } = require("./config-loader");
 const {
   getVaultBasePath,
   getVaultName,
@@ -36,11 +37,11 @@ function getAutoscribeDir(app) {
   if (!vaultRoot || typeof vaultRoot !== "string") {
     throw new Error("getAutoscribeDir requires an active vault root.");
   }
-  return path.join(vaultRoot, ".autoscribe");
+  return path.join(vaultRoot, String(loadConfig("paths").runtime_dir || ".autoscribe"));
 }
 
 function getSelectionsDir(app) {
-  return path.join(getAutoscribeDir(app), "selections");
+  return path.join(getAutoscribeDir(app), String(loadConfig("paths").selection_dir || "selections"));
 }
 
 function getManifestPath(app, operation) {

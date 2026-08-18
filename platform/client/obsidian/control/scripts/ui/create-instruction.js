@@ -1,10 +1,10 @@
 "use strict";
 
-const TYPES = [
-  { label: "Role", folder: "roles", prefix: "rol", component: "role", scope: "library" },
-  { label: "Task", folder: "tasks", prefix: "tsk", component: "task", scope: "library" },
-  { label: "Standing", folder: "standing", prefix: "std", component: "standing", scope: "standing" },
-];
+const { loadConfig } = require("../lib/config-loader");
+
+function types() {
+  return Object.entries(loadConfig("instructions").library_types || {}).map(([id, item]) => ({ id, ...item }));
+}
 
 /** Shared Create Instruction implementation for any instruction vault. */
 module.exports = async function createInstruction(params = {}) {
@@ -17,7 +17,7 @@ module.exports = async function createInstruction(params = {}) {
   const title = titleCase(selection.title);
   if (!title) return notice("The title is blank.", 7000);
 
-  const type = TYPES.find((item) => item.prefix === selection.prefix);
+  const type = types().find((item) => item.prefix === selection.prefix);
   if (!type) throw new Error("Unknown instruction type.");
 
   const folder = normalize(type.folder);
@@ -25,16 +25,17 @@ module.exports = async function createInstruction(params = {}) {
   const filePath = normalize(`${folder}/${title}.md`);
   if (app.vault.getAbstractFileByPath(filePath)) return notice(`A note already exists at ${filePath}`, 7000);
 
-  const slug = `${type.prefix}.${kebab(title)}.${suffix(6)}`;
+  const workflow = loadConfig("workflow");
+  const instructionConfig = loadConfig("instructions");
+  const slug = `${type.prefix}.${kebab(title)}.${suffix(Number(workflow.slug?.suffix_length || 6))}`;
+  const defaults = instructionConfig.created_frontmatter || {};
   const frontmatter = [
     "---",
     `slug: ${slug}`,
     `title: ${title}`,
-    "type: instruction",
-    `component: ${type.component}`,
-    `scope: ${type.scope}`,
-    "version: 1",
-    "tags: []",
+    ...Object.entries({ ...defaults, component: type.component, scope: type.scope }).map(([key, value]) =>
+      `${key}: ${Array.isArray(value) ? JSON.stringify(value) : value}`
+    ),
     "---",
     `# ${title}`,
     "",
@@ -119,7 +120,7 @@ function kebab(value) {
 }
 
 function suffix(length) {
-  const alphabet = "abcdefghjkmnpqrstuvwxyz23456789";
+  const alphabet = String(loadConfig("workflow").slug?.suffix_alphabet || "abcdefghjkmnpqrstuvwxyz23456789");
   const cryptoObj = globalThis.crypto;
   if (cryptoObj?.getRandomValues) {
     const bytes = new Uint8Array(length);
@@ -157,7 +158,7 @@ function openDialog() {
     const choices = document.createElement("div");
     choices.style.cssText = "display:grid;grid-template-columns:repeat(3,1fr);gap:.5rem;";
 
-    const buttons = TYPES.map((type) => {
+    const buttons = types().map((type) => {
       const button = document.createElement("button");
       button.type = "button";
       button.classList.add("mod-cta");

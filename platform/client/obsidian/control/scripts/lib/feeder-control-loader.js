@@ -1,12 +1,14 @@
 "use strict";
 const { callFeeder } = require("./feeder-ipc.js");
+const { loadConfig } = require("./config-loader.js");
+function ops() { return loadConfig("protocol").feeder_operations || {}; }
 
 function loadRegistrySnapshot(app) {
-  try { return { data: callFeeder(app, "pipeline.snapshot", { kind: "registry" }), error: null }; }
+  try { const spec = ops().registry_snapshot || {}; return { data: callFeeder(app, String(spec.command), { kind: String(spec.kind) }), error: null }; }
   catch (error) { return { data: null, error: error.message, stderr: "", stdout: "" }; }
 }
 function loadControlSnapshot(app) {
-  try { return { data: callFeeder(app, "pipeline.snapshot", { kind: "control" }), error: null }; }
+  try { const spec = ops().control_snapshot || {}; return { data: callFeeder(app, String(spec.command), { kind: String(spec.kind) }), error: null }; }
   catch (error) { return { data: null, error: error.message, stderr: "", stdout: "" }; }
 }
 function snapshotList(snapshot, name) {
@@ -19,7 +21,7 @@ function snapshotList(snapshot, name) {
     };
   });
 }
-function listInstructions(app) { return callFeeder(app, "instructions.catalog", { include_pipeline: true }); }
+function listInstructions(app) { const spec = ops().instructions_catalog || {}; return callFeeder(app, String(spec.command), { include_pipeline: spec.include_pipeline === true }); }
 function listControls(app) { return listInstructions(app); }
 function controlWarnings(records) {
   const warnings = [];

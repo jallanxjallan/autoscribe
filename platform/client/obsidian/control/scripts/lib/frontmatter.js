@@ -1,6 +1,7 @@
-const DEFAULT_MISSING = "—";
+const { loadConfig } = require("./config-loader");
+function defaultMissing() { return String(loadConfig("ui").missing_value || "—"); }
 
-function normalizeValue(value, missing = DEFAULT_MISSING) {
+function normalizeValue(value, missing = defaultMissing()) {
   if (value === null || value === undefined) return missing;
 
   if (Array.isArray(value)) {
@@ -29,7 +30,7 @@ function getFrontmatterEntry(app, file, key) {
   return entry?.[1];
 }
 
-function getFrontmatterValue(app, file, key, missing = DEFAULT_MISSING) {
+function getFrontmatterValue(app, file, key, missing = defaultMissing()) {
   return normalizeValue(getFrontmatterEntry(app, file, key), missing);
 }
 
@@ -44,7 +45,7 @@ function getOptionalFrontmatterText(app, file, key) {
 }
 
 module.exports = {
-  DEFAULT_MISSING,
+  DEFAULT_MISSING: defaultMissing(),
   normalizeValue,
   getFrontmatter,
   getFrontmatterJson,

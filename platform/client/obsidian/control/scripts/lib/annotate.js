@@ -1,23 +1,29 @@
 "use strict";
 
-const ANNOTATION_TYPES = Object.freeze([
-  { id: "block", label: "Block", description: "Callout on the current paragraph" },
-  { id: "inline", label: "Inline", description: "Highlight the selected text" },
-  { id: "directive", label: "Directive", description: "Fenced instruction" },
-]);
+const { loadConfig } = require("./config-loader");
 
-const INLINE_KEYS = Object.freeze([
-  { id: "comment", label: "Comment" },
-  { id: "query", label: "Query" },
-  { id: "rewrite", label: "Rewrite" },
-  { id: "verify", label: "Verify" },
-  { id: "defer", label: "Defer" },
-]);
+function annotationConfig() { return loadConfig("annotations"); }
+function vocabularyConfig() { return loadConfig("vocabulary"); }
 
-// Block callouts and inline highlights use the same editorial keys.
-const ANNOTATION_KEYS = INLINE_KEYS;
+function annotationTypes() {
+  return Object.entries(annotationConfig().types || {})
+    .map(([id, item]) => ({ id, ...item }))
+    .sort((a, b) => Number(a.order || 0) - Number(b.order || 0));
+}
 
-const PREVIEW_LIMIT = 120;
+function inlineKeys() {
+  return Object.entries(annotationConfig().keys || {}).map(([id, item]) => ({ id, ...item }));
+}
+
+
+function previewLimit() { return Number(annotationConfig().preview_limit || 120); }
+function excludedFolderPrefix() { return String(loadConfig("paths").excluded_folder_prefix || "_"); }
+function typeId(role) { return String(annotationConfig().roles?.[role] || role); }
+function typeDef(role) {
+  const id = typeId(role);
+  return { id, ...(annotationConfig().types?.[id] || {}) };
+}
+function validKey(id) { return inlineKeys().some((item) => item.id === String(id || "").trim()); }
 
 function asText(value, fallback = "") {
   if (value == null) return fallback;
@@ -25,7 +31,7 @@ function asText(value, fallback = "") {
   return String(value).trim() || fallback;
 }
 
-function truncateAtWord(text, limit = PREVIEW_LIMIT) {
+function truncateAtWord(text, limit = previewLimit()) {
   const normalized = String(text || "").replace(/\s+/g, " ").trim();
   if (normalized.length <= limit) return normalized;
   const slice = normalized.slice(0, limit);
@@ -37,37 +43,16 @@ function isExcludedFolder(filePath) {
   return filePath
     .split("/")
     .slice(0, -1)
-    .some((part) => part.startsWith("_"));
+    .some((part) => part.startsWith(excludedFolderPrefix()));
 }
 
-function annotationKey(value) {
-  const normalized = String(value || "").trim().toLowerCase();
-  return ANNOTATION_KEYS.find(
-    (item) => item.id === normalized || item.label.toLowerCase() === normalized
-  ) || null;
-}
-
-function extractBlock(line, quotedLines = []) {
-  const match = line.match(/^\s*>\s*\\?\[!([^\]]+)\](?:[+-])?\s*(.*)$/i);
+function extractBlock(line) {
+  const match = line.match(new RegExp(`^\\s*>\\s*\\\\?\\[!${typeId("block")}\\](?:[+-])?\\s+(.+)$`, "i"));
   if (!match) return null;
-
-  const key = annotationKey(match[1]);
-  if (!key) return null;
-
-  const message = match[2].trim();
-  const selectedText = quotedLines
-    .map((quoted) => String(quoted).replace(/^\s*>\s?/, ""))
-    .join("\n")
-    .trim();
-  const detail = [message, selectedText].filter(Boolean).join(" — ");
-
   return {
-    annotation: "block",
-    type: "Block",
-    key: key.id,
-    message,
-    selectedText,
-    text: truncateAtWord(`${key.label}${detail ? `: ${detail}` : ""}`),
+    annotation: typeId("block"),
+    type: String(typeDef("block").label || typeId("block")),
+    text: truncateAtWord(match[1]),
   };
 }
 
@@ -75,8 +60,7 @@ function extractInlines(line) {
   return [...line.matchAll(/\[==(.+?)==\]\{([A-Za-z][\w-]*)="((?:\\.|[^"\\])*)"\}/g)]
     .map((match) => {
       const selectedText = match[1].trim();
-      const key = annotationKey(match[2]);
-      if (!key) return null;
+      const key = match[2];
       let message = match[3];
 
       try {
@@ -86,15 +70,15 @@ function extractInlines(line) {
       }
 
       return {
-        annotation: "inline",
-        type: "Inline",
-        key: key.id,
+        annotation: typeId("inline"),
+        type: String(typeDef("inline").label || typeId("inline")),
+        key,
         message,
         selectedText,
-        text: truncateAtWord(`${key.label}: ${message} — ${selectedText}`),
+        text: truncateAtWord(`${key}: ${message} — ${selectedText}`),
       };
     })
-    .filter((item) => item && item.selectedText && item.message.trim());
+    .filter((item) => item.selectedText && item.message.trim());
 }
 
 function parseLine(line) {
@@ -131,8 +115,8 @@ async function collectAnnotations(app) {
         if (trimmed.startsWith(fence.marker)) {
           if (fence.directive) {
             annotations.push({
-              annotation: "directive",
-              type: "Directive",
+              annotation: typeId("directive"),
+              type: String(typeDef("directive").label || typeId("directive")),
               text: truncateAtWord(fence.lines.join("\n")) || "Empty directive",
               path: file.path,
               title,
@@ -150,28 +134,14 @@ async function collectAnnotations(app) {
       if (openingFence) {
         fence = {
           marker: openingFence[1],
-          directive: openingFence[2].toLowerCase() === "directive",
+          directive: openingFence[2].toLowerCase() === typeId("directive").toLowerCase(),
           lines: [],
           line: index + 1,
         };
         continue;
       }
 
-      const quotedLines = [];
-      for (
-        let bodyIndex = index + 1;
-        bodyIndex < lines.length && /^\s*>/.test(lines[bodyIndex]);
-        bodyIndex += 1
-      ) {
-        quotedLines.push(lines[bodyIndex]);
-      }
-      const block = extractBlock(line, quotedLines);
-
-      const items = [];
-      if (block) items.push(block);
-      items.push(...extractInlines(line));
-
-      for (const item of items) {
+      for (const item of parseLine(line)) {
         annotations.push({
           ...item,
           path: file.path,
@@ -214,14 +184,16 @@ function quoteLines(text) {
 }
 
 function block(text, { key, message }) {
-  const selectedKey = annotationKey(key);
-  if (!selectedKey) throw new Error(`Unsupported block key: ${key}`);
+  const attribute = String(key || "").trim();
+  if (!validKey(attribute)) {
+    throw new Error(`Unsupported block key: ${attribute}`);
+  }
 
-  const firstLine = String(message || "").trim();
-  if (!firstLine) throw new Error("A block annotation message is required.");
+  const value = String(message || "").trim();
+  if (!value) throw new Error("A block annotation message is required.");
 
   return [
-    `> [!${selectedKey.label}] ${firstLine}`,
+    `> [!${typeId("block")}] ${attribute}: ${value}`,
     quoteLines(text),
   ].filter(Boolean).join("\n");
 }
@@ -230,26 +202,29 @@ function inline(text, { key, message }) {
   const span = String(text || "");
   if (!span.trim()) throw new Error("Select the text to annotate inline.");
 
-  const selectedKey = annotationKey(key);
-  if (!selectedKey) throw new Error(`Unsupported inline key: ${key}`);
+  const attribute = String(key || "").trim();
+  if (!validKey(attribute)) {
+    throw new Error(`Unsupported inline key: ${attribute}`);
+  }
 
   const value = String(message || "").trim();
   if (!value) throw new Error("An inline annotation message is required.");
 
-  return `[==${span}==]{${selectedKey.id}=${JSON.stringify(value)}}`;
+  return `[==${span}==]{${attribute}=${JSON.stringify(value)}}`;
 }
 
 function directive(instruction) {
   const message = String(instruction || "").trim();
   if (!message) throw new Error("A directive instruction is required.");
-  return `\`\`\`directive\n${message}\n\`\`\``;
+  return `\`\`\`${typeId("directive")}\n${message}\n\`\`\``;
 }
 
 module.exports = {
-  ANNOTATION_TYPES,
-  ANNOTATION_KEYS,
-  INLINE_KEYS,
-  PREVIEW_LIMIT,
+  get ANNOTATION_TYPES() { return annotationTypes(); },
+  get INLINE_KEYS() { return inlineKeys(); },
+  get STAGES() { return [...(vocabularyConfig().stage || [])]; },
+  get STATUSES() { return [...(vocabularyConfig().status || [])]; },
+  get PREVIEW_LIMIT() { return previewLimit(); },
   isExcludedFolder,
   extractBlock,
   extractInlines,

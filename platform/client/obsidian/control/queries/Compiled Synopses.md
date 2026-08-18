@@ -34,6 +34,8 @@ const runtime = createQueryRuntime({
     queryTitle: "Compiled Notes query"
 });
 const { loader } = runtime;
+const { loadConfig } = loader.requireControl("scripts/lib/config-loader.js");
+const queryConfig = loadConfig("queries").compiled_synopses || {};
 
 const {
     parseTabDelimitedSelection,
@@ -77,7 +79,7 @@ const controls = queryContainer.createDiv({
     cls: "compiled-notes-controls"
 });
 const refreshButton = controls.createEl("button", {
-    text: "Refresh from clipboard"
+    text: String(queryConfig.refresh_label || "Refresh from clipboard")
 });
 const output = queryContainer.createDiv({
     cls: "compiled-notes-output"
@@ -102,14 +104,14 @@ async function renderClipboard() {
             const record = frontmatterFor(row.path);
             if (!record) continue;
 
-            const synopsis = propertyText(record.frontmatter.synopsis);
+            const synopsis = propertyText(record.frontmatter[String(queryConfig.synopsis_property || "synopsis")]);
             if (!synopsis) continue;
 
             seen.add(row.path);
             items.push({
                 path: row.path,
-                section: record.frontmatter.section,
-                position: record.frontmatter.position,
+                section: record.frontmatter[String(queryConfig.section_property || "section")],
+                position: record.frontmatter[String(queryConfig.position_property || "position")],
                 synopsis
             });
         }
@@ -122,7 +124,7 @@ async function renderClipboard() {
 
         if (!items.length) {
             output.createEl("p", {
-                text: "No resolved clipboard files contain a synopsis."
+                text: String(queryConfig.no_results || "No resolved clipboard files contain a synopsis.")
             });
             return;
         }
@@ -130,7 +132,7 @@ async function renderClipboard() {
         const sections = new Map();
 
         for (const item of items) {
-            const sectionName = propertyText(item.section) || "Unsectioned";
+            const sectionName = propertyText(item.section) || String(queryConfig.unsectioned_label || "Unsectioned");
             const synopsis = /[.!?]$/.test(item.synopsis)
                 ? item.synopsis
                 : `${item.synopsis}.`;

@@ -5,6 +5,10 @@ const path = require("node:path");
 const os = require("node:os");
 const { spawnSync } = require("node:child_process");
 const { vaultRoot, statInfo, relpath } = require("./vault-state.js");
+const { loadConfig } = require("./config-loader.js");
+function pathsConfig() { return loadConfig("paths"); }
+function workflowConfig() { return loadConfig("workflow"); }
+function expandHome(value) { return String(value || "").replace(/^\$HOME(?=\/|$)/, os.homedir()); }
 
 
 function getNodeRequire() {
@@ -39,7 +43,7 @@ function getActiveQueryPath(app) {
 }
 
 function getControlRoot(queryPath) {
-  const marker = "/queries/";
+  const marker = `/${String(pathsConfig().query_dir || "queries")}/`;
   const markerIndex = String(queryPath || "").indexOf(marker);
 
   if (markerIndex === -1) {
@@ -119,8 +123,8 @@ function createControlLoader({ app, queryPath = null, controlRoot = null } = {})
 }
 
 
-const SKIP_DIRS = new Set(['.git', '.obsidian', 'node_modules', '.trash']);
-const DEFAULT_LIBRARY_VAULT = path.join(os.homedir(), 'Work', 'AutoScribe', 'instructions');
+function skipDirs() { return new Set(pathsConfig().skip_dirs || []); }
+function defaultLibraryVault() { return expandHome(pathsConfig().library_vault); }
 
 function uniqueExistingRoots(roots) {
   const seen = new Set();
@@ -144,19 +148,16 @@ function controlRoots(app) {
   const active = vaultRoot(app);
   return uniqueExistingRoots([
     active,
-    process.env.AUTOSCRIBE_LIBRARY_VAULT,
-    DEFAULT_LIBRARY_VAULT,
+    process.env[String(pathsConfig().environment?.library_vault || "AUTOSCRIBE_LIBRARY_VAULT")],
+    defaultLibraryVault(),
   ]);
 }
 
 function ascCandidatePaths() {
-  const home = os.homedir();
+  const envName = String(pathsConfig().environment?.asc_bin || "ASC_BIN");
   return [
-    process.env.ASC_BIN,
-    `${home}/Python3.13Env/bin/asc`,
-    `${home}/.local/bin/asc`,
-    '/usr/local/bin/asc',
-    '/usr/bin/asc',
+    process.env[envName],
+    ...(pathsConfig().asc_candidate_paths || []).map(expandHome),
   ].filter(Boolean);
 }
 
@@ -165,21 +166,21 @@ function findAscCommand() {
     if (fs.existsSync(candidate)) return { command: candidate, via: 'path' };
   }
 
-  for (const shell of ['/bin/zsh', '/bin/bash']) {
+  for (const shell of (pathsConfig().shell_candidates || [])) {
     if (!fs.existsSync(shell)) continue;
     const result = spawnSync(shell, ['-lc', 'command -v asc'], { encoding: 'utf8' });
     const found = String(result.stdout || '').trim().split(/\r?\n/)[0];
     if (result.status === 0 && found) return { command: found, via: shell };
   }
 
-  return { command: process.env.ASC_BIN || 'asc', via: 'unresolved' };
+  return { command: process.env[String(pathsConfig().environment?.asc_bin || "ASC_BIN")] || String(pathsConfig().asc_command || "asc"), via: "unresolved" };
 }
 
 function loadAscSnapshot({ args, expectedType, label }) {
   const resolved = findAscCommand();
   const result = spawnSync(resolved.command, args, {
     encoding: 'utf8',
-    maxBuffer: 1024 * 1024 * 10,
+    maxBuffer: Number(workflowConfig().control_loader?.asc_snapshot_max_buffer_bytes || 10485760),
   });
 
   const command = resolved.command;
@@ -244,21 +245,17 @@ function loadAscSnapshot({ args, expectedType, label }) {
   }
 }
 
-function loadRegistrySnapshot() {
+function loadNamedSnapshot(name) {
+  const spec = loadConfig("protocol").asc_snapshots?.[name] || {};
   return loadAscSnapshot({
-    args: ['registry', 'snapshot'],
-    expectedType: 'autoscribe.registries',
-    label: 'asc registry snapshot',
+    args: [String(spec.command || name), String(spec.subcommand || "snapshot")],
+    expectedType: String(spec.expected_type || ""),
+    label: String(spec.label || `${name} snapshot`),
   });
 }
 
-function loadControlSnapshot() {
-  return loadAscSnapshot({
-    args: ['control', 'snapshot'],
-    expectedType: 'autoscribe.controls',
-    label: 'asc control snapshot',
-  });
-}
+function loadRegistrySnapshot() { return loadNamedSnapshot("registry"); }
+function loadControlSnapshot() { return loadNamedSnapshot("control"); }
 
 function snapshotList(snapshot, name) {
   return Object.entries(snapshot?.registries?.[name] || {}).map(([registryKey, value]) => {
@@ -277,10 +274,10 @@ function walkMarkdown(root, dir = root, out = []) {
   let entries = [];
   try { entries = fs.readdirSync(dir, { withFileTypes: true }); } catch { return out; }
   for (const entry of entries) {
-    if (entry.name.startsWith('.') && SKIP_DIRS.has(entry.name)) continue;
+    if (entry.name.startsWith('.') && skipDirs().has(entry.name)) continue;
     const file = path.join(dir, entry.name);
     if (entry.isDirectory()) {
-      if (!SKIP_DIRS.has(entry.name)) walkMarkdown(root, file, out);
+      if (!skipDirs().has(entry.name)) walkMarkdown(root, file, out);
     } else if (entry.isFile() && entry.name.endsWith('.md')) {
       out.push(file);
     }

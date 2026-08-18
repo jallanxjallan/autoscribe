@@ -4,6 +4,9 @@ const fs = require("node:fs");
 const os = require("node:os");
 const path = require("node:path");
 const crypto = require("node:crypto");
+const { loadConfig } = require("../lib/config-loader.js");
+function protocolConfig() { return loadConfig("protocol").current_selection || {}; }
+function pathsConfig() { return loadConfig("paths"); }
 
 function vaultRoot(app) {
   const root = app?.vault?.adapter?.basePath;
@@ -24,7 +27,7 @@ function vaultKey(app) {
 }
 
 function currentSelectionPath(app) {
-  return path.join(os.tmpdir(), "autoscribe", "obsidian", "current-selection", `${vaultKey(app)}.json`);
+  return path.join(os.tmpdir(), ...String(pathsConfig().current_selection_tmp || "autoscribe/obsidian/current-selection").split("/"), `${vaultKey(app)}.json`);
 }
 
 function normalizeItem(item, index) {
@@ -58,7 +61,7 @@ function sourceItems(selection) {
     }));
   }
 
-  for (const key of ["records", "selected", "files", "prompts"]) {
+  for (const key of (protocolConfig().source_array_keys || [])) {
     if (Array.isArray(selection[key])) return selection[key];
   }
   return [];
@@ -79,13 +82,13 @@ function normalizeItems(items) {
   return output;
 }
 
-function buildCurrentSelection(app, { items, source = {}, action = "save" } = {}) {
+function buildCurrentSelection(app, { items, source = {}, action = protocolConfig().default_action } = {}) {
   const timestamp = new Date().toISOString();
   const normalized = normalizeItems(items);
   return {
-    type: "current_selection",
-    recordType: "current_selection",
-    version: 1,
+    type: String(protocolConfig().type || "current_selection"),
+    recordType: String(protocolConfig().record_type || "current_selection"),
+    version: Number(protocolConfig().version || 1),
     session_token: sessionToken(),
     vault_key: vaultKey(app),
     vault_root: vaultRoot(app),
@@ -105,8 +108,9 @@ function buildCurrentSelection(app, { items, source = {}, action = "save" } = {}
 
 function publish(app, selection) {
   if (typeof window === "undefined") return;
-  window.__autoscribeCurrentSelections ||= Object.create(null);
-  window.__autoscribeCurrentSelections[vaultKey(app)] = selection;
+  const registryName = String(protocolConfig().browser_registry || "__autoscribeCurrentSelections");
+  window[registryName] ||= Object.create(null);
+  window[registryName][vaultKey(app)] = selection;
 }
 
 function writeCurrentSelection(app, params) {
@@ -123,7 +127,7 @@ function writeCurrentSelection(app, params) {
 function readCurrentSelection(app) {
   const key = vaultKey(app);
   const live = typeof window !== "undefined"
-    ? window.__autoscribeCurrentSelections?.[key]
+    ? window[String(protocolConfig().browser_registry || "__autoscribeCurrentSelections")]?.[key]
     : null;
   if (live?.session_token === sessionToken()) {
     live.items = normalizeItems(live);
@@ -142,7 +146,7 @@ function readCurrentSelection(app) {
     throw error;
   }
 
-  if (selection?.type !== "current_selection") return null;
+  if (selection?.type !== String(protocolConfig().type || "current_selection")) return null;
   if (selection?.vault_key !== key) return null;
   if (selection?.session_token !== sessionToken()) return null;
   selection.items = normalizeItems(selection);
@@ -156,8 +160,9 @@ function readCurrentSelection(app) {
 function clearCurrentSelection(app) {
   const file = currentSelectionPath(app);
   fs.rmSync(file, { force: true });
-  if (typeof window !== "undefined" && window.__autoscribeCurrentSelections) {
-    delete window.__autoscribeCurrentSelections[vaultKey(app)];
+  if (typeof window !== "undefined") {
+    const registryName = String(protocolConfig().browser_registry || "__autoscribeCurrentSelections");
+    if (window[registryName]) delete window[registryName][vaultKey(app)];
   }
 }
 

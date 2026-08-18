@@ -1,4 +1,5 @@
 const { makeSlug } = require('../lib/slug.js');
+const { loadConfig } = require('../lib/config-loader.js');
 
 function normalizeKind(value) {
   return String(value || '').trim().toLowerCase();
@@ -26,23 +27,13 @@ function parseArgsJson(text, stepNumber) {
   return parsed;
 }
 
-const STEP_CONTRACT_ARG_KEYS = new Set([
-  'index',
-  'kind',
-  'label',
-  'instruction',
-  'instruction_slug',
-  'instruction_slugs',
-  'engine',
-  'script',
-  'rag_profile',
-  'model',
-]);
+function stepContractArgKeys() { return new Set(loadConfig("protocol").step_contract_arg_keys || []); }
+
 
 function compactStepArgs(args) {
   const compact = {};
   for (const [key, value] of Object.entries(args || {})) {
-    if (!STEP_CONTRACT_ARG_KEYS.has(key)) compact[key] = value;
+    if (!stepContractArgKeys().has(key)) compact[key] = value;
   }
   return compact;
 }
