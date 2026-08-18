@@ -307,31 +307,53 @@ function firstString(...values) {
   return '';
 }
 
+function instructionScope(fm, slug) {
+  const configured = new Set(Object.keys(loadConfig("instructions").plan_scopes || {}));
+  const explicit = firstString(fm.scope).toLowerCase();
+  if (configured.has(explicit)) return explicit;
+
+  const component = firstString(fm.component, fm.class).toLowerCase();
+  if (component === "role") return "role";
+  if (component === "context") return "context";
+  if (component === "standing") return "standing";
+  if (["task", "specific", "instruction"].includes(component)) return "task";
+
+  const prefix = String(slug || "").split(".")[0].toLowerCase();
+  if (prefix === "rol") return "role";
+  if (prefix === "ctx") return "context";
+  if (prefix === "std") return "standing";
+  if (["tsk", "ins"].includes(prefix)) return "task";
+  return explicit;
+}
+
 function readInstructionFile(root, file, source) {
   let text = '';
   try { text = fs.readFileSync(file, 'utf8'); } catch { return null; }
   const fm = parseFrontmatter(text);
   const slug = firstString(fm.slug, fm.uid, fm.id);
-  if (!slug || !/^ins\./.test(slug)) return null;
-  const kind = 'instruction';
+  if (!slug) return null;
+
+  const declaredType = firstString(fm.record, fm.type, fm.kind).toLowerCase();
+  if (declaredType !== 'instruction') return null;
+
   const stat = statInfo(file);
   const rel = relpath(root, file);
   return {
-    kind,
+    kind: 'instruction',
     slug,
+    record_identity: slug,
     label: firstString(fm.label, fm.title, fm.name) || path.basename(file, '.md'),
+    title: firstString(fm.title, fm.label, fm.name) || path.basename(file, '.md'),
+    component: firstString(fm.component, fm.class),
+    scope: instructionScope(fm, slug),
     source,
     root,
     path: rel,
+    source_path: rel,
     abspath: file,
     exists: stat.exists,
     size: stat.size,
     mtime: stat.mtime,
-    repo_state: 'service-managed',
-    git_status: '',
-    git_commit: null,
-    short_commit: null,
-    has_prior_commit: null,
   };
 }
 

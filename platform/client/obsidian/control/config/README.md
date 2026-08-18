@@ -28,8 +28,8 @@ using the affected operation.
 ## Files
 
 - `vocabulary.yaml` — controlled frontmatter terms (`stage`, `status`, `action`, etc.).
-- `records.yaml` — Create Note choices, folders, prefixes, templates and defaults.
-- `instructions.yaml` — instruction-library types, plan scopes and resolver mapping.
+- `records.yaml` — Create Note choices, folders, prefixes and template paths; templates own record fields/defaults.
+- `instructions.yaml` — plan instruction scopes and resolver mapping; Markdown templates/files define instruction records.
 - `annotations.yaml` — annotation keys, types, ordering and annotation display limits.
 - `paths.yaml` — machine paths, vault mount names, runtime dirs and command names.
 - `workflow.yaml` — workflow modes, operational defaults, limits and writeback defaults.

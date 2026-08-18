@@ -2,7 +2,7 @@
 
 /**
  * QuickAdd launcher: Create Instruction
- * The active vault receives the instruction; _control supplies the UI.
+ * Compatibility launcher: delegates instruction creation to generic Create Note.
  */
 module.exports = async function createInstruction(params = {}) {
   const app = params.app || globalThis.app;

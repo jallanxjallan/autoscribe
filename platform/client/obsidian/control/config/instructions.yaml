@@ -1,32 +1,8 @@
-# INSTRUCTION LIBRARY / PLAN DEFINITIONS
-# --------------------------------------
-# This file consolidates instruction kinds that had drifted across Create
-# Instruction, Define Plan and instruction-resolver.js.
-#
-# IMPORTANT: the old tree contained both ctx and cxt for Context. `ctx` is used
-# here because it was used by Create Note and the older resolver. If the remote
-# service actually requires cxt, change the context prefix here; all refactored
-# consumers will follow this file.
-
-library_types:
-  role:
-    label: Role
-    folder: roles
-    prefix: rol
-    component: role
-    scope: library
-  task:
-    label: Task
-    folder: tasks
-    prefix: tsk
-    component: task
-    scope: library
-  standing:
-    label: Standing
-    folder: standing
-    prefix: std
-    component: standing
-    scope: standing
+# INSTRUCTION RESOLUTION / PLAN DEFINITIONS
+# -----------------------------------------
+# Markdown instruction files are authoritative for Obsidian projects and the
+# generic Library. This file contains only shared plan/resolution vocabulary;
+# record fields and defaults belong in the Markdown templates.
 
 plan_scopes:
   standing:
@@ -48,8 +24,3 @@ resolver_properties:
   specifics:
     payload: specifics
     prefix: spc.
-
-created_frontmatter:
-  type: instruction
-  version: 1
-  tags: []

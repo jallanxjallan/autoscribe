@@ -16,7 +16,6 @@ function scopeFromPrefix(prefix) {
 }
 function stepKinds() { return workflowConfig().step_kinds || []; }
 function scopes() { return Object.keys(instructionConfig().plan_scopes || {}); }
-function prefixes() { return Object.fromEntries(Object.entries(instructionConfig().plan_scopes || {}).map(([k,v]) => [k, v.prefix])); }
 function statusKey() { return String(workflowConfig().define_plan?.status_storage_key || "autoscribe.define-plan.status"); }
 function crockford() { return String(workflowConfig().define_plan?.id_alphabet || "0123456789ABCDEFGHJKMNPQRSTVWXYZ"); }
 
@@ -127,31 +126,6 @@ function materializeServerPlan(record) {
   }};
 }
 
-function instructionEditor(scope) {
-  return new Promise((resolve) => {
-    const overlay = el("div");
-    overlay.style.cssText = "position:fixed;inset:0;z-index:10000;display:grid;place-items:center;background:rgba(0,0,0,.45)";
-    const dialog = el("div");
-    dialog.style.cssText = "width:min(52rem,92vw);background:var(--background-primary);padding:1rem;border:1px solid var(--background-modifier-border);border-radius:8px";
-    const titleInput = el("input", { type: "text", placeholder: `${scope} instruction title` }); titleInput.style.width = "100%";
-    const content = el("textarea", { placeholder: "Paste or write the instruction text here…" });
-    content.style.cssText = "width:100%;height:45vh;margin-top:.75rem;font-family:var(--font-monospace)";
-    const actions = el("div"); actions.style.cssText = "display:flex;gap:.5rem;justify-content:flex-end;margin-top:.75rem";
-    const cancel = el("button", { text: "Cancel" });
-    const keep = el("button", { text: "Use Instruction", class: "mod-cta" });
-    const close = (value) => { overlay.remove(); resolve(value); };
-    cancel.onclick = () => close(null);
-    keep.onclick = () => {
-      const title = titleInput.value.trim(), body = content.value.trim();
-      if (!title || !body) return;
-      close({ title, content: body });
-    };
-    overlay.onmousedown = (event) => { if (event.target === overlay) close(null); };
-    actions.append(cancel, keep); dialog.append(el("h2", { text: `Create ${scope} instruction` }), titleInput, content, actions);
-    overlay.append(dialog); document.body.append(overlay); titleInput.focus();
-  });
-}
-
 async function renderCreatePlan({ app, container }) {
   container.empty();
   const controlVaultRoot = app.vault.adapter.getBasePath?.() || app.vault.adapter.basePath;
@@ -165,8 +139,7 @@ async function renderCreatePlan({ app, container }) {
   const { notify } = loadControl("scripts/lib/notify.js");
   const { buildPlanRecord } = loadControl("scripts/plans/plan-record.js");
   const { vaultRoot } = loadControl("scripts/lib/vault-state.js");
-  const { snapshotList } = loadControl("scripts/lib/control-loader.js");
-  const { makeSlug } = loadControl("scripts/lib/slug.js");
+  const { snapshotList, listInstructions } = loadControl("scripts/lib/control-loader.js");
   const root = vaultRoot(app);
   const control = ascSnapshot("control", root);
   const service = await serviceCall(app, String((protocolConfig().service_operations?.define_plan_snapshot || protocolConfig().define_plan_snapshot || {}).command));
@@ -175,13 +148,10 @@ async function renderCreatePlan({ app, container }) {
     ...record, slug: record.slug || record.record_identity, source: "server",
     scope: record.scope || scopeFromPrefix(String(record.slug || record.record_identity || "").split(".")[0]),
   }));
-  const authoredInstructions = service.authored_instructions.map((record) => ({
-    ...record.extra, slug: record.identity, record_identity: record.identity,
-    title: record.extra?.title || record.identity, label: record.extra?.title || record.identity,
-    scope: record.extra?.scope, content: record.content, authored: true, source: "service",
-  }));
+  const localInstructions = listInstructions(app);
   const instructionMap = new Map(serverInstructions.map((record) => [id(record), record]));
-  authoredInstructions.forEach((record) => instructionMap.set(id(record), record));
+  // Markdown is authoritative: a local/library file overrides the runtime copy.
+  localInstructions.forEach((record) => instructionMap.set(id(record), record));
   const catalogs = {
     engines: snapshotList(control, "engines"), models: snapshotList(control, "models"),
     scripts: snapshotList(control, "local_scripts"), ragProfiles: snapshotList(control, "rag_profiles"),
@@ -190,10 +160,10 @@ async function renderCreatePlan({ app, container }) {
   const serverPlans = Object.values(serverRegistries.plans || {}).map(materializeServerPlan);
   const planMap = new Map(serverPlans.map((record) => [planSlug(record), record]));
   service.authored_plans.forEach((record) => planMap.set(planSlug(record), record));
-  let plans = [...planMap.values()], loaded = null, steps = [], instructionDrafts = new Map();
+  let plans = [...planMap.values()], loaded = null, steps = [];
 
   container.appendChild(el("h2", { text: "Define Plan" }));
-  container.appendChild(el("p", { text: "Create or modify a project plan on the AutoScribe server. Referenced local instructions are synchronized before the plan is saved." }));
+  container.appendChild(el("p", { text: "Create or modify a project plan on the AutoScribe server. Markdown instructions from the active project and generic Library are synchronized before the plan is saved." }));
 
   const planLabel = el("label", { text: "Existing plan" });
   const planSelect = el("select"); planSelect.style.width = "100%";
@@ -244,32 +214,11 @@ async function renderCreatePlan({ app, container }) {
     return select;
   }
 
-  async function createInstruction(scope, step, field) {
-    const draft = await instructionEditor(scope);
-    if (!draft) return;
-    const slug = makeSlug(prefixes()[scope], draft.title);
-    const record = { slug, record_identity: slug, title: draft.title, label: draft.title,
-      scope, content: draft.content, authored: true, source: "service" };
-    instructionDrafts.set(slug, record);
-    catalogs.instructions.push(record);
-    if (scope === "standing") {
-      step.standingSlugs = [...new Set([...(step.standingSlugs || []), slug])];
-    } else {
-      step[field] = record;
-    }
-    redraw();
-    notify(`Created ${scope} instruction: ${draft.title}.`);
-  }
-
   function scopedPicker(card, step, scope, field, titleText) {
     const records = byScope(catalogs.instructions, scope);
     const heading = el("div"); heading.style.cssText = "display:flex;align-items:center;justify-content:space-between;margin-top:.65rem";
     heading.appendChild(el("strong", { text: titleText }));
-    const buttons = el("span");
-    const create = el("button", { text: "Create instruction" });
-    create.addEventListener("click", () => createInstruction(scope, step, field).catch((error) => notify(`Create instruction failed: ${error.message || error}`, 10000)));
-    buttons.appendChild(create);
-    heading.appendChild(buttons);
+    heading.appendChild(el("span", { text: `${records.length} available` }));
     card.appendChild(heading);
     card.appendChild(choice(records, step[field], (value) => { step[field] = value; redraw(); }, `Choose ${scope}`, { titleOnly: true }));
     const current = step[field];
@@ -289,9 +238,7 @@ async function renderCreatePlan({ app, container }) {
     selectAll.addEventListener("click", () => { step.standingSlugs = records.map(id); redraw(); notify(`Selected all ${records.length} standing instruction(s).`); });
     const clearAll = el("button", { text: "Clear all" });
     clearAll.addEventListener("click", () => { step.standingSlugs = []; redraw(); notify("Cleared standing instruction selection."); });
-    const create = el("button", { text: "Create instruction" });
-    create.addEventListener("click", () => createInstruction("standing", step, "standingSlugs").catch((error) => notify(`Create instruction failed: ${error.message || error}`, 10000)));
-    buttons.append(selectAll, clearAll, create); heading.appendChild(buttons); card.appendChild(heading);
+    buttons.append(selectAll, clearAll); heading.appendChild(buttons); card.appendChild(heading);
     const selectedSlugs = new Set(step.standingSlugs || []);
     for (const record of records) {
       const row = el("div"); row.style.cssText = "display:flex;align-items:center;gap:.4rem";
@@ -368,6 +315,34 @@ async function renderCreatePlan({ app, container }) {
     notify(`Added step ${steps.length}.`);
   });
 
+  async function syncReferencedMarkdown() {
+    const selectedSlugs = new Set();
+    for (const step of steps) {
+      for (const slug of step.standingSlugs || []) selectedSlugs.add(slug);
+      for (const record of [step.role, step.context, step.task]) {
+        if (record && id(record)) selectedSlugs.add(id(record));
+      }
+    }
+
+    const localBySlug = new Map(localInstructions.map((record) => [id(record), record]));
+    const byRoot = new Map();
+    for (const slug of selectedSlugs) {
+      const record = localBySlug.get(slug);
+      if (!record?.root || !record?.path) continue;
+      if (!byRoot.has(record.root)) byRoot.set(record.root, []);
+      byRoot.get(record.root).push(record.path);
+    }
+
+    const syncSpec = protocolConfig().service_operations?.instructions_sync || {};
+    for (const [instructionRoot, paths] of byRoot) {
+      await serviceCall(app, String(syncSpec.command || "instructions-sync"), {
+        version: Number(syncSpec.request_version || 1),
+        root: instructionRoot,
+        paths: [...new Set(paths)],
+      });
+    }
+  }
+
   const save = el("button", { text: "Save Plan", class: "mod-cta" });
   save.addEventListener("click", async () => {
     notify("Saving plan and publishing dependencies…");
@@ -383,18 +358,17 @@ async function renderCreatePlan({ app, container }) {
         };
       }
       const record = buildPlanRecord({ label: name.value, type: type.value, description: description.value, steps, force_slug: planSlug(loaded) || null });
-      const instructions = [...instructionDrafts.values()].map((draft) => ({
-        type: "instruction", identity: draft.slug, content: draft.content,
-        extra: { title: draft.title, scope: draft.scope },
-      }));
+      await syncReferencedMarkdown();
       const svc = serviceConfig();
       const dbEnv = String(svc.environment?.database || "AUTOSCRIBE_DATABASE");
       const saveProtocol = protocolConfig().plan_save || {};
-      await serviceCall(app, String(saveProtocol.command || "plan-save"), { version: Number(saveProtocol.request_version || 1),
+      await serviceCall(app, String(saveProtocol.command || "plan-save"), {
+        version: Number(saveProtocol.request_version || 1),
         database_path: process.env[dbEnv] || expandHome(svc.database_default),
-        plan: record, instructions });
+        plan: record,
+      });
       loaded = record;
-      planMap.set(planSlug(record), record); plans = [...planMap.values()]; instructionDrafts.clear();
+      planMap.set(planSlug(record), record); plans = [...planMap.values()];
       refreshSelect(planSlug(record));
       setStatus(`Saved ${planSlug(record)} on the server.`);
       notify(`Saved plan ${planSlug(record)}.`);
