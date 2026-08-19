@@ -46,16 +46,6 @@ function isExcludedFolder(filePath) {
     .some((part) => part.startsWith(excludedFolderPrefix()));
 }
 
-function extractBlock(line) {
-  const match = line.match(new RegExp(`^\\s*>\\s*\\\\?\\[!${typeId("block")}\\](?:[+-])?\\s+(.+)$`, "i"));
-  if (!match) return null;
-  return {
-    annotation: typeId("block"),
-    type: String(typeDef("block").label || typeId("block")),
-    text: truncateAtWord(match[1]),
-  };
-}
-
 function extractInlines(line) {
   return [...line.matchAll(/\[==(.+?)==\]\{([A-Za-z][\w-]*)="((?:\\.|[^"\\])*)"\}/g)]
     .map((match) => {
@@ -69,24 +59,24 @@ function extractInlines(line) {
         // Keep the raw value if a hand-written attribute is not JSON-escaped.
       }
 
+      const prefix = message.match(/^(hm|ai):\s*(.+)$/i);
+      if (!prefix) return null;
+
       return {
         annotation: typeId("inline"),
         type: String(typeDef("inline").label || typeId("inline")),
         key,
+        source: prefix[1].toLowerCase(),
         message,
         selectedText,
         text: truncateAtWord(`${key}: ${message} — ${selectedText}`),
       };
     })
-    .filter((item) => item.selectedText && item.message.trim());
+    .filter((item) => item && item.selectedText && item.message.trim());
 }
 
 function parseLine(line) {
-  const found = [];
-  const block = extractBlock(line);
-  if (block) found.push(block);
-  found.push(...extractInlines(line));
-  return found;
+  return extractInlines(line);
 }
 
 async function collectAnnotations(app) {
@@ -165,52 +155,25 @@ function selectionRange(editor) {
   return orderedRange(editor.getCursor("from"), editor.getCursor("to"));
 }
 
-function paragraphRange(editor) {
-  const cursor = editor.getCursor();
-  let start = cursor?.line ?? 0;
-  let end = start;
+function annotationSpan(text, { key, message }) {
+  const span = String(text || "");
+  if (!span.trim()) throw new Error("Select text to annotate.");
 
-  while (start > 0 && editor.getLine(start - 1).trim()) start -= 1;
-  while (end < editor.lineCount() - 1 && editor.getLine(end + 1).trim()) end += 1;
-
-  return {
-    from: { line: start, ch: 0 },
-    to: { line: end, ch: editor.getLine(end).length },
-  };
-}
-
-function quoteLines(text) {
-  return String(text).split("\n").map((line) => `> ${line}`.trimEnd()).join("\n");
-}
-
-function block(text, { key, message }) {
   const attribute = String(key || "").trim();
   if (!validKey(attribute)) {
-    throw new Error(`Unsupported block key: ${attribute}`);
+    throw new Error(`Unsupported annotation key: ${attribute}`);
   }
 
   const value = String(message || "").trim();
-  if (!value) throw new Error("A block annotation message is required.");
+  if (!/^(hm|ai):\s*\S/i.test(value)) {
+    throw new Error('Annotation messages must begin with "hm:" or "ai:".');
+  }
 
-  return [
-    `> [!${typeId("block")}] ${attribute}: ${value}`,
-    quoteLines(text),
-  ].filter(Boolean).join("\n");
+  return `[==${span}==]{${attribute}=${JSON.stringify(value)}}`;
 }
 
 function inline(text, { key, message }) {
-  const span = String(text || "");
-  if (!span.trim()) throw new Error("Select the text to annotate inline.");
-
-  const attribute = String(key || "").trim();
-  if (!validKey(attribute)) {
-    throw new Error(`Unsupported inline key: ${attribute}`);
-  }
-
-  const value = String(message || "").trim();
-  if (!value) throw new Error("An inline annotation message is required.");
-
-  return `[==${span}==]{${attribute}=${JSON.stringify(value)}}`;
+  return annotationSpan(text, { key, message });
 }
 
 function directive(instruction) {
@@ -226,13 +189,10 @@ module.exports = {
   get STATUSES() { return [...(vocabularyConfig().status || [])]; },
   get PREVIEW_LIMIT() { return previewLimit(); },
   isExcludedFolder,
-  extractBlock,
   extractInlines,
   parseLine,
   collectAnnotations,
   selectionRange,
-  paragraphRange,
-  block,
   inline,
   directive,
 };

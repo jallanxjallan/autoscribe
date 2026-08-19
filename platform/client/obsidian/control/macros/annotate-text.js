@@ -37,16 +37,6 @@ async function requiredPrompt(api, label) {
   return value.trim() || null;
 }
 
-function cursorIsInFrontmatter(editor, cursor) {
-  if (editor.getLine(0).trim() !== "---") return false;
-
-  for (let line = 1; line < editor.lineCount(); line += 1) {
-    if (editor.getLine(line).trim() === "---") return cursor.line <= line;
-  }
-
-  return true;
-}
-
 async function annotateText({ app, quickAddApi }) {
   if (!quickAddApi?.suggester || !quickAddApi?.inputPrompt) {
     throw new Error("Annotate Text must be run as a QuickAdd macro.");
@@ -58,43 +48,26 @@ async function annotateText({ app, quickAddApi }) {
   }
 
   const annotations = loadAnnotations(app);
-  let range;
-  let replacement;
-
-  const selectedRange = annotations.selectionRange(editor);
-  const selectedText = selectedRange
-    ? editor.getRange(selectedRange.from, selectedRange.to)
+  const range = annotations.selectionRange(editor);
+  const selectedText = range
+    ? editor.getRange(range.from, range.to)
     : "";
 
-  if (selectedRange && selectedText.trim()) {
-    const key = await choose(quickAddApi, annotations.INLINE_KEYS, "Inline key");
-    if (!key) return;
-
-    const message = await requiredPrompt(quickAddApi, "Inline message");
-    if (!message) return;
-
-    range = selectedRange;
-    replacement = annotations.inline(selectedText, { key, message });
-  } else {
-    const cursor = editor.getCursor() || { line: 0, ch: 0 };
-    const cursorLine = editor.getLine(cursor.line);
-    if (!cursorLine.trim() || cursorIsInFrontmatter(editor, cursor)) {
-      new Notice("Place the cursor in a paragraph to add a block annotation.");
-      return;
-    }
-
-    const key = await choose(quickAddApi, annotations.INLINE_KEYS, "Block key");
-    if (!key) return;
-
-    const message = await requiredPrompt(quickAddApi, "Block message");
-    if (!message) return;
-
-    range = annotations.paragraphRange(editor);
-    replacement = annotations.block(
-      editor.getRange(range.from, range.to),
-      { key, message }
-    );
+  if (!range || !selectedText.trim()) {
+    new Notice("Select text to annotate.");
+    return;
   }
+
+  const key = await choose(quickAddApi, annotations.INLINE_KEYS, "Annotation key");
+  if (!key) return;
+
+  const message = await requiredPrompt(quickAddApi, "Annotation message");
+  if (!message) return;
+
+  const replacement = annotations.inline(selectedText, {
+    key,
+    message: `hm: ${message}`,
+  });
 
   editor.replaceRange(replacement, range.from, range.to);
 
