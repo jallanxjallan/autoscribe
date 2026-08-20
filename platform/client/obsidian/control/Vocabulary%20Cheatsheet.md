@@ -183,30 +183,11 @@ These terms state **where/how** the annotation is attached.
 | `script` | Execute a deterministic script or program step. |
 | `rag` | Execute a retrieval-augmented generation/retrieval step. |
 
-## Git and workflow vocabulary
-
-### Commit modes
-
-| Key | Label | Meaning |
-|---|---|---|
-| `version` | Version | Commit the selected file(s) as a meaningful version checkpoint; file state becomes `versioned`. |
-| `lock` | Lock | Commit the selected file(s) as a lock checkpoint; file state becomes `locked`. |
-
-### Commit-blocking states
-
-| State | Meaning |
-|---|---|
-| `missing` | The selected file cannot be found. |
-| `outside repository` | The file is not inside the Git repository expected by the workflow. |
-| `ambiguous` | The selection resolves to more than one plausible file/record. |
-| `unknown` | Control cannot establish a safe, recognized file state. |
-
 ## Dashboard operations
 
 | Label | Meaning |
 |---|---|
-| **Create Note** | Create a typed note from the configured record menu and template. |
-| **Commit Files** | Create a workflow checkpoint for selected files. |
+| **Set Note Type** | Apply the configured type, slug prefix and template to the active note. |
 | **Define Plan** | Build or edit the processing plan to be dispatched. |
 | **Dispatch Run** | Send the selected material and plan into the processing pipeline. |
 | **Write Responses** | Apply completed pipeline responses back to the source files. |

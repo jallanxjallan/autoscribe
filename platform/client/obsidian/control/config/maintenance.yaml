@@ -18,4 +18,7 @@ deprecated_files:
   - macros/create-instruction.js
   - macros/apply-template.js
   - scripts/ui/create-instruction.js
+  # Commit Files is intentionally outside Control; use the Git plugin/GUI.
+  - macros/commit-files.js
+  - scripts/ui/commit-files.js
 

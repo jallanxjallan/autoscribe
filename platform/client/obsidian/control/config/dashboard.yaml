@@ -11,9 +11,6 @@ actions:
   set_note_type:
     label: Set Note Type
     macro: macros/set-note-type.js
-  commit_files:
-    label: Commit Files
-    macro: macros/commit-files.js
   define_plan:
     label: Define Plan
     macro: macros/define-plan.js

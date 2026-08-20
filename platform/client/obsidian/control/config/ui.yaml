@@ -45,16 +45,6 @@ write_response_columns:
   - Writeback commit
   - Properties
 
-commit_files_columns:
-  - "#"
-  - File
-  - Path
-  - Slug
-  - State
-  - Git state
-  - Latest commit
-  - Problem
-
 content_index_columns:
   select: ""
   title: Title

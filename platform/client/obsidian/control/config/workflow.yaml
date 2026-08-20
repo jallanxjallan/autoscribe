@@ -30,22 +30,6 @@ writeback:
   status: needs-review
   producer: ai
 
-# Commit Files policy. `blocked_states` are states that cannot be committed;
-# `modes` are the selectable commit modes and their UI descriptions.
-commit:
-  blocked_states:
-    - missing
-    - outside repository
-    - ambiguous
-    - unknown
-  modes:
-    version:
-      label: Version
-      description: Tag commit as version; set file state to "versioned"
-    lock:
-      label: Lock
-      description: Tag commit as lock; set file state to "locked"
-
 # Process output limits. Raise only if legitimate snapshot/query output exceeds
 # the current ceiling; lower values fail faster on runaway processes.
 control_loader:
