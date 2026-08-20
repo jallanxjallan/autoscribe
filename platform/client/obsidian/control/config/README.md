@@ -33,12 +33,11 @@ using the affected operation.
 - `annotations.yaml` — annotation keys, types, ordering and annotation display limits.
 - `paths.yaml` — machine paths, vault mount names, runtime dirs and command names.
 - `workflow.yaml` — workflow modes, operational defaults, limits and writeback defaults.
-- `protocol.yaml` — service/feeder operation names, versions, namespaces and contract keys.
+- `protocol.yaml` — service operation names, versions, namespaces and contract keys.
 - `ui.yaml` — query fields, sort modes, columns and missing-value display.
 - `dashboard.yaml` — dashboard actions, links and resource folders.
 - `queries.yaml` — Dataview/query schema, properties, ordering and labels.
 - `service.yaml` — Rust service discovery/build paths, environment names and defaults.
-- `feeder.yaml` — legacy `obs` feeder discovery and IPC limits.
 - `maintenance.yaml` — paths that are obsolete and should be removed from Control.
 
 ## YAML subset used by Control
