@@ -17,7 +17,7 @@ async function readSystemState(app) {
         total: Number(pipeline.active_dispatches || 0),
         unclaimed: Number(pipeline.pending_uploads || 0),
         waiting: Math.max(0, Number(pipeline.active_dispatches || 0) - Number(pipeline.pending_responses || 0)),
-        response_pending: Number(pipeline.pending_responses || 0),
+        response_pending: Number(pipeline.pending_responses ?? pipeline.pending_files ?? 0),
         uncertain: Number(pipeline.uncertain_uploads || 0),
         reviewed: 0,
       },

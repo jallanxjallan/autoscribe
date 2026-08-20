@@ -26,7 +26,15 @@ function id(record) { return String(record?.slug || record?.record_identity || r
 function title(record) { return String(record?.title || record?.label || record?.name || id(record)); }
 function selected(records, value) { return records.find((record) => id(record) === String(value || "")) || null; }
 function planSlug(record) { return String(record?.record_identity || record?.slug || record?.key || "").trim(); }
-function byScope(records, scope) { return records.filter((record) => String(record?.scope || "").toLowerCase() === scope); }
+function sortRecords(records) {
+  return [...records].sort((a, b) =>
+    title(a).localeCompare(title(b), undefined, { sensitivity: "base", numeric: true }) ||
+    id(a).localeCompare(id(b), undefined, { sensitivity: "base", numeric: true })
+  );
+}
+function byScope(records, scope) {
+  return sortRecords(records.filter((record) => String(record?.scope || "").toLowerCase() === scope));
+}
 
 function option(select, record, { titleOnly = false } = {}) {
   const recordId = id(record);
@@ -139,7 +147,7 @@ async function renderCreatePlan({ app, container }) {
   function refreshSelect(slug = "") {
     planSelect.innerHTML = "";
     planSelect.appendChild(el("option", { value: "", text: plans.length ? "Select a plan…" : "No saved plans" }));
-    for (const plan of plans) {
+    for (const plan of sortRecords(plans)) {
       const slugValue = planSlug(plan);
       if (!slugValue) continue;
       planSelect.appendChild(el("option", { value: slugValue, text: String(plan?.payload?.label || plan?.label || plan?.title || slugValue) }));
@@ -150,7 +158,7 @@ async function renderCreatePlan({ app, container }) {
   function choice(records, value, onChange, placeholder, options = {}) {
     const select = el("select"); select.style.width = "100%";
     select.appendChild(el("option", { value: "", text: placeholder }));
-    records.forEach((record) => option(select, record, options));
+    sortRecords(records).forEach((record) => option(select, record, options));
     select.value = id(value);
     select.addEventListener("change", () => onChange(selected(records, select.value)));
     return select;

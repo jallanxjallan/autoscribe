@@ -164,11 +164,26 @@ fn system_snapshot_from_stdin() -> Result<serde_json::Value, Box<dyn std::error:
     if input.version != 1 { return Err("unsupported system snapshot version".into()); }
     let repository = git::root(&std::env::current_dir()?)?;
     let db = open_database(&configured_database_path()?)?;
+    let mut pipeline = db::system_counts(&db)?;
+    let pending_output = run_asc_capture(
+        &asc_command(), ["export", "list-pending", "--ndjson"], &[],
+    )?;
+    let pending_files = pending_source_identities(&pending_output)?.len();
+    if let Some(object) = pipeline.as_object_mut() {
+        object.insert(
+            "pending_responses".into(),
+            serde_json::Value::from(pending_files as u64),
+        );
+        object.insert(
+            "pending_files".into(),
+            serde_json::Value::from(pending_files as u64),
+        );
+    }
     Ok(serde_json::json!({
         "ok":true,
         "operation":"system.snapshot",
         "git":git::summary(&repository)?,
-        "pipeline":db::system_counts(&db)?
+        "pipeline":pipeline
     }))
 }
 
@@ -339,14 +354,13 @@ fn commit_writeback(
         .ok_or("pending response is missing source_identity")?.to_string();
     let path = record.get("source_path").and_then(serde_json::Value::as_str)
         .ok_or("pending response is missing source_path")?.to_string();
-    let (state, dispatch_identity, _, _, stored_outcome, _, stored_commit, stored_forensic) =
+    let (state, dispatch_identity, _, _, stored_outcome, _, _, stored_forensic) =
         response_repository::require_pending(db, &result, &source)?;
 
-    let (commit, checkpoint_commit) = if state == "written" {
+    if state == "written" {
         if stored_outcome.as_deref() != Some("accepted") {
             return Err("response was already written with another outcome".into());
         }
-        (stored_commit.ok_or("written response has no writeback commit")?, None)
     } else {
         let relative = PathBuf::from(&path);
         if relative.is_absolute() || relative.components().any(|part| !matches!(part, std::path::Component::Normal(_))) {
@@ -360,70 +374,41 @@ fn commit_writeback(
         if !target.canonicalize()?.starts_with(repository) {
             return Err(format!("writeback target resolves outside the repository: {path}").into());
         }
+
         let current = std::fs::read_to_string(&target)?;
         if markdown_slug(&current).as_deref() != Some(source.as_str()) {
             return Err(format!("current target slug does not match {source}: {path}").into());
         }
+
         let response = record.get("content").and_then(serde_json::Value::as_str)
             .ok_or("pending response is missing content")?;
-        let replacement = set_document_review_metadata(&preserve_frontmatter(&current, response)?)?;
-        let status = git::inspect(repository, std::slice::from_ref(&relative))?
-            .into_iter().next().ok_or("writeback target has no Git status")?;
-        let last = git::last_commit(repository, &relative)?;
-        let writeback_subject = format!("Accept AutoScribe response {source}");
-        if !status.dirty && current == replacement &&
-            last.as_ref().is_some_and(|(_, subject, _)| subject == &writeback_subject)
-        {
-            let committed = last.expect("checked above").0;
-            response_repository::mark_written(db, &result, "accepted", Some(&path), Some(&committed))?;
-            (committed, None)
-        } else {
-        let checkpoint = if status.dirty {
-            Some(git::commit(repository, CommitRequest {
-                paths: vec![relative.clone()],
-                message: format!("Checkpoint before AutoScribe writeback {source}"),
-                purpose: CommitPurpose::WritebackCheckpoint,
-            })?.0)
-        } else {
-            last.as_ref().filter(|(_, subject, _)| {
-                subject == &format!("Checkpoint before AutoScribe writeback {source}")
-            }).map(|(hash, _, _)| hash.clone())
-        };
-        std::fs::write(&target, &replacement)?;
-        let committed = match git::commit(repository, CommitRequest {
-            paths: vec![relative],
-            message: writeback_subject,
-            purpose: CommitPurpose::DispatchWriteback,
-        }) {
-            Ok(value) => value.0,
-            Err(error) => {
-                let _ = std::fs::write(&target, current);
-                return Err(error.into());
-            }
-        };
-        response_repository::mark_written(db, &result, "accepted", Some(&path), Some(&committed))?;
-        (committed, checkpoint)
+        let replacement = preserve_frontmatter(&current, response)?;
+
+        if current != replacement {
+            std::fs::write(&target, &replacement)?;
         }
-    };
+
+        response_repository::mark_written(db, &result, "accepted", Some(&path), None)?;
+    }
 
     if stored_forensic.is_none() {
         let event = git::append_response_event(
-            repository, &dispatch_identity, &result, &source, "accepted", Some(&commit),
+            repository, &dispatch_identity, &result, &source, "accepted", None,
         )?;
         response_repository::mark_forensic(db, &result, &event.0)?;
     }
+
     run_asc(&asc_command(), ["export", "update-exports", result.as_str()], &[])?;
     response_repository::complete(db, &result)?;
+
     Ok(serde_json::json!({
         "type":"writeback-result",
-        "status":"committed",
+        "status":"written",
         "result_identity":result,
         "source_identity":source,
         "path":path,
-        "commit":commit,
-        "checkpoint_commit":checkpoint_commit,
-        "document_status":"needs-review",
-        "producer":"ai"
+        "commit":serde_json::Value::Null,
+        "frontmatter":"preserved"
     }))
 }
 
@@ -474,44 +459,6 @@ fn preserve_frontmatter(old: &str, response: &str) -> Result<String, Box<dyn std
     Ok(format!("{}{}", &old[..prefix_len], markdown_body(response)))
 }
 
-fn set_document_review_metadata(text: &str) -> Result<String, Box<dyn std::error::Error>> {
-    let body = markdown_body(text);
-    if body.len() == text.len() { return Err("writeback target has no complete frontmatter".into()); }
-    let prefix_len = text.len() - body.len();
-    let prefix = &text[..prefix_len];
-    let newline = if prefix.contains("\r\n") { "\r\n" } else { "\n" };
-    let normalized = prefix.replace("\r\n", "\n");
-    let mut lines = normalized.lines().map(str::to_string).collect::<Vec<_>>();
-    if lines.first().map(String::as_str) != Some("---") {
-        return Err("writeback target has invalid frontmatter opening".into());
-    }
-    let closing = lines.iter().rposition(|line| line.trim() == "---")
-        .ok_or("writeback target has invalid frontmatter closing")?;
-    let mut status_found = false;
-    let mut producer_found = false;
-    for line in lines.iter_mut().take(closing).skip(1) {
-        if line.starts_with("status:") {
-            *line = "status: needs-review".into();
-            status_found = true;
-        } else if line.starts_with("producer:") {
-            *line = "producer: ai".into();
-            producer_found = true;
-        }
-    }
-    let insertion = lines.iter().take(closing).position(|line| line.starts_with("slug:"))
-        .map(|index| index + 1).unwrap_or(closing);
-    if !status_found {
-        lines.insert(insertion, "status: needs-review".into());
-    }
-    let adjusted_closing = if status_found { closing } else { closing + 1 };
-    if !producer_found {
-        lines.insert(adjusted_closing, "producer: ai".into());
-    }
-    let mut rebuilt = lines.join(newline);
-    rebuilt.push_str(newline);
-    rebuilt.push_str(body);
-    Ok(rebuilt)
-}
 
 fn dispatch_run() -> ExitCode {
     match run_dispatch_from_stdin() {

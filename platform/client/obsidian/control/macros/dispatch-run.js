@@ -28,6 +28,22 @@ async function renderDispatchRun({ app, container }) {
   const protocol = loadConfig("protocol");
   const session = getFileManifest(app);
 
+  function planLabel(plan) {
+    const slug = String(plan.record_identity || plan.slug || plan.key || "").trim();
+    return String(plan.payload?.label || plan.label || plan.title || plan.name || slug);
+  }
+
+  function sortedPlans(plans) {
+    return [...plans].sort((a, b) =>
+      planLabel(a).localeCompare(planLabel(b), undefined, { sensitivity: "base", numeric: true }) ||
+      String(a.record_identity || a.slug || a.key || "").localeCompare(
+        String(b.record_identity || b.slug || b.key || ""),
+        undefined,
+        { sensitivity: "base", numeric: true }
+      )
+    );
+  }
+
   const heading = container.createEl("h2", { text: "Dispatch candidate files" });
   heading.style.marginTop = "0";
   const toolbar = container.createEl("div");
@@ -118,10 +134,10 @@ async function renderDispatchRun({ app, container }) {
   const form = container.createEl("div"); form.style.cssText = "display:grid;gap:.6em;max-width:42em";
   form.createEl("label", { text: "Plan" });
   const select = form.createEl("select");
-  for (const plan of planRows) {
+  for (const plan of sortedPlans(planRows)) {
     const slug = String(plan.record_identity || plan.slug || plan.key || "").trim();
     if (!slug) continue;
-    select.createEl("option", { text: String(plan.payload?.label || plan.label || plan.title || plan.name || slug), value: slug });
+    select.createEl("option", { text: planLabel(plan), value: slug });
   }
 
   const combineRow = form.createEl("label"); combineRow.style.cssText = "display:flex;gap:.5em;align-items:center";
@@ -140,7 +156,10 @@ async function renderDispatchRun({ app, container }) {
       if (combine.checked && !combineBasename.value.trim()) throw new Error("Enter a basename for the combined record.");
       if (combine.checked) throw new Error("Combined dispatch is not yet available through service.");
       const transport = await runDispatch(app, { documents, plan: select.value });
-      session.candidates.clear(); renderCandidates("manifest cleared after dispatch");
+      for (const [key, item] of session.candidates.entries()) {
+        if (item.selected) session.candidates.delete(key);
+      }
+      renderCandidates("dispatched files removed");
       result.setText(`Dispatch uploaded and enqueued by service.\nPlan: ${transport.plan}\nRecords: ${transport.records}`);
     } catch (error) {
       const detail = String(error?.message || error || "Unknown dispatch error");
