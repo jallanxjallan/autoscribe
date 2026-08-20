@@ -1,6 +1,8 @@
 "use strict";
 
 const { loadConfig } = require("./config-loader");
+const { getVaultBasePath } = require("./vault-paths.js");
+const { findFileBySlug } = require("./slug.js");
 function sessionKey() { return String(loadConfig("protocol").session_keys?.dispatch_run || "__autoscribeDispatchRunSessions"); }
 
 function registry() {
@@ -9,7 +11,7 @@ function registry() {
 }
 
 function vaultKey(app) {
-  return app.vault.adapter.getBasePath?.() || app.vault.adapter.basePath || app.vault.getName();
+  return getVaultBasePath(app) || app.vault.getName();
 }
 
 function getFileManifest(app) {
@@ -57,11 +59,7 @@ function resolveCandidate(app, raw) {
   let file = app.vault.getAbstractFileByPath(candidate);
   if (!file && !/\.md$/i.test(candidate)) file = app.vault.getAbstractFileByPath(`${candidate}.md`);
   if (!file) file = app.metadataCache.getFirstLinkpathDest(candidate.replace(/\.md$/i, ""), "");
-  if (!file && candidate.includes(".")) {
-    const matches = app.vault.getMarkdownFiles().filter((item) =>
-      String(app.metadataCache.getFileCache(item)?.frontmatter?.slug || "").trim() === candidate);
-    if (matches.length === 1) file = matches[0];
-  }
+  if (!file && candidate.includes(".")) file = findFileBySlug(app, candidate);
   return file?.extension === "md" ? file : null;
 }
 

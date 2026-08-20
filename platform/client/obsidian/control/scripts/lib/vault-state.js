@@ -1,15 +1,9 @@
 const fs = require('fs');
 const path = require('path');
-const os = require('os');
 const { loadConfig } = require('./config-loader.js');
+const { expandHome, requireVaultBasePath } = require('./vault-paths.js');
 function pathsConfig() { return loadConfig('paths'); }
-function expandHome(value) { return String(value || '').replace(/^\$HOME(?=\/|$)/, os.homedir()); }
-
-function vaultRoot(app) {
-  const root = app?.vault?.adapter?.getBasePath?.() || app?.vault?.adapter?.basePath;
-  if (!root) throw new Error('This query requires a filesystem-backed Obsidian vault.');
-  return root;
-}
+const vaultRoot = requireVaultBasePath;
 
 function autoscribeRoot() {
   return path.resolve(expandHome(pathsConfig().legacy_state_root));

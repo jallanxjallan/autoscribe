@@ -59,4 +59,14 @@ function buildSlugIndex(app, { prefixes = [], excludePaths = [] } = {}) {
   return { records, bySlug, byPath, duplicateSlugs };
 }
 
-module.exports = { kebab, makeSlug, buildSlugIndex };
+function findFileBySlug(app, slug) {
+  const target = String(slug || "").trim();
+  if (!target) return null;
+  const index = buildSlugIndex(app);
+  if (index.duplicateSlugs.has(target)) {
+    throw new Error(`Slug is duplicated in the vault: ${target}`);
+  }
+  return index.bySlug.get(target)?.file || null;
+}
+
+module.exports = { kebab, makeSlug, buildSlugIndex, findFileBySlug };

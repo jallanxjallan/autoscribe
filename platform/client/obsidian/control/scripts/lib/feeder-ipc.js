@@ -1,20 +1,15 @@
 "use strict";
 
 const fs = require("node:fs");
-const os = require("node:os");
 const path = require("node:path");
 const { spawnSync, spawn } = require("node:child_process");
 const { loadConfig } = require("./config-loader.js");
+const { expandHome, requireVaultBasePath } = require("./vault-paths.js");
 function feederConfig() { return loadConfig("feeder"); }
 function pathsConfig() { return loadConfig("paths"); }
-function expandHome(value) { return String(value || "").replace(/^\$HOME(?=\/|$)/, os.homedir()); }
 function ipcArgs(vault) { return (feederConfig().ipc_args || []).map((arg) => String(arg).replace("{vault}", vault)); }
 
-function vaultRoot(app) {
-  const root = app?.vault?.adapter?.basePath;
-  if (!root) throw new Error("Obsidian vault adapter does not expose basePath");
-  return path.resolve(root);
-}
+const vaultRoot = requireVaultBasePath;
 
 function candidateCommands() {
   const cfg = feederConfig();

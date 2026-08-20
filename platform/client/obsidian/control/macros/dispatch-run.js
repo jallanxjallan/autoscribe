@@ -1,30 +1,13 @@
 "use strict";
 
-const path = require("node:path");
-
-function activeInstructionSlugs(app) {
-  const slugs = [];
-  const seen = new Set();
-  for (const file of app.vault.getMarkdownFiles()) {
-    const fm = app.metadataCache.getFileCache(file)?.frontmatter || {};
-    const slug = String(fm.slug || "").trim();
-    if (!slug || seen.has(slug)) continue;
-    const declared = String(fm.record || fm.type || fm.kind || "").trim().toLowerCase();
-    if (declared && declared !== "instruction") continue;
-    seen.add(slug);
-    slugs.push(slug);
-  }
-  return slugs.sort();
-}
+const { getFileManifest, appendClipboardCandidates } = require("../scripts/lib/file-manifest.js");
+const { notify } = require("../scripts/lib/notify.js");
+const { runDispatch, serviceCall } = require("../scripts/lib/dispatch-service.js");
+const { loadConfig } = require("../scripts/lib/config-loader.js");
+const { activeInstructionSlugs } = require("../scripts/lib/instruction-query.js");
 
 async function renderDispatchRun({ app, container }) {
   container.empty();
-  const vaultRoot = app.vault.adapter.getBasePath?.() || app.vault.adapter.basePath;
-  const load = (relative) => require(path.join(vaultRoot, "_control", ...relative.split("/")));
-  const { getFileManifest, appendClipboardCandidates } = load("scripts/lib/file-manifest.js");
-  const { notify } = load("scripts/lib/notify.js");
-  const { runDispatch, serviceCall } = load("scripts/lib/dispatch-service.js");
-  const { loadConfig } = load("scripts/lib/config-loader.js");
   const protocol = loadConfig("protocol");
   const session = getFileManifest(app);
 

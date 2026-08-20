@@ -1,26 +1,16 @@
 "use strict";
 
-const path = require("node:path");
 const { loadConfig } = require("../scripts/lib/config-loader");
+const { el } = require("../scripts/lib/dom.js");
+const { activeInstructionSlugs } = require("../scripts/lib/instruction-query.js");
+const { notify } = require("../scripts/lib/notify.js");
+const { serviceCall: callService } = require("../scripts/lib/dispatch-service.js");
+const { buildPlanRecord } = require("../scripts/plans/plan-record.js");
 
 function workflowConfig() { return loadConfig("workflow"); }
 function protocolConfig() { return loadConfig("protocol"); }
 function stepKinds() { return workflowConfig().step_kinds || ["llm", "script", "rag"]; }
 function statusKey() { return String(workflowConfig().define_plan?.status_storage_key || "autoscribe.define-plan.status"); }
-
-function el(tag, attrs = {}, children = []) {
-  const node = document.createElement(tag);
-  for (const [key, value] of Object.entries(attrs)) {
-    if (key === "text") node.textContent = value;
-    else if (key === "class") node.className = value;
-    else node.setAttribute(key, value);
-  }
-  for (const child of Array.isArray(children) ? children : [children]) {
-    if (child == null) continue;
-    node.appendChild(typeof child === "string" ? document.createTextNode(child) : child);
-  }
-  return node;
-}
 
 function id(record) { return String(record?.slug || record?.record_identity || record?.key || "").trim(); }
 function title(record) { return String(record?.title || record?.label || record?.name || id(record)); }
@@ -45,25 +35,8 @@ function option(select, record, { titleOnly = false } = {}) {
   }));
 }
 
-function activeInstructionSlugs(app) {
-  const slugs = [];
-  const seen = new Set();
-  for (const file of app.vault.getMarkdownFiles()) {
-    const fm = app.metadataCache.getFileCache(file)?.frontmatter || {};
-    const slug = String(fm.slug || "").trim();
-    if (!slug || seen.has(slug)) continue;
-    const declared = String(fm.record || fm.type || fm.kind || "").trim().toLowerCase();
-    if (declared && declared !== "instruction") continue;
-    seen.add(slug);
-    slugs.push(slug);
-  }
-  return slugs.sort();
-}
-
 async function serviceCall(app, command, input = {}) {
-  const root = app.vault.adapter.getBasePath?.() || app.vault.adapter.basePath;
-  const service = require(path.join(root, "_control/scripts/lib/dispatch-service.js"));
-  const result = await service.serviceCall(app, command, input);
+  const result = await callService(app, command, input);
   const output = JSON.parse(String(result.stdout || "{}").trim() || "{}");
   if (!output.ok) throw new Error(output.error || `${command} failed`);
   return output;
@@ -104,10 +77,6 @@ function screenSteps(plan, catalogs) {
 
 async function renderCreatePlan({ app, container }) {
   container.empty();
-  const root = app.vault.adapter.getBasePath?.() || app.vault.adapter.basePath;
-  const load = (relative) => require(path.join(root, "_control", ...relative.split("/")));
-  const { notify } = load("scripts/lib/notify.js");
-  const { buildPlanRecord } = load("scripts/plans/plan-record.js");
   const protocol = protocolConfig();
   const snapshotSpec = protocol.service_operations?.define_plan_snapshot || {};
   const snapshot = await serviceCall(app, String(snapshotSpec.command || "define-plan-snapshot"), {

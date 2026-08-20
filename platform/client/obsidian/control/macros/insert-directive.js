@@ -1,18 +1,6 @@
 "use strict";
 
-const path = require("node:path");
-
-function loadAnnotations(app) {
-  const vaultRoot = app.vault.adapter.getBasePath?.() || app.vault.adapter.basePath;
-  const modulePath = path.join(
-    vaultRoot,
-    "_control",
-    "scripts",
-    "lib",
-    "annotate.js"
-  );
-  return require(modulePath);
-}
+const { formatDirective } = require("../scripts/lib/directive.js");
 
 function frontmatterEndLine(editor) {
   if (editor.getLine(0).trim() !== "---") return -1;
@@ -128,9 +116,8 @@ async function insertDirective({ app, directivePrompt = promptDirective }) {
   const instruction = await directivePrompt();
   if (!instruction?.trim()) return;
 
-  const annotations = loadAnnotations(app);
   const insertion = directiveInsertion(editor);
-  const replacement = `${insertion.prefix}${annotations.directive(instruction)}${insertion.suffix}`;
+  const replacement = `${insertion.prefix}${formatDirective(instruction)}${insertion.suffix}`;
 
   editor.replaceRange(replacement, insertion.range.from, insertion.range.to);
 

@@ -1,18 +1,12 @@
 "use strict";
 
 const fs = require("node:fs");
-const os = require("node:os");
 const path = require("node:path");
 const { spawn } = require("node:child_process");
 const { loadConfig } = require("./config-loader");
+const { expandHome, requireVaultBasePath } = require("./vault-paths.js");
 function serviceConfig() { return loadConfig("service"); }
-function expandHome(value) { return String(value || "").replace(/^\$HOME(?=\/|$)/, os.homedir()); }
-
-function vaultRoot(app) {
-  const root = app?.vault?.adapter?.getBasePath?.() || app?.vault?.adapter?.basePath;
-  if (!root) throw new Error("Obsidian vault adapter does not expose its base path");
-  return path.resolve(root);
-}
+const vaultRoot = requireVaultBasePath;
 
 function autoscribeRoot(app) {
   const cfg = serviceConfig();

@@ -90,7 +90,7 @@ async function collectAnnotations(app) {
     const lines = (await app.vault.cachedRead(file)).split(/\r?\n/);
 
     let inFrontmatter = lines[0]?.trim() === "---";
-    let fence = null;
+    let fenceMarker = null;
 
     for (let index = 0; index < lines.length; index += 1) {
       const line = lines[index];
@@ -101,33 +101,14 @@ async function collectAnnotations(app) {
         continue;
       }
 
-      if (fence) {
-        if (trimmed.startsWith(fence.marker)) {
-          if (fence.directive) {
-            annotations.push({
-              annotation: typeId("directive"),
-              type: String(typeDef("directive").label || typeId("directive")),
-              text: truncateAtWord(fence.lines.join("\n")) || "Empty directive",
-              path: file.path,
-              title,
-              line: fence.line,
-            });
-          }
-          fence = null;
-        } else if (fence.directive) {
-          fence.lines.push(line);
-        }
+      if (fenceMarker) {
+        if (trimmed.startsWith(fenceMarker)) fenceMarker = null;
         continue;
       }
 
-      const openingFence = trimmed.match(/^(`{3,}|~{3,})\s*([^\s`]*)/);
+      const openingFence = trimmed.match(/^(`{3,}|~{3,})/);
       if (openingFence) {
-        fence = {
-          marker: openingFence[1],
-          directive: openingFence[2].toLowerCase() === typeId("directive").toLowerCase(),
-          lines: [],
-          line: index + 1,
-        };
+        fenceMarker = openingFence[1];
         continue;
       }
 
@@ -176,11 +157,6 @@ function inline(text, { key, message }) {
   return annotationSpan(text, { key, message });
 }
 
-function directive(instruction) {
-  const message = String(instruction || "").trim();
-  if (!message) throw new Error("A directive instruction is required.");
-  return `\`\`\`${typeId("directive")}\n${message}\n\`\`\``;
-}
 
 module.exports = {
   get ANNOTATION_TYPES() { return annotationTypes(); },
@@ -194,5 +170,4 @@ module.exports = {
   collectAnnotations,
   selectionRange,
   inline,
-  directive,
 };

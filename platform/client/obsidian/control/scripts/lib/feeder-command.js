@@ -3,13 +3,10 @@
 const fs = require("node:fs");
 const os = require("node:os");
 const path = require("node:path");
+const { requireVaultBasePath } = require("./vault-paths.js");
 const { spawn } = require("node:child_process");
 
-function vaultRoot(app) {
-  const root = app?.vault?.adapter?.getBasePath?.() || app?.vault?.adapter?.basePath;
-  if (!root) throw new Error("Obsidian vault adapter does not expose its base path");
-  return path.resolve(root);
-}
+const vaultRoot = requireVaultBasePath;
 
 function candidateCommands() {
   return [

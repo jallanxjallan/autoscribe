@@ -154,7 +154,10 @@ These terms state **where/how** the annotation is attached.
 |---|---|---|
 | `block` | Block | Callout attached to the current paragraph. |
 | `inline` | Inline | Annotation attached to selected text. |
-| `directive` | Directive | Fenced instruction embedded in the document for later processing. Directive insertion is handled by its own macro. |
+
+### Directives
+
+Directives are **not annotations**. They are fenced operational instructions embedded in a document for later processing and are handled by the dedicated Insert Directive workflow.
 
 ## Plan and instruction vocabulary
 

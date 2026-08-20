@@ -1,18 +1,6 @@
 "use strict";
 
-const path = require("node:path");
-
-function loadAnnotations(app) {
-  const vaultRoot = app.vault.adapter.getBasePath?.() || app.vault.adapter.basePath;
-  const modulePath = path.join(
-    vaultRoot,
-    "_control",
-    "scripts",
-    "lib",
-    "annotate.js"
-  );
-  return require(modulePath);
-}
+const { loadAnnotations } = require("../scripts/lib/annotation-loader.js");
 
 async function choose(api, items, placeholder) {
   const selected = await api.suggester(
@@ -47,7 +35,7 @@ async function annotateText({ app, quickAddApi }) {
     throw new Error("Open a Markdown note in edit mode before running Annotate Text.");
   }
 
-  const annotations = loadAnnotations(app);
+  const annotations = loadAnnotations();
   const range = annotations.selectionRange(editor);
   const selectedText = range
     ? editor.getRange(range.from, range.to)

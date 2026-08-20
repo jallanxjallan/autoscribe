@@ -1,28 +1,6 @@
 "use strict";
 
-const path = require("node:path");
-
-function loadAnnotations(app) {
-  const vaultRoot =
-    app.vault.adapter.getBasePath?.() ||
-    app.vault.adapter.basePath;
-
-  const modulePath = path.join(
-    vaultRoot,
-    "_control",
-    "scripts",
-    "lib",
-    "annotate.js"
-  );
-  const electronRequire = globalThis.window?.require;
-
-  if (electronRequire?.cache && electronRequire?.resolve) {
-    delete electronRequire.cache[electronRequire.resolve(modulePath)];
-    return electronRequire(modulePath);
-  }
-
-  return require(modulePath);
-}
+const { loadAnnotations } = require("../scripts/lib/annotation-loader.js");
 
 function compareText(a, b) {
   return String(a).localeCompare(String(b), undefined, {
@@ -211,7 +189,7 @@ function showAnnotationList(app, found, typeOrder = []) {
 }
 
 module.exports = async ({ app }) => {
-  const annotations = loadAnnotations(app);
+  const annotations = loadAnnotations();
   const found =
     await annotations.collectAnnotations(app);
 

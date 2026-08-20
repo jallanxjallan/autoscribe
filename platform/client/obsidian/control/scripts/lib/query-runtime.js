@@ -1,21 +1,9 @@
-function getNodeRequire() {
-  if (typeof require === "function") return require;
-  if (typeof window !== "undefined" && typeof window.require === "function") return window.require;
-  throw new Error("Node require is unavailable in this Obsidian context.");
-}
+const { getNodeRequire } = require("./node-runtime.js");
+const { requireVaultBasePath } = require("./vault-paths.js");
+
 
 function getVaultBasePath(app) {
-  const adapter = app?.vault?.adapter;
-
-  if (typeof adapter?.getBasePath === "function") {
-    return adapter.getBasePath();
-  }
-
-  if (adapter?.basePath) {
-    return adapter.basePath;
-  }
-
-  throw new Error("Could not determine vault base path.");
+  return requireVaultBasePath(app);
 }
 
 function getVaultName(app) {

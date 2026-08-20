@@ -1,12 +1,9 @@
 "use strict";
 const { serviceCall } = require("./dispatch-service.js");
 const { loadConfig } = require("./config-loader.js");
+const { requireVaultBasePath } = require("./vault-paths.js");
 
-function vaultRoot(app) {
-  const root = app?.vault?.adapter?.getBasePath?.() || app?.vault?.adapter?.basePath;
-  if (!root) throw new Error("Obsidian vault path is unavailable");
-  return root;
-}
+const vaultRoot = requireVaultBasePath;
 
 async function gitFiles(app, action, request = {}) {
   const spec = loadConfig("protocol").service_operations?.git_files || {};

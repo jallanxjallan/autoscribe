@@ -5,14 +5,11 @@ const os = require("node:os");
 const path = require("node:path");
 const crypto = require("node:crypto");
 const { loadConfig } = require("../lib/config-loader.js");
+const { requireVaultBasePath } = require("../lib/vault-paths.js");
 function protocolConfig() { return loadConfig("protocol").current_selection || {}; }
 function pathsConfig() { return loadConfig("paths"); }
 
-function vaultRoot(app) {
-  const root = app?.vault?.adapter?.basePath;
-  if (!root) throw new Error("Current selection requires a filesystem-backed vault.");
-  return path.resolve(root);
-}
+const vaultRoot = requireVaultBasePath;
 
 function sessionToken() {
   if (typeof process !== "undefined" && process?.pid) return `pid-${process.pid}`;
