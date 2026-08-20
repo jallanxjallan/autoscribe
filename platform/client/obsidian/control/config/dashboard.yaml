@@ -8,9 +8,6 @@ paths:
   editorial_notes_query: _control/queries/Editorial Notes.md
 
 actions:
-  set_note_type:
-    label: Set Note Type
-    macro: macros/set-note-type.js
   define_plan:
     label: Define Plan
     macro: macros/define-plan.js

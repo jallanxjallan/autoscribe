@@ -1,6 +1,16 @@
 "use strict";
 
-const { formatDirective } = require("../scripts/lib/directive.js");
+function loadDirectiveLibrary(app) {
+  const nodeRequire = typeof require === "function" ? require : window.require;
+  const path = nodeRequire("node:path");
+  const base = app?.vault?.adapter?.getBasePath?.() || app?.vault?.adapter?.basePath;
+
+  if (!base) {
+    throw new Error("Could not determine vault base path.");
+  }
+
+  return nodeRequire(path.join(base, "_control", "scripts", "lib", "directive.js"));
+}
 
 function frontmatterEndLine(editor) {
   if (editor.getLine(0).trim() !== "---") return -1;
@@ -108,6 +118,7 @@ function promptDirective() {
 }
 
 async function insertDirective({ app, directivePrompt = promptDirective }) {
+  const { formatDirective } = loadDirectiveLibrary(app);
   const editor = app.workspace.activeEditor?.editor;
   if (!editor) {
     throw new Error("Open a Markdown note in edit mode before inserting a directive.");

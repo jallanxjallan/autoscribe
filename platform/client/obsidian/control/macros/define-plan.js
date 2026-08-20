@@ -1,5 +1,6 @@
 "use strict";
 
+const path = require("node:path");
 const { loadConfig } = require("../scripts/lib/config-loader");
 const { el } = require("../scripts/lib/dom.js");
 const { activeInstructionSlugs } = require("../scripts/lib/instruction-query.js");

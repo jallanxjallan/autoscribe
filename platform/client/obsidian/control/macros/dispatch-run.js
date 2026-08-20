@@ -1,5 +1,6 @@
 "use strict";
 
+const path = require("node:path");
 const { getFileManifest, appendClipboardCandidates } = require("../scripts/lib/file-manifest.js");
 const { notify } = require("../scripts/lib/notify.js");
 const { runDispatch, serviceCall } = require("../scripts/lib/dispatch-service.js");

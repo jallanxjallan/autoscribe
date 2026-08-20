@@ -10,7 +10,6 @@ module.exports = async function write_responses(params = {}) {
   const load = (relativePath) => nodeRequire(path.join(base, "_control", ...relativePath.split("/")));
 
   const { openWorkflowModal } = load("scripts/lib/workflow-modal.js");
-  const { createRefreshControl } = load("scripts/lib/refresh-control.js");
   const { notify } = load("scripts/lib/notify.js");
   const { readSystemState } = load("scripts/lib/system-state.js");
   const { serviceCall } = load("scripts/lib/dispatch-service.js");
@@ -38,6 +37,12 @@ module.exports = async function write_responses(params = {}) {
     const heading = container.createEl("h2", { text: "Write Responses" });
     heading.style.marginTop = "0";
 
+    const toolbar = container.createEl("div");
+    toolbar.style.cssText = "display:flex;gap:.6rem;align-items:center;flex-wrap:wrap;margin:.6rem 0 1rem";
+    const refreshButton = toolbar.createEl("button", { text: "Refresh" });
+    refreshButton.type = "button";
+    const refreshStatus = toolbar.createSpan({ text: "" });
+
     container.createEl("p", {
       text: "Writes completed pipeline responses into their source files. Existing frontmatter is preserved; the files remain dirty for vault-specific post-processing.",
     });
@@ -48,8 +53,8 @@ module.exports = async function write_responses(params = {}) {
     const results = container.createEl("div");
     results.style.marginTop = "1rem";
 
-    async function refreshState({ status } = {}) {
-      if (status) status.setText("Reading current service state…");
+    async function refreshState() {
+      refreshStatus.setText("Reading current service state…");
       try {
         const system = await readSystemState(app);
         if (!system.pipeline) {
@@ -61,26 +66,19 @@ module.exports = async function write_responses(params = {}) {
             ? `${pending} pending response${pending === 1 ? "" : "s"} ready to write.`
             : "No pending responses."
         );
-        if (status) status.setText(`Updated ${new Date(system.refreshed_at).toLocaleTimeString()}`);
+        refreshStatus.setText(`Updated ${new Date(system.refreshed_at).toLocaleTimeString()}`);
       } catch (error) {
         const message = error?.message || String(error);
         summary.setText("Pending-response state unavailable.");
-        if (status) status.setText(`Refresh failed: ${message}`);
+        refreshStatus.setText(`Refresh failed: ${message}`);
       }
     }
 
-    const refresh = createRefreshControl(container, { onRefresh: refreshState });
-
-    const writeButton = container.createEl("button", {
-      text: "Write Responses",
-      cls: "mod-cta",
-    });
-    writeButton.type = "button";
-
-    writeButton.addEventListener("click", async () => {
-      if (writeButton.disabled) return;
-      writeButton.disabled = true;
-      writeButton.setText("Writing…");
+    refreshButton.addEventListener("click", async () => {
+      if (refreshButton.disabled) return;
+      refreshButton.disabled = true;
+      refreshButton.setText("Refreshing…");
+      refreshStatus.setText("Checking for completed responses…");
       results.empty();
 
       try {
@@ -134,18 +132,19 @@ module.exports = async function write_responses(params = {}) {
 
         const message = `${written.length} written${failed.length ? `; ${failed.length} failed` : ""}.`;
         notify(`Write Responses complete: ${message}`, failed.length ? 10000 : 6000);
-        await refresh.refresh();
+        await refreshState();
       } catch (error) {
         const message = error?.message || String(error);
         results.createEl("pre", { text: `Write Responses failed.\n${message}` }).style.whiteSpace = "pre-wrap";
+        refreshStatus.setText(`Refresh failed: ${message}`);
         notify(`Write Responses failed: ${message}`, 10000);
       } finally {
-        writeButton.disabled = false;
-        writeButton.setText("Write Responses");
+        refreshButton.disabled = false;
+        refreshButton.setText("Refresh");
       }
     });
 
-    await refresh.refresh();
+    await refreshState();
   }
 
   return openWorkflowModal({
