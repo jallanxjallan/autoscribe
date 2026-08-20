@@ -1,5 +1,4 @@
 ---
-slug: <% tp.user.make_slug(tp, "ctx") %>
 record: instruction
 component: context
 class: context

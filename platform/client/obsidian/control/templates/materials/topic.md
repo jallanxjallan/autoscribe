@@ -1,5 +1,4 @@
 ---
-slug: <% tp.user.make_slug(tp, "tpc") %>
 record: topic
 component: research
 topic: []

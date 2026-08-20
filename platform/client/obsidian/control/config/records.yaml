@@ -1,36 +1,79 @@
-# NOTE / RECORD DEFINITIONS
-# -------------------------
-# Create Note builds its menu directly from this file. Record fields and default
-# values live in the referenced Markdown templates; this file only describes the
-# creation menu and where each record type belongs.
+# NOTE TYPE DEFINITIONS
+# ---------------------
+# Set Note Type builds its folded choice menu directly from this file.
+# The macro acts only on the active Markdown note: creation and movement are
+# deliberately separate operations.
 #
-# `group.folder` is the destination folder in the active project vault.
-# `template` is relative to that vault; _control is expected to be the symlink
-# or directory exposing this control tree.
-# `prefix` is the slug prefix.
+# `template` is relative to the active vault; _control exposes this tree.
+# `prefix` is the canonical slug prefix and lives here, not in templates.
+# `defaults` overrides/adds frontmatter when the type is applied.
 
 groups:
-  content:
-    label: Content
-    folder: Content
+  narrative:
+    label: Narrative
     initially_open: true
     choices:
       passage:
         label: Passage
         prefix: psg
         template: _control/templates/content/passage.md
-      image:
-        label: Image
-        prefix: img
-        template: _control/templates/content/image.md
       opener:
         label: Opener
         prefix: opn
         template: _control/templates/content/opener.md
-  materials:
-    label: Materials
-    folder: Materials
-    initially_open: true
+      image:
+        label: Image
+        prefix: img
+        template: _control/templates/content/image.md
+
+  business:
+    label: Business
+    initially_open: false
+    choices:
+      thesis:
+        label: Thesis
+        prefix: ths
+        template: _control/templates/business/thesis.md
+      brief:
+        label: Brief
+        prefix: brf
+        template: _control/templates/business/brief.md
+      analysis:
+        label: Analysis
+        prefix: anl
+        template: _control/templates/business/analysis.md
+      model:
+        label: Model
+        prefix: mdl
+        template: _control/templates/business/model.md
+      plan:
+        label: Plan
+        prefix: pln
+        template: _control/templates/business/plan.md
+      spec:
+        label: Spec
+        prefix: spc
+        template: _control/templates/business/spec.md
+      profile:
+        label: Profile
+        prefix: prf
+        template: _control/templates/business/profile.md
+      reference:
+        label: Reference
+        prefix: ref
+        template: _control/templates/business/reference.md
+      record:
+        label: Record
+        prefix: rec
+        template: _control/templates/business/record.md
+      index:
+        label: Index
+        prefix: idx
+        template: _control/templates/business/index.md
+
+  research:
+    label: Research
+    initially_open: false
     choices:
       topic:
         label: Topic
@@ -40,31 +83,66 @@ groups:
         label: Finding
         prefix: fnd
         template: _control/templates/materials/finding.md
-  instructions:
-    label: Instructions
-    folder: Instructions
+
+  project_instructions:
+    label: Instructions — Project
     initially_open: false
     choices:
       role:
         label: Role
         prefix: rol
         template: _control/templates/instructions/role.md
+        defaults:
+          scope: local
       context:
         label: Context
         prefix: ctx
         template: _control/templates/instructions/context.md
+        defaults:
+          scope: local
       reference:
         label: Reference
         prefix: ref
         template: _control/templates/instructions/reference.md
+        defaults:
+          scope: local
       instruction:
         label: Instruction
         prefix: ins
         template: _control/templates/instructions/instruction.md
+        defaults:
+          scope: local
+
+  global_instructions:
+    label: Instructions — Global
+    initially_open: false
+    choices:
+      role:
+        label: Role
+        prefix: rol
+        template: _control/templates/instructions/role.md
+        defaults:
+          scope: global
+      context:
+        label: Context
+        prefix: ctx
+        template: _control/templates/instructions/context.md
+        defaults:
+          scope: global
+      reference:
+        label: Reference
+        prefix: ref
+        template: _control/templates/instructions/reference.md
+        defaults:
+          scope: global
+      instruction:
+        label: Instruction
+        prefix: ins
+        template: _control/templates/instructions/instruction.md
+        defaults:
+          scope: global
+
 editorial_note:
-  # Used by Create Editorial Note. These values were previously hard-coded in
-  # the macro. `open` is not in vocabulary.yaml/status; that mismatch is
-  # preserved so you can resolve it deliberately.
   folder: Editorial Notes
   defaults:
     record: editorial-note
@@ -74,6 +152,5 @@ editorial_note:
     title: New Editorial Note
     title_placeholder: Compare regional expansion passages
     action_default: compare
-    # Used if the Action box is deliberately left blank.
     blank_action_fallback: review
     clipboard_default: true

@@ -61,6 +61,7 @@ if (!errors.length) {
   const records = loadConfig("records");
   for (const [groupId, group] of Object.entries(records.groups || {})) {
     for (const [choiceId, choice] of Object.entries(group.choices || {})) {
+      if (!String(choice.prefix || "").trim()) fail(`records.${groupId}.${choiceId}.prefix is blank`);
       const template = controlPath(choice.template);
       if (!fs.existsSync(template)) fail(`records.${groupId}.${choiceId} template not found: ${choice.template}`);
       const defaults = choice.defaults || {};

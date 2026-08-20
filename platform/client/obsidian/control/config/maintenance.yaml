@@ -12,3 +12,10 @@ deprecated_files:
   - scripts/lib/annotations.js
   # Old Dataview query, superseded by the List Annotations macro.
   - queries/Editorial Flags.md
+  # Superseded by Set Note Type; note creation/movement are separate operations.
+  - macros/create-new-new.js
+  - macros/create-note.js
+  - macros/create-instruction.js
+  - macros/apply-template.js
+  - scripts/ui/create-instruction.js
+

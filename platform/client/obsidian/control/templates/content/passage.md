@@ -1,5 +1,4 @@
 ---
-slug: <% tp.user.make_slug(tp, "psg") %>
 record: passage
 component: body
 topic: []

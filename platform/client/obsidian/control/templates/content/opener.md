@@ -1,5 +1,4 @@
 ---
-slug: <% tp.user.make_slug(tp, "opn") %>
 record: opener
 component: section
 level:

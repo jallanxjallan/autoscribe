@@ -1,5 +1,4 @@
 ---
-slug: <% tp.user.make_slug(tp, "img") %>
 record: image
 component: image
 topic: []
