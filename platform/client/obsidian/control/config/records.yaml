@@ -5,7 +5,10 @@
 # deliberately separate operations.
 #
 # `template` is relative to the active vault; _control exposes this tree.
-# `prefix` is the canonical slug prefix and lives here, not in templates.
+# `prefix` opts a note type into slug creation and defines its canonical slug prefix.
+# Omit it for notes that are not pipeline-discoverable. Slugs are reserved for
+# pipeline content and instructions; ordinary business/research/image notes rely
+# on normal Obsidian links/embeds instead.
 # `defaults` overrides/adds frontmatter when the type is applied.
 
 groups:
@@ -23,7 +26,6 @@ groups:
         template: _control/templates/content/opener.md
       image:
         label: Image
-        prefix: img
         template: _control/templates/content/image.md
 
   business:
@@ -32,43 +34,33 @@ groups:
     choices:
       thesis:
         label: Thesis
-        prefix: ths
         template: _control/templates/business/thesis.md
       brief:
         label: Brief
-        prefix: brf
         template: _control/templates/business/brief.md
       analysis:
         label: Analysis
-        prefix: anl
         template: _control/templates/business/analysis.md
       model:
         label: Model
-        prefix: mdl
         template: _control/templates/business/model.md
       plan:
         label: Plan
-        prefix: pln
         template: _control/templates/business/plan.md
       spec:
         label: Spec
-        prefix: spc
         template: _control/templates/business/spec.md
       profile:
         label: Profile
-        prefix: prf
         template: _control/templates/business/profile.md
       reference:
         label: Reference
-        prefix: ref
         template: _control/templates/business/reference.md
       record:
         label: Record
-        prefix: rec
         template: _control/templates/business/record.md
       index:
         label: Index
-        prefix: idx
         template: _control/templates/business/index.md
 
   research:
@@ -77,11 +69,9 @@ groups:
     choices:
       topic:
         label: Topic
-        prefix: tpc
         template: _control/templates/materials/topic.md
       finding:
         label: Finding
-        prefix: fnd
         template: _control/templates/materials/finding.md
 
   project_instructions:

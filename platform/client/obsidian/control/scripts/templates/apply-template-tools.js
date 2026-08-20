@@ -173,9 +173,11 @@ async function applyTemplateToFile({
 
   const configDefaults = configDefaultsForTemplate(templatePath);
   const updates = { ...template.frontmatter, ...configDefaults, ...frontmatterOverrides };
-  if (!updates.slug && slugPrefix) updates.slug = makeSlug(slugPrefix, file.basename);
+  const wantsSlug = Boolean(String(slugPrefix || "").trim());
+  if (!updates.slug && wantsSlug) updates.slug = makeSlug(slugPrefix, file.basename);
 
   await app.fileManager.processFrontMatter(file, (frontmatter) => {
+    if (!wantsSlug) delete frontmatter.slug;
     mergeFrontmatter(frontmatter, updates);
   });
 

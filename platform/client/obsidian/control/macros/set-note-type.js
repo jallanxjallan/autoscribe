@@ -138,10 +138,12 @@ function chooseType(groups, filePath) {
         label.textContent = choice.label || choice.id;
         button.appendChild(label);
 
-        const prefix = document.createElement("span");
-        prefix.className = "set-type-prefix";
-        prefix.textContent = choice.prefix || "";
-        button.appendChild(prefix);
+        if (choice.prefix) {
+          const prefix = document.createElement("span");
+          prefix.className = "set-type-prefix";
+          prefix.textContent = choice.prefix;
+          button.appendChild(prefix);
+        }
 
         button.addEventListener("click", () => close({ group, choice }));
         choices.appendChild(button);
