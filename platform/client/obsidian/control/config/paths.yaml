@@ -38,13 +38,6 @@ shell_candidates:
   - /bin/bash
 preferred_shell: /usr/bin/zsh
 rg_command: rg
-asc_command: asc
-asc_candidate_paths:
-  # `$HOME` is expanded by control-loader.js. Environment ASC_BIN still wins.
-  - $HOME/Python3.13Env/bin/asc
-  - $HOME/.local/bin/asc
-  - /usr/local/bin/asc
-  - /usr/bin/asc
 
 # Compatibility locations retained from older Control layouts. Remove only after
 # you know no project vault still relies on them.
@@ -53,7 +46,6 @@ legacy_query_root: _autoscribe
 # Environment-variable NAMES, not their values.
 environment:
   library_vault: AUTOSCRIBE_LIBRARY_VAULT
-  asc_bin: ASC_BIN
   rg_primary: OBSIDIAN_RG_BIN
   rg_secondary: RG_BIN
 

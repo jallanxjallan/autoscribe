@@ -2,7 +2,7 @@ use autoscribe_service::{
     Service,
     db::{self, Database},
     git, instruction_sync,
-    pandoc, plan_repository, reconcile, response_repository,
+    pandoc, plan_repository, response_repository,
     types::{CommitPurpose, CommitRequest, DispatchId, LedgerSnapshotRequest,
         LedgerSource, PandocJob, PlanId},
 };
@@ -44,9 +44,7 @@ struct DispatchRunOutput {
 #[serde(deny_unknown_fields)]
 struct PlanSaveInput {
     version: u32,
-    database_path: PathBuf,
     plan: serde_json::Value,
-    instructions: Vec<serde_json::Value>,
 }
 
 #[derive(Deserialize)]
@@ -80,9 +78,26 @@ struct PlanSaveOutput {
 struct DefinePlanSnapshotOutput {
     ok: bool,
     operation: &'static str,
-    server: serde_json::Value,
-    authored_plans: Vec<serde_json::Value>,
-    authored_instructions: Vec<serde_json::Value>,
+    catalogs: serde_json::Value,
+    refreshed_at: Option<String>,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct CatalogRefreshInput {
+    version: u32,
+    #[serde(default)]
+    instruction_slugs: Vec<String>,
+}
+
+#[derive(Serialize)]
+struct CatalogRefreshOutput {
+    ok: bool,
+    operation: &'static str,
+    catalogs: serde_json::Value,
+    refreshed_at: String,
+    uploaded_instructions: usize,
+    committed_instructions: usize,
 }
 
 #[derive(Deserialize)]
@@ -106,6 +121,8 @@ fn main() -> ExitCode {
     match env::args().nth(1).as_deref() {
         Some("dispatch-run") => return dispatch_run(),
         Some("define-plan-snapshot") => return define_plan_snapshot(),
+        Some("define-plan-refresh") => return command_output("define-plan.refresh", catalog_refresh_from_stdin("define-plan.refresh")),
+        Some("dispatch-refresh") => return command_output("dispatch.refresh", catalog_refresh_from_stdin("dispatch.refresh")),
         Some("system-snapshot") => return command_output("system.snapshot", system_snapshot_from_stdin()),
         Some("plan-save") => return plan_save(),
         Some("instructions-sync") => return command_output("instructions.sync", instructions_sync_from_stdin()),
@@ -536,8 +553,7 @@ fn run_dispatch_from_stdin() -> Result<DispatchRunOutput, Box<dyn std::error::Er
     if let Some(parent) = database_path.parent() { std::fs::create_dir_all(parent)?; }
     let database = Database::open_path(&database_path)?;
     db::migrate(&database)?;
-    let server = reconcile_authored_catalog(&database, &asc_command())?;
-    require_plan_slug(&server, &input.plan)?;
+    require_plan_available(&database, &input.plan)?;
     let documents = resolve_document_slugs(&repository, &input.documents)?;
     let pandoc_binary = configured_pandoc_binary()?;
     let pandoc_filter = configured_pandoc_filter()?;
@@ -702,20 +718,17 @@ fn configured_pandoc_parallelism() -> usize {
         .unwrap_or_else(|| std::thread::available_parallelism().map(usize::from).unwrap_or(2).max(2))
 }
 
-fn require_plan_slug(snapshot: &serde_json::Value, plan: &str) -> Result<(), Box<dyn std::error::Error>> {
-    let plans = snapshot.pointer("/registries/plans").ok_or("control snapshot has no plans registry")?;
-    let found = match plans {
-        serde_json::Value::Object(records) => records.iter().any(|(key, record)| {
-            key == plan || ["record_identity", "slug", "key"].into_iter()
-                .any(|field| record.get(field).and_then(serde_json::Value::as_str) == Some(plan))
-        }),
-        serde_json::Value::Array(records) => records.iter().any(|record| {
-            ["record_identity", "slug", "key"].into_iter()
-                .any(|field| record.get(field).and_then(serde_json::Value::as_str) == Some(plan))
-        }),
-        _ => false,
-    };
-    if found { Ok(()) } else { Err(format!("plan slug is not available: {plan}").into()) }
+fn require_plan_available(db: &Database, plan: &str) -> Result<(), Box<dyn std::error::Error>> {
+    if plan_repository::list(db)?.iter().any(|record| {
+        ["record_identity", "slug"].into_iter().any(|field| record.get(field).and_then(serde_json::Value::as_str) == Some(plan))
+    }) { return Ok(()); }
+    let cached = cached_server_snapshot(db)?;
+    let catalogs = catalogs_from_server(&cached);
+    let found = catalogs.get("plans").and_then(serde_json::Value::as_array).is_some_and(|records| {
+        records.iter().any(|record| ["record_identity", "slug", "key"].into_iter()
+            .any(|field| record.get(field).and_then(serde_json::Value::as_str) == Some(plan)))
+    });
+    if found { Ok(()) } else { Err(format!("plan slug is not available in service state: {plan}").into()) }
 }
 
 fn resolve_document_slugs(repository: &Path, requested: &[String]) -> Result<Vec<(String, PathBuf)>, Box<dyn std::error::Error>> {
@@ -725,11 +738,10 @@ fn resolve_document_slugs(repository: &Path, requested: &[String]) -> Result<Vec
         if slug.is_empty() { return Err("document slug cannot be blank".into()); }
         if !wanted.insert(slug.to_string()) { return Err(format!("duplicate document slug: {slug}").into()); }
     }
-    let mut matches = std::collections::BTreeMap::<String, Vec<PathBuf>>::new();
-    scan_markdown_slugs(repository, repository, &wanted, &mut matches)?;
+    let matches = instruction_sync::resolve_slug_paths(repository, &wanted)?;
     let mut resolved = Vec::new();
     for slug in wanted {
-        match matches.remove(&slug).unwrap_or_default().as_slice() {
+        match matches.get(&slug).map(Vec::as_slice).unwrap_or(&[]) {
             [] => return Err(format!("document slug was not found: {slug}").into()),
             [path] => resolved.push((slug, path.clone())),
             paths => return Err(format!("document slug is duplicated: {slug}: {}",
@@ -737,32 +749,6 @@ fn resolve_document_slugs(repository: &Path, requested: &[String]) -> Result<Vec
         }
     }
     Ok(resolved)
-}
-
-fn scan_markdown_slugs(
-    repository: &Path,
-    directory: &Path,
-    wanted: &std::collections::BTreeSet<String>,
-    matches: &mut std::collections::BTreeMap<String, Vec<PathBuf>>,
-) -> Result<(), Box<dyn std::error::Error>> {
-    const SKIP: &[&str] = &[".git", ".obsidian", ".trash", "_control", "node_modules", "target"];
-    for entry in std::fs::read_dir(directory)? {
-        let entry = entry?;
-        let file_type = entry.file_type()?;
-        let name = entry.file_name();
-        let name = name.to_string_lossy();
-        if file_type.is_dir() {
-            if !SKIP.contains(&name.as_ref()) { scan_markdown_slugs(repository, &entry.path(), wanted, matches)?; }
-            continue;
-        }
-        if !file_type.is_file() || entry.path().extension().and_then(|value| value.to_str()) != Some("md") { continue; }
-        let text = match std::fs::read_to_string(entry.path()) { Ok(text) => text, Err(_) => continue };
-        let Some(slug) = markdown_slug(&text) else { continue; };
-        if wanted.contains(&slug) {
-            matches.entry(slug).or_default().push(entry.path().strip_prefix(repository)?.to_path_buf());
-        }
-    }
-    Ok(())
 }
 
 fn pending_source_identities(
@@ -797,48 +783,189 @@ fn pending_source_identities(
     Ok(identities)
 }
 
+const CATALOG_SNAPSHOT_KEY: &str = "catalog.snapshot";
+const CATALOG_REFRESHED_AT_KEY: &str = "catalog.refreshed_at";
+
 fn define_plan_snapshot() -> ExitCode {
     command_output("define-plan.snapshot", snapshot_from_service())
 }
 
 fn snapshot_from_service() -> Result<DefinePlanSnapshotOutput, Box<dyn std::error::Error>> {
-    let database_path = env::var_os("AUTOSCRIBE_DATABASE")
-        .map(PathBuf::from)
-        .unwrap_or(default_database_path()?);
-    if let Some(parent) = database_path.parent() {
-        std::fs::create_dir_all(parent)?;
-    }
-    let db = Database::open_path(&database_path)?;
-    db::migrate(&db)?;
-    let server = reconcile_authored_catalog(&db, &asc_command())?;
+    let db = open_configured_database()?;
+    let server = cached_server_snapshot(&db)?;
     Ok(DefinePlanSnapshotOutput {
         ok: true,
         operation: "define-plan.snapshot",
-        server,
-        authored_plans: plan_repository::list(&db, "plans")?,
-        authored_instructions: plan_repository::list(&db, "instructions")?,
+        catalogs: catalogs_with_authored_plans(&db, &server)?,
+        refreshed_at: db::meta_get(&db, CATALOG_REFRESHED_AT_KEY)?,
     })
 }
 
-fn reconcile_authored_catalog(
-    db: &Database,
-    asc: &Path,
-) -> Result<serde_json::Value, Box<dyn std::error::Error>> {
-    let snapshot = || -> Result<serde_json::Value, Box<dyn std::error::Error>> {
-        Ok(serde_json::from_slice(&run_asc_capture(asc, ["control", "snapshot"], &[])?)?)
-    };
-    let server = snapshot()?;
-    let authored_instructions = plan_repository::list(db, "instructions")?;
-    let authored_plans = plan_repository::list(db, "plans")?;
-    let upload = reconcile::authored_catalog(&server, authored_instructions, authored_plans);
-    let changed = !upload.instructions.is_empty() || !upload.plans.is_empty();
-    if !upload.instructions.is_empty() {
-        run_asc(asc, ["upload", "instructions"], &ndjson(&upload.instructions)?)?;
+fn catalog_refresh_from_stdin(operation: &'static str) -> Result<CatalogRefreshOutput, Box<dyn std::error::Error>> {
+    let input: CatalogRefreshInput = read_json_stdin()?;
+    if input.version != 1 { return Err("unsupported catalog refresh version".into()); }
+    let repository = git::root(&std::env::current_dir()?)?;
+    let db = open_configured_database()?;
+    let asc = asc_command();
+    let (server, uploaded, committed) = refresh_catalog(&repository, &asc, &input.instruction_slugs)?;
+    let refreshed_at = unix_timestamp();
+    cache_server_snapshot(&db, &server, &refreshed_at)?;
+    Ok(CatalogRefreshOutput {
+        ok: true,
+        operation,
+        catalogs: catalogs_with_authored_plans(&db, &server)?,
+        refreshed_at,
+        uploaded_instructions: uploaded,
+        committed_instructions: committed,
+    })
+}
+
+fn open_configured_database() -> Result<Database, Box<dyn std::error::Error>> {
+    let database_path = configured_database_path()?;
+    if let Some(parent) = database_path.parent() { std::fs::create_dir_all(parent)?; }
+    let db = Database::open_path(&database_path)?;
+    db::migrate(&db)?;
+    Ok(db)
+}
+
+fn cached_server_snapshot(db: &Database) -> Result<serde_json::Value, Box<dyn std::error::Error>> {
+    Ok(match db::meta_get(db, CATALOG_SNAPSHOT_KEY)? {
+        Some(text) => serde_json::from_str(&text)?,
+        None => serde_json::json!({"registries":{}}),
+    })
+}
+
+fn cache_server_snapshot(db: &Database, snapshot: &serde_json::Value, refreshed_at: &str) -> Result<(), Box<dyn std::error::Error>> {
+    db::meta_set_many(db, &[
+        (CATALOG_SNAPSHOT_KEY, serde_json::to_string(snapshot)?),
+        (CATALOG_REFRESHED_AT_KEY, refreshed_at.to_string()),
+    ])?;
+    Ok(())
+}
+
+fn refresh_catalog(repository: &Path, asc: &Path, instruction_slugs: &[String]) -> Result<(serde_json::Value, usize, usize), Box<dyn std::error::Error>> {
+    let mut server = fetch_server_snapshot(asc)?;
+    let mut uploaded = 0;
+    let mut committed = 0;
+    let requested = instruction_slugs.iter().map(|slug| slug.trim()).filter(|slug| !slug.is_empty())
+        .map(str::to_string).collect::<std::collections::BTreeSet<_>>();
+    if !requested.is_empty() {
+        let local = instruction_sync::scan_slugs(repository, &requested)?;
+        let manifest: serde_json::Value = serde_json::from_slice(&run_asc_capture(asc, ["control", "instruction-manifest"], &[])?)?;
+        let sync = instruction_sync::plan(local, &manifest)?;
+        uploaded = sync.upload.len();
+        if !sync.upload.is_empty() {
+            let records = sync.upload.iter().map(instruction_sync::upload_record).collect::<Vec<_>>();
+            run_asc(asc, ["upload", "instructions"], &ndjson(&records)?)?;
+            let paths = sync.upload.iter().map(|item| PathBuf::from(&item.relative_path)).collect::<Vec<_>>();
+            let dirty = git::inspect(repository, &paths)?.into_iter().filter(|item| item.dirty).map(|item| item.path).collect::<Vec<_>>();
+            if !dirty.is_empty() {
+                git::commit(repository, CommitRequest { paths: dirty.clone(), message: "Sync local instructions".into(), purpose: CommitPurpose::Version })?;
+                committed = dirty.len();
+            }
+            server = fetch_server_snapshot(asc)?;
+        }
     }
-    if !upload.plans.is_empty() {
-        run_asc(asc, ["upload", "plans"], &ndjson(&upload.plans)?)?;
+    Ok((server, uploaded, committed))
+}
+
+fn fetch_server_snapshot(asc: &Path) -> Result<serde_json::Value, Box<dyn std::error::Error>> {
+    let control: serde_json::Value =
+        serde_json::from_slice(&run_asc_capture(asc, ["control", "snapshot"], &[])?)?;
+    if !control.is_object() {
+        return Err("control snapshot must be an object".into());
     }
-    if changed { snapshot() } else { Ok(server) }
+    Ok(control)
+}
+
+fn catalogs_with_authored_plans(db: &Database, server: &serde_json::Value) -> Result<serde_json::Value, Box<dyn std::error::Error>> {
+    let mut catalogs = catalogs_from_server(server);
+    let plans = catalogs.get_mut("plans").and_then(serde_json::Value::as_array_mut).ok_or("catalog plans must be an array")?;
+    let mut by_slug = std::collections::BTreeMap::<String, serde_json::Value>::new();
+    for plan in plans.drain(..) {
+        let slug = ["record_identity", "slug", "key"].into_iter().find_map(|field| plan.get(field).and_then(serde_json::Value::as_str)).unwrap_or("").to_string();
+        if !slug.is_empty() { by_slug.insert(slug, plan); }
+    }
+    for plan in plan_repository::list(db)? {
+        let slug = ["record_identity", "slug"].into_iter().find_map(|field| plan.get(field).and_then(serde_json::Value::as_str)).unwrap_or("").to_string();
+        if !slug.is_empty() { by_slug.insert(slug, plan); }
+    }
+    plans.extend(by_slug.into_values());
+    Ok(catalogs)
+}
+
+fn catalogs_from_server(server: &serde_json::Value) -> serde_json::Value {
+    let registries = server.get("registries").and_then(serde_json::Value::as_object);
+    let list = |name: &str| registry_records(registries.and_then(|all| all.get(name)), name == "instructions");
+    serde_json::json!({
+        "instructions": list("instructions"),
+        "plans": list("plans"),
+        "engines": list("engines"),
+        "models": list("models"),
+        "scripts": list("local_scripts"),
+        "rag_profiles": list("rag_profiles"),
+    })
+}
+
+fn registry_records(value: Option<&serde_json::Value>, instructions: bool) -> Vec<serde_json::Value> {
+    let mut records = Vec::new();
+    match value {
+        Some(serde_json::Value::Object(map)) => for (key, value) in map {
+            let mut record = value.as_object().cloned().unwrap_or_default();
+            record.entry("key").or_insert_with(|| serde_json::Value::String(key.clone()));
+            if instructions { normalize_instruction_record(&mut record, key); }
+            records.push(serde_json::Value::Object(record));
+        },
+        Some(serde_json::Value::Array(values)) => for value in values {
+            let mut record = value.as_object().cloned().unwrap_or_default();
+            let key = ["slug", "record_identity", "key"].into_iter().find_map(|field| record.get(field).and_then(serde_json::Value::as_str)).unwrap_or("").to_string();
+            if instructions { normalize_instruction_record(&mut record, &key); }
+            records.push(serde_json::Value::Object(record));
+        },
+        _ => {}
+    }
+    records
+}
+
+fn normalize_instruction_record(record: &mut serde_json::Map<String, serde_json::Value>, fallback: &str) {
+    let slug = ["slug", "record_identity", "identity", "key"].into_iter()
+        .find_map(|field| record.get(field).and_then(serde_json::Value::as_str)).filter(|value| !value.trim().is_empty())
+        .unwrap_or(fallback).to_string();
+    let extra_scope = record.get("extra").and_then(serde_json::Value::as_object)
+        .and_then(|x| x.get("scope")).and_then(serde_json::Value::as_str).map(str::to_string);
+    let extra_component = record.get("extra").and_then(serde_json::Value::as_object)
+        .and_then(|x| x.get("component")).and_then(serde_json::Value::as_str).map(str::to_string);
+    let extra_title = record.get("extra").and_then(serde_json::Value::as_object)
+        .and_then(|x| x.get("title")).and_then(serde_json::Value::as_str).map(str::to_string);
+    let scope = record.get("scope").and_then(serde_json::Value::as_str).map(str::to_string)
+        .or(extra_scope)
+        .or_else(|| record.get("component").and_then(serde_json::Value::as_str).map(str::to_string))
+        .or(extra_component)
+        .unwrap_or_else(|| match slug.split('.').next().unwrap_or("") { "std"=>"standing", "rol"=>"role", "ctx"=>"context", "tsk"=>"task", _=>"" }.to_string());
+    let title = record.get("title").and_then(serde_json::Value::as_str).map(str::to_string)
+        .or(extra_title).unwrap_or_else(|| slug.clone());
+    record.insert("slug".into(), serde_json::Value::String(slug));
+    record.insert("scope".into(), serde_json::Value::String(scope));
+    record.insert("title".into(), serde_json::Value::String(title));
+}
+
+fn unix_timestamp() -> String {
+    std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|value| value.as_secs().to_string()).unwrap_or_else(|_| "0".into())
+}
+
+fn plan_instruction_slugs(plan: &serde_json::Value) -> std::collections::BTreeSet<String> {
+    let mut out = std::collections::BTreeSet::new();
+    if let Some(steps) = plan.pointer("/payload/steps").and_then(serde_json::Value::as_object) {
+        for step in steps.values() {
+            if let Some(groups) = step.get("instruction_slugs").and_then(serde_json::Value::as_object) {
+                for values in groups.values().filter_map(serde_json::Value::as_array) {
+                    for slug in values.iter().filter_map(serde_json::Value::as_str).map(str::trim).filter(|s| !s.is_empty()) { out.insert(slug.to_string()); }
+                }
+            }
+            if let Some(slug) = step.get("instruction").and_then(serde_json::Value::as_str).map(str::trim).filter(|s| !s.is_empty()) { out.insert(slug.to_string()); }
+        }
+    }
+    out
 }
 
 fn plan_save() -> ExitCode {
@@ -846,40 +973,22 @@ fn plan_save() -> ExitCode {
 }
 
 fn save_plan_from_stdin() -> Result<PlanSaveOutput, Box<dyn std::error::Error>> {
-    let mut raw = String::new();
-    io::stdin().read_to_string(&mut raw)?;
-    let input: PlanSaveInput = serde_json::from_str(&raw)?;
-    if input.version != 1 {
-        return Err(format!("unsupported plan save version: {}", input.version).into());
-    }
-    if let Some(parent) = input.database_path.parent() {
-        std::fs::create_dir_all(parent)?;
-    }
-    let db = Database::open_path(&input.database_path)?;
-    db::migrate(&db)?;
-    plan_repository::save(&db, &input.plan, &input.instructions)?;
+    let input: PlanSaveInput = read_json_stdin()?;
+    if input.version != 1 { return Err(format!("unsupported plan save version: {}", input.version).into()); }
+    let repository = git::root(&std::env::current_dir()?)?;
+    let db = open_configured_database()?;
     let asc = asc_command();
-    if !input.instructions.is_empty() {
-        run_asc(
-            &asc,
-            ["upload", "instructions"],
-            &ndjson(&input.instructions)?,
-        )?;
-    }
-    let identity = input
-        .plan
-        .get("record_identity")
-        .and_then(serde_json::Value::as_str)
-        .ok_or("saved plan is missing record_identity")?
-        .to_string();
+    let slugs = plan_instruction_slugs(&input.plan).into_iter().collect::<Vec<_>>();
+    let (_, uploaded, _) = refresh_catalog(&repository, &asc, &slugs)?;
+    plan_repository::save(&db, &input.plan)?;
+    let identity = input.plan.get("record_identity").and_then(serde_json::Value::as_str)
+        .ok_or("saved plan is missing record_identity")?.to_string();
     let plan_upload = serde_json::json!({"type":"plan","identity":identity.clone(),"content":input.plan["payload"],"extra":{}});
     run_asc(&asc, ["upload", "plans"], &ndjson(&[plan_upload])?)?;
-    Ok(PlanSaveOutput {
-        ok: true,
-        operation: "plan.save",
-        plan: identity,
-        instructions: input.instructions.len(),
-    })
+    let server = fetch_server_snapshot(&asc)?;
+    let refreshed_at = unix_timestamp();
+    cache_server_snapshot(&db, &server, &refreshed_at)?;
+    Ok(PlanSaveOutput { ok: true, operation: "plan.save", plan: identity, instructions: uploaded })
 }
 
 fn command_output<T: Serialize>(

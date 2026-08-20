@@ -64,12 +64,7 @@ pub fn migrate(db: &Database) -> ServiceResult<()> {
                 message TEXT NOT NULL
             );
 
-            CREATE TABLE IF NOT EXISTS authored_instructions (
-                instruction_identity TEXT PRIMARY KEY,
-                record_json TEXT NOT NULL,
-                content_sha256 TEXT NOT NULL,
-                updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
-            );
+            DROP TABLE IF EXISTS authored_instructions;
 
             CREATE TABLE IF NOT EXISTS authored_plans (
                 plan_identity TEXT PRIMARY KEY,
@@ -124,6 +119,27 @@ pub fn migrate(db: &Database) -> ServiceResult<()> {
         db.connection().execute("ALTER TABLE response_records ADD COLUMN forensic_commit TEXT", []).map_err(storage)?;
     }
     Ok(())
+}
+
+
+pub fn meta_get(db: &Database, key: &str) -> ServiceResult<Option<String>> {
+    let mut statement = db.connection().prepare("SELECT value FROM sync_meta WHERE key=?1").map_err(storage)?;
+    let mut rows = statement.query([key]).map_err(storage)?;
+    Ok(match rows.next().map_err(storage)? {
+        Some(row) => Some(row.get::<_, String>(0).map_err(storage)?),
+        None => None,
+    })
+}
+
+pub fn meta_set_many(db: &Database, values: &[(&str, String)]) -> ServiceResult<()> {
+    let transaction = db.connection().unchecked_transaction().map_err(storage)?;
+    for (key, value) in values {
+        transaction.execute(
+            "INSERT INTO sync_meta (key, value) VALUES (?1, ?2) ON CONFLICT(key) DO UPDATE SET value=excluded.value",
+            (*key, value),
+        ).map_err(storage)?;
+    }
+    transaction.commit().map_err(storage)
 }
 
 pub fn record_inflight(

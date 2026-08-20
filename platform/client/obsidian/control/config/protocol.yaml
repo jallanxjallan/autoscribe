@@ -52,20 +52,6 @@ plan_save:
   command: plan-save
   request_version: 1
 
-# `asc` CLI snapshot groups consumed by Control. `expected_type` is checked when
-# loading the result, so changing it must match the CLI output.
-asc_snapshots:
-  registry:
-    command: registry
-    subcommand: snapshot
-    expected_type: autoscribe.registries
-    label: asc registry snapshot
-  control:
-    command: control
-    subcommand: snapshot
-    expected_type: autoscribe.controls
-    label: asc control snapshot
-
 define_plan_snapshot:
   command: define-plan-snapshot
 
@@ -74,6 +60,12 @@ define_plan_snapshot:
 service_operations:
   define_plan_snapshot:
     command: define-plan-snapshot
+    request_version: 1
+  define_plan_refresh:
+    command: define-plan-refresh
+    request_version: 1
+  dispatch_refresh:
+    command: dispatch-refresh
     request_version: 1
   instructions_sync:
     command: instructions-sync
