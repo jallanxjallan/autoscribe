@@ -289,23 +289,34 @@ function firstString(...values) {
   return '';
 }
 
-function instructionScope(fm, slug) {
-  const configured = new Set(Object.keys(loadConfig("instructions").plan_scopes || {}));
-  const explicit = firstString(fm.scope).toLowerCase();
+function instructionComponent(fm, slug) {
+  const configured = new Set(Object.keys(loadConfig("instructions").instruction_components || {}));
+  const explicit = firstString(fm.component, fm.class).toLowerCase();
   if (configured.has(explicit)) return explicit;
+  if (["specific", "instruction"].includes(explicit)) return "task";
+  if (explicit === "reference") return "rule";
 
-  const component = firstString(fm.component, fm.class).toLowerCase();
-  if (component === "role") return "role";
-  if (component === "context") return "context";
-  if (component === "standing") return "standing";
-  if (["task", "specific", "instruction"].includes(component)) return "task";
+  const scope = firstString(fm.scope).toLowerCase();
+  if (["standing", "retrieved", "task", "role", "context"].includes(scope)) {
+    if (scope === "retrieved") return "rule";
+    if (["standing", "task", "role", "context"].includes(scope)) return scope;
+  }
 
   const prefix = String(slug || "").split(".")[0].toLowerCase();
+  if (prefix === "std") return "standing";
+  if (["rul", "ref"].includes(prefix)) return "rule";
   if (prefix === "rol") return "role";
   if (prefix === "ctx") return "context";
-  if (prefix === "std") return "standing";
-  if (["tsk", "ins"].includes(prefix)) return "task";
+  if (["tsk", "ins", "spc"].includes(prefix)) return "task";
   return explicit;
+}
+
+function instructionScope(fm, component) {
+  const explicit = firstString(fm.scope).toLowerCase();
+  if (explicit) return explicit;
+  if (component === "standing") return "standing";
+  if (component === "rule") return "retrieved";
+  return "";
 }
 
 function readInstructionFile(root, file, source) {
@@ -320,14 +331,15 @@ function readInstructionFile(root, file, source) {
 
   const stat = statInfo(file);
   const rel = relpath(root, file);
+  const component = instructionComponent(fm, slug);
   return {
     kind: 'instruction',
     slug,
     record_identity: slug,
     label: firstString(fm.label, fm.title, fm.name) || path.basename(file, '.md'),
     title: firstString(fm.title, fm.label, fm.name) || path.basename(file, '.md'),
-    component: firstString(fm.component, fm.class),
-    scope: instructionScope(fm, slug),
+    component,
+    scope: instructionScope(fm, component),
     source,
     root,
     path: rel,

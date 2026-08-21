@@ -262,10 +262,7 @@ async function renderState({
     } else {
       const { counts, handoffs } = system.pipeline;
 
-      const active =
-        (counts.unclaimed || 0) +
-        (counts.waiting || 0) +
-        (counts.response_pending || 0);
+      const active = counts.total || 0;
 
       line(
         pipelineCard,

@@ -4,15 +4,22 @@
 # generic Library. This file contains only shared plan/resolution vocabulary;
 # record fields and defaults belong in the Markdown templates.
 
-plan_scopes:
+instruction_components:
   standing:
     prefix: std
+    injection: always
+  rule:
+    prefix: rul
+    injection: retrieved
   role:
     prefix: rol
+    injection: selected
   context:
     prefix: ctx
+    injection: selected
   task:
     prefix: tsk
+    injection: selected
 
 resolver_properties:
   role:

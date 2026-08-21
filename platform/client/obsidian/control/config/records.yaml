@@ -78,6 +78,18 @@ groups:
     label: Instructions — Project
     initially_open: false
     choices:
+      standing:
+        label: Standing
+        prefix: std
+        template: _control/templates/instructions/standing.md
+        defaults:
+          scope: standing
+      rule:
+        label: Retrieved Rule
+        prefix: rul
+        template: _control/templates/instructions/rule.md
+        defaults:
+          scope: retrieved
       role:
         label: Role
         prefix: rol
@@ -90,16 +102,10 @@ groups:
         template: _control/templates/instructions/context.md
         defaults:
           scope: local
-      reference:
-        label: Reference
-        prefix: ref
-        template: _control/templates/instructions/reference.md
-        defaults:
-          scope: local
-      instruction:
-        label: Instruction
-        prefix: ins
-        template: _control/templates/instructions/instruction.md
+      task:
+        label: Task
+        prefix: tsk
+        template: _control/templates/instructions/task.md
         defaults:
           scope: local
 
@@ -107,6 +113,18 @@ groups:
     label: Instructions — Global
     initially_open: false
     choices:
+      standing:
+        label: Standing
+        prefix: std
+        template: _control/templates/instructions/standing.md
+        defaults:
+          scope: standing
+      rule:
+        label: Retrieved Rule
+        prefix: rul
+        template: _control/templates/instructions/rule.md
+        defaults:
+          scope: retrieved
       role:
         label: Role
         prefix: rol
@@ -119,16 +137,10 @@ groups:
         template: _control/templates/instructions/context.md
         defaults:
           scope: global
-      reference:
-        label: Reference
-        prefix: ref
-        template: _control/templates/instructions/reference.md
-        defaults:
-          scope: global
-      instruction:
-        label: Instruction
-        prefix: ins
-        template: _control/templates/instructions/instruction.md
+      task:
+        label: Task
+        prefix: tsk
+        template: _control/templates/instructions/task.md
         defaults:
           scope: global
 

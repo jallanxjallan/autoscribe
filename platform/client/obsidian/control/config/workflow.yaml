@@ -12,7 +12,7 @@ step_kinds:
 # Define Plan UI/ID/snapshot defaults.
 define_plan:
   default_step_kind: llm
-  default_scope: standing
+  default_component: standing
   default_args_json: "{}"
   step_label_prefix: Step
   status_storage_key: autoscribe.define-plan.status

@@ -98,9 +98,9 @@ if (!errors.length) {
   }
 
   const instructions = loadConfig("instructions");
-  const scopePrefixes = Object.values(instructions.plan_scopes || {}).map((item) => String(item.prefix || ""));
-  const duplicatePrefixes = duplicates(scopePrefixes.filter(Boolean));
-  if (duplicatePrefixes.length) fail(`instructions.plan_scopes has duplicate prefixes: ${duplicatePrefixes.join(", ")}`);
+  const componentPrefixes = Object.values(instructions.instruction_components || {}).map((item) => String(item.prefix || ""));
+  const duplicatePrefixes = duplicates(componentPrefixes.filter(Boolean));
+  if (duplicatePrefixes.length) fail(`instructions.instruction_components has duplicate prefixes: ${duplicatePrefixes.join(", ")}`);
 
   const dashboard = loadConfig("dashboard");
   for (const [id, action] of Object.entries(dashboard.actions || {})) {

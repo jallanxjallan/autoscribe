@@ -1,13 +1,11 @@
 ---
 record: instruction
-component: specific
-class: instruction
-scope:
+component: standing
+class: standing
+scope: standing
 action: defer
 origin: human
 producer: human
-role: []
-context: []
-specifics: []
+dependencies: {}
 tags: []
 ---

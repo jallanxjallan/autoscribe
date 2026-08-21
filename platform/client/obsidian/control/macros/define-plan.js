@@ -23,8 +23,21 @@ function sortRecords(records) {
     id(a).localeCompare(id(b), undefined, { sensitivity: "base", numeric: true })
   );
 }
-function byScope(records, scope) {
-  return sortRecords(records.filter((record) => String(record?.scope || "").toLowerCase() === scope));
+function componentOf(record) {
+  return String(record?.component || record?.class || "").trim().toLowerCase();
+}
+
+function byComponent(records, component) {
+  const wanted = String(component || "").trim().toLowerCase();
+  return sortRecords(records.filter((record) => {
+    const current = componentOf(record);
+    if (current === wanted) return true;
+
+    // Transitional aliases for existing instruction records. New templates emit
+    // standing/rule/role/context/task directly.
+    if (wanted === "task" && ["instruction", "specific"].includes(current)) return true;
+    return false;
+  }));
 }
 
 function option(select, record, { titleOnly = false } = {}) {
@@ -67,7 +80,9 @@ function screenSteps(plan, catalogs) {
         model: selected(catalogs.models, step.model),
         script: selected(catalogs.scripts, step.script),
         rag_profile: selected(catalogs.ragProfiles, step.rag_profile),
-        standingSlugs: Array.isArray(refs.standing) ? [...refs.standing] : [],
+        standingSlugs: Array.isArray(refs.standing) && refs.standing.length
+          ? [...refs.standing]
+          : byComponent(catalogs.instructions, "standing").map(id),
         role: selected(catalogs.instructions, refs.role?.[0]),
         context: selected(catalogs.instructions, refs.context?.[0]),
         task: selected(catalogs.instructions, refs.task?.[0] || step.instruction),
@@ -134,31 +149,21 @@ async function renderCreatePlan({ app, container }) {
     return select;
   }
 
-  function scopedPicker(card, step, scope, field, heading) {
-    const records = byScope(catalogs.instructions, scope);
+  function componentPicker(card, step, component, field, heading) {
+    const records = byComponent(catalogs.instructions, component);
     card.appendChild(el("strong", { text: `${heading} (${records.length})` }));
-    card.appendChild(choice(records, step[field], (value) => { step[field] = value; redraw(); }, `Choose ${scope}`, { titleOnly: true }));
+    card.appendChild(choice(records, step[field], (value) => { step[field] = value; redraw(); }, `Choose ${heading.toLowerCase()}`, { titleOnly: true }));
   }
 
-  function standingPicker(card, step) {
-    const records = byScope(catalogs.instructions, "standing");
-    const selectedSlugs = new Set(step.standingSlugs || []);
-    const heading = el("div"); heading.style.cssText = "display:flex;gap:.5rem;align-items:center;margin-top:.65rem";
-    heading.appendChild(el("strong", { text: `Standing instructions (${records.length})` }));
-    const all = el("button", { text: "Select all" });
-    const none = el("button", { text: "Clear all" });
-    all.addEventListener("click", () => { step.standingSlugs = records.map(id); redraw(); });
-    none.addEventListener("click", () => { step.standingSlugs = []; redraw(); });
-    heading.append(all, none); card.appendChild(heading);
-    for (const record of records) {
-      const row = el("label"); row.style.cssText = "display:flex;gap:.4rem;align-items:center";
-      const checkbox = el("input", { type: "checkbox" }); checkbox.checked = selectedSlugs.has(id(record));
-      checkbox.addEventListener("change", () => {
-        if (checkbox.checked) selectedSlugs.add(id(record)); else selectedSlugs.delete(id(record));
-        step.standingSlugs = [...selectedSlugs];
-      });
-      row.append(checkbox, el("span", { text: title(record) })); card.appendChild(row);
-    }
+  function standingSummary(card, step) {
+    const records = byComponent(catalogs.instructions, "standing");
+    step.standingSlugs = records.map(id);
+    card.appendChild(el("strong", { text: `Standing instructions (${records.length}, automatic)` }));
+    if (!records.length) return;
+    const list = el("div");
+    list.style.cssText = "margin:.25rem 0 .65rem;color:var(--text-muted)";
+    list.textContent = records.map(title).join(" · ");
+    card.appendChild(list);
   }
 
   function redraw() {
@@ -173,10 +178,10 @@ async function renderCreatePlan({ app, container }) {
       if (step.kind === "llm") {
         card.append(choice(catalogs.engines, step.engine, (v) => { step.engine = v; }, "Engine"));
         card.append(choice(catalogs.models, step.model, (v) => { step.model = v; }, "Model"));
-        standingPicker(card, step);
-        scopedPicker(card, step, "role", "role", "Role");
-        scopedPicker(card, step, "context", "context", "Context");
-        scopedPicker(card, step, "task", "task", "Task");
+        standingSummary(card, step);
+        componentPicker(card, step, "role", "role", "Role");
+        componentPicker(card, step, "context", "context", "Context");
+        componentPicker(card, step, "task", "task", "Task");
       } else if (step.kind === "script") {
         card.append(choice(catalogs.scripts, step.script, (v) => { step.script = v; }, "Script"));
       } else {
@@ -222,7 +227,7 @@ async function renderCreatePlan({ app, container }) {
   newButton.addEventListener("click", () => { planSelect.value = ""; clearForm(); setStatus("New plan form ready."); });
   const add = el("button", { text: "Add Step" });
   add.addEventListener("click", () => {
-    steps.push({ kind: String(workflowConfig().define_plan?.default_step_kind || "llm"), label: `Step ${steps.length + 1}`, argsJson: "{}", standingSlugs: byScope(catalogs.instructions, "standing").map(id) });
+    steps.push({ kind: String(workflowConfig().define_plan?.default_step_kind || "llm"), label: `Step ${steps.length + 1}`, argsJson: "{}", standingSlugs: byComponent(catalogs.instructions, "standing").map(id) });
     redraw();
   });
   const save = el("button", { text: "Save Plan", class: "mod-cta" });
@@ -233,7 +238,7 @@ async function renderCreatePlan({ app, container }) {
         if (step.kind !== "llm") continue;
         if (!step.task) throw new Error(`Step ${index + 1}: choose a task instruction.`);
         step.instruction_slugs = {
-          standing: [...new Set(step.standingSlugs || [])],
+          standing: byComponent(catalogs.instructions, "standing").map(id),
           role: step.role ? [id(step.role)] : [],
           context: step.context ? [id(step.context)] : [],
           task: [id(step.task)],

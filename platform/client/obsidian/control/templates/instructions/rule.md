@@ -1,8 +1,8 @@
 ---
 record: instruction
-component: reference
-class: reference
-scope:
+component: rule
+class: rule
+scope: retrieved
 action: defer
 origin: human
 producer: human
