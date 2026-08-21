@@ -51,7 +51,8 @@ struct PlanSaveInput {
 #[serde(deny_unknown_fields)]
 struct InstructionSyncInput {
     version: u32,
-    slugs: Vec<String>,
+    root: PathBuf,
+    paths: Vec<PathBuf>,
 }
 
 #[derive(Serialize)]
@@ -124,7 +125,6 @@ fn main() -> ExitCode {
         Some("dispatch-refresh") => return command_output("dispatch.refresh", catalog_refresh_from_stdin("dispatch.refresh")),
         Some("system-snapshot") => return command_output("system.snapshot", system_snapshot_from_stdin()),
         Some("plan-save") => return plan_save(),
-        Some("instructions-state-snapshot") => return command_output("instructions.state-snapshot", instructions_state_snapshot_from_stdin()),
         Some("instructions-sync") => return command_output("instructions.sync", instructions_sync_from_stdin()),
         Some("git-files") => return command_output("git.files", git_files_from_stdin()),
         Some("write-responses") => return write_responses(),
@@ -172,105 +172,23 @@ fn system_snapshot_from_stdin() -> Result<serde_json::Value, Box<dyn std::error:
     }))
 }
 
-fn instruction_slug_candidates(repository: &Path) -> Result<std::collections::BTreeSet<String>, Box<dyn std::error::Error>> {
-    let output = Command::new("rg")
-        .args(["-l", "-0", "--glob", "*.md", r"^slug:\s*"])
-        .current_dir(repository)
-        .output()?;
-    if !output.status.success() && output.status.code() != Some(1) {
-        return Err(format!("rg instruction discovery failed with status {:?}: {}",
-            output.status.code(), String::from_utf8_lossy(&output.stderr).trim()).into());
-    }
-    let mut by_slug = std::collections::BTreeMap::<String, Vec<PathBuf>>::new();
-    for raw in output.stdout.split(|byte| *byte == 0).filter(|value| !value.is_empty()) {
-        let relative = PathBuf::from(std::str::from_utf8(raw)?);
-        let absolute = repository.join(&relative);
-        let text = std::fs::read_to_string(&absolute)?;
-        let declared = ["record", "type", "kind"].into_iter()
-            .find_map(|key| markdown_frontmatter_value(&text, key))
-            .unwrap_or_default().to_lowercase();
-        if declared != "instruction" { continue; }
-        let Some(slug) = markdown_frontmatter_value(&text, "slug") else { continue; };
-        by_slug.entry(slug).or_default().push(relative);
-    }
-    let duplicates = by_slug.iter().filter(|(_, paths)| paths.len() > 1)
-        .map(|(slug, paths)| format!("{slug}: {}", paths.iter().map(|p| p.display().to_string()).collect::<Vec<_>>().join(", ")))
-        .collect::<Vec<_>>();
-    if !duplicates.is_empty() {
-        return Err(format!("duplicate instruction slugs: {}", duplicates.join("; ")).into());
-    }
-    Ok(by_slug.into_keys().collect())
-}
-
-fn instruction_record_slug(value: &serde_json::Value) -> String {
-    ["slug", "record_identity", "identity", "key"].into_iter()
-        .find_map(|field| value.get(field).and_then(serde_json::Value::as_str))
-        .unwrap_or("").trim().to_string()
-}
-
-fn instructions_state_snapshot_from_stdin() -> Result<serde_json::Value, Box<dyn std::error::Error>> {
-    let input: VersionInput = read_json_stdin()?;
-    if input.version != 1 { return Err("unsupported instructions state snapshot version".into()); }
-    let repository = git::root(&std::env::current_dir()?)?;
-    let slugs = instruction_slug_candidates(&repository)?;
-    let local = instruction_sync::scan_slugs(&repository, &slugs)?;
-    let manifest: serde_json::Value = serde_json::from_slice(&run_asc_capture(
-        &asc_command(), ["control", "instruction-manifest"], &[],
-    )?)?;
-    let sync = instruction_sync::plan(local, &manifest)?;
-
-    let server = fetch_server_snapshot(&asc_command())?;
-    let db = open_configured_database()?;
-    let refreshed_at = unix_timestamp();
-    cache_server_snapshot(&db, &server, &refreshed_at)?;
-    let server_catalog = catalogs_from_server(&server);
-    let remote_slugs = server_catalog.get("instructions").and_then(serde_json::Value::as_array)
-        .into_iter().flatten().map(instruction_record_slug).filter(|slug| !slug.is_empty())
-        .collect::<std::collections::BTreeSet<_>>();
-
-    let upload_slugs = sync.upload.iter()
-        .map(instruction_sync::upload_record)
-        .map(|value| instruction_record_slug(&value))
-        .filter(|slug| !slug.is_empty())
-        .collect::<std::collections::BTreeSet<_>>();
-    let mut items = Vec::new();
-    for item in &sync.items {
-        let mut value = serde_json::to_value(item)?;
-        let slug = instruction_record_slug(&value);
-        if let Some(object) = value.as_object_mut() {
-            object.insert("remote".into(), serde_json::Value::String(
-                if remote_slugs.contains(&slug) { "present" } else { "missing" }.into()
-            ));
-            object.insert("needs_upload".into(), serde_json::Value::Bool(upload_slugs.contains(&slug)));
-        }
-        items.push(value);
-    }
-    Ok(serde_json::json!({
-        "ok": true,
-        "operation": "instructions.state-snapshot",
-        "items": items,
-        "refreshed_at": refreshed_at,
-        "hashes_compared": sync.hashes_compared,
-        "upload_needed": upload_slugs.len()
-    }))
-}
-
 fn instructions_sync_from_stdin() -> Result<InstructionSyncOutput, Box<dyn std::error::Error>> {
     let input: InstructionSyncInput = read_json_stdin()?;
     if input.version != 1 { return Err("unsupported instruction sync version".into()); }
-    let repository = git::root(&std::env::current_dir()?)?;
-    let selected = input.slugs.into_iter().map(|slug| slug.trim().to_string())
-        .filter(|slug| !slug.is_empty()).collect::<std::collections::BTreeSet<_>>();
-    if selected.is_empty() { return Err("instruction sync requires selected slugs".into()); }
-    let local = instruction_sync::scan_slugs(&repository, &selected)?;
-    let resolved = local.iter()
-        .map(instruction_sync::upload_record)
-        .map(|value| instruction_record_slug(&value))
-        .filter(|slug| !slug.is_empty())
+    let root = input.root.canonicalize()?;
+    let selected = input.paths.into_iter()
+        .map(|path| path.to_string_lossy().replace('\\', "/"))
         .collect::<std::collections::BTreeSet<_>>();
-    if resolved != selected {
+    if selected.is_empty() { return Err("instruction sync requires selected paths".into()); }
+    let all = instruction_sync::scan(&root)?;
+    let scanned = all.len();
+    let local = all.into_iter()
+        .filter(|item| selected.contains(&item.relative_path))
+        .collect::<Vec<_>>();
+    if local.len() != selected.len() {
+        let resolved = local.iter().map(|item| item.relative_path.clone()).collect::<std::collections::BTreeSet<_>>();
         let missing = selected.difference(&resolved).cloned().collect::<Vec<_>>();
-        return Err(format!("selected instruction slugs were not found: {}", missing.join(", ")).into());
+        return Err(format!("selected instruction paths were not found: {}", missing.join(", ")).into());
     }
     let manifest: serde_json::Value = serde_json::from_slice(&run_asc_capture(
         &asc_command(), ["control", "instruction-manifest"], &[],
@@ -284,7 +202,7 @@ fn instructions_sync_from_stdin() -> Result<InstructionSyncOutput, Box<dyn std::
     Ok(InstructionSyncOutput {
         ok: true,
         operation: "instructions.sync",
-        scanned: selected.len(),
+        scanned,
         selected: selected.len(),
         uploaded,
         hashes_compared: plan.hashes_compared,
@@ -521,23 +439,18 @@ fn configured_database_path() -> Result<PathBuf, Box<dyn std::error::Error>> {
     default_database_path()
 }
 
-fn markdown_frontmatter_value(text: &str, key: &str) -> Option<String> {
+fn markdown_slug(text: &str) -> Option<String> {
     let mut lines = text.lines();
     if lines.next().map(str::trim) != Some("---") { return None; }
-    let prefix = format!("{key}:");
     for line in lines {
         if line.trim() == "---" { break; }
         if line.chars().next().is_some_and(char::is_whitespace) { continue; }
-        if let Some(value) = line.strip_prefix(&prefix) {
-            let value = value.trim().trim_matches(['\'', '"']);
-            return (!value.is_empty()).then(|| value.to_string());
+        if let Some(value) = line.strip_prefix("slug:") {
+            let slug = value.trim().trim_matches(['\'', '"']);
+            return (!slug.is_empty()).then(|| slug.to_string());
         }
     }
     None
-}
-
-fn markdown_slug(text: &str) -> Option<String> {
-    markdown_frontmatter_value(text, "slug")
 }
 
 fn markdown_body(text: &str) -> &str {
@@ -958,10 +871,13 @@ fn refresh_catalog(repository: &Path, asc: &Path, instruction_slugs: &[String]) 
 }
 
 fn fetch_server_snapshot(asc: &Path) -> Result<serde_json::Value, Box<dyn std::error::Error>> {
-    let control: serde_json::Value =
-        serde_json::from_slice(&run_asc_capture(asc, ["control", "snapshot"], &[])?)?;
-    if !control.is_object() {
-        return Err("control snapshot must be an object".into());
+    let mut control: serde_json::Value = serde_json::from_slice(&run_asc_capture(asc, ["control", "snapshot"], &[])?)?;
+    let registry: serde_json::Value = serde_json::from_slice(&run_asc_capture(asc, ["registry", "snapshot"], &[])?)?;
+    let target = control.as_object_mut().ok_or("control snapshot must be an object")?;
+    let registries = target.entry("registries").or_insert_with(|| serde_json::json!({}));
+    let target_registries = registries.as_object_mut().ok_or("control registries must be an object")?;
+    if let Some(source) = registry.get("registries").and_then(serde_json::Value::as_object) {
+        for (key, value) in source { target_registries.insert(key.clone(), value.clone()); }
     }
     Ok(control)
 }

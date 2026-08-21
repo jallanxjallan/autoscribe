@@ -75,9 +75,6 @@ service_operations:
   define_plan_snapshot:
     command: define-plan-snapshot
     request_version: 1
-  instructions_state_snapshot:
-    command: instructions-state-snapshot
-    request_version: 1
   instructions_sync:
     command: instructions-sync
     request_version: 1

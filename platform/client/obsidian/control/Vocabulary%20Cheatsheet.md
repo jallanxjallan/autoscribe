@@ -194,8 +194,6 @@ Directives are **not annotations**. They are fenced operational instructions emb
 | **Define Plan** | Build or edit the processing plan to be dispatched. |
 | **Dispatch Run** | Send the selected material and plan into the processing pipeline. |
 | **Write Responses** | Apply completed pipeline responses back to the source files. |
-| **File State** | Inspect the current workflow/Git state of a file. |
-| **File History** | Inspect the version and workflow history of a file. |
 
 ## Query and display vocabulary
 

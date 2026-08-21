@@ -17,12 +17,6 @@ actions:
   write_responses:
     label: Write Responses
     macro: macros/write-responses.js
-  file_state:
-    label: File State
-    macro: macros/file-state.js
-  file_history:
-    label: File History
-    macro: macros/file-history.js
 
 resource_folders:
   queries:

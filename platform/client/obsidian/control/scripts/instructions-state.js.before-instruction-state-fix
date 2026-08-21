@@ -14,8 +14,10 @@ module.exports = async function instructionsState(params = {}) {
 
   const { serviceCall } = require("./lib/dispatch-service.js");
   const { loadConfig } = require("./lib/config-loader.js");
+  const { requireVaultBasePath } = require("./lib/vault-paths.js");
   const path = require("node:path");
   const protocol = loadConfig("protocol");
+  const vaultRoot = requireVaultBasePath(app);
 
   async function callService(spec, input = null) {
     const command = String(spec?.command || "");
@@ -66,30 +68,67 @@ module.exports = async function instructionsState(params = {}) {
     console.log(text);
   }
 
+  function instructionRecords() {
+    return app.vault.getMarkdownFiles()
+      .map((file) => {
+        const frontmatter = app.metadataCache.getFileCache(file)?.frontmatter || {};
+        const slug = String(frontmatter.slug || "").trim();
+        const declared = String(
+          frontmatter.record || frontmatter.type || frontmatter.kind || ""
+        ).trim().toLowerCase();
+
+        if (!slug || declared !== "instruction") return null;
+
+        return {
+          identity: slug,
+          title: String(frontmatter.title || file.basename).trim() || file.basename,
+          filename: file.name,
+          relativePath: file.path,
+          scope: String(frontmatter.scope || "").trim(),
+          component: String(frontmatter.component || "").trim(),
+        };
+      })
+      .filter(Boolean)
+      .sort((a, b) => a.relativePath.localeCompare(b.relativePath));
+  }
+
+  function redisInstructionMap(snapshot) {
+    const registries = snapshot?.registries || {};
+    const values = registries.instructions || registries.instruction || {};
+    const map = new Map();
+    if (Array.isArray(values)) {
+      for (const record of values) {
+        const slug = String(record?.record_identity || record?.slug || "").trim();
+        if (slug) map.set(slug, record);
+      }
+    } else if (values && typeof values === "object") {
+      for (const [key, record] of Object.entries(values)) {
+        const slug = String(record?.record_identity || record?.slug || key || "").trim();
+        if (slug) map.set(slug, record);
+      }
+    }
+    return map;
+  }
+
+  async function readServerInstructions() {
+    const snapshot = await callService(protocol.service_operations?.define_plan_snapshot || protocol.define_plan_snapshot);
+    return redisInstructionMap(snapshot.server);
+  }
+
   async function readInstructionRows() {
-    const spec = protocol.service_operations?.instructions_state_snapshot || {};
-    const snapshot = await callService(spec);
-    const items = Array.isArray(snapshot.items) ? snapshot.items : [];
-    return items.map((item) => {
-      const identity = String(item?.slug || item?.record_identity || item?.key || "").trim();
-      const relativePath = String(item?.relative_path || item?.path || "").trim();
-      const remote = String(item?.remote || "missing");
-      const needsUpload = Boolean(item?.needs_upload);
-      return {
-        identity,
-        title: String(item?.title || identity).trim() || identity,
-        filename: relativePath ? path.posix.basename(relativePath) : `${identity}.md`,
-        relativePath,
-        scope: String(item?.scope || "").trim(),
-        component: String(item?.component || "").trim(),
-        remote,
-        needsUpload,
-        syncStatus: String(item?.status || "").trim(),
-        remoteDetail: remote === "present"
-          ? `Server record present: ${identity}`
-          : `Server record missing: ${identity}`,
-      };
-    }).filter((row) => row.identity && row.relativePath);
+    const records = instructionRecords();
+
+    const rows = records.map((record) => ({ ...record, remote: "checking", remoteDetail: "" }));
+
+    const redis = await readServerInstructions();
+    rows.forEach((row) => {
+      const remote = redis.get(row.identity) || null;
+      row.remote = remote ? "present" : "missing";
+      row.remoteDetail = remote
+        ? `Redis: ${row.identity}${remote.title ? ` — ${remote.title}` : ""}`
+        : `Redis record missing: ${row.identity}`;
+    });
+    return rows;
   }
 
   async function uploadInstructions(rows) {
@@ -97,7 +136,8 @@ module.exports = async function instructionsState(params = {}) {
     const syncSpec = protocol.service_operations?.instructions_sync || {};
     const result = await callService(syncSpec, {
       version: Number(syncSpec.request_version),
-      slugs: rows.map((row) => row.identity),
+      root: vaultRoot,
+      paths: rows.map((row) => row.relativePath),
     });
     return { records: rows, result };
   }
@@ -145,6 +185,11 @@ module.exports = async function instructionsState(params = {}) {
     overlay.addEventListener("mousedown", (event) => { if (event.target === overlay) close(); });
     document.addEventListener("keydown", onKeyDown, true);
 
+    const vaultLine = document.createElement("div");
+    vaultLine.textContent = vaultRoot;
+    vaultLine.style.cssText = "font-family:var(--font-monospace);color:var(--text-muted);margin:-.4rem 0 .8rem;overflow-wrap:anywhere;";
+    container.append(vaultLine);
+
     const toolbar = document.createElement("div");
     toolbar.style.cssText = "display:flex;gap:.5rem;align-items:center;flex-wrap:wrap;margin-bottom:.8rem;";
     const refreshButton = document.createElement("button");
@@ -178,7 +223,7 @@ module.exports = async function instructionsState(params = {}) {
     let boxes = [];
 
     function uploadNeeded(row) {
-      return row.needsUpload;
+      return row.remote === "missing";
     }
 
     function updateSummary() {
@@ -189,9 +234,7 @@ module.exports = async function instructionsState(params = {}) {
     }
 
     function stateText(row) {
-      if (row.remote === "missing") return "missing";
-      if (row.needsUpload) return "dirty";
-      return "current";
+      return row.remote;
     }
 
     function renderRows() {
@@ -275,7 +318,7 @@ module.exports = async function instructionsState(params = {}) {
       selectNeededButton.disabled = true;
       selectAllButton.disabled = true;
       uploadButton.disabled = true;
-      output.textContent = "Reading instruction state from service…";
+      output.textContent = "Reading Instructions and checking Redis state…";
       try {
         rows = await readInstructionRows();
         output.textContent = "";

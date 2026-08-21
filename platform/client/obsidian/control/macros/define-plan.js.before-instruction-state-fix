@@ -91,6 +91,9 @@ function screenSteps(plan, catalogs) {
         model: selected(catalogs.models, step.model),
         script: selected(catalogs.scripts, step.script),
         rag_profile: selected(catalogs.ragProfiles, step.rag_profile),
+        standingSlugs: Array.isArray(refs.standing) && refs.standing.length
+          ? [...refs.standing]
+          : byComponent(catalogs.instructions, "standing").map(id),
         role: selected(catalogs.instructions, refs.role?.[0]),
         context: selected(catalogs.instructions, refs.context?.[0]),
         task: selected(catalogs.instructions, refs.task?.[0] || step.instruction),
@@ -163,6 +166,16 @@ async function renderCreatePlan({ app, container }) {
     card.appendChild(choice(records, step[field], (value) => { step[field] = value; redraw(); }, `Choose ${heading.toLowerCase()}`, { titleOnly: true }));
   }
 
+  function standingSummary(card, step) {
+    const records = byComponent(catalogs.instructions, "standing");
+    step.standingSlugs = records.map(id);
+    card.appendChild(el("strong", { text: `Standing instructions (${records.length}, automatic)` }));
+    if (!records.length) return;
+    const list = el("div");
+    list.style.cssText = "margin:.25rem 0 .65rem;color:var(--text-muted)";
+    list.textContent = records.map(title).join(" · ");
+    card.appendChild(list);
+  }
 
   function redraw() {
     stepsBox.innerHTML = "";
@@ -176,6 +189,7 @@ async function renderCreatePlan({ app, container }) {
       if (step.kind === "llm") {
         card.append(choice(catalogs.engines, step.engine, (v) => { step.engine = v; }, "Engine"));
         card.append(choice(catalogs.models, step.model, (v) => { step.model = v; }, "Model"));
+        standingSummary(card, step);
         componentPicker(card, step, "role", "role", "Role");
         componentPicker(card, step, "context", "context", "Context");
         componentPicker(card, step, "task", "task", "Task");
@@ -223,7 +237,7 @@ async function renderCreatePlan({ app, container }) {
   newButton.addEventListener("click", () => { planSelect.value = ""; clearForm(); setStatus("New plan form ready."); });
   const add = el("button", { text: "Add Step" });
   add.addEventListener("click", () => {
-    steps.push({ kind: String(workflowConfig().define_plan?.default_step_kind || "llm"), label: `Step ${steps.length + 1}`, argsJson: "{}" });
+    steps.push({ kind: String(workflowConfig().define_plan?.default_step_kind || "llm"), label: `Step ${steps.length + 1}`, argsJson: "{}", standingSlugs: byComponent(catalogs.instructions, "standing").map(id) });
     redraw();
   });
   const save = el("button", { text: "Save Plan", class: "mod-cta" });
@@ -234,6 +248,7 @@ async function renderCreatePlan({ app, container }) {
         if (step.kind !== "llm") continue;
         if (!step.task) throw new Error(`Step ${index + 1}: choose a task instruction.`);
         step.instruction_slugs = {
+          standing: byComponent(catalogs.instructions, "standing").map(id),
           role: step.role ? [id(step.role)] : [],
           context: step.context ? [id(step.context)] : [],
           task: [id(step.task)],
