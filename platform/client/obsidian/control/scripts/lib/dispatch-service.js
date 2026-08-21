@@ -6,77 +6,24 @@ const path = require("node:path");
 const { spawn } = require("node:child_process");
 const { loadConfig } = require("./config-loader");
 const { expandHome, requireVaultBasePath } = require("./vault-paths.js");
+
 function serviceConfig() { return loadConfig("service"); }
 const vaultRoot = requireVaultBasePath;
 
-function autoscribeRoot(app) {
+function autoscribeRoot() {
   const cfg = serviceConfig();
   const envName = String(cfg.environment?.source_root || "AUTOSCRIBE_ROOT");
-  if (process.env[envName]) return path.resolve(process.env[envName]);
-  const controlMount = String(loadConfig("paths").control_mount || "_control");
-  let candidate = fs.realpathSync(path.join(vaultRoot(app), controlMount));
-  const marker = String(cfg.source_root_marker || "platform/service/Cargo.toml");
-  for (let depth = 0; depth < Number(cfg.root_search_depth || 8); depth += 1) {
-    if (fs.existsSync(path.join(candidate, ...marker.split("/")))) return candidate;
-    const parent = path.dirname(candidate);
-    if (parent === candidate) break;
-    candidate = parent;
-  }
-  throw new Error(`Could not locate the source root; set ${envName}`);
+  return path.resolve(process.env[envName] || expandHome(cfg.source_root_default));
 }
 
-function cargoTargetDir() {
+function serviceCommand() {
   const cfg = serviceConfig();
-  const envName = String(cfg.environment?.cargo_target_dir || "AUTOSCRIBE_CARGO_TARGET_DIR");
-  return path.resolve(process.env[envName] || expandHome(cfg.cargo_target_default));
-}
-
-function newestServiceSourceMtime(serviceRoot) {
-  let newest = 0;
-  const visit = (directory) => {
-    for (const entry of fs.readdirSync(directory, { withFileTypes: true })) {
-      const file = path.join(directory, entry.name);
-      if (entry.isDirectory()) visit(file);
-      else if (entry.isFile() && entry.name.endsWith(String(serviceConfig().source_extension || ".rs"))) {
-        newest = Math.max(newest, fs.statSync(file).mtimeMs);
-      }
-    }
-  };
-  visit(path.join(serviceRoot, String(serviceConfig().source_dir || "src")));
-  for (const name of (serviceConfig().source_manifest_files || [])) {
-    const file = path.join(serviceRoot, name);
-    if (fs.existsSync(file)) newest = Math.max(newest, fs.statSync(file).mtimeMs);
+  const envName = String(cfg.environment?.service_binary || "SVC_BIN");
+  const command = path.resolve(process.env[envName] || expandHome(cfg.service_binary_default));
+  if (!fs.existsSync(command)) {
+    throw new Error(`Rust service binary not found: ${command}. Re-run the Control installer or set ${envName}.`);
   }
-  return newest;
-}
-
-function serviceCommand(app) {
-  const root = autoscribeRoot(app);
-  const cfg = serviceConfig();
-  const explicit = process.env[String(cfg.environment?.service_binary || "SVC_BIN")];
-  if (explicit) return { command: explicit, prefix: [] };
-
-  const target = cargoTargetDir();
-  const serviceRoot = path.join(root, ...String(cfg.service_relative_path || "platform/service").split("/"));
-  const sourceMtime = newestServiceSourceMtime(serviceRoot);
-  for (const profile of (cfg.build_profiles || [])) {
-    const candidate = path.join(target, profile, String(cfg.service_binary_name || "svc"));
-    if (!fs.existsSync(candidate)) continue;
-    if (fs.statSync(candidate).mtimeMs >= sourceMtime) {
-      return { command: candidate, prefix: [] };
-    }
-  }
-
-  const cargo = expandHome(cfg.cargo_binary);
-  const executable = fs.existsSync(cargo) ? cargo : String(cfg.cargo_fallback_command || "cargo");
-  const manifest = path.join(serviceRoot, String(cfg.cargo_manifest || "Cargo.toml"));
-  const args = (cfg.cargo_run_args || []).map((arg) => String(arg)
-    .replace("{manifest}", manifest)
-    .replace("{binary}", String(cfg.service_binary_name || "svc")));
-  return {
-    command: String(cfg.env_command || "/usr/bin/env"),
-    prefix: [`${String(cfg.cargo_target_runtime_env || "CARGO_TARGET_DIR")}=${target}`, executable, ...args],
-  };
+  return command;
 }
 
 function run(command, args, { cwd, input = "", env = {} } = {}) {
@@ -100,8 +47,8 @@ function run(command, args, { cwd, input = "", env = {} } = {}) {
   });
 }
 
-function serviceEnvironment(app) {
-  const root = autoscribeRoot(app);
+function serviceEnvironment() {
+  const root = autoscribeRoot();
   const cfg = serviceConfig();
   const env = cfg.environment || {};
   const databaseName = String(env.database || "AUTOSCRIBE_DATABASE");
@@ -117,12 +64,10 @@ function serviceEnvironment(app) {
 }
 
 async function serviceCall(app, command, input) {
-  const root = vaultRoot(app);
-  const executable = serviceCommand(app);
-  return run(executable.command, [...executable.prefix, command], {
-    cwd: root,
+  return run(serviceCommand(), [command], {
+    cwd: vaultRoot(app),
     input: JSON.stringify(input),
-    env: serviceEnvironment(app),
+    env: serviceEnvironment(),
   });
 }
 
@@ -142,7 +87,6 @@ async function runDispatch(app, { documents, plan }) {
 
 module.exports = {
   autoscribeRoot,
-  cargoTargetDir,
   run,
   runDispatch,
   serviceCall,

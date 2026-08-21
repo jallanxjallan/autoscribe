@@ -5,7 +5,6 @@ const { getFileManifest, appendClipboardCandidates } = require("../scripts/lib/f
 const { notify } = require("../scripts/lib/notify.js");
 const { runDispatch, serviceCall } = require("../scripts/lib/dispatch-service.js");
 const { loadConfig } = require("../scripts/lib/config-loader.js");
-const { activeInstructionSlugs } = require("../scripts/lib/instruction-query.js");
 
 async function renderDispatchRun({ app, container }) {
   container.empty();
@@ -100,7 +99,6 @@ async function renderDispatchRun({ app, container }) {
       const spec = protocol.service_operations?.dispatch_refresh || {};
       const response = await serviceCall(app, String(spec.command || "dispatch-refresh"), {
         version: Number(spec.request_version || 1),
-        instruction_slugs: activeInstructionSlugs(app),
       });
       const output = JSON.parse(String(response.stdout || "{}").trim() || "{}");
       if (!output.ok) throw new Error(output.error || "Dispatch refresh failed");

@@ -30,13 +30,6 @@ skip_dirs:
   - node_modules
   - .trash
 
-# Shell/command discovery. Candidate order is preference order.
-shell_candidates:
-  - /bin/zsh
-  - /bin/bash
-preferred_shell: /usr/bin/zsh
-rg_command: rg
-
 # Compatibility locations retained from older Control layouts. Remove only after
 # you know no project vault still relies on them.
 legacy_query_root: _autoscribe
@@ -44,15 +37,8 @@ legacy_query_root: _autoscribe
 # Environment-variable NAMES, not their values.
 environment:
   instructions_vault: AUTOSCRIBE_INSTRUCTIONS_VAULT
-  rg_primary: OBSIDIAN_RG_BIN
-  rg_secondary: RG_BIN
 
 current_selection_tmp: autoscribe/obsidian/current-selection
-
-clipboard_selection_library_candidates:
-  # Vault-relative candidates used by Add Active File. Keep only paths that are
-  # intentionally supported by the current layout.
-  - _control/scripts/lib/clipboard-selection.js
 
 dashboard_candidates:
   - _control/Dashboard.md

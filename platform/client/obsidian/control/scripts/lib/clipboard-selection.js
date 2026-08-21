@@ -1,14 +1,12 @@
 "use strict";
 
-const fs = require("node:fs");
 const path = require("node:path");
-const { buildSlugPathMap } = require("./rg.js");
+const { serviceCall } = require("./dispatch-service.js");
+const { loadConfig } = require("./config-loader.js");
 const { getVaultBasePath } = require("./query-runtime.js");
 
 function normalizeCell(value) {
-  return String(value ?? "")
-    .replace(/\r/g, "")
-    .trim();
+  return String(value ?? "").replace(/\r/g, "").trim();
 }
 
 function isSlug(value) {
@@ -48,35 +46,22 @@ function isHeaderRow(cells) {
 function parseTabDelimitedSelection(text) {
   const source = String(text ?? "").replace(/\r\n?/g, "\n").trim();
   if (!source) throw new Error("The clipboard is empty.");
-
   const rows = [];
   const sourceRows = source.split("\n");
-
   for (let sourceIndex = 0; sourceIndex < sourceRows.length; sourceIndex += 1) {
     const line = sourceRows[sourceIndex];
     if (!line.trim()) continue;
     const cells = line.split("\t");
     if (isHeaderRow(cells)) continue;
-
-    const item = {
-      index: rows.length + 1,
-      source_row: sourceIndex + 1,
-      title: "",
-      path: "",
-      slug: "",
-      hints: [],
-    };
-
+    const item = { index: rows.length + 1, source_row: sourceIndex + 1, title: "", path: "", slug: "", hints: [] };
     for (const rawCell of cells) {
       const match = classifyCell(rawCell);
       if (!match) continue;
       if (match.type === "hint") item.hints.push(match.value);
       else if (!item[match.type]) item[match.type] = match.value;
     }
-
     if (item.title || item.path || item.slug || item.hints.length) rows.push(item);
   }
-
   if (!rows.length) throw new Error("The clipboard contains no usable rows.");
   return rows;
 }
@@ -90,35 +75,41 @@ function normalizeRelativePath(root, rawPath) {
   return relative.replace(/\\/g, "/");
 }
 
-function resolveClipboardRows(app, rows) {
+async function resolveSlugs(app, slugs) {
+  const unique = [...new Set(slugs.map(normalizeCell).filter(Boolean))];
+  if (!unique.length) return new Map();
+  const spec = loadConfig("protocol").service_operations?.resolve_slugs || {};
+  const response = await serviceCall(app, String(spec.command || "resolve-slugs"), {
+    version: Number(spec.request_version || 1),
+    slugs: unique,
+  });
+  const output = JSON.parse(String(response.stdout || "{}").trim() || "{}");
+  if (!output.ok) throw new Error(output.error || "Slug resolution failed");
+  return new Map((output.items || []).map((item) => [String(item.slug || ""), item]));
+}
+
+async function resolveClipboardRows(app, rows) {
   const root = getVaultBasePath(app);
   if (!root) throw new Error("Clipboard selection requires a filesystem-backed vault.");
 
-  const { bySlug, duplicates } = buildSlugPathMap({ root });
-
-  return rows.map((row) => {
+  const prepared = rows.map((row) => {
     const item = { ...row, hints: Array.isArray(row.hints) ? [...row.hints] : [] };
-
     if (item.path) {
       const rel = normalizeRelativePath(root, item.path);
-      if (rel && fs.existsSync(path.join(root, rel))) item.path = rel;
-      else item.path = "";
+      const file = rel ? app.vault.getAbstractFileByPath(rel) : null;
+      item.path = file ? rel : "";
     }
+    return item;
+  });
 
-    const candidates = [item.slug, ...item.hints].filter(Boolean);
-    if (!item.path) {
-      for (const candidate of candidates) {
-        if (duplicates.has(candidate)) {
-          throw new Error(`Clipboard row ${item.source_row}: slug is duplicated in the vault: ${candidate}`);
-        }
-        const record = bySlug.get(candidate);
-        if (!record) continue;
-        item.slug = record.slug;
-        item.path = record.path;
-        break;
-      }
+  const unresolvedSlugs = prepared.filter((item) => !item.path && item.slug).map((item) => item.slug);
+  const resolved = await resolveSlugs(app, unresolvedSlugs);
+
+  return prepared.map((item) => {
+    if (!item.path && item.slug) {
+      const record = resolved.get(item.slug);
+      if (record?.status === "found" && record.path) item.path = String(record.path);
     }
-
     delete item.hints;
     return item;
   });
@@ -126,12 +117,9 @@ function resolveClipboardRows(app, rows) {
 
 async function readClipboardText() {
   const readText = globalThis.navigator?.clipboard?.readText;
-  if (typeof readText !== "function") {
-    throw new Error("Clipboard reading is not available in this Obsidian environment.");
-  }
-  try {
-    return await readText.call(globalThis.navigator.clipboard);
-  } catch (error) {
+  if (typeof readText !== "function") throw new Error("Clipboard reading is not available in this Obsidian environment.");
+  try { return await readText.call(globalThis.navigator.clipboard); }
+  catch (error) {
     const detail = error?.message ? `: ${error.message}` : "";
     throw new Error(`Could not read the clipboard${detail}`);
   }

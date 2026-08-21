@@ -115,6 +115,13 @@ struct GitFilesInput {
 
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
+struct ResolveSlugsInput {
+    version: u32,
+    slugs: Vec<String>,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
 struct VersionInput { version:u32 }
 fn main() -> ExitCode {
     match env::args().nth(1).as_deref() {
@@ -123,6 +130,7 @@ fn main() -> ExitCode {
         Some("define-plan-refresh") => return command_output("define-plan.refresh", catalog_refresh_from_stdin("define-plan.refresh")),
         Some("dispatch-refresh") => return command_output("dispatch.refresh", catalog_refresh_from_stdin("dispatch.refresh")),
         Some("system-snapshot") => return command_output("system.snapshot", system_snapshot_from_stdin()),
+        Some("resolve-slugs") => return command_output("slugs.resolve", resolve_slugs_from_stdin()),
         Some("plan-save") => return plan_save(),
         Some("instructions-state-snapshot") => return command_output("instructions.state-snapshot", instructions_state_snapshot_from_stdin()),
         Some("instructions-sync") => return command_output("instructions.sync", instructions_sync_from_stdin()),
@@ -159,16 +167,48 @@ fn upload_instructions()->Result<serde_json::Value,Box<dyn std::error::Error>>{
         "hashes_compared":plan.hashes_compared,"items":plan.items}))
 }
 
+fn runtime_active_call_count(asc: &Path) -> Result<usize, Box<dyn std::error::Error>> {
+    let output = run_asc_capture(asc, ["run", "status"], &[])?;
+    let text = std::str::from_utf8(&output)?;
+    let mut in_active_calls = false;
+    let mut saw_section = false;
+    let mut count = 0usize;
+    for line in text.lines() {
+        let trimmed = line.trim();
+        if trimmed == "active_calls:" {
+            in_active_calls = true;
+            saw_section = true;
+            continue;
+        }
+        if !in_active_calls { continue; }
+        if trimmed == "inboxes:" { break; }
+        if trimmed.is_empty() || trimmed == "none" { continue; }
+        if trimmed.contains(" score=") { count += 1; }
+    }
+    if !saw_section { return Err("asc run status did not contain active_calls section".into()); }
+    Ok(count)
+}
+
 fn system_snapshot_from_stdin() -> Result<serde_json::Value, Box<dyn std::error::Error>> {
     let input: VersionInput = read_json_stdin()?;
     if input.version != 1 { return Err("unsupported system snapshot version".into()); }
     let repository = git::root(&std::env::current_dir()?)?;
     let db = open_database(&configured_database_path()?)?;
+    let mut pipeline = serde_json::to_value(db::system_counts(&db)?)?;
+    let runtime_active_calls = runtime_active_call_count(&asc_command())?;
+    if let Some(object) = pipeline.as_object_mut() {
+        object.insert("runtime_active_calls".into(), runtime_active_calls.into());
+        // Local inflight rows are durable dispatch lineage and can outlive remote
+        // execution. A dispatch is not active once the runtime has no active calls.
+        if runtime_active_calls == 0 {
+            object.insert("active_dispatches".into(), 0.into());
+        }
+    }
     Ok(serde_json::json!({
         "ok":true,
         "operation":"system.snapshot",
         "git":git::summary(&repository)?,
-        "pipeline":db::system_counts(&db)?
+        "pipeline":pipeline
     }))
 }
 
@@ -816,6 +856,33 @@ fn require_plan_available(db: &Database, plan: &str) -> Result<(), Box<dyn std::
             .any(|field| record.get(field).and_then(serde_json::Value::as_str) == Some(plan)))
     });
     if found { Ok(()) } else { Err(format!("plan slug is not available in service state: {plan}").into()) }
+}
+
+fn resolve_slugs_from_stdin() -> Result<serde_json::Value, Box<dyn std::error::Error>> {
+    let input: ResolveSlugsInput = read_json_stdin()?;
+    if input.version != 1 { return Err("unsupported slug resolver version".into()); }
+    let repository = git::root(&std::env::current_dir()?)?;
+    let mut wanted = std::collections::BTreeSet::new();
+    for raw in input.slugs {
+        let slug = raw.trim();
+        if slug.is_empty() { continue; }
+        wanted.insert(slug.to_string());
+    }
+    let matches = instruction_sync::resolve_slug_paths(&repository, &wanted)?;
+    let mut items = Vec::new();
+    for slug in wanted {
+        match matches.get(&slug).map(Vec::as_slice).unwrap_or(&[]) {
+            [] => items.push(serde_json::json!({"slug":slug,"status":"missing"})),
+            [path] => items.push(serde_json::json!({
+                "slug":slug,
+                "status":"found",
+                "path":path.to_string_lossy().replace('\\', "/")
+            })),
+            paths => return Err(format!("slug is duplicated: {slug}: {}",
+                paths.iter().map(|path| path.display().to_string()).collect::<Vec<_>>().join(", ")).into()),
+        }
+    }
+    Ok(serde_json::json!({"ok":true,"operation":"slugs.resolve","items":items}))
 }
 
 fn resolve_document_slugs(repository: &Path, requested: &[String]) -> Result<Vec<(String, PathBuf)>, Box<dyn std::error::Error>> {

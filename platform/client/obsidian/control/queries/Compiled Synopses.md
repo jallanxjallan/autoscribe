@@ -90,7 +90,7 @@ async function renderClipboard() {
 
     try {
         const text = await readClipboardText();
-        const rows = resolveClipboardRows(
+        const rows = await resolveClipboardRows(
             app,
             parseTabDelimitedSelection(text)
         );

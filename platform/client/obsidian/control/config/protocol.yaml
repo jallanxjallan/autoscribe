@@ -87,3 +87,6 @@ service_operations:
   system_snapshot:
     command: system-snapshot
     request_version: 1
+  resolve_slugs:
+    command: resolve-slugs
+    request_version: 1
