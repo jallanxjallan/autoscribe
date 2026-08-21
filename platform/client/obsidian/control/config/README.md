@@ -66,9 +66,9 @@ such as `draft`, `research`, `empty`, `active`, `imported`, `open`, and
 `needs-review` where they sit outside the newly declared stage/status
 vocabulary. That is the point: the conflicts are visible here for you to decide.
 
-`paths.yaml` likewise preserves the Library vault path found in the source tree
+`paths.yaml` likewise preserves the Instructions vault path found in the source tree
 at refactor time. It is labelled there because the Control root has moved to
-Loom but the correct new Library location was not specified during this pass.
+Loom but the correct new Instructions location was not specified during this pass.
 
 ## Bootstrap exception
 

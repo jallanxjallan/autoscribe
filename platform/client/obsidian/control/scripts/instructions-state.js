@@ -1,20 +1,21 @@
 "use strict";
 
 /**
- * Shared Library State implementation.
+ * Shared Instructions State implementation.
  *
- * The active Library vault is the source of instruction files. Every explicit
+ * The active Instructions vault is the source of instruction files. Every explicit
  * instruction Markdown file is listed. The service supplies authoritative
  * server state and performs instruction synchronization. The UI neither
  * invokes `asc` nor inspects Git directly.
  */
-module.exports = async function libraryState(params = {}) {
+module.exports = async function instructionsState(params = {}) {
   const app = params.app || globalThis.app;
   if (!app?.vault || !app?.workspace) throw new Error("Obsidian app object unavailable.");
 
-  const { serviceCall } = require("../lib/dispatch-service.js");
-  const { loadConfig } = require("../lib/config-loader.js");
-  const { requireVaultBasePath } = require("../lib/vault-paths.js");
+  const { serviceCall } = require("./lib/dispatch-service.js");
+  const { loadConfig } = require("./lib/config-loader.js");
+  const { requireVaultBasePath } = require("./lib/vault-paths.js");
+  const path = require("node:path");
   const protocol = loadConfig("protocol");
   const vaultRoot = requireVaultBasePath(app);
 
@@ -141,7 +142,7 @@ module.exports = async function libraryState(params = {}) {
     return { records: rows, result };
   }
 
-  // Dashboard and other read-only Library views consume the same snapshot.
+  // Dashboard and other read-only Instructions views consume the same snapshot.
   if (params.mode === "snapshot") return readInstructionRows();
 
 
@@ -152,13 +153,13 @@ module.exports = async function libraryState(params = {}) {
     const dialog = document.createElement("div");
     dialog.setAttribute("role", "dialog");
     dialog.setAttribute("aria-modal", "true");
-    dialog.setAttribute("aria-label", "Library State");
+    dialog.setAttribute("aria-label", "Instructions State");
     dialog.style.cssText = "width:min(96vw,76rem);max-height:96vh;overflow:auto;background:var(--background-primary);color:var(--text-normal);border:1px solid var(--background-modifier-border);border-radius:var(--radius-l);box-shadow:var(--shadow-l);padding:1rem;";
 
     const header = document.createElement("div");
     header.style.cssText = "display:flex;align-items:center;justify-content:space-between;gap:1rem;margin-bottom:1rem;position:sticky;top:-1rem;background:var(--background-primary);z-index:3;padding:.25rem 0 .65rem;";
     const heading = document.createElement("h2");
-    heading.textContent = "Library State";
+    heading.textContent = "Instructions State";
     heading.style.margin = "0";
     const closeButton = document.createElement("button");
     closeButton.type = "button";
@@ -312,22 +313,22 @@ module.exports = async function libraryState(params = {}) {
     }
 
     async function refresh({ announce = true } = {}) {
-      if (announce) notify("Refreshing Library State…", 3000);
+      if (announce) notify("Refreshing Instructions State…", 3000);
       refreshButton.disabled = true;
       selectNeededButton.disabled = true;
       selectAllButton.disabled = true;
       uploadButton.disabled = true;
-      output.textContent = "Reading Library and checking Redis state…";
+      output.textContent = "Reading Instructions and checking Redis state…";
       try {
         rows = await readInstructionRows();
         output.textContent = "";
         renderRows();
-        if (announce) notify(`Library State refreshed: ${rows.length} instruction(s).`, 5000);
+        if (announce) notify(`Instructions State refreshed: ${rows.length} instruction(s).`, 5000);
       } catch (error) {
         rows = [];
         renderRows();
         output.textContent = error?.stack || error?.message || String(error);
-        notify(`Library State failed: ${error?.message || error}`, 9000);
+        notify(`Instructions State failed: ${error?.message || error}`, 9000);
       } finally {
         refreshButton.disabled = false;
         selectNeededButton.disabled = false;
@@ -380,7 +381,7 @@ module.exports = async function libraryState(params = {}) {
       clearButton.disabled = true;
       output.textContent = startMessage;
       notify(startMessage, 5000);
-      console.info(`[Library State] ${startMessage}`);
+      console.info(`[Instructions State] ${startMessage}`);
 
       // Give Obsidian a paint cycle before spawning the CLI. If the button
       // text and notice appear, we know the click handler itself fired.
@@ -394,14 +395,14 @@ module.exports = async function libraryState(params = {}) {
           Array.isArray(outcome.result?.items) ? `\nService results:\n${outcome.result.items.map((item) => `${item.slug}: ${item.status}`).join("\n")}` : "",
         ].filter(Boolean).join("\n");
         notify(doneMessage, 7000);
-        console.info(`[Library State] ${doneMessage}`);
+        console.info(`[Instructions State] ${doneMessage}`);
         rows = await readInstructionRows();
         renderRows();
       } catch (error) {
         const failure = `Upload failed: ${error?.message || error}`;
         output.textContent = error?.stack || error?.message || String(error);
         notify(failure, 10000);
-        console.error("[Library State]", error);
+        console.error("[Instructions State]", error);
       } finally {
         uploadButton.textContent = originalLabel;
         refreshButton.disabled = false;

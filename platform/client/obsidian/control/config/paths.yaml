@@ -10,10 +10,8 @@
 
 control_root: /home/jeremy/Work/Loom/platform/client/obsidian/control
 control_mount: _control
-# This is the value found in the source tree at refactor time. It still points
-# at the pre-Loom location. Change it here when you decide the new Library path;
-# Control will then follow the config rather than another hard-coded path.
-library_vault: $HOME/Work/AutoScribe/instructions
+# Canonical shared Instructions vault.
+instructions_vault: $HOME/Work/Loom/instructions
 
 # Vault-relative runtime/state directories. Renaming these changes where Control
 # reads/writes transient state; it does not migrate an existing directory.
@@ -45,7 +43,7 @@ legacy_query_root: _autoscribe
 
 # Environment-variable NAMES, not their values.
 environment:
-  library_vault: AUTOSCRIBE_LIBRARY_VAULT
+  instructions_vault: AUTOSCRIBE_INSTRUCTIONS_VAULT
   rg_primary: OBSIDIAN_RG_BIN
   rg_secondary: RG_BIN
 

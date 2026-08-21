@@ -106,7 +106,7 @@ function createControlLoader({ app, queryPath = null, controlRoot = null } = {})
 
 
 function skipDirs() { return new Set(pathsConfig().skip_dirs || []); }
-function defaultLibraryVault() { return expandHome(pathsConfig().library_vault); }
+function defaultInstructionsVault() { return expandHome(pathsConfig().instructions_vault); }
 
 function uniqueExistingRoots(roots) {
   const seen = new Set();
@@ -130,8 +130,8 @@ function controlRoots(app) {
   const active = vaultRoot(app);
   return uniqueExistingRoots([
     active,
-    process.env[String(pathsConfig().environment?.library_vault || "AUTOSCRIBE_LIBRARY_VAULT")],
-    defaultLibraryVault(),
+    process.env[String(pathsConfig().environment?.instructions_vault || "AUTOSCRIBE_INSTRUCTIONS_VAULT")],
+    defaultInstructionsVault(),
   ]);
 }
 
@@ -353,7 +353,7 @@ function readInstructionFile(root, file, source) {
 
 function rootSourceName(activeRoot, root) {
   if (path.resolve(activeRoot) === path.resolve(root)) return 'active';
-  if (path.basename(root).toLowerCase() === 'instructions') return 'library';
+  if (path.basename(root).toLowerCase() === 'instructions') return 'instructions';
   return path.basename(root) || 'control';
 }
 

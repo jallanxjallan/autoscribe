@@ -20,7 +20,6 @@ There is no cross-client runtime, browser-only storage path, or alternative UI a
 - `macros/`: QuickAdd entry points and self-contained Obsidian workflows.
 - `queries/`: DataviewJS query notes.
 - `System Status.md`: detailed project diagnostics opened from the Dashboard.
-- `scripts/ui/`: larger Obsidian modal implementations used by QuickAdd launchers.
 - `scripts/lib/`: reusable Obsidian and local-filesystem mechanics.
 - `scripts/plans/` and `scripts/selections/`: active plan and selection support.
 - `templates/` and `templater/`: vault note templates and Templater helpers.

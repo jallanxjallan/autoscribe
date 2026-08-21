@@ -1,7 +1,7 @@
 # INSTRUCTION RESOLUTION / PLAN DEFINITIONS
 # -----------------------------------------
 # Markdown instruction files are authoritative for Obsidian projects and the
-# generic Library. This file contains only shared plan/resolution vocabulary;
+# generic instruction library. This file contains only shared plan/resolution vocabulary;
 # record fields and defaults belong in the Markdown templates.
 
 instruction_components:
