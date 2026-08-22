@@ -5,6 +5,7 @@ const { getFileManifest, appendClipboardCandidates } = require("../scripts/lib/f
 const { notify } = require("../scripts/lib/notify.js");
 const { runDispatch, serviceCall } = require("../scripts/lib/dispatch-service.js");
 const { loadConfig } = require("../scripts/lib/config-loader.js");
+const { prepareDispatchDocument } = require("../scripts/lib/dispatch-document.js");
 
 async function renderDispatchRun({ app, container }) {
   container.empty();
@@ -44,13 +45,14 @@ async function renderDispatchRun({ app, container }) {
   const list = container.createEl("div");
   list.style.cssText = "display:grid;gap:.35em;margin-bottom:1em";
 
-  function selectedDocumentSlugs() {
+  async function selectedDocumentSlugs() {
     const slugs = [];
     const seen = new Set();
     for (const item of session.candidates.values()) {
       if (!item.selected) continue;
       const file = app.vault.getAbstractFileByPath(item.path);
       if (!file || file.extension !== "md") throw new Error(`Selected Markdown file was not found: ${item.path}`);
+      await prepareDispatchDocument(app, file);
       const slug = String(app.metadataCache.getFileCache(file)?.frontmatter?.slug || "").trim();
       if (!slug) throw new Error(`Selected file is missing required slug property: ${item.path}`);
       if (seen.has(slug)) throw new Error(`Selected document slug is duplicated: ${slug}`);
@@ -133,7 +135,7 @@ async function renderDispatchRun({ app, container }) {
   runButton.addEventListener("click", async () => {
     runButton.disabled = true; result.setText("Sending document and plan slugs to service…");
     try {
-      const documents = selectedDocumentSlugs();
+      const documents = await selectedDocumentSlugs();
       if (!documents.length) throw new Error("Select at least one candidate file.");
       if (combine.checked && !combineBasename.value.trim()) throw new Error("Enter a basename for the combined record.");
       if (combine.checked) throw new Error("Combined dispatch is not yet available through service.");

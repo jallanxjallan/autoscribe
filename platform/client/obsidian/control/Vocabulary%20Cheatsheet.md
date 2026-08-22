@@ -105,7 +105,7 @@ Use these when `status` is acting as a dispatch hint for the next AI/editorial o
 |---|---:|---|
 | `passage` — Passage | `psg` | Narrative or expository text that forms part of the produced content. |
 | `image` — Image | `img` | Image record or image-related content entry. |
-| `opener` — Opener | `opn` | Opening material used to introduce a chapter, section, or similar unit. |
+| `section` — Section | `sec` | Composition file containing headings and ordered passage transclusions; canonical source for section structure and sequence. |
 
 ### Materials
 

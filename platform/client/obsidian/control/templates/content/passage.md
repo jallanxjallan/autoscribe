@@ -1,14 +1,12 @@
 ---
 record: passage
 component: body
-topic: []
 source: []
-claims: []
-scope:
+links: []
 position:
 stage: draft
 status: empty
 origin: human
 producer: human
-synopsis:
+description:
 ---

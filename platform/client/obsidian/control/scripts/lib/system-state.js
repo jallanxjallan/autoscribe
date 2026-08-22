@@ -12,11 +12,14 @@ async function readSystemState(app) {
     if (!output.ok) throw new Error(output.error || "System snapshot failed");
     state.git = output.git || null;
     const pipeline = output.pipeline || {};
+    const runtimeActive = Number(
+      pipeline.runtime_active_calls ?? pipeline.active_dispatches ?? 0
+    );
     state.pipeline = {
       counts: {
-        total: Number(pipeline.active_dispatches || 0),
+        total: runtimeActive,
         unclaimed: Number(pipeline.pending_uploads || 0),
-        waiting: Math.max(0, Number(pipeline.active_dispatches || 0) - Number(pipeline.pending_responses || 0)),
+        waiting: Number(pipeline.processing_calls ?? pipeline.runtime_active_calls ?? 0),
         response_pending: Number(pipeline.pending_responses ?? pipeline.pending_files ?? 0),
         uncertain: Number(pipeline.uncertain_uploads || 0),
         reviewed: 0,

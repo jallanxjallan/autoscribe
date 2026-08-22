@@ -20,10 +20,10 @@ groups:
         label: Passage
         prefix: psg
         template: _control/templates/content/passage.md
-      opener:
-        label: Opener
-        prefix: opn
-        template: _control/templates/content/opener.md
+      section:
+        label: Section
+        prefix: sec
+        template: _control/templates/content/section.md
       image:
         label: Image
         template: _control/templates/content/image.md

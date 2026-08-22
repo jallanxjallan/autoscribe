@@ -1,13 +1,14 @@
 ---
-record: image
-component: image
+record: section
+slug: <% tp.user.make_slug(tp, "sec") %>
 source: []
-position:
+links: []
 stage: draft
 status: empty
-action: human-source
 origin: human
 producer: human
-assets: []
 description:
 ---
+
+# {{title}}
+

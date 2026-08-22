@@ -198,11 +198,10 @@ fn system_snapshot_from_stdin() -> Result<serde_json::Value, Box<dyn std::error:
     let runtime_active_calls = runtime_active_call_count(&asc_command())?;
     if let Some(object) = pipeline.as_object_mut() {
         object.insert("runtime_active_calls".into(), runtime_active_calls.into());
-        // Local inflight rows are durable dispatch lineage and can outlive remote
-        // execution. A dispatch is not active once the runtime has no active calls.
-        if runtime_active_calls == 0 {
-            object.insert("active_dispatches".into(), 0.into());
-        }
+        // inflight_dispatches is durable dispatch lineage, not runtime state.
+        // Dashboard-facing active state must come from the runtime itself.
+        object.insert("active_dispatches".into(), runtime_active_calls.into());
+        object.insert("processing_calls".into(), runtime_active_calls.into());
     }
     Ok(serde_json::json!({
         "ok":true,

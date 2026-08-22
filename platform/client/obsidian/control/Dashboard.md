@@ -16,6 +16,7 @@ const { collectAnnotations } = loadControl("scripts/lib/annotate.js");
 const { loadConfig } = loadControl("scripts/lib/config-loader.js");
 const dashboardConfig = () => loadConfig("dashboard");
 const recordsConfig = () => loadConfig("records");
+const { clipboard } = nodeRequire("electron");
 
 let notify = (message) => new Notice(message);
 try {
@@ -38,8 +39,11 @@ style.textContent = `
   .autoscribe-dashboard .dashboard-bad { color:var(--color-red); }
   .autoscribe-dashboard .dashboard-actions { display:grid; grid-template-columns:repeat(auto-fit,minmax(13rem,1fr)); gap:.5rem; margin:.5rem 0 1.2rem; }
   .autoscribe-dashboard .dashboard-actions button { width:100%; min-height:2.4rem; text-align:left; }
+  .autoscribe-dashboard button[data-dashboard-hotkey]::after { content: attr(data-dashboard-hotkey); float:right; margin-left:.75rem; color:var(--text-muted); font-size:.82em; font-weight:400; }
   .autoscribe-dashboard .dashboard-section { margin-top:1.35rem; }
   .autoscribe-dashboard .dashboard-refresh-status { font-size:.85rem; }
+  .autoscribe-dashboard .dashboard-clipboard { font-size:.85rem; }
+  .autoscribe-dashboard .dashboard-clipboard code { user-select:all; }
 `;
 
 function section(title) {
@@ -87,10 +91,71 @@ function addLink(parent, label, path) {
   };
 }
 
-function addCommand(parent, label, macroPath) {
+const localHotkeys = new Map();
+
+function normalizeHotkey(value) {
+  return String(value || "").trim().toLowerCase();
+}
+
+function bindLocalHotkey(button, hotkey) {
+  const key = normalizeHotkey(hotkey);
+  if (!key) return;
+
+  if (localHotkeys.has(key)) {
+    console.warn(`Dashboard: duplicate local hotkey ${key}`);
+    return;
+  }
+
+  localHotkeys.set(key, button);
+  button.dataset.dashboardHotkey = key.toUpperCase();
+}
+
+function dashboardIsActive() {
+  const leaf = dashboard.closest(".workspace-leaf");
+  return Boolean(leaf?.classList.contains("mod-active"));
+}
+
+function isTypingTarget(target) {
+  return Boolean(
+    target?.closest?.(
+      'input, textarea, select, [contenteditable="true"], .cm-editor'
+    )
+  );
+}
+
+const onDashboardKeydown = (event) => {
+  if (!dashboard.isConnected) {
+    document.removeEventListener("keydown", onDashboardKeydown, true);
+    return;
+  }
+
+  if (
+    event.defaultPrevented ||
+    event.ctrlKey ||
+    event.metaKey ||
+    event.altKey ||
+    isTypingTarget(event.target) ||
+    !dashboardIsActive()
+  ) {
+    return;
+  }
+
+  const button = localHotkeys.get(normalizeHotkey(event.key));
+  if (!button || button.disabled) return;
+
+  event.preventDefault();
+  event.stopPropagation();
+  button.click();
+};
+
+document.addEventListener("keydown", onDashboardKeydown, true);
+
+function addCommand(parent, label, macroPath, hotkey = "") {
   const button = parent.createEl("button", {
     text: label,
   });
+  button.type = "button";
+  bindLocalHotkey(button, hotkey);
 
   button.onclick = async () => {
     button.disabled = true;
@@ -138,17 +203,65 @@ const refresh = toolbar.createEl("button", {
   text: "Refresh state",
 });
 refresh.type = "button";
+bindLocalHotkey(refresh, "r");
 
 const statusLink = toolbar.createEl("button", {
   text: "Open full System Status",
 });
 statusLink.type = "button";
+bindLocalHotkey(statusLink, "s");
 statusLink.onclick = () =>
   openInMain(String(dashboardConfig().paths?.system_status));
 
 const refreshStatus = toolbar.createSpan({
   cls: "dashboard-muted dashboard-refresh-status",
 });
+
+const clipboardStatus = toolbar.createSpan({
+  cls: "dashboard-muted dashboard-clipboard",
+});
+
+function extractClipboardSlug(text) {
+  const value = String(text || "").trim();
+  if (!value) return "";
+
+  const yamlMatch = value.match(/(?:^|\n)\s*slug\s*:\s*["']?([^\s"'\]}>,]+)["']?/i);
+  if (yamlMatch?.[1]) return yamlMatch[1];
+
+  const knownPrefixMatch = value.match(/\b(?:cnt|psg|ins|rol|ctx|spc)\.[a-z0-9][a-z0-9._-]*\b/i);
+  if (knownPrefixMatch?.[0]) return knownPrefixMatch[0];
+
+  const dottedSlugMatch = value.match(/\b[a-z][a-z0-9-]*\.[a-z0-9][a-z0-9._-]*\b/i);
+  return dottedSlugMatch?.[0] || "";
+}
+
+function renderClipboardSlug() {
+  let slug = "";
+  try {
+    slug = extractClipboardSlug(clipboard.readText());
+  } catch (error) {
+    console.debug("Dashboard: clipboard read failed", error);
+  }
+
+  clipboardStatus.empty();
+  clipboardStatus.createSpan({ text: "Clipboard slug: " });
+  if (slug) {
+    clipboardStatus.createEl("code", { text: slug });
+  } else {
+    clipboardStatus.createSpan({ text: "—" });
+  }
+}
+
+renderClipboardSlug();
+const clipboardPoll = window.setInterval(() => {
+  if (!dashboard.isConnected) {
+    window.clearInterval(clipboardPoll);
+    return;
+  }
+  if (dashboardIsActive()) renderClipboardSlug();
+}, 1000);
+
+window.addEventListener("focus", renderClipboardSlug);
 
 const stateGrid = stateSection.createEl("div", {
   cls: "dashboard-grid",
@@ -356,9 +469,10 @@ async function renderState({
   }
 }
 
-refresh.addEventListener("click", () =>
-  renderState({ announce: true })
-);
+refresh.addEventListener("click", () => {
+  renderClipboardSlug();
+  renderState({ announce: true });
+});
 
 await renderState();
 
@@ -394,7 +508,8 @@ line(
 addCommand(
   annotations,
   "List Annotations",
-  "macros/list-annotations.js"
+  "macros/list-annotations.js",
+  "a"
 );
 
 const editorialNotes = card(
@@ -419,9 +534,15 @@ const actions = workflow.createEl("div", {
   cls: "dashboard-actions",
 });
 
-for (const action of Object.values(dashboardConfig().actions || {})) {
-  addCommand(actions, String(action.label), String(action.macro));
-}
+Object.values(dashboardConfig().actions || {}).forEach((action, index) => {
+  const fallbackHotkey = index < 9 ? String(index + 1) : "";
+  addCommand(
+    actions,
+    String(action.label),
+    String(action.macro),
+    String(action.hotkey || fallbackHotkey)
+  );
+});
 
 function normalizePath(path) {
   return path
