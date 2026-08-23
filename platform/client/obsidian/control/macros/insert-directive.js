@@ -1,15 +1,19 @@
 "use strict";
 
-function loadDirectiveLibrary(app) {
+function createControlRuntime(app) {
   const nodeRequire = typeof require === "function" ? require : window.require;
   const path = nodeRequire("node:path");
   const base = app?.vault?.adapter?.getBasePath?.() || app?.vault?.adapter?.basePath;
+  if (!base) throw new Error("Could not determine vault base path.");
 
-  if (!base) {
-    throw new Error("Could not determine vault base path.");
-  }
+  const loaderPath = path.join(base, "_control", "scripts", "lib", "control-loader.js");
+  try { delete nodeRequire.cache[nodeRequire.resolve(loaderPath)]; } catch (_) {}
+  const { createControlLoader } = nodeRequire(loaderPath);
+  return createControlLoader({ app, controlRoot: "_control" });
+}
 
-  return nodeRequire(path.join(base, "_control", "scripts", "lib", "directive.js"));
+function loadDirectiveLibrary(app) {
+  return createControlRuntime(app).requireControl("scripts/lib/directive.js");
 }
 
 function frontmatterEndLine(editor) {

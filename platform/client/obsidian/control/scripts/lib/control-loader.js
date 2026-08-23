@@ -1,28 +1,46 @@
 "use strict";
 
-const { getNodeRequire } = require("./node-runtime.js");
-const { requireVaultBasePath } = require("./vault-paths.js");
-const { loadConfig } = require("./config-loader.js");
-
-function pathsConfig() { return loadConfig("paths"); }
+// This file is the one permitted bootstrap across the Obsidian/Electron ->
+// Control boundary. Keep it self-contained: do not import other Control modules
+// at top level, because their cache must be cleared before they are touched.
+function getNodeRequire() {
+  if (typeof require === "function") return require;
+  if (typeof window !== "undefined" && typeof window.require === "function") {
+    return window.require;
+  }
+  throw new Error("Node require is unavailable in this Obsidian context.");
+}
 
 function getVaultBasePath(app) {
-  return requireVaultBasePath(app);
+  const adapter = app?.vault?.adapter;
+  const base = typeof adapter?.getBasePath === "function"
+    ? adapter.getBasePath()
+    : adapter?.basePath;
+  if (!base) throw new Error("Could not determine vault base path.");
+  return base;
 }
 
 function getActiveQueryPath(app) {
-  const activeFile = app?.workspace?.getActiveFile?.();
-  const queryPath = activeFile?.path;
+  const queryPath = app?.workspace?.getActiveFile?.()?.path;
   if (!queryPath) throw new Error("Could not determine active query path.");
   return queryPath;
 }
 
 function getControlRoot(queryPath) {
-  const marker = `/${String(pathsConfig().query_dir || "queries")}/`;
-  const markerIndex = String(queryPath || "").indexOf(marker);
-  if (markerIndex === -1) throw new Error(`Query is not inside a queries folder: ${queryPath}`);
-  const controlRoot = queryPath.slice(0, markerIndex);
-  if (!controlRoot) throw new Error(`Could not infer control root from query path: ${queryPath}`);
+  const nodeRequire = getNodeRequire();
+  const pathMod = nodeRequire("node:path");
+  const normalized = String(queryPath || "").replace(/\\/g, "/");
+  if (!normalized || !normalized.includes("/")) {
+    throw new Error(`Query has no parent directory: ${queryPath}`);
+  }
+  // Query notes live one directory below the Control root. Infer from structure
+  // rather than hard-coding config.paths.query_dir, so renaming that directory
+  // does not require changing bootstrap JavaScript.
+  const queryDirPath = pathMod.posix.dirname(normalized);
+  const controlRoot = pathMod.posix.dirname(queryDirPath);
+  if (!controlRoot || controlRoot === ".") {
+    throw new Error(`Could not infer control root from query path: ${queryPath}`);
+  }
   return controlRoot;
 }
 
@@ -52,14 +70,23 @@ function createControlLoader({ app, queryPath = null, controlRoot = null } = {})
   const nodeRequire = getNodeRequire();
   const pathMod = nodeRequire("node:path");
   const fsMod = nodeRequire("node:fs");
-  const vaultBasePath = getVaultBasePath(app);
-  const resolvedQueryPath = queryPath || getActiveQueryPath(app);
+  const vaultBasePath = pathMod.resolve(getVaultBasePath(app));
+  const resolvedQueryPath = queryPath || (controlRoot ? null : getActiveQueryPath(app));
   const resolvedControlRoot = controlRoot || getControlRoot(resolvedQueryPath);
   const vaultControlRootPath = toNativePath(pathMod, vaultBasePath, resolvedControlRoot);
 
-  // Filesystem access here is package loading only: resolve the shared _control
-  // symlink to its physical code directory. Workflow discovery belongs to svc.
+  // _control may be a symlink into the installed Control package. Node caches
+  // modules under their physical filenames, so resolve it before invalidating.
   const controlRootPath = fsMod.realpathSync(vaultControlRootPath);
+
+  // Electron keeps Node modules alive for the renderer lifetime. Clear the
+  // entire Control package once at entry so edits, moves and deleted files can
+  // never survive into a new macro/query invocation.
+  for (const id of Object.keys(nodeRequire.cache || {})) {
+    if (id === controlRootPath || id.startsWith(`${controlRootPath}${pathMod.sep}`)) {
+      delete nodeRequire.cache[id];
+    }
+  }
 
   function controlPath(relativePath) {
     return [resolvedControlRoot, relativePath].filter(Boolean).join("/");
@@ -71,7 +98,6 @@ function createControlLoader({ app, queryPath = null, controlRoot = null } = {})
 
   function requireControl(relativePath) {
     const fullPath = pathMod.join(controlRootPath, ...cleanRelativePath(relativePath));
-    if (nodeRequire.cache?.[fullPath]) delete nodeRequire.cache[fullPath];
     return nodeRequire(fullPath);
   }
 

@@ -5,16 +5,21 @@ const nodeRequire = typeof require === "function" ? require : window.require;
 const pathMod = nodeRequire("node:path");
 const vaultBasePath = app.vault.adapter.getBasePath?.() || app.vault.adapter.basePath;
 const queryPath = app.workspace.getActiveFile()?.path || "";
-const markerIndex = queryPath.indexOf("/queries/");
-
-if (markerIndex === -1) {
-  throw new Error(`Query is not inside a queries folder: ${queryPath}`);
+const controlRoot = pathMod.posix.dirname(pathMod.posix.dirname(queryPath));
+if (!queryPath || !controlRoot || controlRoot === ".") {
+  throw new Error(`Could not infer Control root from query path: ${queryPath}`);
 }
-
-const controlRoot = queryPath.slice(0, markerIndex);
-const loadControl = (relativePath) => nodeRequire(
-  pathMod.join(vaultBasePath, ...controlRoot.split("/").filter(Boolean), ...relativePath.split("/"))
+const loaderPath = pathMod.join(
+  vaultBasePath,
+  ...controlRoot.split("/").filter(Boolean),
+  "scripts",
+  "lib",
+  "control-loader.js"
 );
+try { delete nodeRequire.cache[nodeRequire.resolve(loaderPath)]; } catch (_) {}
+const { createControlLoader } = nodeRequire(loaderPath);
+const loader = createControlLoader({ app, queryPath, controlRoot });
+const loadControl = (relativePath) => loader.requireControl(relativePath);
 const { createInternalLink } = loadControl("scripts/lib/internal-link.js");
 const { loadConfig } = loadControl("scripts/lib/config-loader.js");
 const recordsConfig = loadConfig("records");

@@ -1,5 +1,16 @@
 "use strict";
 
+function createControlRuntime(app) {
+  const nodeRequire = typeof require === "function" ? require : window.require;
+  const path = nodeRequire("node:path");
+  const base = app?.vault?.adapter?.getBasePath?.() || app?.vault?.adapter?.basePath;
+  if (!base) throw new Error("Could not determine vault base path.");
+  const loaderPath = path.join(base, "_control", "scripts", "lib", "control-loader.js");
+  try { delete nodeRequire.cache[nodeRequire.resolve(loaderPath)]; } catch (_) {}
+  const { createControlLoader } = nodeRequire(loaderPath);
+  return createControlLoader({ app, controlRoot: "_control" });
+}
+
 /*
  * QuickAdd macro: Vocabulary Cheatsheet
  *
@@ -12,17 +23,10 @@ module.exports = async function vocabularyCheatsheet(params = {}) {
   const app = params.app || globalThis.app;
   if (!app?.vault) throw new Error("Obsidian app object unavailable.");
 
-  const nodeRequire = typeof require === "function" ? require : window.require;
-  const path = nodeRequire("node:path");
-  const fs = nodeRequire("node:fs");
-  const base = app.vault.adapter.getBasePath?.() || app.vault.adapter.basePath;
-  if (!base) throw new Error("Could not determine vault base path.");
-
-  const controlRoot = path.join(base, "_control");
-  const configPath = path.join(controlRoot, "config", "vocabulary.yaml");
-  const loaderPath = path.join(controlRoot, "scripts", "lib", "config-loader.js");
-
-  const { loadConfig } = nodeRequire(loaderPath);
+  const loader = createControlRuntime(app);
+  const fs = loader.nodeRequire("node:fs");
+  const configPath = loader.requireControl("scripts/lib/config-loader.js").CONFIG_ROOT + "/vocabulary.yaml";
+  const { loadConfig } = loader.requireControl("scripts/lib/config-loader.js");
   const vocabulary = loadConfig("vocabulary");
   const source = fs.readFileSync(configPath, "utf8");
   const descriptions = parseInlineDescriptions(source);

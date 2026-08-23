@@ -1,14 +1,18 @@
 # System Status
 
 ````dataviewjs
-const nodeRequire = require;
+const nodeRequire = typeof require === "function" ? require : window.require;
 const pathMod = nodeRequire("node:path");
-const controlVaultRoot = app.vault.adapter.getBasePath?.() || app.vault.adapter.basePath;
-const loadControl = (relativePath) => nodeRequire(pathMod.join(controlVaultRoot, "_control", ...relativePath.split("/")));
+const vaultRoot = app.vault.adapter.getBasePath?.() || app.vault.adapter.basePath;
+const loaderPath = pathMod.join(vaultRoot, "_control", "scripts", "lib", "control-loader.js");
+try { delete nodeRequire.cache[nodeRequire.resolve(loaderPath)]; } catch (_) {}
+const { createControlLoader } = nodeRequire(loaderPath);
+const controlLoader = createControlLoader({ app, controlRoot: "_control" });
+const loadControl = (relativePath) => controlLoader.requireControl(relativePath);
 const { notify } = loadControl("scripts/lib/notify.js");
 const { readSystemState } = loadControl("scripts/lib/system-state.js");
 
-function renderSystemStatus({ app, container }) {
+async function renderSystemStatus({ app, container }) {
   container.empty();
   container.createEl("h2", { text: "System Status" });
   container.createEl("p", { text: "Detailed Git, pipeline, and handoff diagnostics for this project vault." });

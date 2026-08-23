@@ -8,7 +8,6 @@
 # bootstrap name used to find this config loader, so changing it requires first
 # changing/recreating the vault symlink before the new value can be read.
 
-control_root: /home/jeremy/Work/Loom/platform/client/obsidian/control
 control_mount: _control
 # Canonical shared Instructions vault.
 instructions_vault: $HOME/Work/Loom/instructions
@@ -18,7 +17,6 @@ instructions_vault: $HOME/Work/Loom/instructions
 runtime_dir: .autoscribe
 selection_dir: selections
 workflow_dir: workflow
-query_dir: queries
 template_dir: templates
 
 # Folders beginning with this prefix are ignored by content/annotation scans.

@@ -1,10 +1,19 @@
 // Open _control/Dashboard.md in the main workspace.
 
-const path = require("node:path");
+function createControlRuntime(app) {
+  const nodeRequire = typeof require === "function" ? require : window.require;
+  const path = nodeRequire("node:path");
+  const base = app?.vault?.adapter?.getBasePath?.() || app?.vault?.adapter?.basePath;
+  if (!base) throw new Error("Could not determine vault base path.");
+  const loaderPath = path.join(base, "_control", "scripts", "lib", "control-loader.js");
+  try { delete nodeRequire.cache[nodeRequire.resolve(loaderPath)]; } catch (_) {}
+  const { createControlLoader } = nodeRequire(loaderPath);
+  return createControlLoader({ app, controlRoot: "_control" });
+}
 
 module.exports = async ({ app }) => {
-  const root = app.vault.adapter.getBasePath?.() || app.vault.adapter.basePath;
-  const { loadConfig } = require(path.join(root, "_control", "scripts", "lib", "config-loader.js"));
+  const loader = createControlRuntime(app);
+  const { loadConfig } = loader.requireControl("scripts/lib/config-loader.js");
   const candidates = loadConfig("paths").dashboard_candidates || [];
 
   const file = candidates
@@ -16,6 +25,6 @@ module.exports = async ({ app }) => {
     return;
   }
 
-  const { openFileInMain } = require(path.join(root, "_control", "scripts", "lib", "workspace.js"));
+  const { openFileInMain } = loader.requireControl("scripts/lib/workspace.js");
   await openFileInMain(app, file, { mode: "preview" });
 };

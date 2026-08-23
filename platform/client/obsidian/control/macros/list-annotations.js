@@ -1,6 +1,18 @@
 "use strict";
 
-const { loadAnnotations } = require("../scripts/lib/annotation-loader.js");
+function createControlRuntime(app) {
+  const nodeRequire = typeof require === "function" ? require : window.require;
+  const path = nodeRequire("node:path");
+  const base = app?.vault?.adapter?.getBasePath?.() || app?.vault?.adapter?.basePath;
+  if (!base) throw new Error("Could not determine vault base path.");
+
+  const loaderPath = path.join(base, "_control", "scripts", "lib", "control-loader.js");
+  try { delete nodeRequire.cache[nodeRequire.resolve(loaderPath)]; } catch (_) {}
+  const { createControlLoader } = nodeRequire(loaderPath);
+  return createControlLoader({ app, controlRoot: "_control" });
+}
+
+let loadAnnotations;
 
 function compareText(a, b) {
   return String(a).localeCompare(String(b), undefined, {
@@ -189,6 +201,7 @@ function showAnnotationList(app, found, typeOrder = []) {
 }
 
 module.exports = async ({ app }) => {
+  ({ loadAnnotations } = createControlRuntime(app).requireControl("scripts/lib/annotation-loader.js"));
   const annotations = loadAnnotations();
   const found =
     await annotations.collectAnnotations(app);

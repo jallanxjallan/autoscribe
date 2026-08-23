@@ -9,14 +9,21 @@ cssclasses:
 const nodeRequire = typeof require === "function" ? require : window.require;
 const pathMod = nodeRequire("node:path");
 const vaultRoot = app.vault.adapter.getBasePath?.() || app.vault.adapter.basePath;
-const loadControl = (relativePath) => nodeRequire(pathMod.join(vaultRoot, "_control", ...relativePath.split("/")));
+const loaderPath = pathMod.join(vaultRoot, "_control", "scripts", "lib", "control-loader.js");
+function freshControlLoader() {
+  try { delete nodeRequire.cache[nodeRequire.resolve(loaderPath)]; } catch (_) {}
+  const { createControlLoader } = nodeRequire(loaderPath);
+  return createControlLoader({ app, controlRoot: "_control" });
+}
+const controlLoader = freshControlLoader();
+const loadControl = (relativePath) => controlLoader.requireControl(relativePath);
 const { openFileInMain } = loadControl("scripts/lib/workspace.js");
 const { readSystemState } = loadControl("scripts/lib/system-state.js");
 const { collectAnnotations } = loadControl("scripts/lib/annotate.js");
 const { loadConfig } = loadControl("scripts/lib/config-loader.js");
 const dashboardConfig = () => loadConfig("dashboard");
 const recordsConfig = () => loadConfig("records");
-const { clipboard } = nodeRequire("electron");
+const { readClipboardTextSync } = loadControl("scripts/lib/clipboard.js");
 
 let notify = (message) => new Notice(message);
 try {
@@ -162,19 +169,10 @@ function addCommand(parent, label, macroPath, hotkey = "") {
     notify(`Opening ${label}…`);
 
     try {
-      const implementation = pathMod.join(
-        vaultRoot,
-        "_control",
-        ...macroPath.split("/")
-      );
-
-      try {
-        delete nodeRequire.cache[
-          nodeRequire.resolve(implementation)
-        ];
-      } catch (_) {}
-
-      const run = nodeRequire(implementation);
+      // Re-enter Control at each button invocation. The Dashboard can remain
+      // open across code replacement, so action code must not use its old
+      // renderer cache or bypass the canonical runtime boundary.
+      const run = freshControlLoader().requireControl(macroPath);
       await run({ app });
     } catch (error) {
       console.error(`${label} failed:`, error);
@@ -238,7 +236,7 @@ function extractClipboardSlug(text) {
 function renderClipboardSlug() {
   let slug = "";
   try {
-    slug = extractClipboardSlug(clipboard.readText());
+    slug = extractClipboardSlug(readClipboardTextSync());
   } catch (error) {
     console.debug("Dashboard: clipboard read failed", error);
   }

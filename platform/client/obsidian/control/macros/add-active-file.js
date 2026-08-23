@@ -1,22 +1,15 @@
 "use strict";
 
-const path = require("node:path");
+function createControlRuntime(app) {
+  const nodeRequire = typeof require === "function" ? require : window.require;
+  const path = nodeRequire("node:path");
+  const base = app?.vault?.adapter?.getBasePath?.() || app?.vault?.adapter?.basePath;
+  if (!base) throw new Error("Could not determine vault base path.");
 
-function getVaultRoot(app) {
-  const adapter = app?.vault?.adapter;
-  const root = typeof adapter?.getBasePath === "function"
-    ? adapter.getBasePath()
-    : adapter?.basePath;
-  if (!root) throw new Error("Could not determine the vault filesystem path.");
-  return path.resolve(root);
-}
-
-function loadControl(app, relativePath) {
-  return require(path.join(
-    getVaultRoot(app),
-    "_control",
-    ...String(relativePath).split("/").filter(Boolean)
-  ));
+  const loaderPath = path.join(base, "_control", "scripts", "lib", "control-loader.js");
+  try { delete nodeRequire.cache[nodeRequire.resolve(loaderPath)]; } catch (_) {}
+  const { createControlLoader } = nodeRequire(loaderPath);
+  return createControlLoader({ app, controlRoot: "_control" });
 }
 
 function getActiveMarkdownFile(app) {
@@ -58,8 +51,9 @@ module.exports = async function addActiveFileToClipboard(params = {}) {
   const app = params.app ?? globalThis.app;
   if (!app) throw new Error("Obsidian app instance is unavailable.");
 
-  const { readClipboardSelection } = loadControl(app, "scripts/lib/clipboard-selection.js");
-  const { notify } = loadControl(app, "scripts/lib/notify.js");
+  const loader = createControlRuntime(app);
+  const { readClipboardSelection } = loader.requireControl("scripts/lib/clipboard-selection.js");
+  const { notify } = loader.requireControl("scripts/lib/notify.js");
   if (typeof readClipboardSelection !== "function") {
     throw new Error("clipboard-selection.js does not export readClipboardSelection().");
   }

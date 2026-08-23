@@ -1,4 +1,0 @@
-macros/write-responses.js
-scripts/ui/write-responses.js
-scripts/lib/dispatch-service.js
-Dashboard.md

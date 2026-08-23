@@ -1,19 +1,27 @@
 "use strict";
 
+function createControlRuntime(app) {
+  const nodeRequire = typeof require === "function" ? require : window.require;
+  const path = nodeRequire("node:path");
+  const base = app?.vault?.adapter?.getBasePath?.() || app?.vault?.adapter?.basePath;
+  if (!base) throw new Error("Could not determine vault base path.");
+
+  const loaderPath = path.join(base, "_control", "scripts", "lib", "control-loader.js");
+  try { delete nodeRequire.cache[nodeRequire.resolve(loaderPath)]; } catch (_) {}
+  const { createControlLoader } = nodeRequire(loaderPath);
+  return createControlLoader({ app, controlRoot: "_control" });
+}
+
 module.exports = async function write_responses(params = {}) {
   const app = params.app || globalThis.app;
   if (!app?.vault || !app?.workspace) throw new Error("Obsidian app object unavailable.");
 
-  const nodeRequire = typeof require === "function" ? require : window.require;
-  const path = nodeRequire("node:path");
-  const base = app.vault.adapter.getBasePath?.() || app.vault.adapter.basePath;
-  const load = (relativePath) => nodeRequire(path.join(base, "_control", ...relativePath.split("/")));
-
-  const { openWorkflowModal } = load("scripts/lib/workflow-modal.js");
-  const { notify } = load("scripts/lib/notify.js");
-  const { readSystemState } = load("scripts/lib/system-state.js");
-  const { serviceCall } = load("scripts/lib/dispatch-service.js");
-  const { loadConfig } = load("scripts/lib/config-loader.js");
+  const loader = createControlRuntime(app);
+  const { openWorkflowModal } = loader.requireControl("scripts/lib/workflow-modal.js");
+  const { notify } = loader.requireControl("scripts/lib/notify.js");
+  const { readSystemState } = loader.requireControl("scripts/lib/system-state.js");
+  const { serviceCall } = loader.requireControl("scripts/lib/dispatch-service.js");
+  const { loadConfig } = loader.requireControl("scripts/lib/config-loader.js");
 
   const protocol = () => loadConfig("protocol");
 

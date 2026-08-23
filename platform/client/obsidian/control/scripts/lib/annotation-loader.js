@@ -1,9 +1,9 @@
 "use strict";
 
+const annotations = require("./annotate.js");
+
 function loadAnnotations() {
-  const modulePath = require.resolve("./annotate.js");
-  delete require.cache[modulePath];
-  return require(modulePath);
+  return annotations;
 }
 
 module.exports = { loadAnnotations };

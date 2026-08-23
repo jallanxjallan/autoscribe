@@ -1,39 +1,25 @@
 # Compiled Notes
 
 ````dataviewjs
-const nodeRequire =
-    typeof require === "function"
-        ? require
-        : window.require;
-
-const pathMod = nodeRequire("path");
-const vaultBasePath =
-    app.vault.adapter.getBasePath?.() || app.vault.adapter.basePath;
-const queryPathForBootstrap = app.workspace.getActiveFile().path;
-const markerIndexForBootstrap = queryPathForBootstrap.indexOf("/queries/");
-
-if (markerIndexForBootstrap === -1) {
-    throw new Error(
-        `Query is not inside a queries folder: ${queryPathForBootstrap}`
-    );
+const nodeRequire = typeof require === "function" ? require : window.require;
+const pathMod = nodeRequire("node:path");
+const vaultBasePath = app.vault.adapter.getBasePath?.() || app.vault.adapter.basePath;
+const queryPath = app.workspace.getActiveFile()?.path || "";
+const controlRoot = pathMod.posix.dirname(pathMod.posix.dirname(queryPath));
+if (!queryPath || !controlRoot || controlRoot === ".") {
+  throw new Error(`Could not infer Control root from query path: ${queryPath}`);
 }
-
-const controlRootForBootstrap =
-    queryPathForBootstrap.slice(0, markerIndexForBootstrap);
-const runtimePath = pathMod.join(
-    vaultBasePath,
-    ...controlRootForBootstrap.split("/").filter(Boolean),
-    "scripts",
-    "lib",
-    "query-runtime.js"
+const loaderPath = pathMod.join(
+  vaultBasePath,
+  ...controlRoot.split("/").filter(Boolean),
+  "scripts",
+  "lib",
+  "control-loader.js"
 );
-
-const { createQueryRuntime } = nodeRequire(runtimePath);
-const runtime = createQueryRuntime({
-    app,
-    queryTitle: "Compiled Notes query"
-});
-const { loader } = runtime;
+try { delete nodeRequire.cache[nodeRequire.resolve(loaderPath)]; } catch (_) {}
+const { createControlLoader } = nodeRequire(loaderPath);
+const loader = createControlLoader({ app, queryPath, controlRoot });
+const loadControl = (relativePath) => loader.requireControl(relativePath);
 const { loadConfig } = loader.requireControl("scripts/lib/config-loader.js");
 const queryConfig = loadConfig("queries").compiled_synopses || {};
 

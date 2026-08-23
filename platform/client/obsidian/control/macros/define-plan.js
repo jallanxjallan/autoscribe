@@ -1,11 +1,22 @@
 "use strict";
 
-const path = require("node:path");
-const { loadConfig } = require("../scripts/lib/config-loader");
-const { el } = require("../scripts/lib/dom.js");
-const { notify } = require("../scripts/lib/notify.js");
-const { serviceCall: callService } = require("../scripts/lib/dispatch-service.js");
-const { buildPlanRecord } = require("../scripts/plans/plan-record.js");
+function createControlRuntime(app) {
+  const nodeRequire = typeof require === "function" ? require : window.require;
+  const path = nodeRequire("node:path");
+  const base = app?.vault?.adapter?.getBasePath?.() || app?.vault?.adapter?.basePath;
+  if (!base) throw new Error("Could not determine vault base path.");
+
+  const loaderPath = path.join(base, "_control", "scripts", "lib", "control-loader.js");
+  try { delete nodeRequire.cache[nodeRequire.resolve(loaderPath)]; } catch (_) {}
+  const { createControlLoader } = nodeRequire(loaderPath);
+  return createControlLoader({ app, controlRoot: "_control" });
+}
+
+let loadConfig;
+let el;
+let notify;
+let callService;
+let buildPlanRecord;
 
 function workflowConfig() { return loadConfig("workflow"); }
 function protocolConfig() { return loadConfig("protocol"); }
@@ -266,7 +277,12 @@ async function renderCreatePlan({ app, container }) {
 module.exports = async function define_plan(params = {}) {
   const app = params.app || globalThis.app;
   if (!app?.vault || !app?.workspace) throw new Error("Obsidian app object unavailable.");
-  const root = app.vault.adapter.getBasePath?.() || app.vault.adapter.basePath;
-  const { openWorkflowModal } = require(path.join(root, "_control/scripts/lib/workflow-modal.js"));
+  const loader = createControlRuntime(app);
+  ({ loadConfig } = loader.requireControl("scripts/lib/config-loader.js"));
+  ({ el } = loader.requireControl("scripts/lib/dom.js"));
+  ({ notify } = loader.requireControl("scripts/lib/notify.js"));
+  ({ serviceCall: callService } = loader.requireControl("scripts/lib/dispatch-service.js"));
+  ({ buildPlanRecord } = loader.requireControl("scripts/plans/plan-record.js"));
+  const { openWorkflowModal } = loader.requireControl("scripts/lib/workflow-modal.js");
   return openWorkflowModal({ app, title: "Define Plan", render: (container) => renderCreatePlan({ app, container }) });
 };

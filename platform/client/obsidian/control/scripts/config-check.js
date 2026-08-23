@@ -123,6 +123,67 @@ if (!errors.length) {
   }
 }
 
+// Runtime-boundary rule: code evaluated directly by QuickAdd, DataviewJS or
+// Templater must enter Control through control-loader.js. Relative module loads
+// at those boundaries are correctness bugs because Electron may resolve/cache
+// them in the renderer context rather than from the source file.
+function filesUnder(relativeDir, extension) {
+  const root = path.join(CONTROL_ROOT, relativeDir);
+  if (!fs.existsSync(root)) return [];
+  return fs.readdirSync(root, { withFileTypes: true })
+    .filter((entry) => entry.isFile() && entry.name.endsWith(extension))
+    .map((entry) => path.join(root, entry.name));
+}
+
+const boundaryFiles = [
+  ...filesUnder("macros", ".js"),
+  ...filesUnder("templater", ".js"),
+  ...filesUnder("scripts/queries", ".js"),
+  ...filesUnder("queries", ".md"),
+  path.join(CONTROL_ROOT, "Dashboard.md"),
+  path.join(CONTROL_ROOT, "System Status.md"),
+].filter((file) => fs.existsSync(file));
+
+for (const file of boundaryFiles) {
+  const relative = path.relative(CONTROL_ROOT, file).replace(/\\/g, "/");
+  const source = fs.readFileSync(file, "utf8");
+  if (/(?:require|nodeRequire)\(\s*["']\./.test(source)) {
+    fail(`${relative} contains a forbidden relative require()`);
+  }
+  if ((relative.startsWith("queries/") || relative === "Dashboard.md" || relative === "System Status.md")
+      && !source.includes("control-loader.js")) {
+    fail(`${relative} bypasses the canonical control-loader`);
+  }
+  if (source.includes('nodeRequire(runtimePath)') || source.includes('nodeRequire(controlLoaderPath)')) {
+    fail(`${relative} directly loads a secondary Control bootstrap`);
+  }
+  const dynamicNodeRequire = /nodeRequire\(\s*(?!["']node:|loaderPath\b)/.test(source);
+  if (dynamicNodeRequire) {
+    fail(`${relative} dynamically nodeRequire()s code outside the canonical loader`);
+  }
+}
+
+// Electron APIs are allowed only inside explicit platform adapters, never in
+// visible entry points or general-purpose Control modules.
+const electronAdapter = path.join(CONTROL_ROOT, "scripts/lib/clipboard.js");
+function walkFiles(dir) {
+  const output = [];
+  for (const entry of fs.readdirSync(dir, { withFileTypes: true })) {
+    if (entry.name === ".git" || entry.name === "node_modules") continue;
+    const full = path.join(dir, entry.name);
+    if (entry.isDirectory()) output.push(...walkFiles(full));
+    else if (/\.(?:js|md)$/.test(entry.name)) output.push(full);
+  }
+  return output;
+}
+for (const file of walkFiles(CONTROL_ROOT)) {
+  if (path.resolve(file) === path.resolve(electronAdapter)) continue;
+  const source = fs.readFileSync(file, "utf8");
+  if (/(?:require|nodeRequire)\(\s*["']electron["']\s*\)/.test(source)) {
+    fail(`${path.relative(CONTROL_ROOT, file)} imports Electron outside the platform adapter`);
+  }
+}
+
 console.log("");
 console.log(`${errors.length} error(s), ${warnings.length} warning(s).`);
 if (warnings.length) console.log("Warnings are schema decisions for manual review; they do not block Control.");

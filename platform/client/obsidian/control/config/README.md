@@ -13,8 +13,9 @@ through JavaScript.
 
 Normal config edits are re-read when a file's mtime or size changes. The next
 macro/query operation should therefore see the new value without an Obsidian
-restart. Replacing JavaScript itself is different: after installing a new code
-tree, reload Obsidian so QuickAdd/Dataview do not retain an old module instance.
+restart. JavaScript entry points bootstrap through `scripts/lib/control-loader.js`,
+which clears the physical Control module tree before loading reusable code, so
+replacing `_control` should not normally require an Obsidian restart either.
 
 Run this after editing config:
 

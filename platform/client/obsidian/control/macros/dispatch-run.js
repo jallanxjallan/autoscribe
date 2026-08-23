@@ -1,11 +1,24 @@
 "use strict";
 
-const path = require("node:path");
-const { getFileManifest, appendClipboardCandidates } = require("../scripts/lib/file-manifest.js");
-const { notify } = require("../scripts/lib/notify.js");
-const { runDispatch, serviceCall } = require("../scripts/lib/dispatch-service.js");
-const { loadConfig } = require("../scripts/lib/config-loader.js");
-const { prepareDispatchDocument } = require("../scripts/lib/dispatch-document.js");
+function createControlRuntime(app) {
+  const nodeRequire = typeof require === "function" ? require : window.require;
+  const path = nodeRequire("node:path");
+  const base = app?.vault?.adapter?.getBasePath?.() || app?.vault?.adapter?.basePath;
+  if (!base) throw new Error("Could not determine vault base path.");
+
+  const loaderPath = path.join(base, "_control", "scripts", "lib", "control-loader.js");
+  try { delete nodeRequire.cache[nodeRequire.resolve(loaderPath)]; } catch (_) {}
+  const { createControlLoader } = nodeRequire(loaderPath);
+  return createControlLoader({ app, controlRoot: "_control" });
+}
+
+let getFileManifest;
+let appendClipboardCandidates;
+let notify;
+let runDispatch;
+let serviceCall;
+let loadConfig;
+let prepareDispatchDocument;
 
 async function renderDispatchRun({ app, container }) {
   container.empty();
@@ -155,7 +168,12 @@ async function renderDispatchRun({ app, container }) {
 module.exports = async function dispatch_run(params = {}) {
   const app = params.app || globalThis.app;
   if (!app?.vault || !app?.workspace) throw new Error("Obsidian app object unavailable.");
-  const root = app.vault.adapter.getBasePath?.() || app.vault.adapter.basePath;
-  const { openWorkflowModal } = require(path.join(root, "_control/scripts/lib/workflow-modal.js"));
+  const loader = createControlRuntime(app);
+  ({ getFileManifest, appendClipboardCandidates } = loader.requireControl("scripts/lib/file-manifest.js"));
+  ({ notify } = loader.requireControl("scripts/lib/notify.js"));
+  ({ runDispatch, serviceCall } = loader.requireControl("scripts/lib/dispatch-service.js"));
+  ({ loadConfig } = loader.requireControl("scripts/lib/config-loader.js"));
+  ({ prepareDispatchDocument } = loader.requireControl("scripts/lib/dispatch-document.js"));
+  const { openWorkflowModal } = loader.requireControl("scripts/lib/workflow-modal.js");
   return openWorkflowModal({ app, title: "Dispatch Run", render: (container) => renderDispatchRun({ app, container }) });
 };

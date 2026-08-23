@@ -1,6 +1,18 @@
 "use strict";
 
-const { loadAnnotations } = require("../scripts/lib/annotation-loader.js");
+function createControlRuntime(app) {
+  const nodeRequire = typeof require === "function" ? require : window.require;
+  const path = nodeRequire("node:path");
+  const base = app?.vault?.adapter?.getBasePath?.() || app?.vault?.adapter?.basePath;
+  if (!base) throw new Error("Could not determine vault base path.");
+
+  const loaderPath = path.join(base, "_control", "scripts", "lib", "control-loader.js");
+  try { delete nodeRequire.cache[nodeRequire.resolve(loaderPath)]; } catch (_) {}
+  const { createControlLoader } = nodeRequire(loaderPath);
+  return createControlLoader({ app, controlRoot: "_control" });
+}
+
+let loadAnnotations;
 
 async function choose(api, items, placeholder) {
   const selected = await api.suggester(
@@ -26,6 +38,7 @@ async function requiredPrompt(api, label) {
 }
 
 async function annotateText({ app, quickAddApi }) {
+  ({ loadAnnotations } = createControlRuntime(app).requireControl("scripts/lib/annotation-loader.js"));
   if (!quickAddApi?.suggester || !quickAddApi?.inputPrompt) {
     throw new Error("Annotate Text must be run as a QuickAdd macro.");
   }

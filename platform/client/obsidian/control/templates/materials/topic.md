@@ -3,7 +3,6 @@ record: topic
 component: research
 topic: []
 source: []
-scope:
 position:
 stage: research
 status: active

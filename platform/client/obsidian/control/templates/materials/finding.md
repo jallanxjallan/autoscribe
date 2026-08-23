@@ -3,7 +3,6 @@ record: finding
 component: research
 topic: []
 source: []
-scope:
 position:
 stage: research
 status: imported

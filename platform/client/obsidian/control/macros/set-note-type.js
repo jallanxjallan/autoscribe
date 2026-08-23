@@ -1,5 +1,17 @@
 "use strict";
 
+function createControlRuntime(app) {
+  const nodeRequire = typeof require === "function" ? require : window.require;
+  const path = nodeRequire("node:path");
+  const base = app?.vault?.adapter?.getBasePath?.() || app?.vault?.adapter?.basePath;
+  if (!base) throw new Error("Could not determine vault base path.");
+
+  const loaderPath = path.join(base, "_control", "scripts", "lib", "control-loader.js");
+  try { delete nodeRequire.cache[nodeRequire.resolve(loaderPath)]; } catch (_) {}
+  const { createControlLoader } = nodeRequire(loaderPath);
+  return createControlLoader({ app, controlRoot: "_control" });
+}
+
 /**
  * QuickAdd user script: Set Note Type
  *
@@ -15,17 +27,10 @@ module.exports = async function setNoteType(params = {}) {
     throw new Error("Set Note Type requires an active Markdown note.");
   }
 
-  const nodeRequire = typeof require === "function" ? require : window.require;
-  const path = nodeRequire("node:path");
-  const base = app.vault.adapter.getBasePath?.() || app.vault.adapter.basePath;
-  if (!base) throw new Error("Could not determine vault base path.");
-
-  const load = (relativePath) => nodeRequire(
-    path.join(base, "_control", "scripts", ...relativePath.split("/"))
-  );
-  const { notify } = load("lib/notify.js");
-  const { loadConfig } = load("lib/config-loader.js");
-  const { applyTemplateToFile } = load("templates/apply-template-tools.js");
+  const loader = createControlRuntime(app);
+  const { notify } = loader.requireControl("scripts/lib/notify.js");
+  const { loadConfig } = loader.requireControl("scripts/lib/config-loader.js");
+  const { applyTemplateToFile } = loader.requireControl("scripts/templates/apply-template-tools.js");
 
   const records = loadConfig("records");
   const groups = Object.entries(records.groups || {}).map(([id, group]) => ({

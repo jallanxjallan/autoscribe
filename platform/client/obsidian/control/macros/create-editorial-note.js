@@ -1,20 +1,27 @@
 "use strict";
 
+function createControlRuntime(app) {
+  const nodeRequire = typeof require === "function" ? require : window.require;
+  const path = nodeRequire("node:path");
+  const base = app?.vault?.adapter?.getBasePath?.() || app?.vault?.adapter?.basePath;
+  if (!base) throw new Error("Could not determine vault base path.");
+
+  const loaderPath = path.join(base, "_control", "scripts", "lib", "control-loader.js");
+  try { delete nodeRequire.cache[nodeRequire.resolve(loaderPath)]; } catch (_) {}
+  const { createControlLoader } = nodeRequire(loaderPath);
+  return createControlLoader({ app, controlRoot: "_control" });
+}
+
 module.exports = async function createEditorialNote(params = {}) {
   const app = params.app || globalThis.app;
   if (!app?.vault || !app?.workspace) throw new Error("Obsidian app object unavailable.");
 
-  const nodeRequire = typeof require === "function" ? require : window.require;
-  const path = nodeRequire("node:path");
-  const base = app.vault.adapter.getBasePath?.() || app.vault.adapter.basePath;
-  if (!base) throw new Error("Could not determine vault base path.");
-
-  const load = (relativePath) => nodeRequire(path.join(base, "_control", "scripts", ...relativePath.split("/")));
-  const { notify } = load("lib/notify.js");
-  const { titleCaseStem } = load("lib/text.js");
-  const { normalizeVaultPath, ensureFolder } = load("lib/vault-files.js");
-  const { readClipboardSelection } = load("lib/clipboard-selection.js");
-  const { loadConfig } = load("lib/config-loader.js");
+  const loader = createControlRuntime(app);
+  const { notify } = loader.requireControl("scripts/lib/notify.js");
+  const { titleCaseStem } = loader.requireControl("scripts/lib/text.js");
+  const { normalizeVaultPath, ensureFolder } = loader.requireControl("scripts/lib/vault-files.js");
+  const { readClipboardSelection } = loader.requireControl("scripts/lib/clipboard-selection.js");
+  const { loadConfig } = loader.requireControl("scripts/lib/config-loader.js");
   const editorial = loadConfig("records").editorial_note || {};
 
   const input = await openDialog(editorial.dialog || {});
