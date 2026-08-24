@@ -8,7 +8,7 @@ This package supports Obsidian Desktop only. It assumes:
 - the vault adapter exposes a local filesystem path; and
 - Node modules and local command-line tools are available inside Obsidian Desktop.
 
-Rust owns every Git operation. Dispatch Run sends only plan/document slugs;
+Rust owns every Git operation. Dispatch Run only resolves the selected Markdown files to their document slugs and sends those slugs with the selected plan; it does not flatten links, expand transclusions, or rewrite document content.
 Write Responses renders the service's NDJSON outcome manifest. If a writeback
 target is dirty, the service checkpoints it before replacing and committing it.
 Obsidian does not inspect or invoke Git directly.

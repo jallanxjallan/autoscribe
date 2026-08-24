@@ -1,9 +1,8 @@
 ---
 record: passage
-component: body
+component:
 source: []
 links: []
-position:
 stage: draft
 status: empty
 origin: human

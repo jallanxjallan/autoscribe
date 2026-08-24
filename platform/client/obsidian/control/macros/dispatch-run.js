@@ -18,7 +18,6 @@ let notify;
 let runDispatch;
 let serviceCall;
 let loadConfig;
-let prepareDispatchDocument;
 
 async function renderDispatchRun({ app, container }) {
   container.empty();
@@ -65,7 +64,6 @@ async function renderDispatchRun({ app, container }) {
       if (!item.selected) continue;
       const file = app.vault.getAbstractFileByPath(item.path);
       if (!file || file.extension !== "md") throw new Error(`Selected Markdown file was not found: ${item.path}`);
-      await prepareDispatchDocument(app, file);
       const slug = String(app.metadataCache.getFileCache(file)?.frontmatter?.slug || "").trim();
       if (!slug) throw new Error(`Selected file is missing required slug property: ${item.path}`);
       if (seen.has(slug)) throw new Error(`Selected document slug is duplicated: ${slug}`);
@@ -173,7 +171,6 @@ module.exports = async function dispatch_run(params = {}) {
   ({ notify } = loader.requireControl("scripts/lib/notify.js"));
   ({ runDispatch, serviceCall } = loader.requireControl("scripts/lib/dispatch-service.js"));
   ({ loadConfig } = loader.requireControl("scripts/lib/config-loader.js"));
-  ({ prepareDispatchDocument } = loader.requireControl("scripts/lib/dispatch-document.js"));
   const { openWorkflowModal } = loader.requireControl("scripts/lib/workflow-modal.js");
   return openWorkflowModal({ app, title: "Dispatch Run", render: (container) => renderDispatchRun({ app, container }) });
 };
