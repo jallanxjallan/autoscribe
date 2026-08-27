@@ -2,23 +2,21 @@
 # ------------------------------
 # Tunable operational choices that are not stored as long-lived note vocabulary.
 
-# Plan step types presented by Define Plan. Removing a kind hides it from new
+# Plan step types presented by Plan Manager. Removing a kind hides it from new
 # plans; it does not rewrite existing saved plans.
 step_kinds:
   - llm
   - script
   - rag
 
-# Define Plan UI/ID/snapshot defaults.
-define_plan:
+# Plan Manager reads the last svc refresh snapshot and writes local plan drafts.
+# It never invokes the Rust service directly.
+plan_manager:
+  state_dir: .autoscribe
+  state_file: control-state.json
+  plan_dir: plans
   default_step_kind: llm
-  default_component: standing
-  default_args_json: "{}"
-  step_label_prefix: Step
-  status_storage_key: autoscribe.define-plan.status
-  snapshot_timeout_ms: 30000
-  snapshot_max_buffer_bytes: 16777216
-  id_alphabet: 0123456789ABCDEFGHJKMNPQRSTVWXYZ
+  status_storage_key: autoscribe.plan-manager.status
 
 slug:
   # Alphabet used by Create Instruction's short random suffix.

@@ -14,7 +14,131 @@ use std::{
 };
 
 #[test]
-fn write_responses_checkpoints_dirty_target_then_commits_review_copy() {
+fn write_responses_writes_clean_target_without_committing_master() {
+    let (root, db, asc) = setup();
+    let written = invoke(&root, &asc, "write-responses", json!({"version":1}));
+    assert!(written.status.success(), "{}", String::from_utf8_lossy(&written.stdout));
+    let manifest = first_manifest(&written);
+
+    assert_eq!(manifest["status"], "written");
+    assert_eq!(manifest["master_state_before"], "clean");
+    assert_eq!(manifest["source_state"], "matches-dispatch");
+    assert_eq!(
+        fs::read_to_string(root.join("One.md")).unwrap(),
+        "---\nslug: cnt.one\nstatus: needs-review\nproducer: ai\naction: revise\n---\nNew\n"
+    );
+    assert!(!git_output(&root, ["status", "--porcelain", "--", "One.md"]).trim().is_empty());
+    assert_eq!(git_output(&root, ["log", "-1", "--format=%s"]).trim(), "Initial");
+    assert_eq!(
+        git_output(&root, ["show", "refs/heads/autoscribe/inflight:One.md"]),
+        "---\nslug: cnt.one\nstatus: needs-review\nproducer: ai\naction: revise\n---\nNew\n"
+    );
+    assert_eq!(
+        git_output(&root, ["log", "-1", "--format=%s", "refs/heads/autoscribe/inflight"]).trim(),
+        "AUTOSCRIBE RESPONSE saved"
+    );
+    assert_eq!(
+        manifest["inflight_commit"].as_str().unwrap(),
+        git_output(&root, ["rev-parse", "refs/heads/autoscribe/inflight"]).trim()
+    );
+    assert_eq!(
+        fs::read_to_string(root.join("asc.log")).unwrap(),
+        "export extract-pending\nexport update-exports call.one\n"
+    );
+    assert_response_count(&db, 0);
+    fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn write_responses_leaves_dirty_master_untouched_for_user_decision() {
+    let (root, db, asc) = setup();
+    fs::write(
+        root.join("One.md"),
+        "---\nslug: cnt.one\nstatus: draft\nproducer: human\naction: revise\n---\nHuman edit\n",
+    ).unwrap();
+
+    let written = invoke(&root, &asc, "write-responses", json!({"version":1}));
+    assert!(written.status.success(), "{}", String::from_utf8_lossy(&written.stdout));
+    let manifest = first_manifest(&written);
+
+    assert_eq!(manifest["status"], "decision-required");
+    assert_eq!(manifest["master_state"], "dirty");
+    assert_eq!(manifest["reason"], "master-dirty");
+    assert_eq!(
+        fs::read_to_string(root.join("One.md")).unwrap(),
+        "---\nslug: cnt.one\nstatus: draft\nproducer: human\naction: revise\n---\nHuman edit\n"
+    );
+    assert_eq!(git_output(&root, ["log", "-1", "--format=%s"]).trim(), "Initial");
+    assert_eq!(
+        git_output(&root, ["log", "-1", "--format=%s", "refs/heads/autoscribe/inflight"]).trim(),
+        "AUTOSCRIBE RESPONSE saved"
+    );
+    assert_eq!(fs::read_to_string(root.join("asc.log")).unwrap(), "export extract-pending\n");
+    assert_response_count(&db, 1);
+    fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn write_responses_blocks_clean_file_changed_since_dispatch() {
+    let (root, db, asc) = setup();
+    fs::write(
+        root.join("One.md"),
+        "---\nslug: cnt.one\nstatus: draft\nproducer: human\naction: revise\n---\nCommitted rewrite\n",
+    ).unwrap();
+    run_git(&root, ["add", "One.md"]);
+    run_git(&root, ["commit", "--quiet", "-m", "Human rewrite"]);
+    assert!(git_output(&root, ["status", "--porcelain", "--", "One.md"]).trim().is_empty());
+
+    let written = invoke(&root, &asc, "write-responses", json!({"version":1}));
+    assert!(written.status.success(), "{}", String::from_utf8_lossy(&written.stdout));
+    let manifest = first_manifest(&written);
+
+    assert_eq!(manifest["status"], "decision-required");
+    assert_eq!(manifest["master_state"], "clean");
+    assert_eq!(manifest["source_state"], "changed-since-dispatch");
+    assert_eq!(manifest["reason"], "changed-since-dispatch");
+    assert_eq!(
+        fs::read_to_string(root.join("One.md")).unwrap(),
+        "---\nslug: cnt.one\nstatus: draft\nproducer: human\naction: revise\n---\nCommitted rewrite\n"
+    );
+    assert_eq!(git_output(&root, ["log", "-1", "--format=%s"]).trim(), "Human rewrite");
+    assert_eq!(
+        git_output(&root, ["log", "-1", "--format=%s", "refs/heads/autoscribe/inflight"]).trim(),
+        "AUTOSCRIBE RESPONSE saved"
+    );
+    assert_response_count(&db, 1);
+    fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn write_responses_report_mode_is_non_mutating() {
+    let (root, db, asc) = setup();
+    let report = invoke(&root, &asc, "write-responses", json!({"version":1,"apply":false}));
+    assert!(report.status.success(), "{}", String::from_utf8_lossy(&report.stdout));
+    let manifest = first_manifest(&report);
+
+    assert_eq!(manifest["status"], "ready");
+    assert_eq!(manifest["master_state"], "clean");
+    assert_eq!(manifest["source_state"], "matches-dispatch");
+    assert_eq!(
+        fs::read_to_string(root.join("One.md")).unwrap(),
+        "---\nslug: cnt.one\nstatus: draft\nproducer: human\naction: revise\n---\nOld\n"
+    );
+    assert!(git_output(&root, ["status", "--porcelain", "--", "One.md"]).trim().is_empty());
+    assert_eq!(
+        git_output(&root, ["log", "-1", "--format=%s", "refs/heads/autoscribe/inflight"]).trim(),
+        "AUTOSCRIBE RESPONSE saved"
+    );
+    assert_eq!(
+        git_output(&root, ["show", "refs/heads/autoscribe/inflight:One.md"]),
+        "---\nslug: cnt.one\nstatus: needs-review\nproducer: ai\naction: revise\n---\nNew\n"
+    );
+    assert_eq!(fs::read_to_string(root.join("asc.log")).unwrap(), "export extract-pending\n");
+    assert_response_count(&db, 1);
+    fs::remove_dir_all(root).unwrap();
+}
+
+fn setup() -> (PathBuf, PathBuf, PathBuf) {
     let root = temp();
     run_git(&root, ["init", "--quiet", "--initial-branch=main"]);
     run_git(&root, ["config", "user.email", "tests@autoscribe.local"]);
@@ -48,37 +172,20 @@ fn write_responses_checkpoints_dirty_target_then_commits_review_copy() {
     ).unwrap();
     drop(database);
 
-    fs::write(
-        root.join("One.md"),
-        "---\nslug: cnt.one\nstatus: draft\nproducer: human\naction: revise\n---\nHuman edit\n",
-    ).unwrap();
     let asc = fake_asc(&root);
-    let written = invoke(&root, &asc, "write-responses", json!({"version":1}));
-    assert!(written.status.success(), "{}", String::from_utf8_lossy(&written.stdout));
-    let manifest: Value = serde_json::from_str(
-        String::from_utf8_lossy(&written.stdout).lines().next().unwrap(),
-    ).unwrap();
-    assert_eq!(manifest["status"], "committed");
-    assert!(manifest["checkpoint_commit"].as_str().is_some());
-    assert!(manifest["commit"].as_str().is_some());
-    assert_eq!(
-        fs::read_to_string(root.join("One.md")).unwrap(),
-        "---\nslug: cnt.one\nstatus: needs-review\nproducer: ai\naction: revise\n---\nNew\n"
-    );
-    assert!(git_output(&root, ["status", "--porcelain", "--", "One.md"]).trim().is_empty());
-    let subjects = git_output(&root, ["log", "-2", "--format=%s"]);
-    assert!(subjects.contains("Accept AutoScribe response cnt.one"));
-    assert!(subjects.contains("Checkpoint before AutoScribe writeback cnt.one"));
-    assert_eq!(
-        fs::read_to_string(root.join("asc.log")).unwrap(),
-        "export extract-pending\nexport update-exports call.one\n"
-    );
-    let connection = Connection::open(&db).unwrap();
+    (root, db, asc)
+}
+
+fn first_manifest(output: &std::process::Output) -> Value {
+    serde_json::from_str(String::from_utf8_lossy(&output.stdout).lines().next().unwrap()).unwrap()
+}
+
+fn assert_response_count(db: &Path, expected: i64) {
+    let connection = Connection::open(db).unwrap();
     let count: i64 = connection.query_row(
         "SELECT count(*) FROM response_records WHERE result_identity='call.one'", [], |row| row.get(0),
     ).unwrap();
-    assert_eq!(count, 0);
-    fs::remove_dir_all(root).unwrap();
+    assert_eq!(count, expected);
 }
 
 fn invoke(root: &Path, asc: &Path, command: &str, input: Value) -> std::process::Output {

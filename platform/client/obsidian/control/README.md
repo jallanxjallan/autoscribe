@@ -1,31 +1,46 @@
 # AutoScribe Obsidian Control
 
-This package supports Obsidian Desktop only. It assumes:
+Control is the Obsidian-facing UI. It does not own Git history and it does not
+maintain a live connection to the Rust service.
 
-- `_control` resolves to this directory from the active vault;
-- QuickAdd runs the files in `macros/`;
-- DataviewJS runs `Dashboard.md`, `System Status.md`, and `queries/`;
-- the vault adapter exposes a local filesystem path; and
-- Node modules and local command-line tools are available inside Obsidian Desktop.
+## Plan Manager
 
-Rust owns every Git operation. Dispatch Run only resolves the selected Markdown files to their document slugs and sends those slugs with the selected plan; it does not flatten links, expand transclusions, or rewrite document content.
-Write Responses renders the service's NDJSON outcome manifest. If a writeback
-target is dirty, the service checkpoints it before replacing and committing it.
-Obsidian does not inspect or invoke Git directly.
+`macros/plan-manager.js` replaces Define Plan and Dispatch Run.
 
-There is no cross-client runtime, browser-only storage path, or alternative UI adapter in this package. A future client should use its own frontend package and call the service boundary independently.
+Plan Manager reads `.autoscribe/control-state.json`, which is written by
+`svc refresh`. It presents all known plans ordered by a decaying frecency score
+based on successful dispatch use. Editing a plan writes an atomic local draft to
+`.autoscribe/plans/<plan-slug>.json`; the next `svc refresh` validates, stores and
+uploads it.
 
-## Layout
+`Copy Git Marker` copies two Git trailers:
 
-- `macros/`: thin QuickAdd entry points.
-- `queries/`, `Dashboard.md`, `System Status.md`, `templater/`, and `scripts/queries/`: Obsidian runtime entry points. Their first Control import must bootstrap `scripts/lib/control-loader.js`; relative Control imports and secondary dynamic loaders are forbidden.
-- `System Status.md`: detailed project diagnostics opened from the Dashboard.
-- `scripts/lib/`: reusable Obsidian and local-filesystem mechanics.
-- `scripts/plans/` and `scripts/selections/`: active plan and selection support.
-- `templates/` and `templater/`: vault note templates and Templater helpers.
+    Autoscribe-Plan: plan.example
+    Autoscribe-Plan-Title: Human Readable Hint
 
-Control entry points clear the cached physical Control module tree at invocation, so edited or moved modules do not survive in Electron's long-running Node cache. Dashboard actions re-enter through a fresh loader as well. A full Obsidian restart should not normally be required after replacing `_control`. Direct Electron API access is confined to explicit platform adapters under `scripts/lib/`; the Dashboard clipboard poll uses that adapter because synchronous polling is not equivalent to the permission-gated browser clipboard API.
+Only `Autoscribe-Plan` is machine-significant. Stage the intended target files
+with Obsidian Git, use an ordinary human commit message, paste the marker, and
+commit. An ordinary commit without the marker is ignored by AutoScribe.
 
-Service builds default to `~/.cache/autoscribe/cargo/service`. Override source
-discovery with `AUTOSCRIBE_ROOT`, the target with
-`AUTOSCRIBE_CARGO_TARGET_DIR`, or the executable with `SVC_BIN`.
+## Git ownership
+
+The editorial/master branch is user-owned. AutoScribe never creates automatic
+master commits. Dispatch and response forensics are committed only to
+`refs/heads/autoscribe/inflight`.
+
+## Write Responses
+
+Write Responses first saves the response candidate on the inflight ref. A target
+is automatically writable only when master is clean and byte-identical to the
+source that was dispatched. Dirty or clean-but-diverged targets are reported as
+requiring a decision and are left untouched. A successful write is deliberately
+left dirty for editorial review.
+
+## Durable local state
+
+`.autoscribe/` is operational state and should be excluded through
+`.git/info/exclude`, not committed. The installer adds that exclusion.
+
+Dashboard system state reads the current Git worktree directly and reads
+pipeline/catalogue state from the most recent `.autoscribe/control-state.json`.
+Run `svc refresh` from the vault root when you want AutoScribe to reconcile.

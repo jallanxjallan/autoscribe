@@ -1,7 +1,7 @@
 "use strict";
 
 const path = require("node:path");
-const { serviceCall } = require("./dispatch-service.js");
+const { serviceCall } = require("./service-command.js");
 const { loadConfig } = require("./config-loader.js");
 const { getVaultBasePath } = require("./query-runtime.js");
 

@@ -54,8 +54,8 @@ pub fn mark_written(db:&Database,result:&str,outcome:&str,path:Option<&str>,comm
 pub fn mark_forensic(db:&Database,result:&str,commit:&str)->ServiceResult<()> {
     let changed=db.connection().execute(
         "UPDATE response_records SET forensic_commit=?2,updated_at=CURRENT_TIMESTAMP
-         WHERE result_identity=?1 AND state='written'",(result,commit)).map_err(storage)?;
-    if changed==1{Ok(())}else{Err(ServiceError::Conflict(format!("response is not pending: {result}")))}
+         WHERE result_identity=?1 AND state IN ('pending','written')",(result,commit)).map_err(storage)?;
+    if changed==1{Ok(())}else{Err(ServiceError::Conflict(format!("response is not pending or written: {result}")))}
 }
 pub fn complete(db:&Database,result:&str)->ServiceResult<()> {
     let changed=db.connection().execute("DELETE FROM response_records WHERE result_identity=?1 AND state='written'",[result]).map_err(storage)?;

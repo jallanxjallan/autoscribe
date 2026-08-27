@@ -142,6 +142,17 @@ pub fn meta_set_many(db: &Database, values: &[(&str, String)]) -> ServiceResult<
     transaction.commit().map_err(storage)
 }
 
+pub fn inflight_dispatch_ledger(db: &Database, dispatch: &str) -> ServiceResult<Option<(String, String)>> {
+    let mut statement = db.connection().prepare(
+        "SELECT ledger_ref, ledger_commit FROM inflight_dispatches WHERE dispatch_identity=?1"
+    ).map_err(storage)?;
+    let mut rows = statement.query([dispatch]).map_err(storage)?;
+    Ok(match rows.next().map_err(storage)? {
+        Some(row) => Some((row.get::<_, String>(0).map_err(storage)?, row.get::<_, String>(1).map_err(storage)?)),
+        None => None,
+    })
+}
+
 pub fn record_inflight(
     db: &Database,
     dispatch: &str,

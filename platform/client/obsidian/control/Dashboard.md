@@ -198,7 +198,7 @@ const toolbar = stateSection.createEl("div", {
 });
 
 const refresh = toolbar.createEl("button", {
-  text: "Refresh state",
+  text: "Reload state",
 });
 refresh.type = "button";
 bindLocalHotkey(refresh, "r");
@@ -271,9 +271,9 @@ async function renderState({
   if (refresh.disabled) return;
 
   refresh.disabled = true;
-  refresh.setText("Refreshing…");
+  refresh.setText("Reloading…");
   refreshStatus.setText(
-    "Reading current Git and pipeline state…"
+    "Reading current Git and last svc refresh state…"
   );
   stateGrid.empty();
 
@@ -423,7 +423,7 @@ async function renderState({
     );
 
     if (announce) {
-      notify("System state refreshed.");
+      notify("System state reloaded.");
     }
   } catch (error) {
     const message =
@@ -456,7 +456,7 @@ async function renderState({
     }
   } finally {
     refresh.disabled = false;
-    refresh.setText("Refresh state");
+    refresh.setText("Reload state");
 
     if (
       !completed &&

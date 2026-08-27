@@ -19,8 +19,7 @@ module.exports = async function write_responses(params = {}) {
   const loader = createControlRuntime(app);
   const { openWorkflowModal } = loader.requireControl("scripts/lib/workflow-modal.js");
   const { notify } = loader.requireControl("scripts/lib/notify.js");
-  const { readSystemState } = loader.requireControl("scripts/lib/system-state.js");
-  const { serviceCall } = loader.requireControl("scripts/lib/dispatch-service.js");
+  const { serviceCall } = loader.requireControl("scripts/lib/service-command.js");
   const { loadConfig } = loader.requireControl("scripts/lib/config-loader.js");
 
   const protocol = () => loadConfig("protocol");
@@ -39,120 +38,136 @@ module.exports = async function write_responses(params = {}) {
       });
   }
 
+  function pathCell(tr, row) {
+    const cell = tr.createEl("td");
+    if (!row.path) {
+      cell.setText("—");
+      return;
+    }
+    const link = cell.createEl("a", { text: String(row.path), href: "#" });
+    link.addEventListener("click", (event) => {
+      event.preventDefault();
+      app.workspace.openLinkText(String(row.path), "", false);
+    });
+  }
+
+  function reasonText(row) {
+    if (row.status === "ready") return "Ready to write";
+    if (row.status === "written") return "Written; review copy left dirty";
+    if (row.status === "written-pending-ack") return "Written; export acknowledgement pending";
+    if (row.status === "failed") return `Failed: ${row.error || "unknown error"}`;
+    if (row.reason === "master-dirty") return "Decision required: master already dirty";
+    if (row.reason === "changed-since-dispatch") return "Decision required: changed since dispatch";
+    return "Decision required";
+  }
+
+  function addTable(parent, title, rows) {
+    if (!rows.length) return;
+    parent.createEl("h3", { text: title });
+    const table = parent.createEl("table");
+    table.style.width = "100%";
+    const head = table.createEl("tr");
+    for (const label of ["Source", "Path", "Master", "Dispatch source", "State"]) {
+      head.createEl("th", { text: label });
+    }
+    for (const row of rows) {
+      const tr = table.createEl("tr");
+      tr.createEl("td", { text: String(row.source_identity || "—") });
+      pathCell(tr, row);
+      tr.createEl("td", { text: String(row.master_state || row.master_state_after || row.master_state_before || "—") });
+      tr.createEl("td", {
+        text: row.source_state === "matches-dispatch"
+          ? "unchanged"
+          : row.source_state === "changed-since-dispatch"
+            ? "changed"
+            : String(row.source_state || "—"),
+      });
+      tr.createEl("td", { text: reasonText(row) });
+    }
+  }
+
   async function render(container) {
     container.empty();
 
     const heading = container.createEl("h2", { text: "Write Responses" });
     heading.style.marginTop = "0";
 
-    const toolbar = container.createEl("div");
-    toolbar.style.cssText = "display:flex;gap:.6rem;align-items:center;flex-wrap:wrap;margin:.6rem 0 1rem";
-    const refreshButton = toolbar.createEl("button", { text: "Refresh" });
-    refreshButton.type = "button";
-    const refreshStatus = toolbar.createSpan({ text: "" });
-
     container.createEl("p", {
-      text: "Writes completed pipeline responses into their source files. Existing frontmatter is preserved; the files remain dirty for vault-specific post-processing.",
+      text: "AutoScribe never commits the editorial branch. Clean, unchanged targets can be written automatically and are then left dirty for review. Dirty targets, or clean targets changed since dispatch, require a human decision.",
     });
 
-    const summary = container.createEl("div", { text: "Loading pending responses…" });
+    const toolbar = container.createEl("div");
+    toolbar.style.cssText = "display:flex;gap:.6rem;align-items:center;flex-wrap:wrap;margin:.6rem 0 1rem";
+    const refreshButton = toolbar.createEl("button", { text: "Refresh state" });
+    refreshButton.type = "button";
+    const writeButton = toolbar.createEl("button", { text: "Write clean responses" });
+    writeButton.type = "button";
+    const status = toolbar.createSpan({ text: "" });
+
+    const summary = container.createEl("div", { text: "Loading response state…" });
     summary.style.marginBottom = ".75rem";
-
     const results = container.createEl("div");
-    results.style.marginTop = "1rem";
 
-    async function refreshState() {
-      refreshStatus.setText("Reading current service state…");
-      try {
-        const system = await readSystemState(app);
-        if (!system.pipeline) {
-          throw new Error(system.errors?.pipeline || "Pipeline state unavailable");
-        }
-        const pending = Number(system.pipeline.counts?.response_pending || 0);
-        summary.setText(
-          pending
-            ? `${pending} pending response${pending === 1 ? "" : "s"} ready to write.`
-            : "No pending responses."
-        );
-        refreshStatus.setText(`Updated ${new Date(system.refreshed_at).toLocaleTimeString()}`);
-      } catch (error) {
-        const message = error?.message || String(error);
-        summary.setText("Pending-response state unavailable.");
-        refreshStatus.setText(`Refresh failed: ${message}`);
-      }
+    function setBusy(busy) {
+      refreshButton.disabled = busy;
+      writeButton.disabled = busy;
     }
 
-    refreshButton.addEventListener("click", async () => {
-      if (refreshButton.disabled) return;
-      refreshButton.disabled = true;
-      refreshButton.setText("Refreshing…");
-      refreshStatus.setText("Checking for completed responses…");
-      results.empty();
-
+    async function load(apply) {
+      setBusy(true);
+      status.setText(apply ? "Writing safe targets…" : "Reading target state…");
       try {
         const spec = protocol().writeback || {};
         const response = await serviceCall(
           app,
           String(spec.command || "write-responses"),
-          { version: Number(spec.request_version || 1) }
+          { version: Number(spec.request_version || 1), apply: Boolean(apply) }
         );
-
         const rows = parseNdjson(response.stdout)
           .filter((row) => row.type === String(spec.result_type || "writeback-result"));
 
-        const successStatus = String(spec.success_status || "written");
-        const written = rows.filter((row) => row.status === successStatus);
-        const failed = rows.filter((row) => row.status !== successStatus);
+        const ready = rows.filter((row) => row.status === "ready");
+        const decisions = rows.filter((row) => row.status === "decision-required");
+        const written = rows.filter((row) => row.status === "written" || row.status === "written-pending-ack");
+        const failed = rows.filter((row) => row.status === "failed");
 
+        summary.setText(rows.length
+          ? `${ready.length} clean and ready; ${decisions.length} require a decision; ${written.length} written; ${failed.length} failed.`
+          : "No pending responses.");
+
+        results.empty();
         if (!rows.length) {
           results.createEl("p", { text: "No pending responses." });
         } else {
-          const table = results.createEl("table");
-          table.style.width = "100%";
-
-          const head = table.createEl("tr");
-          for (const label of ["Source", "Path", "Outcome"]) {
-            head.createEl("th", { text: label });
-          }
-
-          for (const row of rows) {
-            const tr = table.createEl("tr");
-            tr.createEl("td", { text: String(row.source_identity || "—") });
-
-            const pathCell = tr.createEl("td");
-            if (row.path) {
-              const link = pathCell.createEl("a", { text: String(row.path), href: "#" });
-              link.addEventListener("click", (event) => {
-                event.preventDefault();
-                app.workspace.openLinkText(String(row.path), "", false);
-              });
-            } else {
-              pathCell.setText("—");
-            }
-
-            tr.createEl("td", {
-              text: row.status === successStatus
-                ? "Written"
-                : `Failed: ${row.error || "unknown error"}`,
-            });
-          }
+          addTable(results, "Clean on master", ready);
+          addTable(results, "Decision required", decisions);
+          addTable(results, "Written for review", written);
+          addTable(results, "Failures", failed);
         }
 
-        const message = `${written.length} written${failed.length ? `; ${failed.length} failed` : ""}.`;
-        notify(`Write Responses complete: ${message}`, failed.length ? 10000 : 6000);
-        await refreshState();
+        status.setText(`Updated ${new Date().toLocaleTimeString()}`);
+        if (apply) {
+          notify(
+            `Write Responses: ${written.filter((row) => row.status === "written").length} written; ${decisions.length} require a decision${failed.length ? `; ${failed.length} failed` : ""}.`,
+            failed.length ? 10000 : 6000
+          );
+        }
       } catch (error) {
         const message = error?.message || String(error);
+        results.empty();
         results.createEl("pre", { text: `Write Responses failed.\n${message}` }).style.whiteSpace = "pre-wrap";
-        refreshStatus.setText(`Refresh failed: ${message}`);
+        summary.setText("Response state unavailable.");
+        status.setText(`Failed: ${message}`);
         notify(`Write Responses failed: ${message}`, 10000);
       } finally {
-        refreshButton.disabled = false;
-        refreshButton.setText("Refresh");
+        setBusy(false);
       }
-    });
+    }
 
-    await refreshState();
+    refreshButton.addEventListener("click", () => load(false));
+    writeButton.addEventListener("click", () => load(true));
+
+    await load(false);
   }
 
   return openWorkflowModal({

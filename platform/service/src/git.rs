@@ -35,6 +35,44 @@ pub fn current_branch(repo: &Path) -> ServiceResult<String> {
     Ok(branch)
 }
 
+/// Ensure a repository-local ignore rule is present in `.git/info/exclude`.
+/// This changes neither the working tree nor any committed `.gitignore` file.
+pub fn ensure_info_exclude(repo: &Path, pattern: &str) -> ServiceResult<()> {
+    let repo = repository_root(repo)?;
+    let pattern = one_line("Git exclude pattern", pattern)?;
+    let output = git(&repo, ["rev-parse", "--git-path", "info/exclude"])?;
+    let raw = text(&output).trim().to_string();
+    if raw.is_empty() {
+        return Err(ServiceError::Io("Git did not return an info/exclude path".into()));
+    }
+    let mut exclude = PathBuf::from(raw);
+    if !exclude.is_absolute() {
+        exclude = repo.join(exclude);
+    }
+    if let Some(parent) = exclude.parent() {
+        fs::create_dir_all(parent).map_err(io)?;
+    }
+    let existing = match fs::read_to_string(&exclude) {
+        Ok(value) => value,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => String::new(),
+        Err(error) => return Err(io(error)),
+    };
+    if existing.lines().any(|line| line.trim() == pattern) {
+        return Ok(());
+    }
+    let mut file = fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(&exclude)
+        .map_err(io)?;
+    if !existing.is_empty() && !existing.ends_with('\n') {
+        file.write_all(b"\n").map_err(io)?;
+    }
+    file.write_all(pattern.as_bytes()).map_err(io)?;
+    file.write_all(b"\n").map_err(io)?;
+    Ok(())
+}
+
 pub fn summary(repo: &Path) -> ServiceResult<serde_json::Value> {
     let repo = repository_root(repo)?;
     let branch = text(&git(&repo, ["branch", "--show-current"])?).trim().to_string();
@@ -203,6 +241,75 @@ pub fn append_inflight_snapshot(
         })();
         let _ = fs::remove_file(&temporary_index);
         match result {
+            Err(ServiceError::Conflict(message)) if message.contains("advanced concurrently") => continue,
+            other => return other,
+        }
+    }
+    Err(ServiceError::Conflict("inflight ledger remained busy after retries".into()))
+}
+
+pub fn append_response_snapshot(
+    repo: &Path,
+    dispatch: &str,
+    result: &str,
+    source: &str,
+    outcome: &str,
+    source_path: &Path,
+    bytes: &[u8],
+) -> ServiceResult<CommitId> {
+    let repo = repository_root(repo)?;
+    let dispatch = one_line("dispatch identity", dispatch)?;
+    let result = one_line("result identity", result)?;
+    let source = one_line("source identity", source)?;
+    let source_path = safe_relative_path(source_path)?;
+    if !matches!(outcome, "saved" | "accepted" | "declined") {
+        return Err(ServiceError::InvalidInput("response outcome must be saved, accepted, or declined".into()));
+    }
+    for _ in 0..4 {
+        let old = optional_revision(&repo, INFLIGHT_REF)?.ok_or_else(|| {
+            ServiceError::Conflict("inflight ledger does not exist".into())
+        })?;
+        let temporary_index = temporary_index_path();
+        let attempt = (|| {
+            git_with_env(&repo, ["read-tree", old.as_str()], &temporary_index)?;
+            let blob = hash_bytes(&repo, bytes)?;
+            git_with_env(
+                &repo,
+                [
+                    "update-index",
+                    "--add",
+                    "--cacheinfo",
+                    "100644",
+                    blob.as_str(),
+                    source_path.as_str(),
+                ],
+                &temporary_index,
+            )?;
+            let tree = text(&git_with_env(&repo, ["write-tree"], &temporary_index)?)
+                .trim()
+                .to_string();
+            let message = format!(
+                "AUTOSCRIBE RESPONSE {outcome}\n\nDispatch: {dispatch}\nResult: {result}\nSource: {source}\nSource-Path: {source_path}\nOutcome: {outcome}"
+            );
+            let commit = commit_tree(&repo, &tree, Some(&old), &message)?;
+            let update = git_status_output(
+                &repo,
+                [
+                    "update-ref",
+                    "-m",
+                    "AutoScribe response snapshot",
+                    INFLIGHT_REF,
+                    commit.as_str(),
+                    old.as_str(),
+                ],
+            )?;
+            if !update.status.success() {
+                return Err(ServiceError::Conflict("inflight ledger advanced concurrently".into()));
+            }
+            Ok(CommitId(commit))
+        })();
+        let _ = fs::remove_file(&temporary_index);
+        match attempt {
             Err(ServiceError::Conflict(message)) if message.contains("advanced concurrently") => continue,
             other => return other,
         }

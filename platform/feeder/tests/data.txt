@@ -1,4 +1,0 @@
-file name	position	component	group	tags
-Regulating The Regulators	60	sidebar	advising-goi	#government
-Advising GOI	65	sidebar	advising-goi	#government
-Swiss Verein Network	2	sidebar	baker-mckenzie	

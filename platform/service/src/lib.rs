@@ -17,10 +17,8 @@ pub mod publish;
 pub mod reconcile;
 pub mod response_repository;
 pub mod results;
-pub mod service;
 pub mod submit;
 pub mod sync;
 pub mod types;
 
 pub use error::{ServiceError, ServiceResult};
-pub use service::Service;

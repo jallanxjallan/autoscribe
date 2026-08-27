@@ -8,12 +8,9 @@ paths:
   editorial_notes_query: _control/queries/Editorial Notes.md
 
 actions:
-  define_plan:
-    label: Define Plan
-    macro: macros/define-plan.js
-  dispatch_run:
-    label: Dispatch Run
-    macro: macros/dispatch-run.js
+  plan_manager:
+    label: Plan Manager
+    macro: macros/plan-manager.js
   write_responses:
     label: Write Responses
     macro: macros/write-responses.js

@@ -1,60 +1,45 @@
-# AutoScribe client service
+# AutoScribe Rust service
 
-This crate is the client-side policy boundary. Rust owns SQLite, Git, document
-resolution, Pandoc conversion, pipeline calls, and writeback. Obsidian is a
-thin adapter: it sends slugs or file choices and renders returned manifests.
+`svc` is currently a command-line reconciler. There is no persistent local
+service session or live Obsidian IPC requirement.
 
-## Dispatch Run
+## Normal command
 
-Run from the vault repository and send JSON on standard input:
+Run from a vault Git worktree:
 
-```json
-{"version":1,"plan":"plan.example","documents":["doc.one","doc.two"]}
-```
+    svc refresh
 
-```sh
-svc dispatch-run
-```
+`svc refresh` also ensures `/.autoscribe/` is present in the repository-local `.git/info/exclude`, so Plan Manager drafts and Control state never appear in normal Git/Obsidian Git status.
 
-Only the plan slug and document slugs cross the frontend boundary. Rust finds
-each unique Markdown file by its top-level `slug`, validates the plan, invokes
-Pandoc, appends the immutable inflight ledger snapshot, records SQLite lineage,
-uploads calls, and enqueues the plan. Other frontmatter is filter policy, not
-dispatch-script policy.
+One refresh pass:
 
-## Write Responses
+1. builds the vault-wide slug index;
+2. synchronizes changed local instructions without committing master;
+3. ingests locally edited plans from `.autoscribe/plans/`;
+4. scans new commits on the current branch for `Autoscribe-Plan:` trailers;
+5. dispatches eligible slugged Markdown files changed by each marked commit,
+   using a detached worktree at that exact commit;
+6. records byte-precise source lineage on `refs/heads/autoscribe/inflight`;
+7. increments the successfully used plan's decaying frecency score; and
+8. atomically writes `.autoscribe/control-state.json` for Obsidian Control.
 
-Send `{"version":1}` to `svc write-responses`. The command emits one NDJSON
-`writeback-result` per pending response. For each target Rust:
+The dispatch cursor is stored in the service SQLite database. A commit without
+an `Autoscribe-Plan:` trailer is ignored. The optional
+`Autoscribe-Plan-Title:` trailer is a human hint only.
 
-1. verifies that the current file still has the expected slug;
-2. commits the target alone when it is dirty, as a writeback checkpoint;
-3. preserves current frontmatter and replaces the body;
-4. sets top-level `status: needs-review` and `producer: ai`;
-5. commits the target alone as the writeback;
-6. records the response event and acknowledges the export.
+## Git boundary
 
-A failed item is reported without preventing independent responses from being
-attempted. Re-running resumes a writeback that reached Git before its
-SQLite/export acknowledgement.
+AutoScribe makes no automatic commits on the editorial/master branch. Human
+commits made through Obsidian Git or the normal Git CLI are authoritative.
+Machine forensics live on `refs/heads/autoscribe/inflight`.
 
-## Other frontend operations
+The private `__dispatch-run` command is an implementation detail used only by
+`svc refresh` inside a detached worktree so the existing Pandoc/dispatch path
+operates on the exact source commit. It is not an interactive dispatch API.
 
-- `system-snapshot` returns Git and pipeline counts.
-- `git-files` owns inspect, commit, history, per-file stash, and restore.
-- `define-plan-snapshot`, `plan-save`, and `instructions-sync` own authored
-  catalog operations.
+## Responses
 
-Repository-scoped commands derive the repository from their working directory.
-
-## Build and test outside the source tree
-
-```sh
-export AUTOSCRIBE_CARGO_TARGET_DIR="$HOME/.cache/autoscribe/cargo/service"
-export CARGO_TARGET_DIR="$AUTOSCRIBE_CARGO_TARGET_DIR"
-cargo test --manifest-path platform/service/Cargo.toml
-cargo build --release --manifest-path platform/service/Cargo.toml --bin svc
-```
-
-The Obsidian adapter uses the same default target and honors
-`AUTOSCRIBE_CARGO_TARGET_DIR`, `AUTOSCRIBE_ROOT`, and `SVC_BIN`.
+The existing `write-responses` command remains the writeback boundary. Response
+candidates are saved on the inflight ref before master is inspected. Clean,
+unchanged targets may be written and are left dirty; dirty or committed-diverged
+targets are left untouched and reported as decision-required.

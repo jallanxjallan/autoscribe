@@ -139,6 +139,39 @@ fn inflight_ledger_snapshots_worktree_bytes_without_switching_or_touching_index(
 }
 
 #[test]
+fn response_snapshot_records_exact_bytes_without_touching_master() {
+    let repo = TestRepo::new();
+    let dispatch = git::append_inflight_snapshot(&repo.0, &LedgerSnapshotRequest {
+        dispatch: DispatchId("dispatch-response-01".into()),
+        plan: PlanId("plan.copy".into()),
+        sources: vec![LedgerSource {
+            slug: "cnt.one".into(),
+            path: "one.md".into(),
+            bytes: fs::read(repo.0.join("one.md")).unwrap(),
+        }],
+    }).unwrap();
+    let head_before = output(&repo.0, ["rev-parse", "HEAD"]);
+    let status_before = output(&repo.0, ["status", "--porcelain=v1"]);
+    let response = b"---\nslug: cnt.one\nstatus: needs-review\nproducer: ai\n---\nResponse\n";
+
+    let commit = git::append_response_snapshot(
+        &repo.0,
+        "dispatch-response-01",
+        "result-one",
+        "cnt.one",
+        "accepted",
+        Path::new("one.md"),
+        response,
+    ).unwrap();
+
+    assert_eq!(output(&repo.0, ["rev-parse", "HEAD"]), head_before);
+    assert_eq!(output(&repo.0, ["status", "--porcelain=v1"]), status_before);
+    assert_eq!(output(&repo.0, ["rev-parse", "refs/heads/autoscribe/inflight"]), commit.0);
+    assert_eq!(output(&repo.0, ["show", format!("{}:one.md", commit.0).as_str()]), String::from_utf8_lossy(response).trim());
+    assert_eq!(output(&repo.0, ["rev-parse", format!("{}^", commit.0).as_str()]), dispatch.commit.0);
+}
+
+#[test]
 fn restore_requires_exact_confirmation() {
     let repo = TestRepo::new();
     let source = output(&repo.0, ["rev-parse", "HEAD"]);

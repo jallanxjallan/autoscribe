@@ -12,7 +12,7 @@ module.exports = async function instructionsState(params = {}) {
   const app = params.app || globalThis.app;
   if (!app?.vault || !app?.workspace) throw new Error("Obsidian app object unavailable.");
 
-  const { serviceCall } = require("./lib/dispatch-service.js");
+  const { serviceCall } = require("./lib/service-command.js");
   const { loadConfig } = require("./lib/config-loader.js");
   const path = require("node:path");
   const protocol = loadConfig("protocol");

@@ -1,10 +1,9 @@
 use autoscribe_service::{
-    Service,
     db::{self, Database},
     git, instruction_sync,
     pandoc, plan_repository, response_repository,
     types::{CommitPurpose, CommitRequest, DispatchId, LedgerSnapshotRequest,
-        LedgerSource, PandocJob, PlanId},
+        LedgerSource, PandocJob, PlanId, VersionRequest},
 };
 use serde::{Deserialize, Serialize};
 use std::{
@@ -27,6 +26,8 @@ struct DispatchRunInput {
     version: u32,
     plan: String,
     documents: Vec<String>,
+    #[serde(default)]
+    dispatch_identity: Option<String>,
 }
 
 #[derive(Serialize)]
@@ -115,12 +116,21 @@ struct ResolveSlugsInput {
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 struct VersionInput { version:u32 }
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct WriteResponsesInput {
+    version: u32,
+    #[serde(default = "default_apply_write_responses")]
+    apply: bool,
+}
+
+fn default_apply_write_responses() -> bool { true }
 fn main() -> ExitCode {
     match env::args().nth(1).as_deref() {
-        Some("dispatch-run") => return dispatch_run(),
+        Some("__dispatch-run") => return dispatch_run(),
+        Some("refresh") => return command_output("refresh", refresh_cli()),
         Some("define-plan-snapshot") => return define_plan_snapshot(),
-        Some("define-plan-refresh") => return command_output("define-plan.refresh", catalog_refresh_from_stdin("define-plan.refresh")),
-        Some("dispatch-refresh") => return command_output("dispatch.refresh", catalog_refresh_from_stdin("dispatch.refresh")),
         Some("system-snapshot") => return command_output("system.snapshot", system_snapshot_from_stdin()),
         Some("resolve-slugs") => return command_output("slugs.resolve", resolve_slugs_from_stdin()),
         Some("plan-save") => return plan_save(),
@@ -129,17 +139,9 @@ fn main() -> ExitCode {
         Some("git-files") => return command_output("git.files", git_files_from_stdin()),
         Some("write-responses") => return write_responses(),
         Some("upload-instructions") => return command_output("instructions.upload", upload_instructions()),
-        _ => {}
-    }
-    let config = env::args_os()
-        .nth(1)
-        .map(PathBuf::from)
-        .unwrap_or_else(|| PathBuf::from("autoscribe-service.toml"));
-    match Service::start(&config) {
-        Ok(_) => ExitCode::SUCCESS,
-        Err(error) => {
-            eprintln!("svc: {error}");
-            ExitCode::FAILURE
+        _ => {
+            eprintln!("usage: svc refresh | write-responses | system-snapshot | git-files | instructions-sync | instructions-state-snapshot");
+            return ExitCode::FAILURE;
         }
     }
 }
@@ -382,7 +384,7 @@ fn write_responses() -> ExitCode {
 }
 
 fn write_responses_from_stdin() -> Result<Vec<serde_json::Value>, Box<dyn std::error::Error>> {
-    let input: VersionInput = read_json_stdin()?;
+    let input: WriteResponsesInput = read_json_stdin()?;
     if input.version != 1 { return Err("unsupported Write Responses version".into()); }
     let repository = git::root(&std::env::current_dir()?)?;
     let db = open_database(&configured_database_path()?)?;
@@ -397,7 +399,12 @@ fn write_responses_from_stdin() -> Result<Vec<serde_json::Value>, Box<dyn std::e
             .unwrap_or("unknown-result").to_string();
         let source_identity = record.get("source_identity").and_then(serde_json::Value::as_str)
             .unwrap_or("unknown-source").to_string();
-        match commit_writeback(&repository, &db, record) {
+        let outcome = if input.apply {
+            apply_writeback(&repository, &db, record)
+        } else {
+            inspect_writeback_state(&repository, &db, &record)
+        };
+        match outcome {
             Ok(item) => manifest.push(item),
             Err(error) => manifest.push(serde_json::json!({
                 "type":"writeback-result",
@@ -411,100 +418,232 @@ fn write_responses_from_stdin() -> Result<Vec<serde_json::Value>, Box<dyn std::e
     Ok(manifest)
 }
 
-fn commit_writeback(
+fn response_record_identity(record: &serde_json::Value, field: &str) -> Result<String, Box<dyn std::error::Error>> {
+    Ok(record.get(field).and_then(serde_json::Value::as_str)
+        .map(str::trim).filter(|value| !value.is_empty())
+        .ok_or_else(|| format!("pending response is missing {field}"))?.to_string())
+}
+
+fn resolve_writeback_target(
+    repository: &Path,
+    path: &str,
+    source: &str,
+) -> Result<(PathBuf, PathBuf, String), Box<dyn std::error::Error>> {
+    let relative = PathBuf::from(path);
+    if relative.is_absolute() || relative.components().any(|part| !matches!(part, std::path::Component::Normal(_))) {
+        return Err(format!("writeback path is not repository-relative: {path}").into());
+    }
+    let target = repository.join(&relative);
+    let target_metadata = std::fs::symlink_metadata(&target)?;
+    if target_metadata.file_type().is_symlink() || !target_metadata.is_file() {
+        return Err(format!("writeback target must be a regular repository file: {path}").into());
+    }
+    if !target.canonicalize()?.starts_with(repository) {
+        return Err(format!("writeback target resolves outside the repository: {path}").into());
+    }
+    let current = std::fs::read_to_string(&target)?;
+    if markdown_slug(&current).as_deref() != Some(source) {
+        return Err(format!("current target slug does not match {source}: {path}").into());
+    }
+    Ok((relative, target, current))
+}
+
+fn target_git_state(
+    repository: &Path,
+    relative: &Path,
+    dispatch_blob: &str,
+) -> Result<(bool, bool), Box<dyn std::error::Error>> {
+    let status = git::inspect(repository, &[relative.to_path_buf()])?
+        .into_iter().next().ok_or("writeback target has no Git status")?;
+    let current_blob = git::worktree_blob(repository, relative)?;
+    Ok((status.dirty, current_blob == dispatch_blob))
+}
+
+fn ensure_response_snapshot(
+    repository: &Path,
+    db: &Database,
+    record: &serde_json::Value,
+    result: &str,
+    source: &str,
+    path: &str,
+    dispatch_identity: &str,
+    dispatch_commit: &str,
+    stored_snapshot: Option<&str>,
+) -> Result<(String, Vec<u8>), Box<dyn std::error::Error>> {
+    let relative = PathBuf::from(path);
+    if let Some(commit) = stored_snapshot {
+        let bytes = git::read_version(repository, VersionRequest {
+            revision: commit.to_string(),
+            path: relative,
+        })?;
+        return Ok((commit.to_string(), bytes));
+    }
+
+    // Build the response candidate from the immutable dispatch source, never
+    // from the current master file. A dirty/diverged master may contain human
+    // changes that must not silently leak into the forensic response snapshot.
+    let dispatch_bytes = git::read_version(repository, VersionRequest {
+        revision: dispatch_commit.to_string(),
+        path: relative.clone(),
+    })?;
+    let dispatch_source = String::from_utf8(dispatch_bytes)?;
+    if markdown_slug(&dispatch_source).as_deref() != Some(source) {
+        return Err(format!("dispatch source slug does not match {source}: {path}").into());
+    }
+    let response = record.get("content").and_then(serde_json::Value::as_str)
+        .ok_or("pending response is missing content")?;
+    let replacement = set_document_review_metadata(&preserve_frontmatter(&dispatch_source, response)?)?;
+    let commit = git::append_response_snapshot(
+        repository,
+        dispatch_identity,
+        result,
+        source,
+        "saved",
+        &relative,
+        replacement.as_bytes(),
+    )?.0;
+    response_repository::mark_forensic(db, result, &commit)?;
+    Ok((commit, replacement.into_bytes()))
+}
+
+fn inspect_writeback_state(
+    repository: &Path,
+    db: &Database,
+    record: &serde_json::Value,
+) -> Result<serde_json::Value, Box<dyn std::error::Error>> {
+    let result = response_record_identity(record, "result_identity")?;
+    let source = response_record_identity(record, "source_identity")?;
+    let path = response_record_identity(record, "source_path")?;
+    let (state, dispatch_identity, dispatch_commit, source_blob, stored_outcome, _, stored_commit, stored_forensic) =
+        response_repository::require_pending(db, &result, &source)?;
+    let (relative, _, _) = resolve_writeback_target(repository, &path, &source)?;
+    let (response_commit, _) = ensure_response_snapshot(
+        repository, db, record, &result, &source, &path, &dispatch_identity, &dispatch_commit, stored_forensic.as_deref(),
+    )?;
+    let (dirty, matches_dispatch) = target_git_state(repository, &relative, &source_blob)?;
+    let master_state = if dirty { "dirty" } else { "clean" };
+    let source_state = if matches_dispatch { "matches-dispatch" } else { "changed-since-dispatch" };
+
+    if state == "written" {
+        if stored_outcome.as_deref() != Some("accepted") {
+            return Err("response was already written with another outcome".into());
+        }
+        return Ok(serde_json::json!({
+            "type":"writeback-result",
+            "status":"written-pending-ack",
+            "result_identity":result,
+            "source_identity":source,
+            "path":path,
+            "master_state":master_state,
+            "source_state":source_state,
+            "inflight_commit":stored_commit.unwrap_or(response_commit),
+            "decision_required":false
+        }));
+    }
+
+    let (status, reason, decision_required) = if dirty {
+        ("decision-required", "master-dirty", true)
+    } else if !matches_dispatch {
+        ("decision-required", "changed-since-dispatch", true)
+    } else {
+        ("ready", "ready", false)
+    };
+    Ok(serde_json::json!({
+        "type":"writeback-result",
+        "status":status,
+        "result_identity":result,
+        "source_identity":source,
+        "path":path,
+        "master_state":master_state,
+        "source_state":source_state,
+        "reason":reason,
+        "inflight_commit":response_commit,
+        "decision_required":decision_required
+    }))
+}
+
+fn apply_writeback(
     repository: &Path,
     db: &Database,
     record: serde_json::Value,
 ) -> Result<serde_json::Value, Box<dyn std::error::Error>> {
-    let result = record.get("result_identity").and_then(serde_json::Value::as_str)
-        .ok_or("pending response is missing result_identity")?.to_string();
-    let source = record.get("source_identity").and_then(serde_json::Value::as_str)
-        .ok_or("pending response is missing source_identity")?.to_string();
-    let path = record.get("source_path").and_then(serde_json::Value::as_str)
-        .ok_or("pending response is missing source_path")?.to_string();
-    let (state, dispatch_identity, _, _, stored_outcome, _, stored_commit, stored_forensic) =
+    let result = response_record_identity(&record, "result_identity")?;
+    let source = response_record_identity(&record, "source_identity")?;
+    let path = response_record_identity(&record, "source_path")?;
+    let (state, dispatch_identity, dispatch_commit, source_blob, stored_outcome, _, stored_commit, stored_forensic) =
         response_repository::require_pending(db, &result, &source)?;
 
-    let (commit, checkpoint_commit) = if state == "written" {
+    if state == "written" {
         if stored_outcome.as_deref() != Some("accepted") {
             return Err("response was already written with another outcome".into());
         }
-        (stored_commit.ok_or("written response has no writeback commit")?, None)
-    } else {
+        let commit = stored_commit.or(stored_forensic).ok_or("written response has no inflight response commit")?;
+        run_asc(&asc_command(), ["export", "update-exports", result.as_str()], &[])?;
+        response_repository::complete(db, &result)?;
         let relative = PathBuf::from(&path);
-        if relative.is_absolute() || relative.components().any(|part| !matches!(part, std::path::Component::Normal(_))) {
-            return Err(format!("writeback path is not repository-relative: {path}").into());
-        }
-        let target = repository.join(&relative);
-        let target_metadata = std::fs::symlink_metadata(&target)?;
-        if target_metadata.file_type().is_symlink() || !target_metadata.is_file() {
-            return Err(format!("writeback target must be a regular repository file: {path}").into());
-        }
-        if !target.canonicalize()?.starts_with(repository) {
-            return Err(format!("writeback target resolves outside the repository: {path}").into());
-        }
-        let current = std::fs::read_to_string(&target)?;
-        if markdown_slug(&current).as_deref() != Some(source.as_str()) {
-            return Err(format!("current target slug does not match {source}: {path}").into());
-        }
-        let response = record.get("content").and_then(serde_json::Value::as_str)
-            .ok_or("pending response is missing content")?;
-        let replacement = set_document_review_metadata(&preserve_frontmatter(&current, response)?)?;
-        let status = git::inspect(repository, std::slice::from_ref(&relative))?
-            .into_iter().next().ok_or("writeback target has no Git status")?;
-        let last = git::last_commit(repository, &relative)?;
-        let writeback_subject = format!("Accept AutoScribe response {source}");
-        if !status.dirty && current == replacement &&
-            last.as_ref().is_some_and(|(_, subject, _)| subject == &writeback_subject)
-        {
-            let committed = last.expect("checked above").0;
-            response_repository::mark_written(db, &result, "accepted", Some(&path), Some(&committed))?;
-            (committed, None)
-        } else {
-        let checkpoint = if status.dirty {
-            Some(git::commit(repository, CommitRequest {
-                paths: vec![relative.clone()],
-                message: format!("Checkpoint before AutoScribe writeback {source}"),
-                purpose: CommitPurpose::WritebackCheckpoint,
-            })?.0)
-        } else {
-            last.as_ref().filter(|(_, subject, _)| {
-                subject == &format!("Checkpoint before AutoScribe writeback {source}")
-            }).map(|(hash, _, _)| hash.clone())
-        };
-        std::fs::write(&target, &replacement)?;
-        let committed = match git::commit(repository, CommitRequest {
-            paths: vec![relative],
-            message: writeback_subject,
-            purpose: CommitPurpose::DispatchWriteback,
-        }) {
-            Ok(value) => value.0,
-            Err(error) => {
-                let _ = std::fs::write(&target, current);
-                return Err(error.into());
-            }
-        };
-        response_repository::mark_written(db, &result, "accepted", Some(&path), Some(&committed))?;
-        (committed, checkpoint)
-        }
-    };
+        let after_dirty = git::inspect(repository, std::slice::from_ref(&relative))?
+            .into_iter().next().map(|status| status.dirty).unwrap_or(false);
+        return Ok(serde_json::json!({
+            "type":"writeback-result",
+            "status":"written",
+            "result_identity":result,
+            "source_identity":source,
+            "path":path,
+            "master_state_before":"written-pending-ack",
+            "master_state_after":if after_dirty {"dirty"} else {"clean"},
+            "source_state":"recorded",
+            "inflight_commit":commit,
+            "document_status":"needs-review",
+            "producer":"ai"
+        }));
+    }
 
-    if stored_forensic.is_none() {
-        let event = git::append_response_event(
-            repository, &dispatch_identity, &result, &source, "accepted", Some(&commit),
-        )?;
-        response_repository::mark_forensic(db, &result, &event.0)?;
+    let (relative, target, current) = resolve_writeback_target(repository, &path, &source)?;
+    let (response_commit, response_bytes) = ensure_response_snapshot(
+        repository, db, &record, &result, &source, &path, &dispatch_identity, &dispatch_commit, stored_forensic.as_deref(),
+    )?;
+    let (dirty, matches_dispatch) = target_git_state(repository, &relative, &source_blob)?;
+    if dirty || !matches_dispatch {
+        return Ok(serde_json::json!({
+            "type":"writeback-result",
+            "status":"decision-required",
+            "result_identity":result,
+            "source_identity":source,
+            "path":path,
+            "master_state":if dirty {"dirty"} else {"clean"},
+            "source_state":if matches_dispatch {"matches-dispatch"} else {"changed-since-dispatch"},
+            "reason":if dirty {"master-dirty"} else {"changed-since-dispatch"},
+            "inflight_commit":response_commit,
+            "decision_required":true
+        }));
+    }
+
+    std::fs::write(&target, &response_bytes)?;
+    let saved = std::fs::read(&target)?;
+    if saved != response_bytes {
+        let _ = std::fs::write(&target, current.as_bytes());
+        return Err(format!("writeback verification failed for {path}").into());
+    }
+
+    if let Err(error) = response_repository::mark_written(db, &result, "accepted", Some(&path), Some(&response_commit)) {
+        let _ = std::fs::write(&target, current.as_bytes());
+        return Err(error.into());
     }
     run_asc(&asc_command(), ["export", "update-exports", result.as_str()], &[])?;
     response_repository::complete(db, &result)?;
+    let after_dirty = git::inspect(repository, std::slice::from_ref(&relative))?
+        .into_iter().next().map(|status| status.dirty).unwrap_or(false);
+
     Ok(serde_json::json!({
         "type":"writeback-result",
-        "status":"committed",
+        "status":"written",
         "result_identity":result,
         "source_identity":source,
         "path":path,
-        "commit":commit,
-        "checkpoint_commit":checkpoint_commit,
+        "master_state_before":"clean",
+        "master_state_after":if after_dirty {"dirty"} else {"clean"},
+        "source_state":"matches-dispatch",
+        "inflight_commit":response_commit,
         "document_status":"needs-review",
         "producer":"ai"
     }))
@@ -756,22 +895,27 @@ fn run_dispatch_from_stdin() -> Result<DispatchRunOutput, Box<dyn std::error::Er
         )
         .into());
     }
-    let dispatch = format!(
+    let dispatch = input.dispatch_identity.clone().unwrap_or_else(|| format!(
         "run-{}-{}",
         std::process::id(),
-        std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH)?.as_nanos()
-    );
-    let ledger = git::append_inflight_snapshot(&repository, &LedgerSnapshotRequest {
-        dispatch: DispatchId(dispatch.clone()),
-        plan: PlanId(input.plan.clone()),
-        sources: ledger_sources.clone(),
-    })?;
-    let source_rows = ledger_sources.iter().zip(ledger.blobs.iter()).map(|(source, (path, blob))| {
-        (source.slug.clone(), path.to_string_lossy().into_owned(), blob.clone())
-    }).collect::<Vec<_>>();
-    db::record_inflight(
-        &database, &dispatch, &input.plan, &ledger.reference, &ledger.commit.0, &source_rows,
-    )?;
+        std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|v| v.as_nanos()).unwrap_or(0)
+    ));
+    let inflight_commit = if let Some((_reference, commit)) = db::inflight_dispatch_ledger(&database, &dispatch)? {
+        commit
+    } else {
+        let ledger = git::append_inflight_snapshot(&repository, &LedgerSnapshotRequest {
+            dispatch: DispatchId(dispatch.clone()),
+            plan: PlanId(input.plan.clone()),
+            sources: ledger_sources.clone(),
+        })?;
+        let source_rows = ledger_sources.iter().zip(ledger.blobs.iter()).map(|(source, (path, blob))| {
+            (source.slug.clone(), path.to_string_lossy().into_owned(), blob.clone())
+        }).collect::<Vec<_>>();
+        db::record_inflight(
+            &database, &dispatch, &input.plan, &ledger.reference, &ledger.commit.0, &source_rows,
+        )?;
+        ledger.commit.0
+    };
     run_asc(&asc, ["upload", "calls"], &ndjson(&calls)?)?;
     run_asc(&asc, ["enqueue"], &ndjson(&enqueue)?)?;
     ensure_runtime_daemons(&asc)?;
@@ -782,8 +926,348 @@ fn run_dispatch_from_stdin() -> Result<DispatchRunOutput, Box<dyn std::error::Er
         records: identities.len(),
         calls: identities,
         dispatch,
-        inflight_commit: ledger.commit.0,
+        inflight_commit,
     })
+}
+
+
+fn refresh_cli() -> Result<serde_json::Value, Box<dyn std::error::Error>> {
+    let repository = git::root(&std::env::current_dir()?)?;
+    // Operational state belongs outside the user's commit history. Keep the
+    // vault-local AutoScribe spool invisible to ordinary Git/Obsidian Git.
+    git::ensure_info_exclude(&repository, "/.autoscribe/")?;
+    let db = open_configured_database()?;
+    let asc = asc_command();
+
+    let plans_changed = ingest_local_plan_drafts(&repository, &db, &asc)?;
+
+    // Refresh owns vault discovery. Build the slug index once, then use that
+    // immutable view for local instruction synchronization.
+    let slug_index = instruction_sync::build_slug_index(&repository)?;
+    let local = instruction_sync::scan_indexed_instructions(&repository, &slug_index)?;
+    let (mut server, uploaded_instructions, _) = sync_local_instructions(&repository, &asc, local, None)?;
+
+    let dispatches = reconcile_git_dispatch_commits(&repository, &db)?;
+    if plans_changed > 0 || dispatches.iter().any(|row| row.get("status").and_then(serde_json::Value::as_str) == Some("dispatched")) {
+        server = fetch_server_snapshot(&asc)?;
+    }
+
+    let refreshed_at = unix_timestamp();
+    cache_server_snapshot(&db, &server, &refreshed_at)?;
+    let mut catalogs = catalogs_with_authored_plans(&db, &server, &repository)?;
+    annotate_plan_usage(&db, &mut catalogs)?;
+    let git_state = git::summary(&repository)?;
+    let pipeline = db::system_counts(&db)?;
+    let state = serde_json::json!({
+        "version":1,
+        "refreshed_at":refreshed_at,
+        "catalogs":catalogs,
+        "git":git_state,
+        "pipeline":pipeline,
+        "dispatches":dispatches,
+    });
+    write_control_state(&repository, &state)?;
+    Ok(serde_json::json!({
+        "ok":true,
+        "operation":"refresh",
+        "refreshed_at":refreshed_at,
+        "plans_ingested":plans_changed,
+        "uploaded_instructions":uploaded_instructions,
+        "dispatches":state["dispatches"],
+        "catalogs":state["catalogs"],
+        "state_file":".autoscribe/control-state.json"
+    }))
+}
+
+fn autoscribe_state_dir(repository: &Path) -> PathBuf {
+    repository.join(".autoscribe")
+}
+
+fn write_control_state(repository: &Path, state: &serde_json::Value) -> Result<(), Box<dyn std::error::Error>> {
+    let directory = autoscribe_state_dir(repository);
+    std::fs::create_dir_all(&directory)?;
+    let target = directory.join("control-state.json");
+    let temporary = directory.join(format!(".control-state.json.tmp-{}", std::process::id()));
+    std::fs::write(&temporary, serde_json::to_vec_pretty(state)?)?;
+    std::fs::rename(temporary, target)?;
+    Ok(())
+}
+
+fn ingest_local_plan_drafts(
+    repository: &Path,
+    db: &Database,
+    asc: &Path,
+) -> Result<usize, Box<dyn std::error::Error>> {
+    let directory = autoscribe_state_dir(repository).join("plans");
+    std::fs::create_dir_all(&directory)?;
+    let existing = plan_repository::list(db)?.into_iter().filter_map(|plan| {
+        plan.get("record_identity").and_then(serde_json::Value::as_str)
+            .map(|slug| (slug.to_string(), plan.clone()))
+    }).collect::<std::collections::BTreeMap<_, _>>();
+    let mut changed = 0usize;
+    let mut entries = std::fs::read_dir(&directory)?.collect::<Result<Vec<_>, _>>()?;
+    entries.sort_by_key(|entry| entry.file_name());
+    for entry in entries {
+        let path = entry.path();
+        if path.extension().and_then(|value| value.to_str()) != Some("json") { continue; }
+        let plan: serde_json::Value = serde_json::from_slice(&std::fs::read(&path)?)?;
+        let identity = plan.get("record_identity").and_then(serde_json::Value::as_str)
+            .map(str::trim).filter(|value| !value.is_empty())
+            .ok_or_else(|| format!("{}: local plan is missing record_identity", path.display()))?;
+        if path.file_stem().and_then(|value| value.to_str()) != Some(identity) {
+            return Err(format!("local plan filename must match record_identity: {}", path.display()).into());
+        }
+        if existing.get(identity) == Some(&plan) { continue; }
+        let slugs = plan_instruction_slugs(&plan).into_iter().collect::<Vec<_>>();
+        let _ = sync_instruction_slugs(repository, asc, &slugs)?;
+        plan_repository::save(db, &plan)?;
+        let upload = serde_json::json!({"type":"plan","identity":identity,"content":plan["payload"],"extra":{}});
+        run_asc(asc, ["upload", "plans"], &ndjson(&[upload])?)?;
+        changed += 1;
+    }
+    Ok(changed)
+}
+
+fn plan_usage(db: &Database, slug: &str) -> Result<(f64, u64, Option<String>), Box<dyn std::error::Error>> {
+    let score_key = format!("plan.usage.score.{slug}");
+    let count_key = format!("plan.usage.count.{slug}");
+    let last_key = format!("plan.usage.last.{slug}");
+    let stored_score = db::meta_get(db, &score_key)?.and_then(|value| value.parse::<f64>().ok()).unwrap_or(0.0);
+    let count = db::meta_get(db, &count_key)?.and_then(|value| value.parse::<u64>().ok()).unwrap_or(0);
+    let last = db::meta_get(db, &last_key)?;
+    let now = unix_timestamp().parse::<f64>().unwrap_or(0.0);
+    let last_seconds = last.as_deref().and_then(|value| value.parse::<f64>().ok()).unwrap_or(now);
+    let age_days = ((now - last_seconds).max(0.0)) / 86_400.0;
+    let half_life_days = 30.0_f64;
+    let score = stored_score * 2.0_f64.powf(-age_days / half_life_days);
+    Ok((score, count, last))
+}
+
+fn record_plan_use(db: &Database, slug: &str) -> Result<(), Box<dyn std::error::Error>> {
+    let (score, count, _) = plan_usage(db, slug)?;
+    let now = unix_timestamp();
+    let score_key = format!("plan.usage.score.{slug}");
+    let count_key = format!("plan.usage.count.{slug}");
+    let last_key = format!("plan.usage.last.{slug}");
+    db::meta_set_many(db, &[
+        (score_key.as_str(), format!("{:.12}", score + 1.0)),
+        (count_key.as_str(), (count + 1).to_string()),
+        (last_key.as_str(), now),
+    ])?;
+    Ok(())
+}
+
+fn annotate_plan_usage(db: &Database, catalogs: &mut serde_json::Value) -> Result<(), Box<dyn std::error::Error>> {
+    let plans = catalogs.get_mut("plans").and_then(serde_json::Value::as_array_mut)
+        .ok_or("catalog plans must be an array")?;
+    for plan in plans {
+        let slug = ["record_identity", "slug", "key"].into_iter()
+            .find_map(|field| plan.get(field).and_then(serde_json::Value::as_str))
+            .unwrap_or("").trim().to_string();
+        if slug.is_empty() { continue; }
+        let (score, count, last) = plan_usage(db, &slug)?;
+        if let Some(object) = plan.as_object_mut() {
+            object.insert("usage_score".into(), serde_json::json!(score));
+            object.insert("use_count".into(), serde_json::json!(count));
+            if let Some(last) = last { object.insert("last_used_at".into(), serde_json::Value::String(last)); }
+        }
+    }
+    Ok(())
+}
+
+fn reconcile_git_dispatch_commits(
+    repository: &Path,
+    db: &Database,
+) -> Result<Vec<serde_json::Value>, Box<dyn std::error::Error>> {
+    let branch = git::current_branch(repository)?;
+    let head = git::head(repository)?.0;
+    let cursor_key = format!("git.dispatch.cursor.{branch}");
+    let cursor = db::meta_get(db, &cursor_key)?;
+    let commits = match cursor.as_deref() {
+        None => vec![head.clone()],
+        Some(previous) if previous == head => Vec::new(),
+        Some(previous) => {
+            if !git_is_ancestor(repository, previous, &head)? {
+                db::meta_set_many(db, &[(cursor_key.as_str(), head.clone())])?;
+                return Ok(vec![serde_json::json!({
+                    "status":"cursor-reset",
+                    "branch":branch,
+                    "reason":"history-rewritten",
+                    "head":head
+                })]);
+            }
+            git_lines(repository, &["rev-list", "--reverse", &format!("{previous}..{head}")])?
+        }
+    };
+
+    let mut output = Vec::new();
+    for commit in commits {
+        let message = git_text(repository, &["show", "-s", "--format=%B", &commit])?;
+        let plan = dispatch_plan_trailer(&message)?;
+        if let Some(plan) = plan {
+            let receipt_key = format!("git.dispatch.receipt.{commit}.{plan}");
+            if db::meta_get(db, &receipt_key)?.is_some() {
+                output.push(serde_json::json!({"status":"already-dispatched","commit":commit,"plan":plan}));
+            } else {
+                require_plan_available(db, &plan)?;
+                let result = dispatch_commit_worktree(repository, &commit, &plan)?;
+                record_plan_use(db, &plan)?;
+                db::meta_set_many(db, &[(receipt_key.as_str(), unix_timestamp())])?;
+                output.push(serde_json::json!({
+                    "status":"dispatched",
+                    "commit":commit,
+                    "plan":plan,
+                    "dispatch":result.get("dispatch").cloned().unwrap_or(serde_json::Value::Null),
+                    "records":result.get("records").cloned().unwrap_or(serde_json::Value::Null)
+                }));
+            }
+        } else {
+            output.push(serde_json::json!({"status":"ignored","commit":commit}));
+        }
+        db::meta_set_many(db, &[(cursor_key.as_str(), commit.clone())])?;
+    }
+    Ok(output)
+}
+
+fn dispatch_plan_trailer(message: &str) -> Result<Option<String>, Box<dyn std::error::Error>> {
+    let mut found = Vec::new();
+    for line in message.lines() {
+        if let Some(value) = line.strip_prefix("Autoscribe-Plan:") {
+            let value = value.trim();
+            if value.is_empty() { return Err("Autoscribe-Plan trailer is blank".into()); }
+            found.push(value.to_string());
+        }
+    }
+    found.sort();
+    found.dedup();
+    match found.len() {
+        0 => Ok(None),
+        1 => Ok(found.into_iter().next()),
+        _ => Err("a commit may contain only one distinct Autoscribe-Plan trailer".into()),
+    }
+}
+
+fn dispatch_commit_worktree(
+    repository: &Path,
+    commit: &str,
+    plan: &str,
+) -> Result<serde_json::Value, Box<dyn std::error::Error>> {
+    let temporary = std::env::temp_dir().join(format!(
+        "autoscribe-dispatch-{}-{}-{}",
+        std::process::id(),
+        &commit[..commit.len().min(12)],
+        std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH)?.as_nanos()
+    ));
+    std::fs::create_dir_all(&temporary)?;
+    let worktree = temporary.join("worktree");
+    let add = Command::new("/usr/bin/git")
+        .arg("-C").arg(repository)
+        .args(["worktree", "add", "--quiet", "--detach"])
+        .arg(&worktree).arg(commit).output()?;
+    if !add.status.success() {
+        let _ = std::fs::remove_dir_all(&temporary);
+        return Err(format!("could not create dispatch worktree: {}", String::from_utf8_lossy(&add.stderr).trim()).into());
+    }
+    let result = (|| {
+        let paths = git_lines(repository, &["diff-tree", "--root", "--no-commit-id", "--name-only", "--diff-filter=AMCR", "-r", commit])?;
+        let mut documents = Vec::new();
+        for relative in paths {
+            if !relative.to_ascii_lowercase().ends_with(".md") { continue; }
+            let target = worktree.join(&relative);
+            if !target.is_file() { continue; }
+            let text = std::fs::read_to_string(&target)?;
+            let Some(slug) = markdown_slug(&text) else { continue; };
+            if is_dispatch_target_slug(&slug) { documents.push(slug); }
+        }
+        documents.sort();
+        documents.dedup();
+        if documents.is_empty() {
+            return Err(format!("Git dispatch commit {commit} contains no eligible slugged Markdown targets").into());
+        }
+        let dispatch_identity = format!("git-{}-{}", &commit[..commit.len().min(16)], safe_dispatch_part(plan));
+        run_internal_dispatch(&worktree, plan, &documents, &dispatch_identity)
+    })();
+    let remove = Command::new("/usr/bin/git")
+        .arg("-C").arg(repository)
+        .args(["worktree", "remove", "--force"])
+        .arg(&worktree).output();
+    let _ = std::fs::remove_dir_all(&temporary);
+    if let Ok(remove) = remove {
+        if !remove.status.success() && result.is_ok() {
+            return Err(format!("dispatch succeeded but temporary worktree cleanup failed: {}", String::from_utf8_lossy(&remove.stderr).trim()).into());
+        }
+    }
+    result
+}
+
+fn is_dispatch_target_slug(slug: &str) -> bool {
+    let prefix = slug.split('.').next().unwrap_or("").to_ascii_lowercase();
+    !matches!(prefix.as_str(), "plan" | "ins" | "std" | "rul" | "rol" | "ctx" | "tsk" | "spc" | "ref")
+}
+
+fn safe_dispatch_part(value: &str) -> String {
+    let mut out = value.chars().map(|ch| if ch.is_ascii_alphanumeric() { ch } else { '-' }).collect::<String>();
+    while out.contains("--") { out = out.replace("--", "-"); }
+    out.trim_matches('-').chars().take(48).collect()
+}
+
+fn run_internal_dispatch(
+    worktree: &Path,
+    plan: &str,
+    documents: &[String],
+    dispatch_identity: &str,
+) -> Result<serde_json::Value, Box<dyn std::error::Error>> {
+    let executable = std::env::current_exe()?;
+    let mut child = Command::new(executable)
+        .arg("__dispatch-run")
+        .current_dir(worktree)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()?;
+    let input = serde_json::to_vec(&serde_json::json!({
+        "version":1,
+        "plan":plan,
+        "documents":documents,
+        "dispatch_identity":dispatch_identity
+    }))?;
+    if let Some(mut stdin) = child.stdin.take() {
+        use std::io::Write;
+        stdin.write_all(&input)?;
+    }
+    let output = child.wait_with_output()?;
+    let text = String::from_utf8_lossy(&output.stdout).trim().to_string();
+    if !output.status.success() {
+        let error = if output.stderr.is_empty() { text } else { String::from_utf8_lossy(&output.stderr).trim().to_string() };
+        return Err(format!("Git-triggered dispatch failed: {error}").into());
+    }
+    let value: serde_json::Value = serde_json::from_str(&text)?;
+    if value.get("ok").and_then(serde_json::Value::as_bool) != Some(true) {
+        return Err(value.get("error").and_then(serde_json::Value::as_str).unwrap_or("dispatch failed").to_string().into());
+    }
+    Ok(value)
+}
+
+fn git_text(repository: &Path, args: &[&str]) -> Result<String, Box<dyn std::error::Error>> {
+    let output = Command::new("/usr/bin/git").arg("-C").arg(repository).args(args).output()?;
+    if !output.status.success() {
+        return Err(format!("git {} failed: {}", args.join(" "), String::from_utf8_lossy(&output.stderr).trim()).into());
+    }
+    Ok(String::from_utf8(output.stdout)?)
+}
+
+fn git_lines(repository: &Path, args: &[&str]) -> Result<Vec<String>, Box<dyn std::error::Error>> {
+    Ok(git_text(repository, args)?.lines().map(str::trim).filter(|line| !line.is_empty()).map(str::to_string).collect())
+}
+
+fn git_is_ancestor(repository: &Path, ancestor: &str, descendant: &str) -> Result<bool, Box<dyn std::error::Error>> {
+    let output = Command::new("/usr/bin/git").arg("-C").arg(repository)
+        .args(["merge-base", "--is-ancestor", ancestor, descendant]).output()?;
+    match output.status.code() {
+        Some(0) => Ok(true),
+        Some(1) => Ok(false),
+        _ => Err(format!("could not compare Git dispatch cursor: {}", String::from_utf8_lossy(&output.stderr).trim()).into()),
+    }
 }
 
 fn configured_pandoc_binary() -> Result<PathBuf, Box<dyn std::error::Error>> {
@@ -794,9 +1278,16 @@ fn configured_pandoc_binary() -> Result<PathBuf, Box<dyn std::error::Error>> {
 }
 
 fn configured_pandoc_filter() -> Result<PathBuf, Box<dyn std::error::Error>> {
-    let path = env::var_os("AUTOSCRIBE_PANDOC_FILTER").map(PathBuf::from)
-        .ok_or("AUTOSCRIBE_PANDOC_FILTER is not set")?;
+    let path = if let Some(path) = env::var_os("AUTOSCRIBE_PANDOC_FILTER") {
+        PathBuf::from(path)
+    } else {
+        let root = env::var_os("AUTOSCRIBE_ROOT").map(PathBuf::from).unwrap_or_else(|| {
+            PathBuf::from(env::var_os("HOME").unwrap_or_else(|| "/home/jeremy".into())).join("Work/Loom")
+        });
+        root.join("platform/pandoc/filters/emit/emit_ndjson.lua")
+    };
     if !path.is_absolute() { return Err("AUTOSCRIBE_PANDOC_FILTER must be absolute".into()); }
+    if !path.is_file() { return Err(format!("Pandoc filter not found: {}", path.display()).into()); }
     Ok(path)
 }
 
@@ -969,14 +1460,13 @@ fn cache_server_snapshot(db: &Database, snapshot: &serde_json::Value, refreshed_
 }
 
 fn sync_local_instructions(
-    repository: &Path,
+    _repository: &Path,
     asc: &Path,
     local: Vec<instruction_sync::LocalInstruction>,
-    known_dirty_paths: Option<&std::collections::BTreeSet<PathBuf>>,
+    _known_dirty_paths: Option<&std::collections::BTreeSet<PathBuf>>,
 ) -> Result<(serde_json::Value, usize, usize), Box<dyn std::error::Error>> {
     let mut server = fetch_server_snapshot(asc)?;
     let mut uploaded = 0;
-    let mut committed = 0;
     if !local.is_empty() {
         let manifest: serde_json::Value = serde_json::from_slice(&run_asc_capture(asc, ["control", "instruction-manifest"], &[])?)?;
         let sync = instruction_sync::plan(local, &manifest)?;
@@ -984,19 +1474,13 @@ fn sync_local_instructions(
         if !sync.upload.is_empty() {
             let records = sync.upload.iter().map(instruction_sync::upload_record).collect::<Vec<_>>();
             run_asc(asc, ["upload", "instructions"], &ndjson(&records)?)?;
-            let paths = sync.upload.iter().map(|item| PathBuf::from(&item.relative_path)).collect::<Vec<_>>();
-            let dirty = match known_dirty_paths {
-                Some(known) => paths.into_iter().filter(|path| known.contains(path)).collect::<Vec<_>>(),
-                None => git::inspect(repository, &paths)?.into_iter().filter(|item| item.dirty).map(|item| item.path).collect::<Vec<_>>(),
-            };
-            if !dirty.is_empty() {
-                git::commit(repository, CommitRequest { paths: dirty.clone(), message: "Sync local instructions".into(), purpose: CommitPurpose::Version })?;
-                committed = dirty.len();
-            }
+            // Upload synchronization must never create commits on the editorial
+            // branch. Local Git history is user-owned; AutoScribe records its
+            // own immutable execution lineage on dedicated refs instead.
             server = fetch_server_snapshot(asc)?;
         }
     }
-    Ok((server, uploaded, committed))
+    Ok((server, uploaded, 0))
 }
 
 fn sync_instruction_slugs(
@@ -1336,9 +1820,9 @@ fn default_database_path() -> Result<PathBuf, Box<dyn std::error::Error>> {
 }
 
 fn asc_command() -> PathBuf {
-    env::var_os("ASC_BIN")
-        .map(PathBuf::from)
-        .unwrap_or_else(|| PathBuf::from("/home/jeremy/Python3.13Env/bin/asc"))
+    env::var_os("ASC_BIN").map(PathBuf::from).unwrap_or_else(|| {
+        PathBuf::from(env::var_os("HOME").unwrap_or_else(|| "/home/jeremy".into())).join("Python3.13Env/bin/asc")
+    })
 }
 
 fn ensure_runtime_daemons(asc: &Path) -> Result<(), AscFailure> {

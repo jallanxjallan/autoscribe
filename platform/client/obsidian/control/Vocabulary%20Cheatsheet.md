@@ -191,8 +191,8 @@ Directives are **not annotations**. They are fenced operational instructions emb
 | Label | Meaning |
 |---|---|
 | **Set Note Type** | Apply the configured type, slug prefix and template to the active note. |
-| **Define Plan** | Build or edit the processing plan to be dispatched. |
-| **Dispatch Run** | Send the selected material and plan into the processing pipeline. |
+| **Plan Manager** | Build/edit plans, rank them by dispatch frecency, and copy the Git dispatch marker. |
+| **Git dispatch marker** | `Autoscribe-Plan:` trailer pasted into an ordinary Git commit; `svc refresh` dispatches that exact commit. |
 | **Write Responses** | Apply completed pipeline responses back to the source files. |
 
 ## Query and display vocabulary

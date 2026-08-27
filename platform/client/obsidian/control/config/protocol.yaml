@@ -5,7 +5,6 @@
 # payloads or other clients. Treat this file as low-level config.
 
 session_keys:
-  dispatch_run: __autoscribeDispatchRunSessions
   current_selection_registry: autoscribe.current-selection.by-vault
 
 step_contract_arg_keys:
@@ -27,7 +26,7 @@ writeback:
   command: write-responses
   request_version: 1
   result_type: writeback-result
-  success_status: committed
+  success_status: written
 
 # Persisted current-selection record shape/namespaces.
 current_selection:
@@ -41,16 +40,6 @@ current_selection:
     - selected
     - files
     - prompts
-
-# Rust service command used by Dispatch Run.
-dispatch:
-  command: dispatch-run
-  request_version: 1
-
-# Rust service command used when Define Plan saves a plan.
-plan_save:
-  command: plan-save
-  request_version: 1
 
 # `asc` CLI snapshot groups consumed by Control. `expected_type` is checked when
 # loading the result, so changing it must match the CLI output.
@@ -66,15 +55,9 @@ asc_snapshots:
     expected_type: autoscribe.controls
     label: asc control snapshot
 
-define_plan_snapshot:
-  command: define-plan-snapshot
-
 # Service operations used by read/write UI modules. Keeping command names and
 # request versions here lets the Rust/API surface evolve without editing JS.
 service_operations:
-  define_plan_snapshot:
-    command: define-plan-snapshot
-    request_version: 1
   instructions_state_snapshot:
     command: instructions-state-snapshot
     request_version: 1

@@ -71,24 +71,9 @@ async function serviceCall(app, command, input) {
   });
 }
 
-async function runDispatch(app, { documents, plan }) {
-  const selected = [...new Set((documents || []).map(String).map((value) => value.trim()).filter(Boolean))].sort();
-  if (!selected.length) throw new Error("Dispatch requires document slugs");
-  const protocol = loadConfig("protocol").dispatch || {};
-  const response = await serviceCall(app, String(protocol.command || "dispatch-run"), {
-    version: Number(protocol.request_version || 1),
-    plan: String(plan || "").trim(),
-    documents: selected,
-  });
-  const output = JSON.parse(response.stdout.trim() || "{}");
-  if (!output.ok) throw new Error(output.error || "Rust dispatch run failed");
-  return output;
-}
-
 module.exports = {
   autoscribeRoot,
   run,
-  runDispatch,
   serviceCall,
   serviceCommand,
   serviceEnvironment,

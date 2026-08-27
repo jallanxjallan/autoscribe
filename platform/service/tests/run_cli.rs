@@ -101,7 +101,7 @@ fn invoke(root: &Path, pandoc: &Path, asc: &Path) -> std::process::Output {
     let request = json!({"version":1,"plan":"plan.test","documents":["cnt.one"]});
     fs::write(root.join("filter.lua"), "-- fixture\n").unwrap();
     let mut child = Command::new(env!("CARGO_BIN_EXE_svc"))
-        .arg("dispatch-run")
+        .arg("__dispatch-run")
         .env("ASC_BIN", asc)
         .env("AUTOSCRIBE_DATABASE", root.join("service.sqlite"))
         .env("AUTOSCRIBE_PANDOC_FILTER", root.join("filter.lua"))

@@ -21,8 +21,13 @@ deprecated_files:
   # Commit Files is intentionally outside Control; use the Git plugin/GUI.
   - macros/commit-files.js
   - scripts/ui/commit-files.js
-  # Define Plan now lives in its macro; service resolves instruction slugs.
+  # Old Define Plan/Dispatch Run support; Plan Manager + Git trailers replaced it.
   - scripts/ui/define-plan.js
   - scripts/ui/dispatch-run.js
   - scripts/plans/instruction-resolver.js
-
+  # Git commits with Autoscribe-Plan trailers replaced interactive dispatch.
+  - macros/dispatch-run.js
+  - macros/define-plan.js
+  - scripts/lib/dispatch-document.js
+  - scripts/lib/file-manifest.js
+  - scripts/lib/dispatch-service.js

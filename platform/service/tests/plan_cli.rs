@@ -31,7 +31,8 @@ fn plan_save_keeps_only_plan_json_and_syncs_local_instruction_by_slug() {
     assert_eq!(plans, 1);
     assert_eq!(instruction_table, 0);
     let git_log = String::from_utf8(Command::new("git").current_dir(&root).args(["log", "-1", "--format=%s"]).output().unwrap().stdout).unwrap();
-    assert_eq!(git_log.trim(), "Sync local instructions");
+    assert_eq!(git_log.trim(), "initial");
+    assert!(!String::from_utf8(Command::new("git").current_dir(&root).args(["status", "--porcelain", "--", "Instructions/Context.md"]).output().unwrap().stdout).unwrap().trim().is_empty());
 
     fs::write(root.join("asc.log"), "").unwrap();
     let snapshot = invoke(&root, &asc, "define-plan-snapshot", None);
@@ -51,12 +52,13 @@ fn explicit_refresh_populates_context_catalog_and_snapshot_is_cache_only() {
     fs::write(instructions.join("Context.md"), "---\ntitle: Project Context\nslug: ctx.project.test\nrecord: instruction\ncomponent: context\n---\nLocal context\n").unwrap();
     let asc = fake_asc(&root);
 
-    let refresh = invoke(&root, &asc, "define-plan-refresh", Some(json!({"version":1})));
+    let refresh = invoke(&root, &asc, "refresh", None);
     assert!(refresh.status.success(), "{}", String::from_utf8_lossy(&refresh.stdout));
     let response: Value = serde_json::from_slice(&refresh.stdout).unwrap();
     assert_eq!(response["catalogs"]["instructions"][0]["slug"], "ctx.project.test");
     assert_eq!(response["catalogs"]["instructions"][0]["scope"], "context");
     assert_eq!(response["uploaded_instructions"], 1);
+    
 
     fs::write(root.join("asc.log"), "").unwrap();
     let snapshot = invoke(&root, &asc, "define-plan-snapshot", None);
