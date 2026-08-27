@@ -19,6 +19,53 @@ pub struct SyncItem { pub slug:String, pub path:String, pub status:String, pub r
 #[derive(Debug)]
 pub struct SyncPlan { pub upload:Vec<LocalInstruction>, pub items:Vec<SyncItem>, pub hashes_compared:usize }
 
+/// Vault-wide slug index built once at an explicit refresh boundary.
+/// Slugs are durable identity; paths are derived state. Duplicate slugs are rejected
+/// before any refresh consumer sees a partial or ambiguous snapshot.
+pub type SlugIndex = BTreeMap<String, PathBuf>;
+
+pub fn build_slug_index(root:&Path)->ServiceResult<SlugIndex>{
+    let root=root.canonicalize().map_err(io)?;
+    let output=Command::new("rg").current_dir(&root)
+        .args(["--files-with-matches","--glob","*.md","--glob","!.git/**","--glob","!.obsidian/**","--glob","!_control/**","--glob","!target/**",r"^slug:\s*[^[:space:]]+", "."])
+        .output().map_err(io)?;
+    if !output.status.success() && output.status.code()!=Some(1){
+        return Err(ServiceError::Io(format!("rg slug index failed: {}",String::from_utf8_lossy(&output.stderr).trim())));
+    }
+    let mut index=SlugIndex::new();
+    for line in String::from_utf8_lossy(&output.stdout).lines(){
+        let relative=PathBuf::from(line.trim_start_matches("./"));
+        let text=fs::read_to_string(root.join(&relative)).map_err(io)?;
+        let Some((frontmatter,_))=split_frontmatter(&text) else{continue};
+        let slug=frontmatter.get("slug").map(String::as_str).unwrap_or("").trim();
+        if slug.is_empty(){continue;}
+        if let Some(previous)=index.insert(slug.to_string(),relative.clone()){
+            return Err(ServiceError::Conflict(format!(
+                "duplicate slug: {slug}: {}, {}",previous.display(),relative.display()
+            )));
+        }
+    }
+    Ok(index)
+}
+
+pub fn scan_indexed_instructions(root:&Path,index:&SlugIndex)->ServiceResult<Vec<LocalInstruction>>{
+    let root=root.canonicalize().map_err(io)?;
+    let mut found=Vec::new();
+    for (slug,relative) in index{
+        let text=fs::read_to_string(root.join(relative)).map_err(io)?;
+        let Some((frontmatter,_))=split_frontmatter(&text) else{continue};
+        if !is_instruction(&frontmatter){continue;}
+        let item=read_instruction(&root,relative)?;
+        if item.slug.as_str()!=slug.as_str(){
+            return Err(ServiceError::Conflict(format!(
+                "slug index changed during refresh: expected {slug}, found {} in {}",item.slug,relative.display()
+            )));
+        }
+        found.push(item);
+    }
+    Ok(found)
+}
+
 /// Resolve Markdown records by authoritative slug using ripgrep. Paths are derived state.
 pub fn resolve_slug_paths(root:&Path, requested:&BTreeSet<String>)->ServiceResult<BTreeMap<String,Vec<PathBuf>>>{
     if requested.is_empty(){return Ok(BTreeMap::new());}
@@ -56,23 +103,11 @@ pub fn scan_slugs(root:&Path, requested:&BTreeSet<String>)->ServiceResult<Vec<Lo
     Ok(found)
 }
 
-/// Compatibility/manual command. New interactive flows should call scan_slugs.
+/// Compatibility/manual command. Explicit catalogue refreshes build the slug index
+/// themselves and hand that single snapshot to their consumers.
 pub fn scan(root:&Path)->ServiceResult<Vec<LocalInstruction>>{
-    let root=root.canonicalize().map_err(io)?;
-    let output=Command::new("rg").current_dir(&root)
-        .args(["--files-with-matches","--glob","*.md","--glob","!.git/**","--glob","!.obsidian/**","--glob","!_control/**","--glob","!target/**",r"^slug:\s*[^[:space:]]+", "."])
-        .output().map_err(io)?;
-    if !output.status.success() && output.status.code()!=Some(1){return Err(ServiceError::Io(format!("rg instruction scan failed: {}",String::from_utf8_lossy(&output.stderr).trim())));}
-    let mut found=BTreeMap::new();
-    for line in String::from_utf8_lossy(&output.stdout).lines(){
-        let relative=PathBuf::from(line.trim_start_matches("./"));
-        let text=fs::read_to_string(root.join(&relative)).map_err(io)?;
-        let Some((frontmatter,_))=split_frontmatter(&text) else{continue};
-        if !is_instruction(&frontmatter){continue;}
-        let item=read_instruction(&root,&relative)?;
-        if found.insert(item.slug.clone(),item).is_some(){return Err(ServiceError::Conflict("duplicate instruction slug".into()));}
-    }
-    Ok(found.into_values().collect())
+    let index=build_slug_index(root)?;
+    scan_indexed_instructions(root,&index)
 }
 
 fn read_instruction(root:&Path,relative:&Path)->ServiceResult<LocalInstruction>{

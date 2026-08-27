@@ -81,14 +81,6 @@ struct DefinePlanSnapshotOutput {
     refreshed_at: Option<String>,
 }
 
-#[derive(Deserialize)]
-#[serde(deny_unknown_fields)]
-struct CatalogRefreshInput {
-    version: u32,
-    #[serde(default)]
-    instruction_slugs: Vec<String>,
-}
-
 #[derive(Serialize)]
 struct CatalogRefreshOutput {
     ok: bool,
@@ -211,36 +203,6 @@ fn system_snapshot_from_stdin() -> Result<serde_json::Value, Box<dyn std::error:
     }))
 }
 
-fn instruction_slug_candidates(repository: &Path) -> Result<std::collections::BTreeSet<String>, Box<dyn std::error::Error>> {
-    let output = Command::new("rg")
-        .args(["-l", "-0", "--glob", "*.md", r"^slug:\s*"])
-        .current_dir(repository)
-        .output()?;
-    if !output.status.success() && output.status.code() != Some(1) {
-        return Err(format!("rg instruction discovery failed with status {:?}: {}",
-            output.status.code(), String::from_utf8_lossy(&output.stderr).trim()).into());
-    }
-    let mut by_slug = std::collections::BTreeMap::<String, Vec<PathBuf>>::new();
-    for raw in output.stdout.split(|byte| *byte == 0).filter(|value| !value.is_empty()) {
-        let relative = PathBuf::from(std::str::from_utf8(raw)?);
-        let absolute = repository.join(&relative);
-        let text = std::fs::read_to_string(&absolute)?;
-        let declared = ["record", "type", "kind"].into_iter()
-            .find_map(|key| markdown_frontmatter_value(&text, key))
-            .unwrap_or_default().to_lowercase();
-        if declared != "instruction" { continue; }
-        let Some(slug) = markdown_frontmatter_value(&text, "slug") else { continue; };
-        by_slug.entry(slug).or_default().push(relative);
-    }
-    let duplicates = by_slug.iter().filter(|(_, paths)| paths.len() > 1)
-        .map(|(slug, paths)| format!("{slug}: {}", paths.iter().map(|p| p.display().to_string()).collect::<Vec<_>>().join(", ")))
-        .collect::<Vec<_>>();
-    if !duplicates.is_empty() {
-        return Err(format!("duplicate instruction slugs: {}", duplicates.join("; ")).into());
-    }
-    Ok(by_slug.into_keys().collect())
-}
-
 fn instruction_record_slug(value: &serde_json::Value) -> String {
     ["slug", "record_identity", "identity", "key"].into_iter()
         .find_map(|field| value.get(field).and_then(serde_json::Value::as_str))
@@ -251,8 +213,8 @@ fn instructions_state_snapshot_from_stdin() -> Result<serde_json::Value, Box<dyn
     let input: VersionInput = read_json_stdin()?;
     if input.version != 1 { return Err("unsupported instructions state snapshot version".into()); }
     let repository = git::root(&std::env::current_dir()?)?;
-    let slugs = instruction_slug_candidates(&repository)?;
-    let local = instruction_sync::scan_slugs(&repository, &slugs)?;
+    let slug_index = instruction_sync::build_slug_index(&repository)?;
+    let local = instruction_sync::scan_indexed_instructions(&repository, &slug_index)?;
     let manifest: serde_json::Value = serde_json::from_slice(&run_asc_capture(
         &asc_command(), ["control", "instruction-manifest"], &[],
     )?)?;
@@ -956,12 +918,21 @@ fn snapshot_from_service() -> Result<DefinePlanSnapshotOutput, Box<dyn std::erro
 }
 
 fn catalog_refresh_from_stdin(operation: &'static str) -> Result<CatalogRefreshOutput, Box<dyn std::error::Error>> {
-    let input: CatalogRefreshInput = read_json_stdin()?;
+    let input: VersionInput = read_json_stdin()?;
     if input.version != 1 { return Err("unsupported catalog refresh version".into()); }
     let repository = git::root(&std::env::current_dir()?)?;
     let db = open_configured_database()?;
     let asc = asc_command();
-    let (server, uploaded, committed) = refresh_catalog(&repository, &asc, &input.instruction_slugs)?;
+
+    // Refresh owns discovery. Build one vault-wide slug index first, then hand
+    // that immutable snapshot to the instruction/catalogue refresh path.
+    let slug_index = instruction_sync::build_slug_index(&repository)?;
+    let indexed_paths = slug_index.values().cloned().collect::<Vec<_>>();
+    let dirty_paths = git::inspect(&repository, &indexed_paths)?.into_iter()
+        .filter(|item| item.dirty).map(|item| item.path).collect::<std::collections::BTreeSet<_>>();
+    let local = instruction_sync::scan_indexed_instructions(&repository, &slug_index)?;
+    let (server, uploaded, committed) = sync_local_instructions(&repository, &asc, local, Some(&dirty_paths))?;
+
     let refreshed_at = unix_timestamp();
     cache_server_snapshot(&db, &server, &refreshed_at)?;
     Ok(CatalogRefreshOutput {
@@ -997,14 +968,16 @@ fn cache_server_snapshot(db: &Database, snapshot: &serde_json::Value, refreshed_
     Ok(())
 }
 
-fn refresh_catalog(repository: &Path, asc: &Path, instruction_slugs: &[String]) -> Result<(serde_json::Value, usize, usize), Box<dyn std::error::Error>> {
+fn sync_local_instructions(
+    repository: &Path,
+    asc: &Path,
+    local: Vec<instruction_sync::LocalInstruction>,
+    known_dirty_paths: Option<&std::collections::BTreeSet<PathBuf>>,
+) -> Result<(serde_json::Value, usize, usize), Box<dyn std::error::Error>> {
     let mut server = fetch_server_snapshot(asc)?;
     let mut uploaded = 0;
     let mut committed = 0;
-    let requested = instruction_slugs.iter().map(|slug| slug.trim()).filter(|slug| !slug.is_empty())
-        .map(str::to_string).collect::<std::collections::BTreeSet<_>>();
-    if !requested.is_empty() {
-        let local = instruction_sync::scan_slugs(repository, &requested)?;
+    if !local.is_empty() {
         let manifest: serde_json::Value = serde_json::from_slice(&run_asc_capture(asc, ["control", "instruction-manifest"], &[])?)?;
         let sync = instruction_sync::plan(local, &manifest)?;
         uploaded = sync.upload.len();
@@ -1012,7 +985,10 @@ fn refresh_catalog(repository: &Path, asc: &Path, instruction_slugs: &[String]) 
             let records = sync.upload.iter().map(instruction_sync::upload_record).collect::<Vec<_>>();
             run_asc(asc, ["upload", "instructions"], &ndjson(&records)?)?;
             let paths = sync.upload.iter().map(|item| PathBuf::from(&item.relative_path)).collect::<Vec<_>>();
-            let dirty = git::inspect(repository, &paths)?.into_iter().filter(|item| item.dirty).map(|item| item.path).collect::<Vec<_>>();
+            let dirty = match known_dirty_paths {
+                Some(known) => paths.into_iter().filter(|path| known.contains(path)).collect::<Vec<_>>(),
+                None => git::inspect(repository, &paths)?.into_iter().filter(|item| item.dirty).map(|item| item.path).collect::<Vec<_>>(),
+            };
             if !dirty.is_empty() {
                 git::commit(repository, CommitRequest { paths: dirty.clone(), message: "Sync local instructions".into(), purpose: CommitPurpose::Version })?;
                 committed = dirty.len();
@@ -1021,6 +997,17 @@ fn refresh_catalog(repository: &Path, asc: &Path, instruction_slugs: &[String]) 
         }
     }
     Ok((server, uploaded, committed))
+}
+
+fn sync_instruction_slugs(
+    repository: &Path,
+    asc: &Path,
+    instruction_slugs: &[String],
+) -> Result<(serde_json::Value, usize, usize), Box<dyn std::error::Error>> {
+    let requested = instruction_slugs.iter().map(|slug| slug.trim()).filter(|slug| !slug.is_empty())
+        .map(str::to_string).collect::<std::collections::BTreeSet<_>>();
+    let local = if requested.is_empty() { Vec::new() } else { instruction_sync::scan_slugs(repository, &requested)? };
+    sync_local_instructions(repository, asc, local, None)
 }
 
 fn fetch_server_snapshot(asc: &Path) -> Result<serde_json::Value, Box<dyn std::error::Error>> {
@@ -1262,7 +1249,7 @@ fn save_plan_from_stdin() -> Result<PlanSaveOutput, Box<dyn std::error::Error>> 
     let db = open_configured_database()?;
     let asc = asc_command();
     let slugs = plan_instruction_slugs(&input.plan).into_iter().collect::<Vec<_>>();
-    let (_, uploaded, _) = refresh_catalog(&repository, &asc, &slugs)?;
+    let (_, uploaded, _) = sync_instruction_slugs(&repository, &asc, &slugs)?;
     plan_repository::save(&db, &input.plan)?;
     let identity = input.plan.get("record_identity").and_then(serde_json::Value::as_str)
         .ok_or("saved plan is missing record_identity")?.to_string();

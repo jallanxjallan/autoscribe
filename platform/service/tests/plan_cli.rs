@@ -51,7 +51,7 @@ fn explicit_refresh_populates_context_catalog_and_snapshot_is_cache_only() {
     fs::write(instructions.join("Context.md"), "---\ntitle: Project Context\nslug: ctx.project.test\nrecord: instruction\ncomponent: context\n---\nLocal context\n").unwrap();
     let asc = fake_asc(&root);
 
-    let refresh = invoke(&root, &asc, "define-plan-refresh", Some(json!({"version":1,"instruction_slugs":["ctx.project.test"]})));
+    let refresh = invoke(&root, &asc, "define-plan-refresh", Some(json!({"version":1})));
     assert!(refresh.status.success(), "{}", String::from_utf8_lossy(&refresh.stdout));
     let response: Value = serde_json::from_slice(&refresh.stdout).unwrap();
     assert_eq!(response["catalogs"]["instructions"][0]["slug"], "ctx.project.test");
