@@ -11,6 +11,9 @@ actions:
   plan_manager:
     label: Plan Manager
     macro: macros/plan-manager.js
+  dispatch_run:
+    label: Dispatch Run
+    macro: macros/dispatch-run.js
   write_responses:
     label: Write Responses
     macro: macros/write-responses.js

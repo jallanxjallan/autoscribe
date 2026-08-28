@@ -16,6 +16,8 @@ let el;
 let notify;
 let buildPlanRecord;
 let copyText;
+let readControlState;
+let writePlanDraftFile;
 
 function workflowConfig() { return loadConfig("workflow"); }
 function stepKinds() { return workflowConfig().step_kinds || ["llm", "script", "rag"]; }
@@ -94,41 +96,6 @@ function screenSteps(plan, catalogs) {
     });
 }
 
-function statePaths(app) {
-  const nodeRequire = typeof require === "function" ? require : window.require;
-  const path = nodeRequire("node:path");
-  const base = app.vault.adapter.getBasePath?.() || app.vault.adapter.basePath;
-  const stateDir = String(managerConfig().state_dir || ".autoscribe");
-  return {
-    state: path.join(base, stateDir, String(managerConfig().state_file || "control-state.json")),
-    plans: path.join(base, stateDir, String(managerConfig().plan_dir || "plans")),
-  };
-}
-function readState(app) {
-  const nodeRequire = typeof require === "function" ? require : window.require;
-  const fs = nodeRequire("node:fs");
-  const paths = statePaths(app);
-  if (!fs.existsSync(paths.state)) {
-    throw new Error(`Plan catalogue is not initialized. Run 'svc refresh' from the vault root first.`);
-  }
-  const state = JSON.parse(fs.readFileSync(paths.state, "utf8"));
-  if (Number(state.version || 0) !== 1) throw new Error("Unsupported AutoScribe control-state version.");
-  return state;
-}
-function writePlanDraft(app, record) {
-  const nodeRequire = typeof require === "function" ? require : window.require;
-  const fs = nodeRequire("node:fs");
-  const path = nodeRequire("node:path");
-  const paths = statePaths(app);
-  fs.mkdirSync(paths.plans, { recursive: true });
-  const slug = planSlug(record);
-  if (!/^[a-z0-9][a-z0-9._-]*$/i.test(slug)) throw new Error(`Unsafe plan slug: ${slug}`);
-  const target = path.join(paths.plans, `${slug}.json`);
-  const temp = `${target}.tmp-${process.pid}-${Date.now()}`;
-  fs.writeFileSync(temp, JSON.stringify(record, null, 2) + "\n", "utf8");
-  fs.renameSync(temp, target);
-  return target;
-}
 function gitMarker(record) {
   const slug = planSlug(record);
   const hint = String(record?.payload?.label || record?.label || record?.title || slug).replace(/[\r\n]+/g, " ").trim();
@@ -137,9 +104,22 @@ function gitMarker(record) {
 
 async function renderPlanManager({ app, container }) {
   container.empty();
-  const state = readState(app);
+  container.appendChild(el("p", { text: "Loading local plan catalogue…" }));
+  const state = await readControlState(app);
+  container.empty();
   const catalogs = catalogsFrom(state);
   const plans = catalogs.plans;
+  const sortedCatalogs = {
+    engines: sortRecords(catalogs.engines),
+    models: sortRecords(catalogs.models),
+    scripts: sortRecords(catalogs.scripts),
+    ragProfiles: sortRecords(catalogs.ragProfiles),
+  };
+  const componentRecords = {
+    role: byComponent(catalogs.instructions, "role"),
+    context: byComponent(catalogs.instructions, "context"),
+    task: byComponent(catalogs.instructions, "task"),
+  };
   let loaded = null;
   let steps = [];
 
@@ -195,15 +175,15 @@ async function renderPlanManager({ app, container }) {
   function choice(records, value, onChange, placeholder, options = {}) {
     const select = el("select"); select.style.width = "100%";
     select.appendChild(el("option", { value: "", text: placeholder }));
-    sortRecords(records).forEach((record) => option(select, record, options));
+    records.forEach((record) => option(select, record, options));
     select.value = id(value);
     select.addEventListener("change", () => onChange(selected(records, select.value)));
     return select;
   }
   function componentPicker(card, step, component, field, heading) {
-    const records = byComponent(catalogs.instructions, component);
+    const records = componentRecords[component] || [];
     card.appendChild(el("strong", { text: `${heading} (${records.length})` }));
-    card.appendChild(choice(records, step[field], (value) => { step[field] = value; redraw(); }, `Choose ${heading.toLowerCase()}`, { titleOnly: true }));
+    card.appendChild(choice(records, step[field], (value) => { step[field] = value; }, `Choose ${heading.toLowerCase()}`, { titleOnly: true }));
   }
   function redraw() {
     stepsBox.innerHTML = "";
@@ -215,15 +195,15 @@ async function renderPlanManager({ app, container }) {
       kind.value = step.kind; kind.addEventListener("change", () => { step.kind = kind.value; redraw(); });
       card.append(el("h3", { text: `Step ${index + 1}` }), stepLabel, kind);
       if (step.kind === "llm") {
-        card.append(choice(catalogs.engines, step.engine, (v) => { step.engine = v; }, "Engine"));
-        card.append(choice(catalogs.models, step.model, (v) => { step.model = v; }, "Model"));
+        card.append(choice(sortedCatalogs.engines, step.engine, (v) => { step.engine = v; }, "Engine"));
+        card.append(choice(sortedCatalogs.models, step.model, (v) => { step.model = v; }, "Model"));
         componentPicker(card, step, "role", "role", "Role");
         componentPicker(card, step, "context", "context", "Context");
         componentPicker(card, step, "task", "task", "Task");
       } else if (step.kind === "script") {
-        card.append(choice(catalogs.scripts, step.script, (v) => { step.script = v; }, "Script"));
+        card.append(choice(sortedCatalogs.scripts, step.script, (v) => { step.script = v; }, "Script"));
       } else {
-        card.append(choice(catalogs.ragProfiles, step.rag_profile, (v) => { step.rag_profile = v; }, "RAG profile"));
+        card.append(choice(sortedCatalogs.ragProfiles, step.rag_profile, (v) => { step.rag_profile = v; }, "RAG profile"));
       }
       const args = el("textarea"); args.style.width = "100%"; args.value = step.argsJson || "{}";
       args.addEventListener("input", () => { step.argsJson = args.value; }); card.append(args);
@@ -263,7 +243,7 @@ async function renderPlanManager({ app, container }) {
         };
       }
       const record = buildPlanRecord({ label: name.value, type: type.value, description: description.value, steps, force_slug: planSlug(loaded) || null });
-      writePlanDraft(app, record);
+      await writePlanDraftFile(app, record, planSlug(record));
       const existing = plans.findIndex((plan) => planSlug(plan) === planSlug(record));
       const scored = { ...record, usage_score: existing >= 0 ? planScore(plans[existing]) : 0, use_count: existing >= 0 ? planUseCount(plans[existing]) : 0 };
       if (existing >= 0) plans.splice(existing, 1, scored); else plans.push(scored);
@@ -305,6 +285,7 @@ module.exports = async function plan_manager(params = {}) {
   ({ notify } = loader.requireControl("scripts/lib/notify.js"));
   ({ copyText } = loader.requireControl("scripts/lib/clipboard.js"));
   ({ buildPlanRecord } = loader.requireControl("scripts/plans/plan-record.js"));
+  ({ readControlState, writePlanDraft: writePlanDraftFile } = loader.requireControl("scripts/lib/control-state.js"));
   const { openWorkflowModal } = loader.requireControl("scripts/lib/workflow-modal.js");
   return openWorkflowModal({ app, title: "Plan Manager", render: (container) => renderPlanManager({ app, container }) });
 };

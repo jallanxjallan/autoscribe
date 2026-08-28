@@ -26,7 +26,6 @@ deprecated_files:
   - scripts/ui/dispatch-run.js
   - scripts/plans/instruction-resolver.js
   # Git commits with Autoscribe-Plan trailers replaced interactive dispatch.
-  - macros/dispatch-run.js
   - macros/define-plan.js
   - scripts/lib/dispatch-document.js
   - scripts/lib/file-manifest.js
