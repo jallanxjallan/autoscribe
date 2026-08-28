@@ -1,3 +1,4 @@
+use autoscribe_service::{db, db::Database, plan_repository};
 use serde_json::{Value, json};
 use std::{
     fs,
@@ -30,7 +31,7 @@ fn dispatch_run_converts_uploads_and_enqueues_in_one_service_call() {
     assert_eq!(response["records"], 1);
     assert_eq!(
         fs::read_to_string(root.join("asc.log")).unwrap(),
-        "control snapshot\nexport list-pending --ndjson\nupload calls\nenqueue\nrun status\n"
+        "export list-pending --ndjson\nupload calls\nenqueue\nrun status\n"
     );
     let input = fs::read_to_string(root.join("asc.log.input")).unwrap();
     assert!(input.contains("\"type\":\"call\""));
@@ -55,7 +56,7 @@ fn dispatch_starts_runtime_daemons_when_status_is_unhealthy() {
     assert!(output.status.success(), "{}", String::from_utf8_lossy(&output.stdout));
     assert_eq!(
         fs::read_to_string(root.join("asc.log")).unwrap(),
-        "control snapshot\nexport list-pending --ndjson\nupload calls\nenqueue\nrun status\nrun start\n"
+        "export list-pending --ndjson\nupload calls\nenqueue\nrun status\nrun start\n"
     );
     fs::remove_dir_all(root).unwrap();
 }
@@ -71,7 +72,10 @@ fn conversion_failure_prevents_upload_and_enqueue() {
     let asc = fake_asc(&root);
     let output = invoke(&root, &pandoc, &asc);
     assert!(!output.status.success());
-    assert_eq!(fs::read_to_string(root.join("asc.log")).unwrap(), "control snapshot\n");
+    assert!(!root.join("asc.log").exists());
+    assert!(Command::new("/usr/bin/git").current_dir(&root)
+        .args(["rev-parse", "--verify", "refs/heads/autoscribe/inflight"])
+        .output().unwrap().status.success());
     fs::remove_dir_all(root).unwrap();
 }
 
@@ -92,12 +96,13 @@ fn pending_response_blocks_dispatch_before_upload_and_enqueue() {
     assert!(response["error"].as_str().unwrap().contains("cnt.one"));
     assert_eq!(
         fs::read_to_string(root.join("asc.log")).unwrap(),
-        "control snapshot\nexport list-pending --ndjson\n"
+        "export list-pending --ndjson\n"
     );
     fs::remove_dir_all(root).unwrap();
 }
 
 fn invoke(root: &Path, pandoc: &Path, asc: &Path) -> std::process::Output {
+    save_plan(&root.join("service.sqlite"));
     let request = json!({"version":1,"plan":"plan.test","documents":["cnt.one"]});
     fs::write(root.join("filter.lua"), "-- fixture\n").unwrap();
     let mut child = Command::new(env!("CARGO_BIN_EXE_svc"))
@@ -120,6 +125,14 @@ fn invoke(root: &Path, pandoc: &Path, asc: &Path) -> std::process::Output {
         .write_all(request.to_string().as_bytes())
         .unwrap();
     child.wait_with_output().unwrap()
+}
+fn save_plan(path: &Path) {
+    let database = Database::open_path(path).unwrap();
+    db::migrate(&database).unwrap();
+    plan_repository::save(&database, &json!({
+        "record_identity":"plan.test",
+        "payload":{"steps":{"1":{"kind":"llm"}}}
+    })).unwrap();
 }
 fn fake_asc(root: &Path) -> PathBuf {
     fake_asc_with_status(root, "  worker=running pid=123")

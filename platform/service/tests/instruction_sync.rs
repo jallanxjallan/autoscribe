@@ -48,17 +48,19 @@ fn missing_server_instruction_is_reuploaded_without_consulting_prior_state(){
 #[test]
 fn service_sync_uploads_only_selected_instruction_paths(){
  let root=temp();
+ assert!(Command::new("git").current_dir(&root).args(["init","-q"]).status().unwrap().success());
  fs::write(root.join("One.md"),"---\nslug: tsk.one\ntype: instruction\n---\nOne\n").unwrap();
  fs::write(root.join("Two.md"),"---\nslug: tsk.two\ntype: instruction\n---\nTwo\n").unwrap();
  let asc=root.join("asc");let log=root.join("asc.input");
- fs::write(&asc,format!("#!/bin/sh\nif [ \"$1 $2\" = \"control instruction-manifest\" ]; then printf '%s\\n' '{{\"instructions\":{{}}}}'; exit 0; fi\ncat >> '{}'\n",log.display())).unwrap();
+ fs::write(&asc,format!("#!/bin/sh\nif [ \"$1 $2\" = \"control snapshot\" ]; then printf '%s\\n' '{{\"registries\":{{\"instructions\":{{}},\"plans\":{{}}}}}}'; exit 0; fi\nif [ \"$1 $2\" = \"control instruction-manifest\" ]; then printf '%s\\n' '{{\"instructions\":{{}}}}'; exit 0; fi\ncat >> '{}'\n",log.display())).unwrap();
  executable(&asc);
- let request=json!({"version":1,"root":root,"paths":["One.md"]});
+ let request=json!({"version":1,"slugs":["tsk.one"]});
  let mut child=Command::new(env!("CARGO_BIN_EXE_svc")).arg("instructions-sync").env("ASC_BIN",&asc)
+   .current_dir(&root)
    .stdin(Stdio::piped()).stdout(Stdio::piped()).stderr(Stdio::piped()).spawn().unwrap();
  child.stdin.take().unwrap().write_all(request.to_string().as_bytes()).unwrap();
  let output=child.wait_with_output().unwrap();
- assert!(output.status.success(),"{}",String::from_utf8_lossy(&output.stderr));
+ assert!(output.status.success(),"stdout: {}\nstderr: {}",String::from_utf8_lossy(&output.stdout),String::from_utf8_lossy(&output.stderr));
  let response:serde_json::Value=serde_json::from_slice(&output.stdout).unwrap();
  assert_eq!(response["selected"],1);assert_eq!(response["uploaded"],1);
  let uploaded=fs::read_to_string(&log).unwrap();assert!(uploaded.contains("tsk.one"));assert!(!uploaded.contains("tsk.two"));

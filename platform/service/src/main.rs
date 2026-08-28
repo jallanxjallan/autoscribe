@@ -8,9 +8,11 @@ use autoscribe_service::{
 use serde::{Deserialize, Serialize};
 use std::{
     env,
-    io::{self, Read},
+    fs::OpenOptions,
+    io::{self, Read, Write},
     path::{Path, PathBuf},
     process::{Command, ExitCode, Stdio},
+    time::Duration,
 };
 
 #[derive(Serialize)]
@@ -82,16 +84,6 @@ struct DefinePlanSnapshotOutput {
     refreshed_at: Option<String>,
 }
 
-#[derive(Serialize)]
-struct CatalogRefreshOutput {
-    ok: bool,
-    operation: &'static str,
-    catalogs: serde_json::Value,
-    refreshed_at: String,
-    uploaded_instructions: usize,
-    committed_instructions: usize,
-}
-
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 struct GitFilesInput {
@@ -129,6 +121,7 @@ fn default_apply_write_responses() -> bool { true }
 fn main() -> ExitCode {
     match env::args().nth(1).as_deref() {
         Some("__dispatch-run") => return dispatch_run(),
+        Some("watch-dispatch") => return watch_dispatch(),
         Some("refresh") => return command_output("refresh", refresh_cli()),
         Some("define-plan-snapshot") => return define_plan_snapshot(),
         Some("system-snapshot") => return command_output("system.snapshot", system_snapshot_from_stdin()),
@@ -140,8 +133,125 @@ fn main() -> ExitCode {
         Some("write-responses") => return write_responses(),
         Some("upload-instructions") => return command_output("instructions.upload", upload_instructions()),
         _ => {
-            eprintln!("usage: svc refresh | write-responses | system-snapshot | git-files | instructions-sync | instructions-state-snapshot");
+            eprintln!("usage: svc watch-dispatch [--once] | refresh | write-responses | system-snapshot | git-files | instructions-sync | instructions-state-snapshot");
             return ExitCode::FAILURE;
+        }
+    }
+}
+
+struct WatcherLock {
+    path: PathBuf,
+}
+
+impl Drop for WatcherLock {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_file(&self.path);
+    }
+}
+
+fn acquire_watcher_lock(repository: &Path) -> Result<WatcherLock, Box<dyn std::error::Error>> {
+    let directory = autoscribe_state_dir(repository);
+    std::fs::create_dir_all(&directory)?;
+    let path = directory.join("watch-dispatch.pid");
+    loop {
+        match OpenOptions::new().write(true).create_new(true).open(&path) {
+            Ok(mut file) => {
+                writeln!(file, "{}", std::process::id())?;
+                return Ok(WatcherLock { path });
+            }
+            Err(error) if error.kind() == io::ErrorKind::AlreadyExists => {
+                let pid = std::fs::read_to_string(&path).ok()
+                    .and_then(|value| value.trim().parse::<u32>().ok());
+                if pid.is_some_and(|pid| PathBuf::from(format!("/proc/{pid}")).exists()) {
+                    return Err(format!("watch-dispatch is already running with pid {}", pid.unwrap()).into());
+                }
+                std::fs::remove_file(&path)?;
+            }
+            Err(error) => return Err(error.into()),
+        }
+    }
+}
+
+fn watcher_interval(name: &str, default_millis: u64) -> Result<Duration, Box<dyn std::error::Error>> {
+    let millis = match env::var(name) {
+        Ok(value) => value.parse::<u64>().map_err(|_| format!("{name} must be an integer number of milliseconds"))?,
+        Err(env::VarError::NotPresent) => default_millis,
+        Err(error) => return Err(error.into()),
+    };
+    if millis == 0 { return Err(format!("{name} must be greater than zero").into()); }
+    Ok(Duration::from_millis(millis))
+}
+
+fn emit_watch_event(value: &serde_json::Value) {
+    println!("{}", serde_json::to_string(value).expect("serializable watcher event"));
+    let _ = io::stdout().flush();
+}
+
+fn watch_dispatch() -> ExitCode {
+    let once = env::args().skip(2).any(|argument| argument == "--once");
+    if env::args().skip(2).any(|argument| argument != "--once") {
+        eprintln!("usage: svc watch-dispatch [--once]");
+        return ExitCode::FAILURE;
+    }
+    let repository = match git::root(&std::env::current_dir().unwrap_or_default()) {
+        Ok(repository) => repository,
+        Err(error) => {
+            emit_watch_event(&serde_json::json!({"ok":false,"operation":"watch-dispatch","error":error.to_string()}));
+            return ExitCode::FAILURE;
+        }
+    };
+    let result = (|| -> Result<ExitCode, Box<dyn std::error::Error>> {
+        git::ensure_info_exclude(&repository, "/.autoscribe/")?;
+        let _lock = acquire_watcher_lock(&repository)?;
+        let db = open_configured_database()?;
+        let poll = watcher_interval("AUTOSCRIBE_DISPATCH_POLL_MS", 2_000)?;
+        let retry = watcher_interval("AUTOSCRIBE_DISPATCH_RETRY_MS", 30_000)?;
+        if !once {
+            emit_watch_event(&serde_json::json!({
+                "ok":true,
+                "operation":"watch-dispatch.started",
+                "repository":repository,
+                "poll_ms":poll.as_millis(),
+                "retry_ms":retry.as_millis()
+            }));
+        }
+        loop {
+            match reconcile_git_dispatch_commits(&repository, &db) {
+                Ok(events) => {
+                    if once {
+                        emit_watch_event(&serde_json::json!({
+                            "ok":true,"operation":"watch-dispatch.pass","events":events
+                        }));
+                        return Ok(ExitCode::SUCCESS);
+                    }
+                    for event in events {
+                        emit_watch_event(&serde_json::json!({
+                            "ok":true,"operation":"watch-dispatch.event","event":event
+                        }));
+                    }
+                    std::thread::sleep(poll);
+                }
+                Err(error) => {
+                    if once {
+                        emit_watch_event(&serde_json::json!({
+                            "ok":false,"operation":"watch-dispatch.pass","error":error.to_string()
+                        }));
+                        return Ok(ExitCode::FAILURE);
+                    }
+                    emit_watch_event(&serde_json::json!({
+                        "ok":false,"operation":"watch-dispatch.retry","error":error.to_string(),
+                        "retry_ms":retry.as_millis()
+                    }));
+                    std::thread::sleep(retry);
+                }
+            }
+        }
+    })();
+    match result {
+        Ok(code) => code,
+        Err(error) => {
+            emit_watch_event(&serde_json::json!({"ok":false,"operation":"watch-dispatch","error":error.to_string()}));
+            ExitCode::FAILURE
         }
     }
 }
@@ -813,6 +923,29 @@ fn run_dispatch_from_stdin() -> Result<DispatchRunOutput, Box<dyn std::error::Er
             ],
         });
     }
+    // The inflight ledger is the immutable handoff boundary. Record the exact
+    // commit-worktree bytes before conversion, upload, or enqueue can begin.
+    let dispatch = input.dispatch_identity.clone().unwrap_or_else(|| format!(
+        "run-{}-{}",
+        std::process::id(),
+        std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|v| v.as_nanos()).unwrap_or(0)
+    ));
+    let inflight_commit = if let Some((_reference, commit)) = db::inflight_dispatch_ledger(&database, &dispatch)? {
+        commit
+    } else {
+        let ledger = git::append_inflight_snapshot(&repository, &LedgerSnapshotRequest {
+            dispatch: DispatchId(dispatch.clone()),
+            plan: PlanId(input.plan.clone()),
+            sources: ledger_sources.clone(),
+        })?;
+        let source_rows = ledger_sources.iter().zip(ledger.blobs.iter()).map(|(source, (path, blob))| {
+            (source.slug.clone(), path.to_string_lossy().into_owned(), blob.clone())
+        }).collect::<Vec<_>>();
+        db::record_inflight(
+            &database, &dispatch, &input.plan, &ledger.reference, &ledger.commit.0, &source_rows,
+        )?;
+        ledger.commit.0
+    };
     let outcomes = pandoc::run_parallel(&pandoc_binary, jobs, pandoc_parallelism)?;
     let mut calls = Vec::new();
     let mut enqueue = Vec::new();
@@ -895,27 +1028,6 @@ fn run_dispatch_from_stdin() -> Result<DispatchRunOutput, Box<dyn std::error::Er
         )
         .into());
     }
-    let dispatch = input.dispatch_identity.clone().unwrap_or_else(|| format!(
-        "run-{}-{}",
-        std::process::id(),
-        std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|v| v.as_nanos()).unwrap_or(0)
-    ));
-    let inflight_commit = if let Some((_reference, commit)) = db::inflight_dispatch_ledger(&database, &dispatch)? {
-        commit
-    } else {
-        let ledger = git::append_inflight_snapshot(&repository, &LedgerSnapshotRequest {
-            dispatch: DispatchId(dispatch.clone()),
-            plan: PlanId(input.plan.clone()),
-            sources: ledger_sources.clone(),
-        })?;
-        let source_rows = ledger_sources.iter().zip(ledger.blobs.iter()).map(|(source, (path, blob))| {
-            (source.slug.clone(), path.to_string_lossy().into_owned(), blob.clone())
-        }).collect::<Vec<_>>();
-        db::record_inflight(
-            &database, &dispatch, &input.plan, &ledger.reference, &ledger.commit.0, &source_rows,
-        )?;
-        ledger.commit.0
-    };
     run_asc(&asc, ["upload", "calls"], &ndjson(&calls)?)?;
     run_asc(&asc, ["enqueue"], &ndjson(&enqueue)?)?;
     ensure_runtime_daemons(&asc)?;
@@ -947,8 +1059,7 @@ fn refresh_cli() -> Result<serde_json::Value, Box<dyn std::error::Error>> {
     let local = instruction_sync::scan_indexed_instructions(&repository, &slug_index)?;
     let (mut server, uploaded_instructions, _) = sync_local_instructions(&repository, &asc, local, None)?;
 
-    let dispatches = reconcile_git_dispatch_commits(&repository, &db)?;
-    if plans_changed > 0 || dispatches.iter().any(|row| row.get("status").and_then(serde_json::Value::as_str) == Some("dispatched")) {
+    if plans_changed > 0 {
         server = fetch_server_snapshot(&asc)?;
     }
 
@@ -964,7 +1075,7 @@ fn refresh_cli() -> Result<serde_json::Value, Box<dyn std::error::Error>> {
         "catalogs":catalogs,
         "git":git_state,
         "pipeline":pipeline,
-        "dispatches":dispatches,
+        "dispatches":[],
     });
     write_control_state(&repository, &state)?;
     Ok(serde_json::json!({
@@ -1103,14 +1214,14 @@ fn reconcile_git_dispatch_commits(
     let mut output = Vec::new();
     for commit in commits {
         let message = git_text(repository, &["show", "-s", "--format=%B", &commit])?;
-        let plan = dispatch_plan_trailer(&message)?;
-        if let Some(plan) = plan {
+        let trailers = dispatch_trailers(&message)?;
+        if let Some(plan) = trailers.plan {
             let receipt_key = format!("git.dispatch.receipt.{commit}.{plan}");
             if db::meta_get(db, &receipt_key)?.is_some() {
                 output.push(serde_json::json!({"status":"already-dispatched","commit":commit,"plan":plan}));
             } else {
                 require_plan_available(db, &plan)?;
-                let result = dispatch_commit_worktree(repository, &commit, &plan)?;
+                let result = dispatch_commit_worktree(repository, &commit, &plan, &trailers.documents)?;
                 record_plan_use(db, &plan)?;
                 db::meta_set_many(db, &[(receipt_key.as_str(), unix_timestamp())])?;
                 output.push(serde_json::json!({
@@ -1129,28 +1240,58 @@ fn reconcile_git_dispatch_commits(
     Ok(output)
 }
 
-fn dispatch_plan_trailer(message: &str) -> Result<Option<String>, Box<dyn std::error::Error>> {
-    let mut found = Vec::new();
-    for line in message.lines() {
+struct DispatchTrailers {
+    plan: Option<String>,
+    documents: Vec<String>,
+}
+
+fn dispatch_trailers(message: &str) -> Result<DispatchTrailers, Box<dyn std::error::Error>> {
+    let mut plans = Vec::new();
+    let mut documents = Vec::new();
+    let lines = message.lines().collect::<Vec<_>>();
+    let end = lines.iter().rposition(|line| !line.trim().is_empty())
+        .map(|index| index + 1).unwrap_or(0);
+    let start = lines[..end].iter().rposition(|line| line.trim().is_empty())
+        .map(|index| index + 1).unwrap_or(0);
+    for line in &lines[start..end] {
         if let Some(value) = line.strip_prefix("Autoscribe-Plan:") {
             let value = value.trim();
             if value.is_empty() { return Err("Autoscribe-Plan trailer is blank".into()); }
-            found.push(value.to_string());
+            plans.push(value.to_string());
+        }
+        if let Some(value) = line.strip_prefix("Autoscribe-Document:") {
+            let value = value.trim();
+            if value.is_empty() { return Err("Autoscribe-Document trailer is blank".into()); }
+            if !value.chars().all(|character| character.is_ascii_alphanumeric() || matches!(character, '.' | '-' | '_')) {
+                return Err(format!("Autoscribe-Document must contain a document slug: {value}").into());
+            }
+            if documents.iter().any(|document| document == value) {
+                return Err(format!("duplicate Autoscribe-Document trailer: {value}").into());
+            }
+            documents.push(value.to_string());
         }
     }
-    found.sort();
-    found.dedup();
-    match found.len() {
-        0 => Ok(None),
-        1 => Ok(found.into_iter().next()),
-        _ => Err("a commit may contain only one distinct Autoscribe-Plan trailer".into()),
+    plans.sort();
+    plans.dedup();
+    let plan = match plans.len() {
+        0 => None,
+        1 => plans.into_iter().next(),
+        _ => return Err("a commit may contain only one distinct Autoscribe-Plan trailer".into()),
+    };
+    if plan.is_none() && !documents.is_empty() {
+        return Err("Autoscribe-Document trailer requires Autoscribe-Plan".into());
     }
+    if plan.is_some() && documents.is_empty() {
+        return Err("Autoscribe-Plan trailer requires at least one Autoscribe-Document trailer".into());
+    }
+    Ok(DispatchTrailers { plan, documents })
 }
 
 fn dispatch_commit_worktree(
     repository: &Path,
     commit: &str,
     plan: &str,
+    document_slugs: &[String],
 ) -> Result<serde_json::Value, Box<dyn std::error::Error>> {
     let temporary = std::env::temp_dir().join(format!(
         "autoscribe-dispatch-{}-{}-{}",
@@ -1169,23 +1310,16 @@ fn dispatch_commit_worktree(
         return Err(format!("could not create dispatch worktree: {}", String::from_utf8_lossy(&add.stderr).trim()).into());
     }
     let result = (|| {
-        let paths = git_lines(repository, &["diff-tree", "--root", "--no-commit-id", "--name-only", "--diff-filter=AMCR", "-r", commit])?;
-        let mut documents = Vec::new();
-        for relative in paths {
-            if !relative.to_ascii_lowercase().ends_with(".md") { continue; }
-            let target = worktree.join(&relative);
-            if !target.is_file() { continue; }
-            let text = std::fs::read_to_string(&target)?;
-            let Some(slug) = markdown_slug(&text) else { continue; };
-            if is_dispatch_target_slug(&slug) { documents.push(slug); }
-        }
-        documents.sort();
-        documents.dedup();
-        if documents.is_empty() {
-            return Err(format!("Git dispatch commit {commit} contains no eligible slugged Markdown targets").into());
+        for slug in document_slugs {
+            if !is_dispatch_target_slug(slug) {
+                return Err(format!("Autoscribe-Document is not a dispatch target: {slug}").into());
+            }
         }
         let dispatch_identity = format!("git-{}-{}", &commit[..commit.len().min(16)], safe_dispatch_part(plan));
-        run_internal_dispatch(&worktree, plan, &documents, &dispatch_identity)
+        // Slug resolution now happens inside the detached exact-commit
+        // worktree. The filepath is derived state, never part of the commit
+        // message contract.
+        run_internal_dispatch(&worktree, plan, document_slugs, &dispatch_identity)
     })();
     let remove = Command::new("/usr/bin/git")
         .arg("-C").arg(repository)
@@ -1339,14 +1473,16 @@ fn resolve_slugs_from_stdin() -> Result<serde_json::Value, Box<dyn std::error::E
 
 fn resolve_document_slugs(repository: &Path, requested: &[String]) -> Result<Vec<(String, PathBuf)>, Box<dyn std::error::Error>> {
     let mut wanted = std::collections::BTreeSet::new();
+    let mut ordered = Vec::new();
     for slug in requested {
         let slug = slug.trim();
         if slug.is_empty() { return Err("document slug cannot be blank".into()); }
         if !wanted.insert(slug.to_string()) { return Err(format!("duplicate document slug: {slug}").into()); }
+        ordered.push(slug.to_string());
     }
     let matches = instruction_sync::resolve_slug_paths(repository, &wanted)?;
     let mut resolved = Vec::new();
-    for slug in wanted {
+    for slug in ordered {
         match matches.get(&slug).map(Vec::as_slice).unwrap_or(&[]) {
             [] => return Err(format!("document slug was not found: {slug}").into()),
             [path] => resolved.push((slug, path.clone())),
@@ -1405,34 +1541,6 @@ fn snapshot_from_service() -> Result<DefinePlanSnapshotOutput, Box<dyn std::erro
         operation: "define-plan.snapshot",
         catalogs: catalogs_with_authored_plans(&db, &server, &repository)?,
         refreshed_at: db::meta_get(&db, CATALOG_REFRESHED_AT_KEY)?,
-    })
-}
-
-fn catalog_refresh_from_stdin(operation: &'static str) -> Result<CatalogRefreshOutput, Box<dyn std::error::Error>> {
-    let input: VersionInput = read_json_stdin()?;
-    if input.version != 1 { return Err("unsupported catalog refresh version".into()); }
-    let repository = git::root(&std::env::current_dir()?)?;
-    let db = open_configured_database()?;
-    let asc = asc_command();
-
-    // Refresh owns discovery. Build one vault-wide slug index first, then hand
-    // that immutable snapshot to the instruction/catalogue refresh path.
-    let slug_index = instruction_sync::build_slug_index(&repository)?;
-    let indexed_paths = slug_index.values().cloned().collect::<Vec<_>>();
-    let dirty_paths = git::inspect(&repository, &indexed_paths)?.into_iter()
-        .filter(|item| item.dirty).map(|item| item.path).collect::<std::collections::BTreeSet<_>>();
-    let local = instruction_sync::scan_indexed_instructions(&repository, &slug_index)?;
-    let (server, uploaded, committed) = sync_local_instructions(&repository, &asc, local, Some(&dirty_paths))?;
-
-    let refreshed_at = unix_timestamp();
-    cache_server_snapshot(&db, &server, &refreshed_at)?;
-    Ok(CatalogRefreshOutput {
-        ok: true,
-        operation,
-        catalogs: catalogs_with_authored_plans(&db, &server, &repository)?,
-        refreshed_at,
-        uploaded_instructions: uploaded,
-        committed_instructions: committed,
     })
 }
 
@@ -1905,4 +2013,52 @@ where
             detail.trim()
         ),
     })
+}
+
+#[cfg(test)]
+mod watch_dispatch_tests {
+    use super::*;
+
+    #[test]
+    fn parses_repeated_document_trailers_in_order() {
+        let trailers = dispatch_trailers(
+            "Editorial commit\n\nAutoscribe-Plan: plan.test\nAutoscribe-Document: cnt.one\nAutoscribe-Document: psg.two\n"
+        ).unwrap();
+        assert_eq!(trailers.plan.as_deref(), Some("plan.test"));
+        assert_eq!(trailers.documents, vec!["cnt.one", "psg.two"]);
+    }
+
+    #[test]
+    fn ignores_trailer_examples_outside_the_final_trailer_block() {
+        let trailers = dispatch_trailers(
+            "Explain Autoscribe trailers\n\nAutoscribe-Plan: example.only\n\nNo dispatch in this commit.\n"
+        ).unwrap();
+        assert!(trailers.plan.is_none());
+        assert!(trailers.documents.is_empty());
+    }
+
+    #[test]
+    fn rejects_a_filepath_instead_of_a_slug() {
+        let error = dispatch_trailers(
+            "Editorial commit\n\nAutoscribe-Plan: plan.test\nAutoscribe-Document: Content/Outside.md\n"
+        ).err().unwrap().to_string();
+        assert!(error.contains("document slug"));
+    }
+
+    #[test]
+    fn document_resolution_preserves_trailer_order() {
+        let nonce = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH)
+            .unwrap().as_nanos();
+        let root = std::env::temp_dir().join(format!("autoscribe-document-order-{nonce}"));
+        std::fs::create_dir(&root).unwrap();
+        std::fs::write(root.join("First.md"), "---\nslug: cnt.first\n---\nFirst\n").unwrap();
+        std::fs::write(root.join("Second.md"), "---\nslug: psg.second\n---\nSecond\n").unwrap();
+        let resolved = resolve_document_slugs(
+            &root,
+            &["psg.second".to_string(), "cnt.first".to_string()],
+        ).unwrap();
+        assert_eq!(resolved.iter().map(|(slug, _)| slug.as_str()).collect::<Vec<_>>(),
+            vec!["psg.second", "cnt.first"]);
+        std::fs::remove_dir_all(root).unwrap();
+    }
 }
