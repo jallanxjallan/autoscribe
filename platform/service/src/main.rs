@@ -331,61 +331,94 @@ fn mirror_committed_instructions_to_config(repository: &Path) -> Result<(usize, 
     Ok((local.len(), commit))
 }
 
-fn sync_config_pass(repository: &Path, db: &Database) -> Result<serde_json::Value, Box<dyn std::error::Error>> {
+fn config_record_identity(category: &str, record: &serde_json::Value) -> Option<String> {
+    let fields: &[&str] = match category {
+        "instructions" => &["identity", "record_identity", "slug", "key"],
+        "plans" => &["record_identity", "identity", "slug", "key"],
+        _ => &[],
+    };
+    fields.iter().find_map(|field| record.get(*field).and_then(serde_json::Value::as_str))
+        .map(str::trim).filter(|value| !value.is_empty()).map(str::to_string)
+}
+
+fn pending_config_records(
+    repository: &Path,
+    category: &str,
+    revision: &str,
+) -> Result<Vec<serde_json::Value>, Box<dyn std::error::Error>> {
+    let current = git::config_list_json_at(repository, category, revision)?;
+    let submitted = match git::config_category_submitted_head(repository, category)? {
+        Some(head) => git::config_list_json_at(repository, category, &head.0)?,
+        None => Vec::new(),
+    };
+    let submitted = submitted.into_iter().filter_map(|record| {
+        config_record_identity(category, &record).map(|identity| (identity, record))
+    }).collect::<std::collections::BTreeMap<_, _>>();
+    Ok(current.into_iter().filter(|record| {
+        let Some(identity) = config_record_identity(category, record) else { return true; };
+        submitted.get(&identity) != Some(record)
+    }).collect())
+}
+
+fn plan_upload_record(record: &serde_json::Value) -> serde_json::Value {
+    serde_json::json!({
+        "type":"plan",
+        "identity":record.get("record_identity").cloned().unwrap_or(serde_json::Value::Null),
+        "content":record.get("payload").cloned().unwrap_or(serde_json::Value::Null),
+        "extra":{}
+    })
+}
+
+fn sync_config_pass(repository: &Path, _db: &Database) -> Result<serde_json::Value, Box<dyn std::error::Error>> {
     let (scanned, staged_commit) = mirror_committed_instructions_to_config(repository)?;
     let head = git::config_head(repository)?.ok_or("config ref was not created")?;
-    let state_missing = git::config_get_json(repository, "state", "control")?.is_none();
-    let payload_current = git::config_revision_is_synced(repository, &head.0)?;
 
-    if payload_current && !state_missing {
+    let instructions_current = git::config_category_revision_is_submitted(repository, "instructions", &head.0)?;
+    let plans_current = git::config_category_revision_is_submitted(repository, "plans", &head.0)?;
+    if instructions_current && plans_current {
+        if !git::config_revision_is_synced(repository, &head.0)? {
+            git::mark_config_synced(repository, &head.0)?;
+        }
         return Ok(serde_json::json!({
             "status":"current","instructions":scanned,
             "plans":plan_repository::list_at(repository, &head.0)?.len(),"config_commit":head.0
         }));
     }
 
-    // Capture one immutable config revision and reconcile exactly that payload.
-    // Plan Manager may advance the ref while network work is in progress; in
-    // that case only this captured revision is marked synchronized and the
-    // newer payload remains pending for the next pass.
-    let instructions = git::config_list_json_at(repository, "instructions", &head.0)?;
-    let plans = plan_repository::list_at(repository, &head.0)?;
+    // watch-config is intentionally local-state-driven. It does not read the
+    // live pipeline/Redis catalog. The submitted refs are the durable handoff
+    // ledger: only records absent or changed there are sent.
+    let pending_instructions = pending_config_records(repository, "instructions", &head.0)?;
+    let pending_plans = pending_config_records(repository, "plans", &head.0)?;
     let asc = asc_command();
-    let server_before = fetch_server_snapshot(&asc)?;
-    let upload = if payload_current {
-        reconcile::AuthoredCatalogUpload { instructions: Vec::new(), plans: Vec::new() }
-    } else {
-        // Validate the plan against the exact catalog visible at this captured
-        // revision before uploading any part of the configuration.
-        let visible_catalogs = catalogs_with_local_config_at(&server_before, repository, &head.0)?;
-        for plan in &plans {
-            plan_repository::validate_against_catalog(plan, &visible_catalogs)?;
+
+    if !instructions_current {
+        if !pending_instructions.is_empty() {
+            run_asc(&asc, ["upload", "instructions"], &ndjson(&pending_instructions)?)?;
         }
-        reconcile::authored_catalog(&server_before, instructions.clone(), plans.clone())
-    };
-    let uploaded_instructions = upload.instructions.len();
-    let uploaded_plans = upload.plans.len();
-    if !upload.instructions.is_empty() {
-        run_asc(&asc, ["upload", "instructions"], &ndjson(&upload.instructions)?)?;
+        git::mark_config_category_submitted(repository, "instructions", &head.0)?;
     }
-    if !upload.plans.is_empty() {
-        run_asc(&asc, ["upload", "plans"], &ndjson(&upload.plans)?)?;
+
+    if !plans_current {
+        if !pending_plans.is_empty() {
+            let uploads = pending_plans.iter().map(plan_upload_record).collect::<Vec<_>>();
+            run_asc(&asc, ["upload", "plans"], &ndjson(&uploads)?)?;
+        }
+        git::mark_config_category_submitted(repository, "plans", &head.0)?;
     }
-    let server = if uploaded_instructions + uploaded_plans > 0 {
-        fetch_server_snapshot(&asc)?
-    } else {
-        server_before
-    };
-    if !payload_current {
+
+    if git::config_category_revision_is_submitted(repository, "instructions", &head.0)?
+        && git::config_category_revision_is_submitted(repository, "plans", &head.0)? {
         git::mark_config_synced(repository, &head.0)?;
     }
-    let refreshed_at = unix_timestamp();
-    let (_, state_commit) = publish_control_state(repository, db, &server, &refreshed_at)?;
+
     Ok(serde_json::json!({
-        "status": if payload_current { "refreshed" } else { "synchronized" },
-        "instructions":instructions.len(),"plans":plans.len(),
-        "uploaded_instructions":uploaded_instructions,"uploaded_plans":uploaded_plans,
-        "config_commit":head.0,"state_commit":state_commit,"staged_commit":staged_commit,"ref":git::CONFIG_REF
+        "status":"submitted",
+        "instructions":git::config_list_json_at(repository, "instructions", &head.0)?.len(),
+        "plans":plan_repository::list_at(repository, &head.0)?.len(),
+        "uploaded_instructions":pending_instructions.len(),
+        "uploaded_plans":pending_plans.len(),
+        "config_commit":head.0,"staged_commit":staged_commit,"ref":git::CONFIG_REF
     }))
 }
 
@@ -1123,8 +1156,10 @@ fn run_dispatch_from_stdin() -> Result<DispatchRunOutput, Box<dyn std::error::Er
         .into());
     }
     run_asc(&asc, ["upload", "calls"], &ndjson(&calls)?)?;
-    run_asc(&asc, ["enqueue"], &ndjson(&enqueue)?)?;
-    ensure_runtime_daemons(&asc)?;
+    // Enqueue owns its own durable failure reporting. Once the payload has
+    // been handed to asc, svc must not wait for enqueue validation or runtime
+    // processing; the response/inflight watcher will surface overdue work.
+    run_asc_fire_and_forget(&asc, ["enqueue"], &ndjson(&enqueue)?)?;
     Ok(DispatchRunOutput {
         ok: true,
         operation: "dispatch.run",
@@ -1511,23 +1546,21 @@ fn configured_pandoc_parallelism() -> usize {
 }
 
 fn require_plan_available(repository: &Path, _db: &Database, plan: &str) -> Result<(), Box<dyn std::error::Error>> {
-    let local = plan_repository::list(repository)?.iter().any(|record| {
+    let local = plan_repository::list(repository)?.into_iter().find(|record| {
+        ["record_identity", "slug"].into_iter().any(|field| record.get(field).and_then(serde_json::Value::as_str) == Some(plan))
+    }).ok_or_else(|| format!("plan slug is not present in local configuration: {plan}"))?;
+
+    let Some(submitted_head) = git::config_category_submitted_head(repository, "plans")? else {
+        return Err(format!("plan has not been submitted: {plan}").into());
+    };
+    let submitted = plan_repository::list_at(repository, &submitted_head.0)?.into_iter().find(|record| {
         ["record_identity", "slug"].into_iter().any(|field| record.get(field).and_then(serde_json::Value::as_str) == Some(plan))
     });
-    if local {
-        if !git::config_is_synced(repository)? {
-            return Err(format!("configuration is pending synchronization; refusing dispatch of local plan: {plan}").into());
-        }
-        return Ok(());
+    if submitted.as_ref() == Some(&local) {
+        Ok(())
+    } else {
+        Err(format!("plan has local changes not yet submitted: {plan}").into())
     }
-    let state = git::config_get_json(repository, "state", "control")?
-        .ok_or("configuration catalog has not been published yet")?;
-    let found = state.get("catalogs").and_then(|value| value.get("plans"))
-        .and_then(serde_json::Value::as_array).is_some_and(|records| {
-            records.iter().any(|record| ["record_identity", "slug", "key"].into_iter()
-                .any(|field| record.get(field).and_then(serde_json::Value::as_str) == Some(plan)))
-        });
-    if found { Ok(()) } else { Err(format!("plan slug is not available in published config state: {plan}").into()) }
 }
 
 fn resolve_slugs_from_stdin() -> Result<serde_json::Value, Box<dyn std::error::Error>> {
@@ -1920,22 +1953,28 @@ fn asc_command() -> PathBuf {
     })
 }
 
-fn ensure_runtime_daemons(asc: &Path) -> Result<(), AscFailure> {
-    let status = run_asc_capture(asc, ["run", "status"], &[]);
-    let needs_start = match status {
-        Ok(output) => {
-            let text = String::from_utf8_lossy(&output);
-            text.lines().any(|line| {
-                line.contains("=not-running")
-                    || line.contains("=stale")
-                    || line.contains("=crashed")
-            })
-        }
-        Err(_) => true,
-    };
-    if needs_start {
-        run_asc(asc, ["run", "start"], &[])?;
+fn run_asc_fire_and_forget<I, S>(asc: &Path, args: I, input: &[u8]) -> Result<(), AscFailure>
+where
+    I: IntoIterator<Item = S>,
+    S: AsRef<std::ffi::OsStr>,
+{
+    let mut child = Command::new(asc)
+        .args(args)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn()
+        .map_err(|error| AscFailure {
+            message: format!("could not start {}: {error}", asc.display()),
+        })?;
+    if let Some(mut stdin) = child.stdin.take() {
+        use std::io::Write;
+        stdin.write_all(input).map_err(|error| AscFailure {
+            message: format!("could not stream payload to {}: {error}", asc.display()),
+        })?;
     }
+    // Deliberately do not wait. asc is responsible for recording any enqueue
+    // failure after accepting the payload.
     Ok(())
 }
 

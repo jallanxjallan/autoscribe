@@ -34,16 +34,16 @@ fn plan_save_writes_only_config_ref_and_watch_config_syncs_committed_configurati
     let watcher = invoke(&root, &asc, "watch-config", None);
     assert!(watcher.status.success(), "{}", String::from_utf8_lossy(&watcher.stdout));
     let log = fs::read_to_string(root.join("asc.log")).unwrap();
-    assert_eq!(log, "control snapshot\nupload instructions\nupload plans\ncontrol snapshot\n");
+    assert_eq!(log, "upload instructions\nupload plans\n");
     assert!(git_output(&root, ["show", "refs/heads/autoscribe/config:instructions/ctx.project.test.json"])
         .contains("Local context"));
     let config = git_output(&root, ["rev-parse", "refs/heads/autoscribe/config"]);
     let synced = git_output(&root, ["rev-parse", "refs/autoscribe/config-synced"]);
-    assert_ne!(config.trim(), synced.trim(), "state publication advances config without changing its payload");
-    assert!(git_output(&root, ["show", "refs/heads/autoscribe/config:state/control.json"])
-        .contains("\"current\": true"));
-    assert_eq!(git_output(&root, ["ls-tree", "-r", "refs/heads/autoscribe/config", "--", "plans", "instructions"]),
-        git_output(&root, ["ls-tree", "-r", "refs/autoscribe/config-synced", "--", "plans", "instructions"]));
+    assert_eq!(config.trim(), synced.trim());
+    assert_eq!(git_output(&root, ["rev-parse", "refs/autoscribe/config-instructions-submitted"]).trim(), config.trim());
+    assert_eq!(git_output(&root, ["rev-parse", "refs/autoscribe/config-plans-submitted"]).trim(), config.trim());
+    let state = Command::new("git").current_dir(&root).args(["show", "refs/heads/autoscribe/config:state/control.json"]).output().unwrap();
+    assert!(!state.status.success(), "watch-config must not publish server-derived control state");
 
     fs::remove_dir_all(root).unwrap();
 }
@@ -94,7 +94,7 @@ fn define_plan_snapshot_reads_published_git_state_without_pipeline_or_database()
 }
 
 #[test]
-fn watch_config_rejects_plan_values_outside_the_captured_catalog_before_upload() {
+fn watch_config_submits_plan_without_reading_server_catalog() {
     let root = temp();
     init_git(&root);
     let asc = fake_asc(&root);
@@ -108,13 +108,13 @@ fn watch_config_rejects_plan_values_outside_the_captured_catalog_before_upload()
     let saved = invoke(&root, &asc, "plan-save", Some(json!({"version":1,"plan":plan})));
     assert!(saved.status.success());
     let watcher = invoke(&root, &asc, "watch-config", None);
-    assert!(!watcher.status.success());
-    assert_eq!(fs::read_to_string(root.join("asc.log")).unwrap(), "control snapshot\n");
-    assert!(!root.join("asc.log.input").exists());
+    assert!(watcher.status.success(), "{}", String::from_utf8_lossy(&watcher.stdout));
+    assert_eq!(fs::read_to_string(root.join("asc.log")).unwrap(), "upload plans\n");
+    assert!(root.join("asc.log.input").exists());
     let synced = Command::new("git").current_dir(&root)
-        .args(["rev-parse", "--verify", "refs/autoscribe/config-synced"])
+        .args(["rev-parse", "--verify", "refs/autoscribe/config-plans-submitted"])
         .output().unwrap();
-    assert!(!synced.status.success());
+    assert!(synced.status.success());
     fs::remove_dir_all(root).unwrap();
 }
 
@@ -179,4 +179,42 @@ fn temp() -> PathBuf {
 fn executable(path: &Path) {
     use std::os::unix::fs::PermissionsExt;
     let mut permissions = fs::metadata(path).unwrap().permissions(); permissions.set_mode(0o755); fs::set_permissions(path, permissions).unwrap();
+}
+
+#[test]
+fn watch_config_retries_only_the_category_that_did_not_submit() {
+    let root = temp();
+    init_git(&root);
+    let instructions = root.join("Instructions");
+    fs::create_dir(&instructions).unwrap();
+    fs::write(instructions.join("Context.md"), "---\ntitle: Project Context\nslug: ctx.project.retry\nrecord: instruction\ncomponent: context\n---\nRetry context\n").unwrap();
+    git(&root, ["add", "Instructions/Context.md"]);
+    git(&root, ["commit", "-q", "-m", "Add retry context"]);
+    let asc = root.join("asc-retry");
+    let log = root.join("asc-retry.log");
+    let failed = root.join("plan-failed-once");
+    fs::write(&asc, format!(r#"#!/bin/sh
+printf '%s\n' "$1 $2" >> '{log}'
+cat >> '{log}.input'
+if [ "$1 $2" = "upload plans" ] && [ ! -e '{failed}' ]; then
+  : > '{failed}'
+  exit 1
+fi
+exit 0
+"#, log=log.display(), failed=failed.display())).unwrap();
+    executable(&asc);
+    let plan = json!({"record_type":"plan","record_identity":"plan.retry.test","payload":{"steps":{"1":{"index":1,"kind":"script","script":"anything"}}}});
+    assert!(invoke(&root, &asc, "plan-save", Some(json!({"version":1,"plan":plan}))).status.success());
+
+    let first = invoke(&root, &asc, "watch-config", None);
+    assert!(!first.status.success());
+    assert_eq!(fs::read_to_string(&log).unwrap(), "upload instructions\nupload plans\n");
+    assert!(Command::new("git").current_dir(&root).args(["rev-parse", "--verify", "refs/autoscribe/config-instructions-submitted"]).output().unwrap().status.success());
+    assert!(!Command::new("git").current_dir(&root).args(["rev-parse", "--verify", "refs/autoscribe/config-plans-submitted"]).output().unwrap().status.success());
+
+    let second = invoke(&root, &asc, "watch-config", None);
+    assert!(second.status.success(), "{}", String::from_utf8_lossy(&second.stdout));
+    assert_eq!(fs::read_to_string(&log).unwrap(), "upload instructions\nupload plans\nupload plans\n");
+    assert!(Command::new("git").current_dir(&root).args(["rev-parse", "--verify", "refs/autoscribe/config-plans-submitted"]).output().unwrap().status.success());
+    fs::remove_dir_all(root).unwrap();
 }

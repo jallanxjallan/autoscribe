@@ -14,6 +14,8 @@ const GIT: &str = "/usr/bin/git";
 const INFLIGHT_REF: &str = "refs/heads/autoscribe/inflight";
 pub const CONFIG_REF: &str = "refs/heads/autoscribe/config";
 pub const CONFIG_SYNCED_REF: &str = "refs/autoscribe/config-synced";
+pub const CONFIG_INSTRUCTIONS_SUBMITTED_REF: &str = "refs/autoscribe/config-instructions-submitted";
+pub const CONFIG_PLANS_SUBMITTED_REF: &str = "refs/autoscribe/config-plans-submitted";
 pub const CONFIG_SOURCE_REF: &str = "refs/autoscribe/config-source";
 
 pub fn root(path: &Path) -> ServiceResult<PathBuf> {
@@ -402,6 +404,31 @@ pub fn config_synced_head(repo: &Path) -> ServiceResult<Option<CommitId>> {
     Ok(optional_revision(&repo, CONFIG_SYNCED_REF)?.map(CommitId))
 }
 
+pub fn config_category_submitted_head(repo: &Path, category: &str) -> ServiceResult<Option<CommitId>> {
+    let repo = repository_root(repo)?;
+    let reference = config_submitted_ref(category)?;
+    Ok(optional_revision(&repo, reference)?.map(CommitId))
+}
+
+pub fn config_category_revision_is_submitted(repo: &Path, category: &str, revision_spec: &str) -> ServiceResult<bool> {
+    let repo = repository_root(repo)?;
+    let category = config_category(category)?;
+    let revision = revision(&repo, revision_spec)?;
+    let reference = config_submitted_ref(&category)?;
+    let submitted = optional_revision(&repo, reference)?;
+    Ok(config_category_listing(&repo, &category, Some(revision.as_str()))?
+        == config_category_listing(&repo, &category, submitted.as_deref())?)
+}
+
+pub fn mark_config_category_submitted(repo: &Path, category: &str, commit: &str) -> ServiceResult<()> {
+    let repo = repository_root(repo)?;
+    let category = config_category(category)?;
+    let reference = config_submitted_ref(&category)?;
+    let commit = revision(&repo, commit)?;
+    git(&repo, ["update-ref", "-m", "AutoScribe config submitted", reference, commit.as_str()])?;
+    Ok(())
+}
+
 pub fn config_is_synced(repo: &Path) -> ServiceResult<bool> {
     let repo = repository_root(repo)?;
     let head = optional_revision(&repo, CONFIG_REF)?;
@@ -596,6 +623,22 @@ where F: FnMut(&Path) -> ServiceResult<()> {
 fn config_payload_listing(repo: &Path, revision: Option<&str>) -> ServiceResult<String> {
     let Some(revision) = revision else { return Ok(String::new()); };
     let output = git(repo, ["ls-tree", "-r", revision, "--", "plans", "instructions"])?;
+    Ok(text(&output))
+}
+
+fn config_submitted_ref(category: &str) -> ServiceResult<&'static str> {
+    match category {
+        "instructions" => Ok(CONFIG_INSTRUCTIONS_SUBMITTED_REF),
+        "plans" => Ok(CONFIG_PLANS_SUBMITTED_REF),
+        _ => Err(ServiceError::InvalidInput(format!("configuration category has no submitted ledger: {category}"))),
+    }
+}
+
+fn config_category_listing(repo: &Path, category: &str, revision_spec: Option<&str>) -> ServiceResult<String> {
+    let Some(revision_spec) = revision_spec else { return Ok(String::new()); };
+    let revision = revision(repo, revision_spec)?;
+    let prefix = format!("{category}/");
+    let output = git(repo, ["ls-tree", "-r", revision.as_str(), "--", prefix.as_str()])?;
     Ok(text(&output))
 }
 

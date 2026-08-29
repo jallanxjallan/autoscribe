@@ -31,33 +31,11 @@ fn dispatch_run_converts_uploads_and_enqueues_in_one_service_call() {
     assert_eq!(response["records"], 1);
     assert_eq!(
         fs::read_to_string(root.join("asc.log")).unwrap(),
-        "export list-pending --ndjson\nupload calls\nenqueue\nrun status\n"
+        "export list-pending --ndjson\nupload calls\nenqueue\n"
     );
     let input = fs::read_to_string(root.join("asc.log.input")).unwrap();
     assert!(input.contains("\"type\":\"call\""));
     assert!(input.contains("\"directive\":\"Use this\""));
-    fs::remove_dir_all(root).unwrap();
-}
-
-#[test]
-fn dispatch_starts_runtime_daemons_when_status_is_unhealthy() {
-    let root = temp("start-daemons");
-    fs::write(root.join("One.md"), "---\nslug: cnt.one\n---\nBody\n").unwrap();
-    git(&root, ["init", "--quiet", "--initial-branch=main"]);
-    git(&root, ["config", "user.email", "tests@autoscribe.local"]);
-    git(&root, ["config", "user.name", "AutoScribe Tests"]);
-    git(&root, ["add", "One.md"]);
-    git(&root, ["commit", "--quiet", "-m", "Initial"]);
-    let pandoc = root.join("pandoc");
-    fs::write(&pandoc, "#!/bin/sh\nprintf '%s\\n' '{\"record_type\":\"content\",\"record_identity\":\"cnt.one\",\"payload\":{\"content\":\"Body\"}}'\n").unwrap();
-    executable(&pandoc);
-    let asc = fake_asc_with_status(&root, "  worker=not-running");
-    let output = invoke(&root, &pandoc, &asc);
-    assert!(output.status.success(), "{}", String::from_utf8_lossy(&output.stdout));
-    assert_eq!(
-        fs::read_to_string(root.join("asc.log")).unwrap(),
-        "export list-pending --ndjson\nupload calls\nenqueue\nrun status\nrun start\n"
-    );
     fs::remove_dir_all(root).unwrap();
 }
 
@@ -131,6 +109,7 @@ fn save_plan(root: &Path) {
         "record_identity":"plan.test",
         "payload":{"steps":{"1":{"kind":"llm"}}}
     })).unwrap();
+    git::mark_config_category_submitted(root, "plans", &commit).unwrap();
     git::mark_config_synced(root, &commit).unwrap();
 }
 

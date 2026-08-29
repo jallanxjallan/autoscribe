@@ -43,7 +43,7 @@ fn watcher_dispatches_declared_document_from_exact_commit_snapshot() {
     assert_eq!(fs::read_to_string(root.join("pandoc.input")).unwrap(), committed);
     assert_eq!(git_output(&root, ["show", "refs/heads/autoscribe/inflight:Content/One.md"]), committed);
     assert_eq!(fs::read_to_string(root.join("asc.log")).unwrap(),
-        "export list-pending --ndjson\nupload calls\nenqueue\nrun status\n");
+        "export list-pending --ndjson\nupload calls\nenqueue\n");
 
     fs::remove_dir_all(root).unwrap();
 }
@@ -79,6 +79,7 @@ fn save_plan(root: &Path) {
         "record_identity":"plan.test",
         "payload":{"steps":{"1":{"kind":"llm"}}}
     })).unwrap();
+    git::mark_config_category_submitted(root, "plans", &commit).unwrap();
     git::mark_config_synced(root, &commit).unwrap();
 }
 
