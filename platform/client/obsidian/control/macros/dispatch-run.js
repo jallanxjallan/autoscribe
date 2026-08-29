@@ -229,8 +229,8 @@ module.exports = async function dispatch_run(params = {}) {
   const { openWorkflowModal } = loader.requireControl("scripts/lib/workflow-modal.js");
   const { notify } = loader.requireControl("scripts/lib/notify.js");
   const { readCurrentSelection, clearCurrentSelection } = loader.requireControl("scripts/selections/current-selection.js");
-  const { readControlState, catalogsFromState } = loader.requireControl("scripts/lib/control-state.js");
   const { createDispatchCommit } = loader.requireControl("scripts/lib/git-dispatch.js");
+  const { readPlanManagerSnapshot } = loader.requireControl("scripts/lib/config-git.js");
 
   async function render(container) {
     container.empty();
@@ -243,19 +243,23 @@ module.exports = async function dispatch_run(params = {}) {
     const status = container.createEl("pre", { text: "Loading local selection and plan catalogue…" });
     status.style.whiteSpace = "pre-wrap";
 
-    let state;
     let plans;
     let selection;
     let documents;
     try {
-      const [clipboard, stateResult, selectionResult] = await Promise.all([
+      const [clipboard, selectionResult] = await Promise.all([
         clipboardDocuments(app),
-        readControlState(app),
         Promise.resolve(readCurrentSelection(app)),
       ]);
-      state = stateResult;
       selection = selectionResult;
-      plans = sortedPlans(state, catalogsFromState);
+      const snapshot = await readPlanManagerSnapshot(loader.vaultBasePath);
+      plans = (Array.isArray(snapshot?.catalogs?.plans) ? snapshot.catalogs.plans : [])
+        .filter((record) => identity(record))
+        .sort((a, b) =>
+          (Number(b?.usage_score || 0) - Number(a?.usage_score || 0)) ||
+          label(a).localeCompare(label(b), undefined, { sensitivity: "base", numeric: true }) ||
+          identity(a).localeCompare(identity(b), undefined, { sensitivity: "base", numeric: true })
+        );
       documents = mergeDocuments(
         clipboard,
         selectionDocuments(app, selection)
@@ -274,12 +278,17 @@ module.exports = async function dispatch_run(params = {}) {
     planSelect.style.minWidth = "min(36rem, 80vw)";
 
     if (!plans.length) {
-      planSelect.createEl("option", { text: "No plans in local catalogue", value: "" });
+      const emptyOption = planSelect.createEl("option", { text: "No plans in local catalogue" });
+      emptyOption.value = "";
       planSelect.disabled = true;
     } else {
+      const placeholder = planSelect.createEl("option", { text: "Select a plan…" });
+      placeholder.value = "";
+      placeholder.selected = true;
       for (const plan of plans) {
         const slug = identity(plan);
-        planSelect.createEl("option", { value: slug, text: `${label(plan)} — ${slug}` });
+        const option = planSelect.createEl("option", { text: `${label(plan)} — ${slug}` });
+        option.value = slug;
       }
     }
 

@@ -5,7 +5,7 @@ const { loadConfig } = require("../scripts/lib/config-loader");
 
 function workflowConfig() { return loadConfig("workflow"); }
 function stepKinds() { return workflowConfig().step_kinds || ["llm", "script", "rag"]; }
-function statusKey() { return String(workflowConfig().define_plan?.status_storage_key || "autoscribe.define-plan.status"); }
+function statusKey() { return String(workflowConfig().plan_manager?.status_storage_key || "autoscribe.plan-manager.status"); }
 
 function el(tag, attrs = {}, children = []) {
   const node = document.createElement(tag);
@@ -24,6 +24,12 @@ function el(tag, attrs = {}, children = []) {
 function id(record) { return String(record?.slug || record?.record_identity || record?.key || "").trim(); }
 function title(record) { return String(record?.title || record?.label || record?.name || id(record)); }
 function selected(records, value) { return records.find((record) => id(record) === String(value || "")) || null; }
+function missingRecord(value) {
+  const slug = String(value || "").trim();
+  return slug ? { slug, title: slug, missing: true } : null;
+}
+function selectedOrMissing(records, value) { return selected(records, value) || missingRecord(value); }
+function isMissing(record) { return Boolean(record?.missing); }
 function planSlug(record) { return String(record?.record_identity || record?.slug || record?.key || "").trim(); }
 function byScope(records, scope) { return records.filter((record) => String(record?.scope || "").toLowerCase() === scope); }
 function modelsForEngine(records, engine) {
@@ -69,9 +75,9 @@ function screenSteps(plan, catalogs) {
         script: selected(catalogs.scripts, step.script),
         rag_profile: selected(catalogs.ragProfiles, step.rag_profile),
         standingSlugs: Array.isArray(refs.standing) ? [...refs.standing] : [],
-        role: selected(catalogs.instructions, refs.role?.[0]),
-        context: selected(catalogs.instructions, refs.context?.[0]),
-        task: selected(catalogs.instructions, refs.task?.[0] || step.instruction),
+        role: selectedOrMissing(catalogs.instructions, refs.role?.[0]),
+        context: selectedOrMissing(catalogs.instructions, refs.context?.[0]),
+        task: selectedOrMissing(catalogs.instructions, refs.task?.[0] || step.instruction),
         argsJson: JSON.stringify(step.args || {}, null, 2),
       };
     });
@@ -83,8 +89,8 @@ async function renderCreatePlan({ app, container }) {
   const load = (relative) => require(path.join(root, "_control", ...relative.split("/")));
   const { notify } = load("scripts/lib/notify.js");
   const { buildPlanRecord } = load("scripts/plans/plan-record.js");
-  const { readPlanManagerSnapshot, savePlan } = load("scripts/lib/config-git.js");
-  const snapshot = readPlanManagerSnapshot(root);
+  const { readPlanManagerSnapshot, savePlan, deletePlan } = load("scripts/lib/config-git.js");
+  const snapshot = await readPlanManagerSnapshot(root);
 
   const catalogs = catalogsFrom(snapshot);
   const plans = catalogs.plans;
@@ -105,6 +111,9 @@ async function renderCreatePlan({ app, container }) {
   const planSelect = el("select"); planSelect.style.width = "100%";
   const loadButton = el("button", { text: "Load Plan" });
   const newButton = el("button", { text: "New Plan" });
+  const deleteButton = el("button", { text: "Delete Plan" });
+  deleteButton.disabled = true;
+  let deleteArmedSlug = "";
   const name = el("input", { type: "text", placeholder: "Plan label" }); name.style.width = "100%";
   const description = el("textarea", { placeholder: "Optional description" }); description.style.width = "100%";
   const stepsBox = el("div");
@@ -132,8 +141,12 @@ async function renderCreatePlan({ app, container }) {
   function choice(records, value, onChange, placeholder, options = {}) {
     const select = el("select"); select.style.width = "100%";
     select.appendChild(el("option", { value: "", text: placeholder }));
+    const valueId = id(value);
+    if (valueId && !records.some((record) => id(record) === valueId)) {
+      select.appendChild(el("option", { value: valueId, text: `⚠ Missing from catalog — ${valueId}` }));
+    }
     records.forEach((record) => option(select, record, options));
-    select.value = id(value);
+    select.value = valueId;
     select.addEventListener("change", () => onChange(selected(records, select.value)));
     return select;
   }
@@ -142,6 +155,11 @@ async function renderCreatePlan({ app, container }) {
     const records = byScope(catalogs.instructions, scope);
     card.appendChild(el("strong", { text: `${heading} (${records.length})` }));
     card.appendChild(choice(records, step[field], (value) => { step[field] = value; redraw(); }, `Choose ${scope}`, { titleOnly: true }));
+    if (isMissing(step[field])) {
+      const warning = el("div", { text: `⚠ Referenced ${scope} instruction is not in the catalog: ${id(step[field])}` });
+      warning.style.cssText = "color:var(--text-warning);margin:.25rem 0 .5rem";
+      card.appendChild(warning);
+    }
   }
 
   function standingPicker(card, step) {
@@ -154,6 +172,18 @@ async function renderCreatePlan({ app, container }) {
     all.addEventListener("click", () => { step.standingSlugs = records.map(id); redraw(); });
     none.addEventListener("click", () => { step.standingSlugs = []; redraw(); });
     heading.append(all, none); card.appendChild(heading);
+    const catalogSlugs = new Set(records.map(id));
+    for (const slug of selectedSlugs) {
+      if (catalogSlugs.has(slug)) continue;
+      const row = el("label"); row.style.cssText = "display:flex;gap:.4rem;align-items:center;color:var(--text-warning)";
+      const checkbox = el("input", { type: "checkbox" }); checkbox.checked = true;
+      checkbox.addEventListener("change", () => {
+        if (!checkbox.checked) selectedSlugs.delete(slug);
+        step.standingSlugs = [...selectedSlugs];
+        redraw();
+      });
+      row.append(checkbox, el("span", { text: `⚠ Missing from catalog — ${slug}` })); card.appendChild(row);
+    }
     for (const record of records) {
       const row = el("label"); row.style.cssText = "display:flex;gap:.4rem;align-items:center";
       const checkbox = el("input", { type: "checkbox" }); checkbox.checked = selectedSlugs.has(id(record));
@@ -198,8 +228,28 @@ async function renderCreatePlan({ app, container }) {
     });
   }
 
+  function disarmDelete() {
+    deleteArmedSlug = "";
+    deleteButton.textContent = "Delete Plan";
+    deleteButton.classList.remove("mod-warning");
+  }
+
   function clearForm() {
-    loaded = null; name.value = ""; description.value = ""; steps = []; redraw();
+    loaded = null; name.value = ""; description.value = ""; steps = []; deleteButton.disabled = true; disarmDelete(); redraw();
+  }
+
+  function missingInstructionSlugs() {
+    const catalog = new Set(catalogs.instructions.map(id));
+    const missing = new Set();
+    for (const step of steps) {
+      if (step.kind !== "llm") continue;
+      for (const slug of step.standingSlugs || []) if (slug && !catalog.has(slug)) missing.add(slug);
+      for (const record of [step.role, step.context, step.task]) {
+        const slug = id(record);
+        if (slug && !catalog.has(slug)) missing.add(slug);
+      }
+    }
+    return [...missing];
   }
 
   function loadSelectedPlan() {
@@ -208,7 +258,13 @@ async function renderCreatePlan({ app, container }) {
     if (!loaded) return setStatus("The selected plan is no longer present in Git state.");
     name.value = loaded.payload?.label || "";
     description.value = loaded.payload?.description || "";
-    steps = screenSteps(loaded, catalogs); redraw(); setStatus(`Loaded ${planSlug(loaded)}.`);
+    steps = screenSteps(loaded, catalogs);
+    deleteButton.disabled = false;
+    redraw();
+    const missing = missingInstructionSlugs();
+    setStatus(missing.length
+      ? `Loaded ${planSlug(loaded)} with ${missing.length} missing instruction reference${missing.length === 1 ? "" : "s"}: ${missing.join(", ")}`
+      : `Loaded ${planSlug(loaded)}.`);
   }
 
   refresh.addEventListener("click", async () => {
@@ -220,11 +276,45 @@ async function renderCreatePlan({ app, container }) {
     } finally { refresh.disabled = false; }
   });
 
+  planSelect.addEventListener("change", () => {
+    disarmDelete();
+    deleteButton.disabled = !planSelect.value;
+  });
   loadButton.addEventListener("click", loadSelectedPlan);
   newButton.addEventListener("click", () => { planSelect.value = ""; clearForm(); setStatus("New plan form ready."); });
+  deleteButton.addEventListener("click", async () => {
+    const slug = planSelect.value || planSlug(loaded);
+    if (!slug) return setStatus("Select a plan first.");
+    const plan = plans.find((record) => planSlug(record) === slug) || loaded;
+    const label = String(plan?.payload?.label || plan?.label || slug);
+
+    if (deleteArmedSlug !== slug) {
+      deleteArmedSlug = slug;
+      deleteButton.textContent = "Confirm Delete";
+      deleteButton.classList.add("mod-warning");
+      setStatus(`Press Confirm Delete to remove “${label}” (${slug}) from autoscribe/config. Select another plan or press New Plan to cancel.`);
+      return;
+    }
+
+    deleteButton.disabled = true;
+    setStatus(`Deleting ${slug}…`);
+    try {
+      const commit = await deletePlan(root, slug);
+      const deletedIndex = plans.findIndex((record) => planSlug(record) === slug);
+      if (deletedIndex >= 0) plans.splice(deletedIndex, 1);
+      clearForm();
+      refreshSelect();
+      notify(`Deleted plan ${slug} from Git.`);
+      setStatus(`Deleted ${slug} from autoscribe/config (${String(commit).slice(0, 10)}). Waiting for watch-config synchronization.`);
+    } catch (error) {
+      const message = `Delete failed: ${error.message || error}`; setStatus(message); notify(message, 10000);
+      disarmDelete();
+      deleteButton.disabled = !planSelect.value;
+    }
+  });
   const add = el("button", { text: "Add Step" });
   add.addEventListener("click", () => {
-    steps.push({ kind: String(workflowConfig().define_plan?.default_step_kind || "llm"), label: `Step ${steps.length + 1}`, argsJson: "{}", standingSlugs: byScope(catalogs.instructions, "standing").map(id) });
+    steps.push({ kind: String(workflowConfig().plan_manager?.default_step_kind || "llm"), label: `Step ${steps.length + 1}`, argsJson: "{}", standingSlugs: byScope(catalogs.instructions, "standing").map(id) });
     redraw();
   });
   const save = el("button", { text: "Save Plan", class: "mod-cta" });
@@ -242,7 +332,7 @@ async function renderCreatePlan({ app, container }) {
         };
       }
       const record = buildPlanRecord({ label: name.value, description: description.value, steps, force_slug: planSlug(loaded) || null });
-      const commit = savePlan(root, record);
+      const commit = await savePlan(root, record);
       setStatus(`Saved ${planSlug(record)} to autoscribe/config (${String(commit).slice(0, 10)}). Waiting for watch-config synchronization.`);
       notify(`Saved plan ${planSlug(record)} to Git.`);
       await renderCreatePlan({ app, container });
@@ -252,7 +342,7 @@ async function renderCreatePlan({ app, container }) {
   });
 
   refreshSelect();
-  const pickerButtons = el("div"); pickerButtons.style.cssText = "display:flex;gap:.5rem;margin:.4rem 0 1rem"; pickerButtons.append(loadButton, newButton);
+  const pickerButtons = el("div"); pickerButtons.style.cssText = "display:flex;gap:.5rem;margin:.4rem 0 1rem"; pickerButtons.append(loadButton, newButton, deleteButton);
   const actionButtons = el("div"); actionButtons.style.cssText = "display:flex;gap:.5rem;margin-top:.75rem"; actionButtons.append(add, save);
   container.append(
     el("label", { text: "Existing plan" }), planSelect, pickerButtons,

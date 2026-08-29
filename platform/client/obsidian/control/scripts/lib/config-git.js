@@ -21,23 +21,52 @@ function gitEnv(extra = {}) {
 }
 
 function runGit(root, args, { input = null, env = {}, allowFailure = false } = {}) {
-  const result = childProcess.spawnSync(GIT, args, {
-    cwd: root,
-    env: gitEnv(env),
-    input,
-    encoding: "utf8",
-    maxBuffer: 32 * 1024 * 1024,
+  return new Promise((resolve, reject) => {
+    const child = childProcess.spawn(GIT, args, {
+      cwd: root,
+      env: gitEnv(env),
+      stdio: ["pipe", "pipe", "pipe"],
+    });
+    const stdout = [];
+    const stderr = [];
+    let settled = false;
+
+    child.stdout.on("data", (chunk) => stdout.push(chunk));
+    child.stderr.on("data", (chunk) => stderr.push(chunk));
+    child.on("error", (error) => {
+      if (settled) return;
+      settled = true;
+      reject(error);
+    });
+    child.on("close", (status) => {
+      if (settled) return;
+      settled = true;
+      const result = {
+        status,
+        stdout: Buffer.concat(stdout).toString("utf8"),
+        stderr: Buffer.concat(stderr).toString("utf8"),
+      };
+      if (status !== 0 && !allowFailure) {
+        const detail = String(result.stderr || result.stdout || "git failed").trim();
+        reject(new Error(`git ${args.join(" ")} failed: ${detail}`));
+        return;
+      }
+      resolve(result);
+    });
+
+    child.stdin.on("error", (error) => {
+      if (error?.code !== "EPIPE" && !settled) {
+        settled = true;
+        child.kill();
+        reject(error);
+      }
+    });
+    child.stdin.end(input == null ? undefined : input);
   });
-  if (result.error) throw result.error;
-  if (result.status !== 0 && !allowFailure) {
-    const detail = String(result.stderr || result.stdout || "git failed").trim();
-    throw new Error(`git ${args.join(" ")} failed: ${detail}`);
-  }
-  return result;
 }
 
-function revision(root, ref) {
-  const result = runGit(root, ["rev-parse", "--verify", ref], { allowFailure: true });
+async function revision(root, ref) {
+  const result = await runGit(root, ["rev-parse", "--verify", ref], { allowFailure: true });
   return result.status === 0 ? String(result.stdout).trim() : null;
 }
 
@@ -49,9 +78,9 @@ function safeIdentity(raw) {
   return value;
 }
 
-function readJsonAt(root, ref, relativePath) {
-  if (!revision(root, ref)) return null;
-  const result = runGit(root, ["show", `${ref}:${relativePath}`], { allowFailure: true });
+async function readJsonAt(root, ref, relativePath) {
+  if (!(await revision(root, ref))) return null;
+  const result = await runGit(root, ["show", `${ref}:${relativePath}`], { allowFailure: true });
   if (result.status !== 0) return null;
   try {
     return JSON.parse(result.stdout);
@@ -60,31 +89,33 @@ function readJsonAt(root, ref, relativePath) {
   }
 }
 
-function listJsonAt(root, category, ref = CONFIG_REF) {
-  if (!revision(root, ref)) return [];
-  const listing = runGit(root, ["ls-tree", "-r", "--name-only", ref, "--", `${category}/`]);
-  const records = [];
-  for (const relativePath of String(listing.stdout).split(/\r?\n/).map((x) => x.trim()).filter(Boolean)) {
-    if (!relativePath.endsWith(".json")) continue;
-    const record = readJsonAt(root, ref, relativePath);
-    if (record) records.push(record);
-  }
-  return records;
+async function listJsonAt(root, category, ref = CONFIG_REF) {
+  if (!(await revision(root, ref))) return [];
+  const listing = await runGit(root, ["ls-tree", "-r", "--name-only", ref, "--", `${category}/`]);
+  const paths = String(listing.stdout).split(/\r?\n/).map((x) => x.trim()).filter((x) => x.endsWith(".json"));
+  const records = await Promise.all(paths.map((relativePath) => readJsonAt(root, ref, relativePath)));
+  return records.filter(Boolean);
 }
 
-function payloadListing(root, ref) {
+async function payloadListing(root, ref) {
   if (!ref) return "";
-  const result = runGit(root, ["ls-tree", "-r", ref, "--", "plans", "instructions"], { allowFailure: true });
+  const result = await runGit(root, ["ls-tree", "-r", ref, "--", "plans", "instructions"], { allowFailure: true });
   return result.status === 0 ? String(result.stdout) : "";
 }
 
-function configStatus(root) {
-  const head = revision(root, CONFIG_REF);
-  const synced = revision(root, CONFIG_SYNCED_REF);
-  return { head, synced, current: payloadListing(root, head) === payloadListing(root, synced) };
+async function configStatus(root) {
+  const [head, synced] = await Promise.all([
+    revision(root, CONFIG_REF),
+    revision(root, CONFIG_SYNCED_REF),
+  ]);
+  const [currentPayload, syncedPayload] = await Promise.all([
+    payloadListing(root, head),
+    payloadListing(root, synced),
+  ]);
+  return { head, synced, current: currentPayload === syncedPayload };
 }
 
-function writeJson(root, category, identity, value, message) {
+async function writeJson(root, category, identity, value, message) {
   const safeCategory = String(category || "");
   if (safeCategory !== "plans") {
     throw new Error(`Frontend may not write config category: ${safeCategory}`);
@@ -94,33 +125,63 @@ function writeJson(root, category, identity, value, message) {
   const bytes = `${JSON.stringify(value, null, 2)}\n`;
 
   for (let attempt = 0; attempt < 4; attempt += 1) {
-    const old = revision(root, CONFIG_REF);
+    const old = await revision(root, CONFIG_REF);
     const index = path.join(os.tmpdir(), `autoscribe-config-${process.pid}-${Date.now()}-${Math.random().toString(16).slice(2)}.index`);
     try {
       const env = { GIT_INDEX_FILE: index };
-      if (old) runGit(root, ["read-tree", old], { env });
-      else runGit(root, ["read-tree", "--empty"], { env });
+      if (old) await runGit(root, ["read-tree", old], { env });
+      else await runGit(root, ["read-tree", "--empty"], { env });
 
-      const blob = String(runGit(root, ["hash-object", "-w", "--stdin"], { input: bytes }).stdout).trim();
-      runGit(root, ["update-index", "--add", "--cacheinfo", "100644", blob, relativePath], { env });
-      const tree = String(runGit(root, ["write-tree"], { env }).stdout).trim();
+      const blob = String((await runGit(root, ["hash-object", "-w", "--stdin"], { input: bytes })).stdout).trim();
+      await runGit(root, ["update-index", "--add", "--cacheinfo", "100644", blob, relativePath], { env });
+      const tree = String((await runGit(root, ["write-tree"], { env })).stdout).trim();
 
       if (old) {
-        const oldTree = String(runGit(root, ["show", "-s", "--format=%T", old]).stdout).trim();
+        const oldTree = String((await runGit(root, ["show", "-s", "--format=%T", old])).stdout).trim();
         if (tree === oldTree) return old;
       }
 
       const commitArgs = ["commit-tree", tree];
       if (old) commitArgs.push("-p", old);
-      const commit = String(runGit(root, commitArgs, { input: `${message}\n` }).stdout).trim();
+      const commit = String((await runGit(root, commitArgs, { input: `${message}\n` })).stdout).trim();
       const expected = old || "0000000000000000000000000000000000000000";
-      const update = runGit(root, ["update-ref", "-m", "AutoScribe config ledger", CONFIG_REF, commit, expected], { allowFailure: true });
+      const update = await runGit(root, ["update-ref", "-m", "AutoScribe config ledger", CONFIG_REF, commit, expected], { allowFailure: true });
       if (update.status === 0) return commit;
     } finally {
-      try { fs.unlinkSync(index); } catch {}
+      try { await fs.promises.unlink(index); } catch {}
     }
   }
   throw new Error("AutoScribe config ref kept changing; save the plan again.");
+}
+
+async function deleteJson(root, category, identity, message) {
+  const safeCategory = String(category || "");
+  if (safeCategory !== "plans") {
+    throw new Error(`Frontend may not delete config category: ${safeCategory}`);
+  }
+  const safeId = safeIdentity(identity);
+  const relativePath = `${safeCategory}/${safeId}.json`;
+
+  for (let attempt = 0; attempt < 4; attempt += 1) {
+    const old = await revision(root, CONFIG_REF);
+    if (!old) throw new Error("AutoScribe config ref does not exist.");
+    const existing = await runGit(root, ["cat-file", "-e", `${old}:${relativePath}`], { allowFailure: true });
+    if (existing.status !== 0) return old;
+
+    const index = path.join(os.tmpdir(), `autoscribe-config-${process.pid}-${Date.now()}-${Math.random().toString(16).slice(2)}.index`);
+    try {
+      const env = { GIT_INDEX_FILE: index };
+      await runGit(root, ["read-tree", old], { env });
+      await runGit(root, ["update-index", "--force-remove", relativePath], { env });
+      const tree = String((await runGit(root, ["write-tree"], { env })).stdout).trim();
+      const commit = String((await runGit(root, ["commit-tree", tree, "-p", old], { input: `${message}\n` })).stdout).trim();
+      const update = await runGit(root, ["update-ref", "-m", "AutoScribe config ledger", CONFIG_REF, commit, old], { allowFailure: true });
+      if (update.status === 0) return commit;
+    } finally {
+      try { await fs.promises.unlink(index); } catch {}
+    }
+  }
+  throw new Error("AutoScribe config ref kept changing; delete the plan again.");
 }
 
 function recordId(record) {
@@ -159,8 +220,14 @@ function overlayById(base, additions, convert = (value) => value) {
   return [...map.values()];
 }
 
-function readPlanManagerSnapshot(root) {
-  const state = readJsonAt(root, CONFIG_REF, "state/control.json") || {};
+async function readPlanManagerSnapshot(root) {
+  const [stateValue, instructionRecords, planRecords, status] = await Promise.all([
+    readJsonAt(root, CONFIG_REF, "state/control.json"),
+    listJsonAt(root, "instructions"),
+    listJsonAt(root, "plans"),
+    configStatus(root),
+  ]);
+  const state = stateValue || {};
   const source = state.catalogs && typeof state.catalogs === "object" ? state.catalogs : {};
   const catalogs = {
     instructions: Array.isArray(source.instructions) ? [...source.instructions] : [],
@@ -170,19 +237,24 @@ function readPlanManagerSnapshot(root) {
     scripts: Array.isArray(source.scripts) ? [...source.scripts] : [],
     rag_profiles: Array.isArray(source.rag_profiles) ? [...source.rag_profiles] : [],
   };
-  catalogs.instructions = overlayById(catalogs.instructions, listJsonAt(root, "instructions"), instructionForUi);
-  catalogs.plans = overlayById(catalogs.plans, listJsonAt(root, "plans"));
+  catalogs.instructions = overlayById(catalogs.instructions, instructionRecords, instructionForUi);
+  catalogs.plans = overlayById(catalogs.plans, planRecords);
   return {
     catalogs,
     refreshed_at: state.refreshed_at || null,
-    config: configStatus(root),
+    config: status,
     state_available: Boolean(state.catalogs),
   };
 }
 
-function savePlan(root, record) {
+async function savePlan(root, record) {
   const identity = safeIdentity(recordId(record));
   return writeJson(root, "plans", identity, record, `AUTOSCRIBE CONFIG plan ${identity}`);
+}
+
+async function deletePlan(root, identity) {
+  const safeId = safeIdentity(identity);
+  return deleteJson(root, "plans", safeId, `AUTOSCRIBE CONFIG delete plan ${safeId}`);
 }
 
 module.exports = {
@@ -193,4 +265,5 @@ module.exports = {
   readJsonAt,
   readPlanManagerSnapshot,
   savePlan,
+  deletePlan,
 };
