@@ -12,6 +12,9 @@ use serde_json::json;
 
 const GIT: &str = "/usr/bin/git";
 const INFLIGHT_REF: &str = "refs/heads/autoscribe/inflight";
+pub const CONFIG_REF: &str = "refs/heads/autoscribe/config";
+pub const CONFIG_SYNCED_REF: &str = "refs/autoscribe/config-synced";
+pub const CONFIG_SOURCE_REF: &str = "refs/autoscribe/config-source";
 
 pub fn root(path: &Path) -> ServiceResult<PathBuf> {
     repository_root(path)
@@ -370,6 +373,238 @@ pub fn append_dispatch_terminal_event(repo: &Path, dispatch: &str, outcome: &str
         if update.status.success() { return Ok(CommitId(commit)); }
     }
     Err(ServiceError::Conflict("inflight ledger remained busy after retries".into()))
+}
+
+
+
+/// Read the current AutoScribe configuration ledger head. The configuration
+/// ledger is an orphan history: it shares the repository object database but
+/// is never checked out into the user's working tree.
+pub fn config_head(repo: &Path) -> ServiceResult<Option<CommitId>> {
+    let repo = repository_root(repo)?;
+    Ok(optional_revision(&repo, CONFIG_REF)?.map(CommitId))
+}
+
+pub fn config_source_head(repo: &Path) -> ServiceResult<Option<CommitId>> {
+    let repo = repository_root(repo)?;
+    Ok(optional_revision(&repo, CONFIG_SOURCE_REF)?.map(CommitId))
+}
+
+pub fn mark_config_source(repo: &Path, commit: &str) -> ServiceResult<()> {
+    let repo = repository_root(repo)?;
+    let commit = revision(&repo, commit)?;
+    git(&repo, ["update-ref", "-m", "AutoScribe config source", CONFIG_SOURCE_REF, commit.as_str()])?;
+    Ok(())
+}
+
+pub fn config_synced_head(repo: &Path) -> ServiceResult<Option<CommitId>> {
+    let repo = repository_root(repo)?;
+    Ok(optional_revision(&repo, CONFIG_SYNCED_REF)?.map(CommitId))
+}
+
+pub fn config_is_synced(repo: &Path) -> ServiceResult<bool> {
+    let repo = repository_root(repo)?;
+    let head = optional_revision(&repo, CONFIG_REF)?;
+    let synced = optional_revision(&repo, CONFIG_SYNCED_REF)?;
+    let head_payload = config_payload_listing(&repo, head.as_deref())?;
+    let synced_payload = config_payload_listing(&repo, synced.as_deref())?;
+    Ok(head_payload == synced_payload)
+}
+
+pub fn config_revision_is_synced(repo: &Path, revision_spec: &str) -> ServiceResult<bool> {
+    let repo = repository_root(repo)?;
+    let revision = revision(&repo, revision_spec)?;
+    let synced = optional_revision(&repo, CONFIG_SYNCED_REF)?;
+    let revision_payload = config_payload_listing(&repo, Some(revision.as_str()))?;
+    let synced_payload = config_payload_listing(&repo, synced.as_deref())?;
+    Ok(revision_payload == synced_payload)
+}
+
+pub fn config_payload_equal(repo: &Path, left: &str, right: &str) -> ServiceResult<bool> {
+    let repo = repository_root(repo)?;
+    let left = revision(&repo, left)?;
+    let right = revision(&repo, right)?;
+    Ok(
+        config_payload_listing(&repo, Some(left.as_str()))?
+            == config_payload_listing(&repo, Some(right.as_str()))?
+    )
+}
+
+/// Read one JSON record from the configuration ledger. State records live in
+/// the same orphan history as plans/instructions but are not part of the
+/// payload synchronized to the remote pipeline.
+pub fn config_get_json(
+    repo: &Path,
+    category: &str,
+    identity: &str,
+) -> ServiceResult<Option<serde_json::Value>> {
+    let repo = repository_root(repo)?;
+    let category = config_category(category)?;
+    let identity = ref_component("config identity", identity)?;
+    let Some(head) = optional_revision(&repo, CONFIG_REF)? else { return Ok(None); };
+    let path = format!("{category}/{identity}.json");
+    let spec = format!("{head}:{path}");
+    let output = git_status_output(&repo, ["show", spec.as_str()])?;
+    if !output.status.success() {
+        return Ok(None);
+    }
+    let value = serde_json::from_slice(&output.stdout)
+        .map_err(|error| ServiceError::Storage(format!("invalid config JSON at {path}: {error}")))?;
+    Ok(Some(value))
+}
+
+pub fn config_list_json(repo: &Path, category: &str) -> ServiceResult<Vec<serde_json::Value>> {
+    let repo = repository_root(repo)?;
+    let Some(head) = optional_revision(&repo, CONFIG_REF)? else { return Ok(Vec::new()); };
+    config_list_json_at(&repo, category, &head)
+}
+
+pub fn config_list_json_at(
+    repo: &Path,
+    category: &str,
+    revision_spec: &str,
+) -> ServiceResult<Vec<serde_json::Value>> {
+    let repo = repository_root(repo)?;
+    let category = config_category(category)?;
+    let revision = revision(&repo, revision_spec)?;
+    let prefix = format!("{category}/");
+    let output = git(&repo, ["ls-tree", "-r", "--name-only", revision.as_str(), "--", prefix.as_str()])?;
+    let mut records = Vec::new();
+    for path in text(&output).lines().map(str::trim).filter(|line| !line.is_empty()) {
+        if !path.ends_with(".json") { continue; }
+        let spec = format!("{revision}:{path}");
+        let bytes = git(&repo, ["show", spec.as_str()])?.stdout;
+        let value = serde_json::from_slice(&bytes)
+            .map_err(|error| ServiceError::Storage(format!("invalid config JSON at {path}: {error}")))?;
+        records.push(value);
+    }
+    Ok(records)
+}
+
+pub fn config_upsert_json(
+    repo: &Path,
+    category: &str,
+    identity: &str,
+    value: &serde_json::Value,
+    message: &str,
+) -> ServiceResult<CommitId> {
+    let repo = repository_root(repo)?;
+    let category = config_category(category)?;
+    let identity = ref_component("config identity", identity)?;
+    let path = format!("{category}/{identity}.json");
+    let mut bytes = serde_json::to_vec_pretty(value)
+        .map_err(|error| ServiceError::InvalidInput(error.to_string()))?;
+    bytes.push(b'\n');
+    mutate_config(&repo, message, |index| {
+        let blob = hash_bytes(&repo, &bytes)?;
+        git_with_env(&repo, ["update-index", "--add", "--cacheinfo", "100644", blob.as_str(), path.as_str()], index)?;
+        Ok(())
+    })
+}
+
+pub fn config_replace_json(
+    repo: &Path,
+    category: &str,
+    records: &[(String, serde_json::Value)],
+    message: &str,
+) -> ServiceResult<Option<CommitId>> {
+    let repo = repository_root(repo)?;
+    let category = config_category(category)?;
+    for _ in 0..4 {
+        let expected = optional_revision(&repo, CONFIG_REF)?;
+        let temporary_index = temporary_index_path();
+        let result = (|| {
+            if let Some(old) = expected.as_deref() {
+                git_with_env(&repo, ["read-tree", old], &temporary_index)?;
+                let prefix = format!("{category}/");
+                let listing = git(&repo, ["ls-tree", "-r", "--name-only", old, "--", prefix.as_str()])?;
+                for path in text(&listing).lines().map(str::trim).filter(|line| !line.is_empty()) {
+                    git_with_env(&repo, ["update-index", "--force-remove", "--", path], &temporary_index)?;
+                }
+            } else {
+                git_with_env(&repo, ["read-tree", "--empty"], &temporary_index)?;
+            }
+            for (identity, value) in records {
+                let identity = ref_component("config identity", identity)?;
+                let path = format!("{category}/{identity}.json");
+                let mut bytes = serde_json::to_vec_pretty(value)
+                    .map_err(|error| ServiceError::InvalidInput(error.to_string()))?;
+                bytes.push(b'\n');
+                let blob = hash_bytes(&repo, &bytes)?;
+                git_with_env(&repo, ["update-index", "--add", "--cacheinfo", "100644", blob.as_str(), path.as_str()], &temporary_index)?;
+            }
+            let tree = text(&git_with_env(&repo, ["write-tree"], &temporary_index)?).trim().to_string();
+            if let Some(old) = expected.as_deref() {
+                let old_tree = text(&git(&repo, ["show", "-s", "--format=%T", old])?).trim().to_string();
+                if tree == old_tree { return Ok(None); }
+            }
+            let commit = commit_tree(&repo, &tree, expected.as_deref(), message)?;
+            let expected_ref = expected.as_deref().unwrap_or("0000000000000000000000000000000000000000");
+            let update = git_status_output(&repo, ["update-ref", "-m", "AutoScribe config ledger", CONFIG_REF, commit.as_str(), expected_ref])?;
+            if !update.status.success() { return Err(ServiceError::Conflict("config ledger advanced concurrently".into())); }
+            Ok(Some(CommitId(commit)))
+        })();
+        let _ = fs::remove_file(&temporary_index);
+        match result {
+            Err(ServiceError::Conflict(message)) if message.contains("advanced concurrently") => continue,
+            other => return other,
+        }
+    }
+    Err(ServiceError::Conflict("config ledger remained busy after retries".into()))
+}
+
+pub fn mark_config_synced(repo: &Path, commit: &str) -> ServiceResult<()> {
+    let repo = repository_root(repo)?;
+    let commit = revision(&repo, commit)?;
+    git(&repo, ["update-ref", "-m", "AutoScribe config synchronized", CONFIG_SYNCED_REF, commit.as_str()])?;
+    Ok(())
+}
+
+fn mutate_config<F>(repo: &Path, message: &str, mut change: F) -> ServiceResult<CommitId>
+where F: FnMut(&Path) -> ServiceResult<()> {
+    let message = one_line("config commit message", message)?;
+    for _ in 0..4 {
+        let old = optional_revision(repo, CONFIG_REF)?;
+        let temporary_index = temporary_index_path();
+        let result = (|| {
+            if let Some(old) = old.as_deref() {
+                git_with_env(repo, ["read-tree", old], &temporary_index)?;
+            } else {
+                git_with_env(repo, ["read-tree", "--empty"], &temporary_index)?;
+            }
+            change(&temporary_index)?;
+            let tree = text(&git_with_env(repo, ["write-tree"], &temporary_index)?).trim().to_string();
+            if let Some(old) = old.as_deref() {
+                let old_tree = text(&git(repo, ["show", "-s", "--format=%T", old])?).trim().to_string();
+                if tree == old_tree { return Ok(CommitId(old.to_string())); }
+            }
+            let commit = commit_tree(repo, &tree, old.as_deref(), &message)?;
+            let expected = old.as_deref().unwrap_or("0000000000000000000000000000000000000000");
+            let update = git_status_output(repo, ["update-ref", "-m", "AutoScribe config ledger", CONFIG_REF, commit.as_str(), expected])?;
+            if !update.status.success() { return Err(ServiceError::Conflict("config ledger advanced concurrently".into())); }
+            Ok(CommitId(commit))
+        })();
+        let _ = fs::remove_file(&temporary_index);
+        match result {
+            Err(ServiceError::Conflict(message)) if message.contains("advanced concurrently") => continue,
+            other => return other,
+        }
+    }
+    Err(ServiceError::Conflict("config ledger remained busy after retries".into()))
+}
+
+fn config_payload_listing(repo: &Path, revision: Option<&str>) -> ServiceResult<String> {
+    let Some(revision) = revision else { return Ok(String::new()); };
+    let output = git(repo, ["ls-tree", "-r", revision, "--", "plans", "instructions"])?;
+    Ok(text(&output))
+}
+
+fn config_category(value: &str) -> ServiceResult<String> {
+    let value = one_line("config category", value)?;
+    if !matches!(value.as_str(), "plans" | "instructions" | "state") {
+        return Err(ServiceError::InvalidInput(format!("invalid config category: {value}")));
+    }
+    Ok(value)
 }
 
 pub fn last_commit(repo: &Path, path: &Path) -> ServiceResult<Option<(String, String, i64)>> {

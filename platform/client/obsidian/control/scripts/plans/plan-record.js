@@ -1,59 +1,65 @@
-const { makeSlug } = require('../lib/slug.js');
-const { loadConfig } = require('../lib/config-loader.js');
+"use strict";
+
+const { makeSlug } = require("../lib/slug.js");
 
 function normalizeKind(value) {
-  return String(value || '').trim().toLowerCase();
+  return String(value || "").trim().toLowerCase();
 }
 
 function compactRegistryRecord(record) {
   if (!record) return null;
-  if (typeof record === 'string') return { key: record };
+  if (typeof record === "string") return { key: record };
   return {
-    key: record.key,
+    key: record.key || record.slug || record.record_identity || null,
     slug: record.slug || null,
     kind: normalizeKind(record.kind || record.type),
     type: record.type || null,
-    label: record.label || record.slug || record.key,
+    label: record.label || record.title || record.slug || record.key,
   };
 }
 
 function parseArgsJson(text, stepNumber) {
-  const trimmed = String(text || '').trim();
+  const trimmed = String(text || "").trim();
   if (!trimmed) return {};
   const parsed = JSON.parse(trimmed);
-  if (!parsed || Array.isArray(parsed) || typeof parsed !== 'object') {
+  if (!parsed || Array.isArray(parsed) || typeof parsed !== "object") {
     throw new Error(`Step ${stepNumber}: args JSON must be an object.`);
   }
   return parsed;
 }
 
-function stepContractArgKeys() { return new Set(loadConfig("protocol").step_contract_arg_keys || []); }
-
+const STEP_CONTRACT_ARG_KEYS = new Set([
+  "index", "kind", "label", "instruction", "instruction_slug",
+  "instruction_slugs", "engine", "script", "rag_profile", "model",
+]);
 
 function compactStepArgs(args) {
   const compact = {};
   for (const [key, value] of Object.entries(args || {})) {
-    if (!stepContractArgKeys().has(key)) compact[key] = value;
+    if (!STEP_CONTRACT_ARG_KEYS.has(key)) compact[key] = value;
   }
   return compact;
 }
 
 function normalizeStepKind(step) {
   const kind = normalizeKind(step?.kind || step?.step_kind || step?.type);
-  if (kind === 'script' || kind === 'rag' || kind === 'llm') return kind;
-  if (step?.script) return 'script';
-  if (step?.rag_profile) return 'rag';
-  return 'llm';
+  if (["script", "rag", "llm"].includes(kind)) return kind;
+  if (step?.script) return "script";
+  if (step?.rag_profile) return "rag";
+  return "llm";
 }
 
-function buildPlanRecord({ label, type, description, steps, force_slug = null }) {
-  const cleanLabel = String(label || '').trim();
-  if (!cleanLabel) throw new Error('Plan label is required.');
-  if (!Array.isArray(steps) || !steps.length) {
-    throw new Error('At least one step is required.');
-  }
+function slugOf(record) {
+  return String(record?.slug || record?.record_identity || record?.key || "").trim();
+}
 
-  const recordIdentity = force_slug || makeSlug('plan', cleanLabel);
+function buildPlanRecord({ label, description, steps, force_slug = null }) {
+  const cleanLabel = String(label || "").trim();
+  const cleanDescription = String(description || "").trim();
+  if (!cleanLabel) throw new Error("Plan label is required.");
+  if (!Array.isArray(steps) || !steps.length) throw new Error("At least one step is required.");
+
+  const recordIdentity = force_slug || makeSlug("plan", cleanLabel);
   const planSteps = {};
 
   steps.forEach((step, index) => {
@@ -63,57 +69,49 @@ function buildPlanRecord({ label, type, description, steps, force_slug = null })
     const script = compactRegistryRecord(step.script);
     const ragProfile = compactRegistryRecord(step.rag_profile);
     const model = compactRegistryRecord(step.model);
-    const instruction = compactRegistryRecord(step.instruction);
-    const instructionSlugs = step.instruction_slugs;
     const args = compactStepArgs(parseArgsJson(step.argsJson, stepNumber));
 
-    if (kind === 'script' && !script?.key) {
-      throw new Error(`Step ${stepNumber}: choose a script.`);
-    }
-    if (kind === 'rag' && !ragProfile?.key) {
-      throw new Error(`Step ${stepNumber}: choose a RAG profile.`);
-    }
-    if (kind === 'llm' && !engine?.key) {
-      throw new Error(`Step ${stepNumber}: choose an LLM provider/engine.`);
-    }
-    if (kind === 'llm' && !model?.key) {
-      throw new Error(`Step ${stepNumber}: choose a model.`);
-    }
+    if (kind === "script" && !script?.key) throw new Error(`Step ${stepNumber}: choose a script.`);
+    if (kind === "rag" && !ragProfile?.key) throw new Error(`Step ${stepNumber}: choose a RAG profile.`);
+    if (kind === "llm" && !engine?.key) throw new Error(`Step ${stepNumber}: choose an LLM provider/engine.`);
+    if (kind === "llm" && !model?.key) throw new Error(`Step ${stepNumber}: choose a model.`);
 
     const out = {
       index: stepNumber,
       kind,
       label: String(step.label || `Step ${stepNumber}`).trim() || `Step ${stepNumber}`,
     };
-
-    if (instructionSlugs && typeof instructionSlugs === 'object' && !Array.isArray(instructionSlugs)) {
-      out.instruction_slugs = {
-        standing: Array.isArray(instructionSlugs.standing) ? [...instructionSlugs.standing] : [],
-        role: Array.isArray(instructionSlugs.role) ? [...instructionSlugs.role] : [],
-        context: Array.isArray(instructionSlugs.context) ? [...instructionSlugs.context] : [],
-        task: Array.isArray(instructionSlugs.task) ? [...instructionSlugs.task] : [],
-      };
-    } else if (instruction?.slug || instruction?.key) {
-      out.instruction = String(instruction.slug || instruction.key).trim();
-    }
     if (Object.keys(args).length) out.args = args;
     if (engine?.key) out.engine = engine.key;
-    if (kind === 'llm') out.model = model.key;
+    if (kind === "llm") out.model = model.key;
     if (script?.key) out.script = script.key;
     if (ragProfile?.key) out.rag_profile = ragProfile.key;
 
+    if (kind === "llm") {
+      const refs = step.instruction_slugs && typeof step.instruction_slugs === "object" && !Array.isArray(step.instruction_slugs)
+        ? step.instruction_slugs : {};
+      const standing = Array.isArray(refs.standing) ? refs.standing.map(String).map((x) => x.trim()).filter(Boolean) : [];
+      const role = Array.isArray(refs.role) ? refs.role.map(String).map((x) => x.trim()).filter(Boolean) : [];
+      const context = Array.isArray(refs.context) ? refs.context.map(String).map((x) => x.trim()).filter(Boolean) : [];
+      const task = Array.isArray(refs.task) ? refs.task.map(String).map((x) => x.trim()).filter(Boolean) : [];
+      if (!task.length && step.task) task.push(slugOf(step.task));
+      if (!task.length) throw new Error(`Step ${stepNumber}: choose a task instruction.`);
+      out.instruction_slugs = {
+        standing: [...new Set(standing)],
+        role: role.slice(0, 1),
+        context: context.slice(0, 1),
+        task: task.slice(0, 1),
+      };
+    }
     planSteps[String(stepNumber)] = out;
   });
 
-  const cleanType = String(type || "").trim().toLowerCase();
-  if (!cleanType) throw new Error("Plan type is required.");
-  const cleanDescription = String(description || '').trim();
   return {
-    record_type: 'plan',
+    record_type: "plan",
     record_identity: recordIdentity,
+    record_content: cleanDescription,
     payload: {
       label: cleanLabel,
-      type: cleanType,
       description: cleanDescription,
       steps: planSteps,
     },

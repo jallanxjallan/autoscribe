@@ -14,14 +14,14 @@ pub struct AuthoredCatalogUpload {
 /// server snapshot. Execution and scheduling remain the caller's concern.
 pub fn authored_catalog(
     server: &Value,
-    authored_instructions: Vec<Value>,
-    authored_plans: Vec<Value>,
+    local_instructions: Vec<Value>,
+    local_plans: Vec<Value>,
 ) -> AuthoredCatalogUpload {
     let registries = server.get("registries").unwrap_or(&Value::Null);
     let live_instructions = registries.get("instructions").and_then(Value::as_object);
     let live_plans = registries.get("plans").and_then(Value::as_object);
 
-    let instructions = authored_instructions.into_iter().filter(|record| {
+    let instructions = local_instructions.into_iter().filter(|record| {
         let Some(identity) = record.get("identity").and_then(Value::as_str) else { return true; };
         let local_hash = record.get("content").and_then(Value::as_str)
             .map(|content| sha256_hex(content.trim().as_bytes()));
@@ -30,7 +30,7 @@ pub fn authored_catalog(
         local_hash.as_deref() != remote_hash
     }).collect();
 
-    let plans = authored_plans.into_iter().filter(|record| {
+    let plans = local_plans.into_iter().filter(|record| {
         let identity = record.get("record_identity").and_then(Value::as_str).unwrap_or("");
         let local_version = record.get("payload").and_then(|payload| {
             serde_json::to_vec(payload).ok().map(|bytes| {

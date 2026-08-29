@@ -1,4 +1,4 @@
-use autoscribe_service::{db, db::Database, plan_repository};
+use autoscribe_service::{db, db::Database, git, plan_repository};
 use serde_json::{Value, json};
 use std::{
     fs,
@@ -23,7 +23,7 @@ fn watcher_dispatches_declared_document_from_exact_commit_snapshot() {
     // The live worktree is deliberately different. Dispatch must never read it.
     fs::write(&document, "---\nslug: cnt.one\n---\nDirty later edit\n").unwrap();
     let database = root.join("service.sqlite");
-    save_plan(&database);
+    save_plan(&root);
     let pandoc = fake_pandoc(&root);
     let asc = fake_asc(&root);
 
@@ -56,7 +56,7 @@ fn malformed_dispatch_commit_is_retried_instead_of_advancing_cursor() {
     git(&root, ["add", "One.md"]);
     git(&root, ["commit", "--quiet", "-m", "Broken dispatch", "-m", "Autoscribe-Plan: plan.test"]);
     let database = root.join("service.sqlite");
-    save_plan(&database);
+    save_plan(&root);
 
     let output = Command::new(env!("CARGO_BIN_EXE_svc"))
         .args(["watch-dispatch", "--once"])
@@ -74,13 +74,12 @@ fn malformed_dispatch_commit_is_retried_instead_of_advancing_cursor() {
     fs::remove_dir_all(root).unwrap();
 }
 
-fn save_plan(path: &Path) {
-    let database = Database::open_path(path).unwrap();
-    db::migrate(&database).unwrap();
-    plan_repository::save(&database, &json!({
+fn save_plan(root: &Path) {
+    let commit = plan_repository::save(root, &json!({
         "record_identity":"plan.test",
         "payload":{"steps":{"1":{"kind":"llm"}}}
     })).unwrap();
+    git::mark_config_synced(root, &commit).unwrap();
 }
 
 fn fake_pandoc(root: &Path) -> PathBuf {

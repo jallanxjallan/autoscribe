@@ -103,6 +103,56 @@ pub fn scan_slugs(root:&Path, requested:&BTreeSet<String>)->ServiceResult<Vec<Lo
     Ok(found)
 }
 
+
+
+/// Build the instruction set from a committed Git tree, never from the live
+/// working tree. This is the configuration daemon's authoritative source.
+pub fn scan_git(root: &Path, revision: &str) -> ServiceResult<Vec<LocalInstruction>> {
+    let root = root.canonicalize().map_err(io)?;
+    let output = Command::new("/usr/bin/git").current_dir(&root)
+        .args(["ls-tree", "-r", "--name-only", revision])
+        .output().map_err(io)?;
+    if !output.status.success() {
+        return Err(ServiceError::Io(format!("git ls-tree failed: {}", String::from_utf8_lossy(&output.stderr).trim())));
+    }
+    let mut found = Vec::new();
+    let mut seen = BTreeMap::<String, PathBuf>::new();
+    for line in String::from_utf8_lossy(&output.stdout).lines() {
+        let relative = PathBuf::from(line.trim());
+        if relative.extension().and_then(|v| v.to_str()) != Some("md") { continue; }
+        let path_text = relative.to_string_lossy().replace('\\', "/");
+        if path_text.starts_with(".git/") || path_text.starts_with(".obsidian/")
+            || path_text.starts_with("_control/") || path_text.starts_with("target/") { continue; }
+        let spec = format!("{revision}:{path_text}");
+        let blob = Command::new("/usr/bin/git").current_dir(&root)
+            .args(["show", spec.as_str()]).output().map_err(io)?;
+        if !blob.status.success() {
+            return Err(ServiceError::Io(format!("git show {spec} failed: {}", String::from_utf8_lossy(&blob.stderr).trim())));
+        }
+        let text = String::from_utf8(blob.stdout).map_err(|error| ServiceError::InvalidInput(format!("{path_text}: instruction is not UTF-8: {error}")))?;
+        let Some((frontmatter, body)) = split_frontmatter(&text) else { continue; };
+        if !is_instruction(&frontmatter) { continue; }
+        let slug = frontmatter.get("slug").map(String::as_str).unwrap_or("").trim();
+        if slug.is_empty() { return Err(ServiceError::InvalidInput(format!("instruction has no slug: {path_text}"))); }
+        if body.trim().is_empty() { return Err(ServiceError::InvalidInput(format!("instruction body is blank: {path_text}"))); }
+        if let Some(previous) = seen.insert(slug.to_string(), relative.clone()) {
+            return Err(ServiceError::Conflict(format!("duplicate instruction slug: {slug}: {}, {}", previous.display(), relative.display())));
+        }
+        let title = frontmatter.get("title").cloned().unwrap_or_else(|| relative.file_stem().unwrap_or_default().to_string_lossy().into_owned());
+        let component = frontmatter.get("component").or_else(|| frontmatter.get("class")).cloned().unwrap_or_default().to_lowercase();
+        let scope = frontmatter.get("scope").cloned().filter(|v| !v.trim().is_empty()).unwrap_or_else(|| scope_from_slug(slug, &component));
+        found.push(LocalInstruction {
+            slug: slug.to_string(), title, scope, component,
+            relative_path: path_text, body: body.to_string(),
+            // Git has content identity, not filesystem mtimes. Zero disables the
+            // timestamp/size shortcut and forces a content-hash comparison.
+            modified_ns: 0, size: text.as_bytes().len() as u64,
+        });
+    }
+    found.sort_by(|a, b| a.slug.cmp(&b.slug));
+    Ok(found)
+}
+
 /// Compatibility/manual command. Explicit catalogue refreshes build the slug index
 /// themselves and hand that single snapshot to their consumers.
 pub fn scan(root:&Path)->ServiceResult<Vec<LocalInstruction>>{
@@ -131,7 +181,7 @@ pub fn plan(local:Vec<LocalInstruction>,manifest:&Value)->ServiceResult<SyncPlan
     let mut upload=Vec::new();let mut items=Vec::new();let mut hashes_compared=0;
     for item in local{let Some(server)=remote.get(&item.slug) else{items.push(row(&item,"upload","missing remotely"));upload.push(item);continue};
         let remote_mtime=integer(server.get("source_modified_ns"));let remote_size=integer(server.get("source_size"));
-        if remote_mtime==Some(item.modified_ns)&&remote_size==Some(item.size as u128){items.push(row(&item,"current","timestamp and size match"));continue;}
+        if item.modified_ns != 0 && remote_mtime==Some(item.modified_ns)&&remote_size==Some(item.size as u128){items.push(row(&item,"current","timestamp and size match"));continue;}
         if server.get("title").and_then(Value::as_str).is_some_and(|title|title!=item.title){items.push(row(&item,"upload","instruction title differs"));upload.push(item);continue;}
         hashes_compared+=1;let local_hash=sha256_hex(item.body.trim().as_bytes());let remote_hash=server.get("content_sha256").and_then(Value::as_str).unwrap_or("");
         if local_hash==remote_hash{items.push(row(&item,"current","content hash matches"));}else{items.push(row(&item,"upload","metadata and content differ"));upload.push(item);}

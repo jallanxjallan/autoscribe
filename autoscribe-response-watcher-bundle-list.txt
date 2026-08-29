@@ -1,0 +1,3 @@
+platform/service
+platform/pipeline
+platform/client/obsidian/control

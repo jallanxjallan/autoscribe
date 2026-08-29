@@ -1,4 +1,4 @@
-use autoscribe_service::{db, db::Database, plan_repository};
+use autoscribe_service::{git, plan_repository};
 use serde_json::{Value, json};
 use std::{
     fs,
@@ -102,7 +102,7 @@ fn pending_response_blocks_dispatch_before_upload_and_enqueue() {
 }
 
 fn invoke(root: &Path, pandoc: &Path, asc: &Path) -> std::process::Output {
-    save_plan(&root.join("service.sqlite"));
+    save_plan(root);
     let request = json!({"version":1,"plan":"plan.test","documents":["cnt.one"]});
     fs::write(root.join("filter.lua"), "-- fixture\n").unwrap();
     let mut child = Command::new(env!("CARGO_BIN_EXE_svc"))
@@ -126,14 +126,14 @@ fn invoke(root: &Path, pandoc: &Path, asc: &Path) -> std::process::Output {
         .unwrap();
     child.wait_with_output().unwrap()
 }
-fn save_plan(path: &Path) {
-    let database = Database::open_path(path).unwrap();
-    db::migrate(&database).unwrap();
-    plan_repository::save(&database, &json!({
+fn save_plan(root: &Path) {
+    let commit = plan_repository::save(root, &json!({
         "record_identity":"plan.test",
         "payload":{"steps":{"1":{"kind":"llm"}}}
     })).unwrap();
+    git::mark_config_synced(root, &commit).unwrap();
 }
+
 fn fake_asc(root: &Path) -> PathBuf {
     fake_asc_with_status(root, "  worker=running pid=123")
 }
