@@ -105,8 +105,8 @@ async function renderCreatePlan({ app, container }) {
   toolbar.style.cssText = "display:flex;gap:.5rem;align-items:center;margin-bottom:.75rem";
   const refresh = el("button", { text: "Reload Git" });
   const stateText = snapshot.catalog?.available
-    ? `Catalogue: ${snapshot.catalog.server_instructions} server + ${snapshot.catalog.local_instructions} local instruction(s) · local overrides win`
-    : `Catalogue: local instructions only${snapshot.catalog?.warning ? ` · server fetch failed` : ""}`;
+    ? `Control/master: ${snapshot.catalog.committed_instructions} committed instruction(s) · ${snapshot.catalog.plans} plan(s)${snapshot.catalog.unpublished ? " · unpublished commits pending" : ""}`
+    : "Control catalogue unavailable";
   const freshness = el("span", { text: stateText });
   toolbar.append(refresh, freshness);
   container.appendChild(toolbar);
@@ -271,7 +271,7 @@ async function renderCreatePlan({ app, container }) {
   }
 
   refresh.addEventListener("click", async () => {
-    refresh.disabled = true; setStatus("Fetching server catalogue and re-reading local instructions…");
+    refresh.disabled = true; setStatus("Re-reading committed Control repository…");
     try {
       await renderCreatePlan({ app, container });
     } catch (error) {
@@ -295,7 +295,7 @@ async function renderCreatePlan({ app, container }) {
       deleteArmedSlug = slug;
       deleteButton.textContent = "Confirm Delete";
       deleteButton.classList.add("mod-warning");
-      setStatus(`Press Confirm Delete to remove “${label}” (${slug}) from autoscribe/config. Select another plan or press New Plan to cancel.`);
+      setStatus(`Press Confirm Delete to remove “${label}” (${slug}) from Control/master. Select another plan or press New Plan to cancel.`);
       return;
     }
 
@@ -308,7 +308,7 @@ async function renderCreatePlan({ app, container }) {
       clearForm();
       refreshSelect();
       notify(`Deleted plan ${slug} from Git.`);
-      setStatus(`Deleted ${slug} from autoscribe/config (${String(commit).slice(0, 10)}). Pushed for server ingestion.`);
+      setStatus(`Deleted ${slug} from Control/master (${String(commit).slice(0, 10)}). Published Control/master for server ingestion.`);
     } catch (error) {
       const message = `Delete failed: ${error.message || error}`; setStatus(message); notify(message, 10000);
       disarmDelete();
@@ -336,8 +336,8 @@ async function renderCreatePlan({ app, container }) {
       }
       const record = buildPlanRecord({ label: name.value, description: description.value, steps, force_slug: planSlug(loaded) || null });
       const commit = await savePlan(root, record);
-      setStatus(`Saved ${planSlug(record)} to autoscribe/config (${String(commit).slice(0, 10)}). Pushed for server ingestion.`);
-      notify(`Saved plan ${planSlug(record)} to Git.`);
+      setStatus(`Saved ${planSlug(record)} to Control/master (${String(commit).slice(0, 10)}). Published Control/master for server ingestion.`);
+      notify(`Saved plan ${planSlug(record)} to Control Git.`);
       await renderCreatePlan({ app, container });
     } catch (error) {
       const message = `Save failed: ${error.message || error}`; setStatus(message); notify(message, 10000);

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import re
 import subprocess
 from dataclasses import dataclass
 from pathlib import Path
@@ -109,7 +110,7 @@ def _provenance(
     if not identity:
         raise IngestInputError("repository identity must be non-empty")
     kind = str(repo_kind or "project").strip().lower()
-    if kind not in {"project", "global"}:
+    if kind not in {"project", "global", "control"}:
         raise IngestInputError(f"unsupported repository kind: {repo_kind!r}")
     ref = str(trigger_ref).strip() if trigger_ref is not None else None
     return RepositoryProvenance(
@@ -170,7 +171,11 @@ def _changes(repo: Path, base: str, commit: str) -> tuple[ConfigChange, ...]:
 
 
 def _is_config_path(path: str) -> bool:
-    return path.endswith(".json") and path.startswith(CONFIG_PREFIXES)
+    if path.startswith("plans/"):
+        return path.endswith(".json")
+    if path.startswith("instructions/"):
+        return path.endswith(".json") or path.endswith(".md")
+    return False
 
 
 def _ingest_path(
@@ -179,14 +184,15 @@ def _ingest_path(
     path: str,
     provenance: RepositoryProvenance,
 ) -> IngestedItem:
-    record = _record_at(repo, commit, path)
     category = path.split("/", 1)[0]
     try:
         if category == "instructions":
+            record = _instruction_source_at(repo, commit, path)
             normalized = _instruction_record(record, path)
             _attach_provenance(normalized, provenance, commit, path)
             return ingest_instruction(normalized)
         if category == "plans":
+            record = _record_at(repo, commit, path)
             normalized = _plan_record(record, path)
             _attach_provenance(normalized, provenance, commit, path)
             return ingest_plan(normalized)
@@ -217,8 +223,8 @@ def _attach_provenance(
 def _delete_path(repo: Path, commit: str | None, path: str) -> None:
     if not commit:
         return
-    record = _record_at(repo, commit, path)
     category = path.split("/", 1)[0]
+    record = _instruction_source_at(repo, commit, path) if category == "instructions" else _record_at(repo, commit, path)
     normalized = _instruction_record(record, path) if category == "instructions" else _plan_record(record, path)
     slug = str(normalized["identity"]).strip()
     slugmap = SlugMap()
@@ -226,6 +232,100 @@ def _delete_path(repo: Path, commit: str | None, path: str) -> None:
     slugmap.delete(slug)
     if old_key:
         RedisKey(old_key).delete()
+
+
+
+def _instruction_source_at(repo: Path, commit: str, path: str) -> Mapping[str, Any]:
+    if path.endswith(".json"):
+        return _record_at(repo, commit, path)
+    if path.endswith(".md"):
+        return _instruction_markdown_at(repo, commit, path)
+    raise IngestInputError(f"{path}: unsupported instruction source")
+
+
+def _instruction_markdown_at(repo: Path, commit: str, path: str) -> Mapping[str, Any]:
+    raw = _git(repo, "show", f"{commit}:{path}")
+    frontmatter, body = _split_markdown_frontmatter(raw, path)
+    slug = str(frontmatter.get("slug") or "").strip()
+    if not slug:
+        raise IngestInputError(f"{path}: missing instruction slug")
+    kind = str(
+        frontmatter.get("record")
+        or frontmatter.get("type")
+        or frontmatter.get("kind")
+        or ""
+    ).strip().lower()
+    if kind and kind != "instruction":
+        raise IngestInputError(f"{path}: expected instruction record; got {kind!r}")
+
+    component = str(
+        frontmatter.get("component")
+        or frontmatter.get("class")
+        or _infer_instruction_component(slug)
+        or ""
+    ).strip()
+    title = str(
+        frontmatter.get("title")
+        or frontmatter.get("label")
+        or Path(path).stem
+    ).strip()
+    description = str(
+        frontmatter.get("description")
+        or frontmatter.get("summary")
+        or ""
+    ).strip()
+
+    return {
+        "type": "instruction",
+        "identity": slug,
+        "content": body,
+        "extra": {
+            "title": title,
+            "description": description,
+            "scope": component,
+            "component": component,
+            "source_path": path,
+        },
+    }
+
+
+def _split_markdown_frontmatter(raw: str, path: str) -> tuple[dict[str, str], str]:
+    text = str(raw).replace("\\r\\n", "\\n")
+    lines = text.split("\\n")
+    if not lines or lines[0].strip() != "---":
+        raise IngestInputError(f"{path}: instruction Markdown requires YAML frontmatter")
+    try:
+        end = next(i for i, line in enumerate(lines[1:], start=1) if line.strip() == "---")
+    except StopIteration as exc:
+        raise IngestInputError(f"{path}: unterminated YAML frontmatter") from exc
+
+    frontmatter: dict[str, str] = {}
+    for line in lines[1:end]:
+        match = re.match(r"^([A-Za-z0-9_-]+):\\s*(.*)$", line)
+        if not match:
+            continue
+        value = match.group(2).strip()
+        if len(value) >= 2 and value[0] == value[-1] and value[0] in {"'", '"'}:
+            value = value[1:-1]
+        frontmatter[match.group(1)] = value
+
+    body = "\\n".join(lines[end + 1:]).strip()
+    if not body:
+        raise IngestInputError(f"{path}: instruction content must not be empty")
+    return frontmatter, body
+
+
+def _infer_instruction_component(slug: str) -> str:
+    prefix = str(slug).split(".", 1)[0]
+    return {
+        "std": "standing",
+        "rul": "rule",
+        "rol": "role",
+        "ctx": "context",
+        "tsk": "task",
+        "ins": "task",
+        "spc": "task",
+    }.get(prefix, "")
 
 
 def _record_at(repo: Path, commit: str, path: str) -> Mapping[str, Any]:

@@ -9,9 +9,12 @@ step_kinds:
   - script
   - rag
 
-# Plan Manager reads the live server component catalogue through asc, overlays
-# project-local instruction Markdown (local duplicate slugs win), and publishes plans via Git.
+# Plan Manager is vault-independent. It reads committed plans/instructions from
+# the unified Control repository and publishes Control/master. Vault repositories
+# remain content/run repositories only.
 plan_manager:
+  control_root: /home/jeremy/Work/Control
+  branch: master
   asc_command: /home/jeremy/Python3.13Env/bin/asc
   push_remote: origin
   default_step_kind: llm
