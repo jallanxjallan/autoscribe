@@ -1,4 +1,4 @@
-use crate::{ServiceError, ServiceResult, dispatch::sha256_hex};
+use crate::{ServiceError, ServiceResult};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::{collections::{BTreeMap, BTreeSet, HashMap}, fs, path::{Path, PathBuf}, process::Command, time::UNIX_EPOCH};
@@ -16,8 +16,6 @@ pub struct LocalInstruction {
 }
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SyncItem { pub slug:String, pub path:String, pub status:String, pub reason:String }
-#[derive(Debug)]
-pub struct SyncPlan { pub upload:Vec<LocalInstruction>, pub items:Vec<SyncItem>, pub hashes_compared:usize }
 
 /// Vault-wide slug index built once at an explicit refresh boundary.
 /// Slugs are durable identity; paths are derived state. Duplicate slugs are rejected
@@ -106,7 +104,7 @@ pub fn scan_slugs(root:&Path, requested:&BTreeSet<String>)->ServiceResult<Vec<Lo
 
 
 /// Build the instruction set from a committed Git tree, never from the live
-/// working tree. This is the configuration daemon's authoritative source.
+/// working tree. This is the authoritative source for an explicit local config-ref staging operation.
 pub fn scan_git(root: &Path, revision: &str) -> ServiceResult<Vec<LocalInstruction>> {
     let root = root.canonicalize().map_err(io)?;
     let output = Command::new("/usr/bin/git").current_dir(&root)
@@ -176,22 +174,8 @@ fn read_instruction(root:&Path,relative:&Path)->ServiceResult<LocalInstruction>{
     Ok(LocalInstruction{slug:slug.to_string(),title,scope,component,relative_path:relative.to_string_lossy().replace('\\',"/"),body:body.to_string(),modified_ns,size:metadata.len()})
 }
 
-pub fn plan(local:Vec<LocalInstruction>,manifest:&Value)->ServiceResult<SyncPlan>{
-    let remote=manifest.get("instructions").and_then(Value::as_object).ok_or_else(||ServiceError::InvalidInput("instruction manifest has no instructions object".into()))?;
-    let mut upload=Vec::new();let mut items=Vec::new();let mut hashes_compared=0;
-    for item in local{let Some(server)=remote.get(&item.slug) else{items.push(row(&item,"upload","missing remotely"));upload.push(item);continue};
-        let remote_mtime=integer(server.get("source_modified_ns"));let remote_size=integer(server.get("source_size"));
-        if item.modified_ns != 0 && remote_mtime==Some(item.modified_ns)&&remote_size==Some(item.size as u128){items.push(row(&item,"current","timestamp and size match"));continue;}
-        if server.get("title").and_then(Value::as_str).is_some_and(|title|title!=item.title){items.push(row(&item,"upload","instruction title differs"));upload.push(item);continue;}
-        hashes_compared+=1;let local_hash=sha256_hex(item.body.trim().as_bytes());let remote_hash=server.get("content_sha256").and_then(Value::as_str).unwrap_or("");
-        if local_hash==remote_hash{items.push(row(&item,"current","content hash matches"));}else{items.push(row(&item,"upload","metadata and content differ"));upload.push(item);}
-    }
-    Ok(SyncPlan{upload,items,hashes_compared})
-}
 
-pub fn upload_record(item:&LocalInstruction)->Value{serde_json::json!({"type":"instruction","identity":item.slug,"content":item.body,"extra":{"title":item.title,"scope":item.scope,"component":item.component,"source_path":item.relative_path,"source_modified_ns":item.modified_ns.to_string(),"source_size":item.size}})}
-fn row(item:&LocalInstruction,status:&str,reason:&str)->SyncItem{SyncItem{slug:item.slug.clone(),path:item.relative_path.clone(),status:status.into(),reason:reason.into()}}
-fn integer(value:Option<&Value>)->Option<u128>{value.and_then(|v|v.as_u64().map(u128::from).or_else(||v.as_str()?.parse().ok()))}
+pub fn config_record(item:&LocalInstruction)->Value{serde_json::json!({"type":"instruction","identity":item.slug,"content":item.body,"extra":{"title":item.title,"scope":item.scope,"component":item.component,"source_path":item.relative_path,"source_modified_ns":item.modified_ns.to_string(),"source_size":item.size}})}
 fn is_instruction(frontmatter:&HashMap<String,String>)->bool{["record","type","kind"].into_iter().filter_map(|k|frontmatter.get(k)).any(|v|v.eq_ignore_ascii_case("instruction"))}
 fn scope_from_slug(slug:&str,component:&str)->String{match slug.split('.').next().unwrap_or(""){"std"=>"standing","rol"=>"role","ctx"=>"context","tsk"=>"task",_=>component}.to_string()}
 fn regex_escape(value:&str)->String{let mut out=String::new();for c in value.chars(){if r".[]{}()*+?^$|\\".contains(c){out.push('\\');}out.push(c);}out}

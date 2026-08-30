@@ -42,7 +42,7 @@ pub fn validate(plan: &Value) -> ServiceResult<&str> {
 /// Validate the fields that a Plan Manager is allowed to persist against the
 /// catalog visible at the captured config revision. This is the daemon-side
 /// acceptance gate: even if another frontend writes malformed JSON directly
-/// to the config ref, it will never be uploaded to the pipeline.
+/// to the config ref, it will never be materialized into the pipeline.
 pub fn validate_against_catalog(plan: &Value, catalogs: &Value) -> ServiceResult<()> {
     let plan_identity = validate(plan)?;
     if let Some(record_type) = plan.get("record_type").and_then(Value::as_str) {

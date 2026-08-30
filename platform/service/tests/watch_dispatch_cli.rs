@@ -1,4 +1,4 @@
-use autoscribe_service::{db, db::Database, git, plan_repository};
+use autoscribe_service::{db, db::Database, plan_repository};
 use serde_json::{Value, json};
 use std::{
     fs,
@@ -43,7 +43,7 @@ fn watcher_dispatches_declared_document_from_exact_commit_snapshot() {
     assert_eq!(fs::read_to_string(root.join("pandoc.input")).unwrap(), committed);
     assert_eq!(git_output(&root, ["show", "refs/heads/autoscribe/inflight:Content/One.md"]), committed);
     assert_eq!(fs::read_to_string(root.join("asc.log")).unwrap(),
-        "export list-pending --ndjson\nupload calls\nenqueue\n");
+        "export list-pending --ndjson\nenqueue\n");
 
     fs::remove_dir_all(root).unwrap();
 }
@@ -75,12 +75,10 @@ fn malformed_dispatch_commit_is_retried_instead_of_advancing_cursor() {
 }
 
 fn save_plan(root: &Path) {
-    let commit = plan_repository::save(root, &json!({
+    plan_repository::save(root, &json!({
         "record_identity":"plan.test",
         "payload":{"steps":{"1":{"kind":"llm"}}}
     })).unwrap();
-    git::mark_config_category_submitted(root, "plans", &commit).unwrap();
-    git::mark_config_synced(root, &commit).unwrap();
 }
 
 fn fake_pandoc(root: &Path) -> PathBuf {

@@ -1,4 +1,4 @@
-use autoscribe_service::{git, plan_repository};
+use autoscribe_service::plan_repository;
 use serde_json::{Value, json};
 use std::{
     fs,
@@ -9,7 +9,7 @@ use std::{
 };
 
 #[test]
-fn dispatch_run_converts_uploads_and_enqueues_in_one_service_call() {
+fn dispatch_run_converts_and_enqueues_inline_calls() {
     let root = temp("success");
     fs::write(root.join("One.md"), "---\nslug: cnt.one\n---\nBody\n").unwrap();
     git(&root, ["init", "--quiet", "--initial-branch=main"]);
@@ -31,7 +31,7 @@ fn dispatch_run_converts_uploads_and_enqueues_in_one_service_call() {
     assert_eq!(response["records"], 1);
     assert_eq!(
         fs::read_to_string(root.join("asc.log")).unwrap(),
-        "export list-pending --ndjson\nupload calls\nenqueue\n"
+        "export list-pending --ndjson\nenqueue\n"
     );
     let input = fs::read_to_string(root.join("asc.log.input")).unwrap();
     assert!(input.contains("\"type\":\"call\""));
@@ -40,7 +40,7 @@ fn dispatch_run_converts_uploads_and_enqueues_in_one_service_call() {
 }
 
 #[test]
-fn conversion_failure_prevents_upload_and_enqueue() {
+fn conversion_failure_prevents_enqueue() {
     let root = temp("failure");
     fs::write(root.join("One.md"), "---\nslug: cnt.one\n---\nBody\n").unwrap();
     initialize_repo(&root);
@@ -58,7 +58,7 @@ fn conversion_failure_prevents_upload_and_enqueue() {
 }
 
 #[test]
-fn pending_response_blocks_dispatch_before_upload_and_enqueue() {
+fn pending_response_blocks_dispatch_before_enqueue() {
     let root = temp("pending");
     fs::write(root.join("One.md"), "---\nslug: cnt.one\n---\nBody\n").unwrap();
     initialize_repo(&root);
@@ -105,12 +105,10 @@ fn invoke(root: &Path, pandoc: &Path, asc: &Path) -> std::process::Output {
     child.wait_with_output().unwrap()
 }
 fn save_plan(root: &Path) {
-    let commit = plan_repository::save(root, &json!({
+    plan_repository::save(root, &json!({
         "record_identity":"plan.test",
         "payload":{"steps":{"1":{"kind":"llm"}}}
     })).unwrap();
-    git::mark_config_category_submitted(root, "plans", &commit).unwrap();
-    git::mark_config_synced(root, &commit).unwrap();
 }
 
 fn fake_asc(root: &Path) -> PathBuf {

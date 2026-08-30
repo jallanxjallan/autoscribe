@@ -172,49 +172,6 @@ fn response_snapshot_records_exact_bytes_without_touching_master() {
 }
 
 #[test]
-fn config_sync_status_ignores_state_only_commits() {
-    let repo = TestRepo::new();
-    let plan = serde_json::json!({
-        "record_type":"plan",
-        "record_identity":"plan.test",
-        "payload":{"steps":{"1":{"kind":"script","script":"test"}}}
-    });
-    let payload_commit = git::config_upsert_json(
-        &repo.0,
-        "plans",
-        "plan.test",
-        &plan,
-        "AUTOSCRIBE CONFIG plan plan.test",
-    ).unwrap();
-    git::mark_config_synced(&repo.0, &payload_commit.0).unwrap();
-    assert!(git::config_is_synced(&repo.0).unwrap());
-
-    let state_commit = git::config_upsert_json(
-        &repo.0,
-        "state",
-        "control",
-        &serde_json::json!({"version":1,"config":{"current":true}}),
-        "AUTOSCRIBE CONFIG control state",
-    ).unwrap();
-    assert_ne!(payload_commit.0, state_commit.0);
-    assert!(git::config_is_synced(&repo.0).unwrap());
-
-    let changed = serde_json::json!({
-        "record_type":"plan",
-        "record_identity":"plan.test",
-        "payload":{"steps":{"1":{"kind":"script","script":"different"}}}
-    });
-    git::config_upsert_json(
-        &repo.0,
-        "plans",
-        "plan.test",
-        &changed,
-        "AUTOSCRIBE CONFIG update plan.test",
-    ).unwrap();
-    assert!(!git::config_is_synced(&repo.0).unwrap());
-}
-
-#[test]
 fn restore_requires_exact_confirmation() {
     let repo = TestRepo::new();
     let source = output(&repo.0, ["rev-parse", "HEAD"]);

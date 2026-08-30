@@ -4,12 +4,12 @@ import typer
 
 from asc.enqueue.service import enqueue_from_stream
 
-app = typer.Typer(help="Enqueue uploaded calls from call/plan slug manifests.")
+app = typer.Typer(help="Persist inline call records, resolve plans, and queue runtimes.")
 
 
 @app.command("-")
 def enqueue_stdin() -> None:
-    """Read NDJSON call/plan manifest records from stdin and enqueue calls."""
+    """Read NDJSON call records with plan slugs from stdin and enqueue them."""
 
     report = enqueue_from_stream(sys.stdin)
     print(
@@ -21,7 +21,7 @@ def enqueue_stdin() -> None:
 
 @app.callback(invoke_without_command=True)
 def enqueue(ctx: typer.Context) -> None:
-    """Read NDJSON call/plan manifest records from stdin when no subcommand is given."""
+    """Read NDJSON call records with plan slugs from stdin when no subcommand is given."""
 
     if ctx.invoked_subcommand is not None:
         return

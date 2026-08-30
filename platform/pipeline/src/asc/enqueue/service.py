@@ -32,7 +32,7 @@ def enqueue_records(records: Iterable[EnqueueRecord]) -> EnqueueReport:
 
 
 def enqueue_record(record: EnqueueRecord) -> EnqueuedCall:
-    """Compile runtimes for one uploaded call and register its job."""
+    """Persist one call, compile its runtimes, and register its job."""
 
     call = record.call
     call_key = record.call_key

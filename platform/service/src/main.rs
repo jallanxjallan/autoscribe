@@ -1,6 +1,6 @@
 use autoscribe_service::{
     db::{self, Database},
-    git, instruction_sync, reconcile,
+    git, instruction_sync,
     pandoc, plan_repository, response_repository,
     types::{CommitPurpose, CommitRequest, DispatchId, LedgerSnapshotRequest,
         LedgerSource, PandocJob, PlanId, VersionRequest},
@@ -50,32 +50,6 @@ struct PlanSaveInput {
     plan: serde_json::Value,
 }
 
-#[derive(Deserialize)]
-#[serde(deny_unknown_fields)]
-struct InstructionSyncInput {
-    version: u32,
-    slugs: Vec<String>,
-}
-
-#[derive(Serialize)]
-struct InstructionSyncOutput {
-    ok: bool,
-    operation: &'static str,
-    scanned: usize,
-    selected: usize,
-    uploaded: usize,
-    hashes_compared: usize,
-    items: Vec<instruction_sync::SyncItem>,
-}
-
-#[derive(Serialize)]
-struct PlanSaveOutput {
-    ok: bool,
-    operation: &'static str,
-    plan: String,
-    config_commit: String,
-}
-
 #[derive(Serialize)]
 struct DefinePlanSnapshotOutput {
     ok: bool,
@@ -122,19 +96,14 @@ fn main() -> ExitCode {
     match env::args().nth(1).as_deref() {
         Some("__dispatch-run") => return dispatch_run(),
         Some("watch-dispatch") => return watch_dispatch(),
-        Some("watch-config") => return watch_config(),
         Some("refresh") => return command_output("refresh", refresh_cli()),
         Some("define-plan-snapshot") => return define_plan_snapshot(),
         Some("system-snapshot") => return command_output("system.snapshot", system_snapshot_from_stdin()),
         Some("resolve-slugs") => return command_output("slugs.resolve", resolve_slugs_from_stdin()),
-        Some("plan-save") => return plan_save(),
-        Some("instructions-state-snapshot") => return command_output("instructions.state-snapshot", instructions_state_snapshot_from_stdin()),
-        Some("instructions-sync") => return command_output("instructions.sync", instructions_sync_from_stdin()),
         Some("git-files") => return command_output("git.files", git_files_from_stdin()),
         Some("write-responses") => return write_responses(),
-        Some("upload-instructions") => return command_output("instructions.upload", upload_instructions()),
         _ => {
-            eprintln!("usage: svc watch-config [--once] | watch-dispatch [--once] | refresh | write-responses | system-snapshot | git-files | instructions-sync | instructions-state-snapshot");
+            eprintln!("usage: svc watch-dispatch [--once] | refresh | write-responses | system-snapshot | git-files");
             return ExitCode::FAILURE;
         }
     }
@@ -258,243 +227,6 @@ fn watch_dispatch() -> ExitCode {
 }
 
 
-fn watch_config() -> ExitCode {
-    let once = env::args().skip(2).any(|argument| argument == "--once");
-    if env::args().skip(2).any(|argument| argument != "--once") {
-        eprintln!("usage: svc watch-config [--once]");
-        return ExitCode::FAILURE;
-    }
-    let repository = match git::root(&std::env::current_dir().unwrap_or_default()) {
-        Ok(repository) => repository,
-        Err(error) => {
-            emit_watch_event(&serde_json::json!({"ok":false,"operation":"watch-config","error":error.to_string()}));
-            return ExitCode::FAILURE;
-        }
-    };
-    let result = (|| -> Result<ExitCode, Box<dyn std::error::Error>> {
-        git::ensure_info_exclude(&repository, "/.autoscribe/")?;
-        let _lock = acquire_watcher_lock(&repository, "watch-config")?;
-        let db = open_configured_database()?;
-        let poll = watcher_interval("AUTOSCRIBE_CONFIG_POLL_MS", 2_000)?;
-        let retry = watcher_interval("AUTOSCRIBE_CONFIG_RETRY_MS", 30_000)?;
-        if !once {
-            emit_watch_event(&serde_json::json!({
-                "ok":true,"operation":"watch-config.started","repository":repository,
-                "poll_ms":poll.as_millis(),"retry_ms":retry.as_millis(),
-                "ref":git::CONFIG_REF
-            }));
-        }
-        loop {
-            match sync_config_pass(&repository, &db) {
-                Ok(event) => {
-                    if once {
-                        emit_watch_event(&serde_json::json!({"ok":true,"operation":"watch-config.pass","event":event}));
-                        return Ok(ExitCode::SUCCESS);
-                    }
-                    if event.get("status").and_then(serde_json::Value::as_str) != Some("current") {
-                        emit_watch_event(&serde_json::json!({"ok":true,"operation":"watch-config.event","event":event}));
-                    }
-                    std::thread::sleep(poll);
-                }
-                Err(error) => {
-                    if once {
-                        emit_watch_event(&serde_json::json!({"ok":false,"operation":"watch-config.pass","error":error.to_string()}));
-                        return Ok(ExitCode::FAILURE);
-                    }
-                    emit_watch_event(&serde_json::json!({"ok":false,"operation":"watch-config.retry","error":error.to_string(),"retry_ms":retry.as_millis()}));
-                    std::thread::sleep(retry);
-                }
-            }
-        }
-    })();
-    match result {
-        Ok(code) => code,
-        Err(error) => {
-            emit_watch_event(&serde_json::json!({"ok":false,"operation":"watch-config","error":error.to_string()}));
-            ExitCode::FAILURE
-        }
-    }
-}
-
-fn mirror_committed_instructions_to_config(repository: &Path) -> Result<(usize, Option<String>), Box<dyn std::error::Error>> {
-    let head = git::head(repository)?;
-    if git::config_source_head(repository)?.as_ref().map(|value| value.0.as_str()) == Some(head.0.as_str()) {
-        return Ok((git::config_list_json(repository, "instructions")?.len(), None));
-    }
-    let local = instruction_sync::scan_git(repository, &head.0)?;
-    let records = local.iter().map(|item| (item.slug.clone(), instruction_sync::upload_record(item))).collect::<Vec<_>>();
-    let commit = git::config_replace_json(
-        repository, "instructions", &records,
-        "AUTOSCRIBE CONFIG committed instructions",
-    )?.map(|value| value.0);
-    git::mark_config_source(repository, &head.0)?;
-    Ok((local.len(), commit))
-}
-
-fn config_record_identity(category: &str, record: &serde_json::Value) -> Option<String> {
-    let fields: &[&str] = match category {
-        "instructions" => &["identity", "record_identity", "slug", "key"],
-        "plans" => &["record_identity", "identity", "slug", "key"],
-        _ => &[],
-    };
-    fields.iter().find_map(|field| record.get(*field).and_then(serde_json::Value::as_str))
-        .map(str::trim).filter(|value| !value.is_empty()).map(str::to_string)
-}
-
-fn pending_config_records(
-    repository: &Path,
-    category: &str,
-    revision: &str,
-) -> Result<Vec<serde_json::Value>, Box<dyn std::error::Error>> {
-    let current = git::config_list_json_at(repository, category, revision)?;
-    let submitted = match git::config_category_submitted_head(repository, category)? {
-        Some(head) => git::config_list_json_at(repository, category, &head.0)?,
-        None => Vec::new(),
-    };
-    let submitted = submitted.into_iter().filter_map(|record| {
-        config_record_identity(category, &record).map(|identity| (identity, record))
-    }).collect::<std::collections::BTreeMap<_, _>>();
-    Ok(current.into_iter().filter(|record| {
-        let Some(identity) = config_record_identity(category, record) else { return true; };
-        submitted.get(&identity) != Some(record)
-    }).collect())
-}
-
-fn plan_upload_record(record: &serde_json::Value) -> serde_json::Value {
-    serde_json::json!({
-        "type":"plan",
-        "identity":record.get("record_identity").cloned().unwrap_or(serde_json::Value::Null),
-        "content":record.get("payload").cloned().unwrap_or(serde_json::Value::Null),
-        "extra":{}
-    })
-}
-
-fn configured_globals_repository() -> Result<Option<PathBuf>, Box<dyn std::error::Error>> {
-    if let Some(raw) = env::var_os("AUTOSCRIBE_GLOBALS_VAULT") {
-        if raw.is_empty() { return Ok(None); }
-        return Ok(Some(git::root(&PathBuf::from(raw))?));
-    }
-    let root = env::var_os("AUTOSCRIBE_ROOT").map(PathBuf::from).unwrap_or_else(|| {
-        PathBuf::from(env::var_os("HOME").unwrap_or_else(|| "/home/jeremy".into())).join("Work/Loom")
-    });
-    let candidate = root.join("platform/instructions");
-    if candidate.is_dir() { Ok(Some(git::root(&candidate)?)) } else { Ok(None) }
-}
-
-fn instruction_records_by_slug(items: Vec<instruction_sync::LocalInstruction>)
-    -> std::collections::BTreeMap<String, serde_json::Value> {
-    items.into_iter().map(|item| {
-        let slug = item.slug.clone();
-        (slug, instruction_sync::upload_record(&item))
-    }).collect()
-}
-
-fn pending_instruction_source_records(
-    repository: &Path,
-    revision: &str,
-) -> Result<Vec<serde_json::Value>, Box<dyn std::error::Error>> {
-    let current = instruction_records_by_slug(instruction_sync::scan_git(repository, revision)?);
-    let submitted = match git::instruction_source_submitted_head(repository)? {
-        Some(head) => instruction_records_by_slug(instruction_sync::scan_git(repository, &head.0)?),
-        None => std::collections::BTreeMap::new(),
-    };
-    Ok(current.into_iter().filter_map(|(slug, record)| {
-        if submitted.get(&slug) == Some(&record) { None } else { Some(record) }
-    }).collect())
-}
-
-fn submit_globals_pass(asc: &Path) -> Result<serde_json::Value, Box<dyn std::error::Error>> {
-    let Some(repository) = configured_globals_repository()? else {
-        return Ok(serde_json::json!({"status":"disabled","scanned":0,"uploaded":0}));
-    };
-    let head = git::head(&repository)?;
-    let pending = pending_instruction_source_records(&repository, &head.0)?;
-    let scanned = instruction_sync::scan_git(&repository, &head.0)?.len();
-    if !pending.is_empty() {
-        run_asc(asc, ["upload", "instructions"], &ndjson(&pending)?)?;
-    }
-    git::mark_instruction_source_submitted(&repository, &head.0)?;
-    Ok(serde_json::json!({
-        "status": if pending.is_empty() { "current" } else { "submitted" },
-        "repository":repository,
-        "scanned":scanned,
-        "uploaded":pending.len(),
-        "source_commit":head.0,
-        "submitted_ref":git::INSTRUCTION_SOURCE_SUBMITTED_REF
-    }))
-}
-
-fn sync_config_pass(repository: &Path, _db: &Database) -> Result<serde_json::Value, Box<dyn std::error::Error>> {
-    let (scanned, staged_commit) = mirror_committed_instructions_to_config(repository)?;
-    let head = git::config_head(repository)?.ok_or("config ref was not created")?;
-
-    let instructions_current = git::config_category_revision_is_submitted(repository, "instructions", &head.0)?;
-    let plans_current = git::config_category_revision_is_submitted(repository, "plans", &head.0)?;
-    let asc = asc_command();
-    if instructions_current && plans_current {
-        if !git::config_revision_is_synced(repository, &head.0)? {
-            git::mark_config_synced(repository, &head.0)?;
-        }
-        let globals = submit_globals_pass(&asc)?;
-        return Ok(serde_json::json!({
-            "status": if globals.get("status").and_then(serde_json::Value::as_str) == Some("submitted") { "submitted" } else { "current" },
-            "instructions":scanned,
-            "plans":plan_repository::list_at(repository, &head.0)?.len(),
-            "uploaded_instructions":0,"uploaded_plans":0,
-            "globals":globals,"config_commit":head.0
-        }));
-    }
-
-    // watch-config is intentionally local-state-driven. It does not read the
-    // live pipeline/Redis catalog. The submitted refs are the durable handoff
-    // ledger: only records absent or changed there are sent.
-    let pending_instructions = pending_config_records(repository, "instructions", &head.0)?;
-    let pending_plans = pending_config_records(repository, "plans", &head.0)?;
-
-    if !instructions_current {
-        if !pending_instructions.is_empty() {
-            run_asc(&asc, ["upload", "instructions"], &ndjson(&pending_instructions)?)?;
-        }
-        git::mark_config_category_submitted(repository, "instructions", &head.0)?;
-    }
-
-    if !plans_current {
-        if !pending_plans.is_empty() {
-            let uploads = pending_plans.iter().map(plan_upload_record).collect::<Vec<_>>();
-            run_asc(&asc, ["upload", "plans"], &ndjson(&uploads)?)?;
-        }
-        git::mark_config_category_submitted(repository, "plans", &head.0)?;
-    }
-
-    if git::config_category_revision_is_submitted(repository, "instructions", &head.0)?
-        && git::config_category_revision_is_submitted(repository, "plans", &head.0)? {
-        git::mark_config_synced(repository, &head.0)?;
-    }
-    let globals = submit_globals_pass(&asc)?;
-
-    Ok(serde_json::json!({
-        "status":"submitted",
-        "instructions":git::config_list_json_at(repository, "instructions", &head.0)?.len(),
-        "plans":plan_repository::list_at(repository, &head.0)?.len(),
-        "uploaded_instructions":pending_instructions.len(),
-        "uploaded_plans":pending_plans.len(),
-        "globals":globals,
-        "config_commit":head.0,"staged_commit":staged_commit,"ref":git::CONFIG_REF
-    }))
-}
-
-fn upload_instructions()->Result<serde_json::Value,Box<dyn std::error::Error>>{
-    // Compatibility command: direct instruction upload is deliberately retired.
-    // Stage the committed instruction set into refs/heads/autoscribe/config;
-    // watch-config is the sole network synchronization owner.
-    let repository = git::root(&std::env::current_dir()?)?;
-    let (scanned, commit) = mirror_committed_instructions_to_config(&repository)?;
-    Ok(serde_json::json!({
-        "ok":true,"operation":"instructions.stage-config","scanned":scanned,
-        "config_commit":commit,"uploaded":0
-    }))
-}
-
 fn runtime_active_call_count(asc: &Path) -> Result<usize, Box<dyn std::error::Error>> {
     let output = run_asc_capture(asc, ["run", "status"], &[])?;
     let text = std::str::from_utf8(&output)?;
@@ -543,54 +275,6 @@ fn instruction_record_slug(value: &serde_json::Value) -> String {
     ["slug", "record_identity", "identity", "key"].into_iter()
         .find_map(|field| value.get(field).and_then(serde_json::Value::as_str))
         .unwrap_or("").trim().to_string()
-}
-
-fn instructions_state_snapshot_from_stdin() -> Result<serde_json::Value, Box<dyn std::error::Error>> {
-    let input: VersionInput = read_json_stdin()?;
-    if input.version != 1 { return Err("unsupported instructions state snapshot version".into()); }
-    let repository = git::root(&std::env::current_dir()?)?;
-    let records = git::config_list_json(&repository, "instructions")?;
-    let items = records.iter().map(|record| {
-        let slug = instruction_record_slug(record);
-        let extra = record.get("extra").cloned().unwrap_or_else(|| serde_json::json!({}));
-        serde_json::json!({"slug":slug,"status":"configured","extra":extra})
-    }).collect::<Vec<_>>();
-    Ok(serde_json::json!({
-        "ok": true,
-        "operation": "instructions.state-snapshot",
-        "items": items,
-        "config_head": git::config_head(&repository)?.map(|v|v.0),
-        "config_synced": git::config_synced_head(&repository)?.map(|v|v.0),
-        "current": git::config_is_synced(&repository)?
-    }))
-}
-
-fn instructions_sync_from_stdin() -> Result<InstructionSyncOutput, Box<dyn std::error::Error>> {
-    let input: InstructionSyncInput = read_json_stdin()?;
-    if input.version != 1 { return Err("unsupported instruction sync version".into()); }
-    let repository = git::root(&std::env::current_dir()?)?;
-    let selected = input.slugs.into_iter().map(|slug| slug.trim().to_string())
-        .filter(|slug| !slug.is_empty()).collect::<std::collections::BTreeSet<_>>();
-    if selected.is_empty() { return Err("instruction sync requires selected slugs".into()); }
-    let local = instruction_sync::scan_git(&repository, "HEAD")?;
-    let present = local.iter().map(|item| item.slug.clone()).collect::<std::collections::BTreeSet<_>>();
-    let missing = selected.difference(&present).cloned().collect::<Vec<_>>();
-    if !missing.is_empty() {
-        return Err(format!("selected committed instruction slugs were not found: {}", missing.join(", ")).into());
-    }
-    let (scanned, _) = mirror_committed_instructions_to_config(&repository)?;
-    let items = local.into_iter().filter(|item| selected.contains(&item.slug)).map(|item| instruction_sync::SyncItem {
-        slug:item.slug, path:item.relative_path, status:"configured".into(), reason:"staged from committed Git state; watch-config owns upload".into()
-    }).collect::<Vec<_>>();
-    Ok(InstructionSyncOutput {
-        ok: true,
-        operation: "instructions.sync",
-        scanned,
-        selected: selected.len(),
-        uploaded: 0,
-        hashes_compared: 0,
-        items,
-    })
 }
 
 fn git_files_from_stdin() -> Result<serde_json::Value, Box<dyn std::error::Error>> {
@@ -1078,7 +762,6 @@ fn run_dispatch_from_stdin() -> Result<DispatchRunOutput, Box<dyn std::error::Er
     if let Some(parent) = database_path.parent() { std::fs::create_dir_all(parent)?; }
     let database = Database::open_path(&database_path)?;
     db::migrate(&database)?;
-    require_plan_available(&repository, &database, &input.plan)?;
     let documents = resolve_document_slugs(&repository, &input.documents)?;
     let pandoc_binary = configured_pandoc_binary()?;
     let pandoc_filter = configured_pandoc_filter()?;
@@ -1136,7 +819,6 @@ fn run_dispatch_from_stdin() -> Result<DispatchRunOutput, Box<dyn std::error::Er
     };
     let outcomes = pandoc::run_parallel(&pandoc_binary, jobs, pandoc_parallelism)?;
     let mut calls = Vec::new();
-    let mut enqueue = Vec::new();
     let mut identities = Vec::new();
     for ((expected_slug, relative), outcome) in documents.iter().zip(outcomes) {
         if outcome.exit_code != Some(0) || outcome.error.is_some() {
@@ -1186,19 +868,19 @@ fn run_dispatch_from_stdin() -> Result<DispatchRunOutput, Box<dyn std::error::Er
             .filter(|(key, _)| key.as_str() != "content")
             .map(|(key, value)| (key.clone(), value.clone()))
             .collect::<serde_json::Map<_, _>>();
-        calls.push(serde_json::json!({"type":"call","identity":identity,"content":content,
+        let mut call = serde_json::json!({"type":"call","identity":identity,"content":content,
+            "plan":input.plan,
             "extra":{"filename_hint":relative.file_name().and_then(|name| name.to_str()).unwrap_or(expected_slug),
-            "source_path":relative.to_string_lossy().replace('\\',"/"),"metadata":metadata}}));
-        let mut manifest = serde_json::json!({"call":identity,"plan":input.plan});
+            "source_path":relative.to_string_lossy().replace('\\',"/"),"metadata":metadata}});
         if let Some(directive) = record
             .get("directive")
             .and_then(serde_json::Value::as_str)
             .map(str::trim)
             .filter(|value| !value.is_empty())
         {
-            manifest["directive"] = serde_json::Value::String(directive.into());
+            call["directive"] = serde_json::Value::String(directive.into());
         }
-        enqueue.push(manifest);
+        calls.push(call);
         identities.push(identity);
     }
     let asc = asc_command();
@@ -1216,11 +898,10 @@ fn run_dispatch_from_stdin() -> Result<DispatchRunOutput, Box<dyn std::error::Er
         )
         .into());
     }
-    run_asc(&asc, ["upload", "calls"], &ndjson(&calls)?)?;
-    // Enqueue owns its own durable failure reporting. Once the payload has
-    // been handed to asc, svc must not wait for enqueue validation or runtime
-    // processing; the response/inflight watcher will surface overdue work.
-    run_asc_fire_and_forget(&asc, ["enqueue"], &ndjson(&enqueue)?)?;
+    // Enqueue owns call persistence as well as runtime construction. Once the
+    // inline records have been handed to asc, svc does not wait for validation
+    // or runtime processing; failure keys surface asynchronous errors.
+    run_asc_fire_and_forget(&asc, ["enqueue"], &ndjson(&calls)?)?;
     Ok(DispatchRunOutput {
         ok: true,
         operation: "dispatch.run",
@@ -1276,10 +957,6 @@ fn publish_control_state(
             None => catalogs_from_server(server),
         };
         annotate_plan_usage(db, &mut catalogs)?;
-        let current = match payload_revision.as_ref() {
-            Some(revision) => git::config_revision_is_synced(repository, &revision.0)?,
-            None => true,
-        };
         let state = serde_json::json!({
             "version":1,
             "refreshed_at":refreshed_at,
@@ -1288,8 +965,7 @@ fn publish_control_state(
             "pipeline":db::system_counts(db)?,
             "config":{
                 "payload_revision":payload_revision.as_ref().map(|v|v.0.clone()),
-                "synced":git::config_synced_head(repository)?.map(|v|v.0),
-                "current":current
+                "transport":"git-push"
             },
             "dispatches":[],
         });
@@ -1395,7 +1071,6 @@ fn reconcile_git_dispatch_commits(
             if db::meta_get(db, &receipt_key)?.is_some() {
                 output.push(serde_json::json!({"status":"already-dispatched","commit":commit,"plan":plan}));
             } else {
-                require_plan_available(repository, db, &plan)?;
                 let result = dispatch_commit_worktree(repository, &commit, &plan, &trailers.documents)?;
                 record_plan_use(db, &plan)?;
                 db::meta_set_many(db, &[(receipt_key.as_str(), unix_timestamp())])?;
@@ -1606,24 +1281,6 @@ fn configured_pandoc_parallelism() -> usize {
         .unwrap_or_else(|| std::thread::available_parallelism().map(usize::from).unwrap_or(2).max(2))
 }
 
-fn require_plan_available(repository: &Path, _db: &Database, plan: &str) -> Result<(), Box<dyn std::error::Error>> {
-    let local = plan_repository::list(repository)?.into_iter().find(|record| {
-        ["record_identity", "slug"].into_iter().any(|field| record.get(field).and_then(serde_json::Value::as_str) == Some(plan))
-    }).ok_or_else(|| format!("plan slug is not present in local configuration: {plan}"))?;
-
-    let Some(submitted_head) = git::config_category_submitted_head(repository, "plans")? else {
-        return Err(format!("plan has not been submitted: {plan}").into());
-    };
-    let submitted = plan_repository::list_at(repository, &submitted_head.0)?.into_iter().find(|record| {
-        ["record_identity", "slug"].into_iter().any(|field| record.get(field).and_then(serde_json::Value::as_str) == Some(plan))
-    });
-    if submitted.as_ref() == Some(&local) {
-        Ok(())
-    } else {
-        Err(format!("plan has local changes not yet submitted: {plan}").into())
-    }
-}
-
 fn resolve_slugs_from_stdin() -> Result<serde_json::Value, Box<dyn std::error::Error>> {
     let input: ResolveSlugsInput = read_json_stdin()?;
     if input.version != 1 { return Err("unsupported slug resolver version".into()); }
@@ -1714,7 +1371,7 @@ fn define_plan_snapshot() -> ExitCode {
 fn snapshot_from_config_ref() -> Result<DefinePlanSnapshotOutput, Box<dyn std::error::Error>> {
     let repository = git::root(&std::env::current_dir()?)?;
     let state = git::config_get_json(&repository, "state", "control")?
-        .ok_or("configuration state has not been published yet; run watch-config or refresh")?;
+        .ok_or("configuration state has not been published yet; run refresh")?;
     let catalogs = state.get("catalogs").cloned()
         .ok_or("published configuration state has no catalogs")?;
     let refreshed_at = state.get("refreshed_at").and_then(serde_json::Value::as_str).map(str::to_string);
@@ -1793,24 +1450,6 @@ fn catalogs_with_local_config_at(
     }
     plans.extend(by_slug.into_values());
     Ok(catalogs)
-}
-
-fn markdown_frontmatter_scalar(text: &str, wanted: &str) -> Option<String> {
-    let mut lines = text.lines();
-    if lines.next().map(str::trim) != Some("---") { return None; }
-    let prefix = format!("{wanted}:");
-    for line in lines {
-        let trimmed = line.trim();
-        if trimmed == "---" { break; }
-        if line.chars().next().is_some_and(char::is_whitespace) { continue; }
-        if let Some(value) = line.strip_prefix(&prefix) {
-            let value = value.trim().trim_matches(['\'', '"']);
-            if !value.is_empty() && value != "null" && value != "~" {
-                return Some(value.to_string());
-            }
-        }
-    }
-    None
 }
 
 fn instruction_component_from_slug(slug: &str) -> String {
@@ -1904,34 +1543,6 @@ fn normalize_instruction_record(record: &mut serde_json::Map<String, serde_json:
 
 fn unix_timestamp() -> String {
     std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|value| value.as_secs().to_string()).unwrap_or_else(|_| "0".into())
-}
-
-fn plan_instruction_slugs(plan: &serde_json::Value) -> std::collections::BTreeSet<String> {
-    let mut out = std::collections::BTreeSet::new();
-    if let Some(steps) = plan.pointer("/payload/steps").and_then(serde_json::Value::as_object) {
-        for step in steps.values() {
-            if let Some(groups) = step.get("instruction_slugs").and_then(serde_json::Value::as_object) {
-                for values in groups.values().filter_map(serde_json::Value::as_array) {
-                    for slug in values.iter().filter_map(serde_json::Value::as_str).map(str::trim).filter(|s| !s.is_empty()) { out.insert(slug.to_string()); }
-                }
-            }
-            if let Some(slug) = step.get("instruction").and_then(serde_json::Value::as_str).map(str::trim).filter(|s| !s.is_empty()) { out.insert(slug.to_string()); }
-        }
-    }
-    out
-}
-
-fn plan_save() -> ExitCode {
-    command_output("plan.save", save_plan_from_stdin())
-}
-
-fn save_plan_from_stdin() -> Result<PlanSaveOutput, Box<dyn std::error::Error>> {
-    let input: PlanSaveInput = read_json_stdin()?;
-    if input.version != 1 { return Err(format!("unsupported plan save version: {}", input.version).into()); }
-    let repository = git::root(&std::env::current_dir()?)?;
-    let identity = plan_repository::validate(&input.plan)?.to_string();
-    let config_commit = plan_repository::save(&repository, &input.plan)?;
-    Ok(PlanSaveOutput { ok: true, operation: "plan.save", plan: identity, config_commit })
 }
 
 fn command_output<T: Serialize>(

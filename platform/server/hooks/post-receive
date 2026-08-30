@@ -1,0 +1,18 @@
+#!/bin/sh
+set -eu
+
+ASC_BIN="${ASC_BIN:-asc}"
+CONFIG_REF="${AUTOSCRIBE_CONFIG_REF:-refs/heads/autoscribe/config}"
+ZERO=0000000000000000000000000000000000000000
+REPO="$(git rev-parse --absolute-git-dir)"
+
+while read -r old new ref; do
+    [ "$ref" = "$CONFIG_REF" ] || continue
+    [ "$new" != "$ZERO" ] || continue
+
+    if [ "$old" = "$ZERO" ]; then
+        "$ASC_BIN" ingest "$REPO" "$new" --full
+    else
+        "$ASC_BIN" ingest "$REPO" "$new" --base "$old"
+    fi
+done

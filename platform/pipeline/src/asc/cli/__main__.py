@@ -5,7 +5,7 @@ from asc.cli.enqueue import app as enqueue_app
 from asc.cli.export import app as export_app
 from asc.cli.run import app as run_app
 from asc.cli.storage import app as storage_app
-from asc.cli.upload import app as upload_app
+from asc.cli.ingest import app as ingest_app
 
 
 app = typer.Typer(
@@ -23,15 +23,15 @@ app.add_typer(
 )
 
 app.add_typer(
-    upload_app,
-    name="upload",
-    help="Upload instructions, calls, plans, and future assets.",
+    ingest_app,
+    name="ingest",
+    help="Materialize Git-authored configuration into Redis.",
 )
 
 app.add_typer(
     enqueue_app,
     name="enqueue",
-    help="Freeze uploaded call records and queue them.",
+    help="Persist call records, resolve their plans, and queue them.",
 )
 
 app.add_typer(
