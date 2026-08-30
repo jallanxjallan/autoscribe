@@ -16,7 +16,6 @@ pub const CONFIG_REF: &str = "refs/heads/autoscribe/config";
 pub const CONFIG_SYNCED_REF: &str = "refs/autoscribe/config-synced";
 pub const CONFIG_INSTRUCTIONS_SUBMITTED_REF: &str = "refs/autoscribe/config-instructions-submitted";
 pub const CONFIG_PLANS_SUBMITTED_REF: &str = "refs/autoscribe/config-plans-submitted";
-pub const INSTRUCTION_SOURCE_SUBMITTED_REF: &str = "refs/autoscribe/instructions-submitted";
 pub const CONFIG_SOURCE_REF: &str = "refs/autoscribe/config-source";
 
 pub fn root(path: &Path) -> ServiceResult<PathBuf> {
@@ -427,23 +426,6 @@ pub fn mark_config_category_submitted(repo: &Path, category: &str, commit: &str)
     let reference = config_submitted_ref(&category)?;
     let commit = revision(&repo, commit)?;
     git(&repo, ["update-ref", "-m", "AutoScribe config submitted", reference, commit.as_str()])?;
-    Ok(())
-}
-
-/// Cursor for an instruction-only source repository such as the canonical
-/// globals vault. This is deliberately independent of project config refs.
-pub fn instruction_source_submitted_head(repo: &Path) -> ServiceResult<Option<CommitId>> {
-    let repo = repository_root(repo)?;
-    Ok(optional_revision(&repo, INSTRUCTION_SOURCE_SUBMITTED_REF)?.map(CommitId))
-}
-
-pub fn mark_instruction_source_submitted(repo: &Path, commit: &str) -> ServiceResult<()> {
-    let repo = repository_root(repo)?;
-    let commit = revision(&repo, commit)?;
-    git(&repo, [
-        "update-ref", "-m", "AutoScribe instructions submitted",
-        INSTRUCTION_SOURCE_SUBMITTED_REF, commit.as_str(),
-    ])?;
     Ok(())
 }
 

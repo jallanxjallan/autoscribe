@@ -369,79 +369,19 @@ fn plan_upload_record(record: &serde_json::Value) -> serde_json::Value {
     })
 }
 
-fn configured_globals_repository() -> Result<Option<PathBuf>, Box<dyn std::error::Error>> {
-    if let Some(raw) = env::var_os("AUTOSCRIBE_GLOBALS_VAULT") {
-        if raw.is_empty() { return Ok(None); }
-        return Ok(Some(git::root(&PathBuf::from(raw))?));
-    }
-    let root = env::var_os("AUTOSCRIBE_ROOT").map(PathBuf::from).unwrap_or_else(|| {
-        PathBuf::from(env::var_os("HOME").unwrap_or_else(|| "/home/jeremy".into())).join("Work/Loom")
-    });
-    let candidate = root.join("platform/instructions");
-    if candidate.is_dir() { Ok(Some(git::root(&candidate)?)) } else { Ok(None) }
-}
-
-fn instruction_records_by_slug(items: Vec<instruction_sync::LocalInstruction>)
-    -> std::collections::BTreeMap<String, serde_json::Value> {
-    items.into_iter().map(|item| {
-        let slug = item.slug.clone();
-        (slug, instruction_sync::upload_record(&item))
-    }).collect()
-}
-
-fn pending_instruction_source_records(
-    repository: &Path,
-    revision: &str,
-) -> Result<Vec<serde_json::Value>, Box<dyn std::error::Error>> {
-    let current = instruction_records_by_slug(instruction_sync::scan_git(repository, revision)?);
-    let submitted = match git::instruction_source_submitted_head(repository)? {
-        Some(head) => instruction_records_by_slug(instruction_sync::scan_git(repository, &head.0)?),
-        None => std::collections::BTreeMap::new(),
-    };
-    Ok(current.into_iter().filter_map(|(slug, record)| {
-        if submitted.get(&slug) == Some(&record) { None } else { Some(record) }
-    }).collect())
-}
-
-fn submit_globals_pass(asc: &Path) -> Result<serde_json::Value, Box<dyn std::error::Error>> {
-    let Some(repository) = configured_globals_repository()? else {
-        return Ok(serde_json::json!({"status":"disabled","scanned":0,"uploaded":0}));
-    };
-    let head = git::head(&repository)?;
-    let pending = pending_instruction_source_records(&repository, &head.0)?;
-    let scanned = instruction_sync::scan_git(&repository, &head.0)?.len();
-    if !pending.is_empty() {
-        run_asc(asc, ["upload", "instructions"], &ndjson(&pending)?)?;
-    }
-    git::mark_instruction_source_submitted(&repository, &head.0)?;
-    Ok(serde_json::json!({
-        "status": if pending.is_empty() { "current" } else { "submitted" },
-        "repository":repository,
-        "scanned":scanned,
-        "uploaded":pending.len(),
-        "source_commit":head.0,
-        "submitted_ref":git::INSTRUCTION_SOURCE_SUBMITTED_REF
-    }))
-}
-
 fn sync_config_pass(repository: &Path, _db: &Database) -> Result<serde_json::Value, Box<dyn std::error::Error>> {
     let (scanned, staged_commit) = mirror_committed_instructions_to_config(repository)?;
     let head = git::config_head(repository)?.ok_or("config ref was not created")?;
 
     let instructions_current = git::config_category_revision_is_submitted(repository, "instructions", &head.0)?;
     let plans_current = git::config_category_revision_is_submitted(repository, "plans", &head.0)?;
-    let asc = asc_command();
     if instructions_current && plans_current {
         if !git::config_revision_is_synced(repository, &head.0)? {
             git::mark_config_synced(repository, &head.0)?;
         }
-        let globals = submit_globals_pass(&asc)?;
         return Ok(serde_json::json!({
-            "status": if globals.get("status").and_then(serde_json::Value::as_str) == Some("submitted") { "submitted" } else { "current" },
-            "instructions":scanned,
-            "plans":plan_repository::list_at(repository, &head.0)?.len(),
-            "uploaded_instructions":0,"uploaded_plans":0,
-            "globals":globals,"config_commit":head.0
+            "status":"current","instructions":scanned,
+            "plans":plan_repository::list_at(repository, &head.0)?.len(),"config_commit":head.0
         }));
     }
 
@@ -450,6 +390,7 @@ fn sync_config_pass(repository: &Path, _db: &Database) -> Result<serde_json::Val
     // ledger: only records absent or changed there are sent.
     let pending_instructions = pending_config_records(repository, "instructions", &head.0)?;
     let pending_plans = pending_config_records(repository, "plans", &head.0)?;
+    let asc = asc_command();
 
     if !instructions_current {
         if !pending_instructions.is_empty() {
@@ -470,7 +411,6 @@ fn sync_config_pass(repository: &Path, _db: &Database) -> Result<serde_json::Val
         && git::config_category_revision_is_submitted(repository, "plans", &head.0)? {
         git::mark_config_synced(repository, &head.0)?;
     }
-    let globals = submit_globals_pass(&asc)?;
 
     Ok(serde_json::json!({
         "status":"submitted",
@@ -478,7 +418,6 @@ fn sync_config_pass(repository: &Path, _db: &Database) -> Result<serde_json::Val
         "plans":plan_repository::list_at(repository, &head.0)?.len(),
         "uploaded_instructions":pending_instructions.len(),
         "uploaded_plans":pending_plans.len(),
-        "globals":globals,
         "config_commit":head.0,"staged_commit":staged_commit,"ref":git::CONFIG_REF
     }))
 }
