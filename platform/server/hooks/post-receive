@@ -1,39 +1,61 @@
-#!/usr/bin/env bash
-set -euo pipefail
+\
+    #!/usr/bin/env bash
+    set -euo pipefail
 
-# AutoScribe server-side configuration ingestion hook.
-# Git invokes post-receive from the repository that accepted the push. Preserve
-# that repository as the provenance boundary rather than treating incoming JSON
-# as anonymous configuration.
+    # AutoScribe control-repository receive hook.
+    #
+    # Configuration has exactly one server-side Git source in the prototype:
+    # the unified AutoScribe Control bare repository. Vault/project repositories
+    # are content/run repositories and must not materialize plans/instructions.
 
-ASC_BIN="${AUTOSCRIBE_ASC_BIN:-asc}"
-REPO="$(git rev-parse --absolute-git-dir)"
-REPO_ID="$(git config --get autoscribe.repo-id || true)"
-REPO_KIND="$(git config --get autoscribe.repo-kind || true)"
-INGEST_REF="$(git config --get autoscribe.ingest-ref || true)"
+    REPO="$(git rev-parse --absolute-git-dir)"
+    ASC="${AUTOSCRIBE_ASC:-/home/jeremy/Python3.13Env/bin/asc}"
 
-[[ -n "$REPO_ID" ]] || REPO_ID="$(basename "$REPO" .git)"
-[[ -n "$REPO_KIND" ]] || REPO_KIND="project"
-[[ -n "$INGEST_REF" ]] || INGEST_REF="refs/heads/autoscribe/config"
+    repo_id="$(git config --get autoscribe.repo-id || true)"
+    repo_kind="$(git config --get autoscribe.repo-kind || true)"
+    ingest_ref="$(git config --get autoscribe.ingest-ref || true)"
 
-zero=0000000000000000000000000000000000000000
+    [[ -n "$repo_id" ]] || repo_id="autoscribe-control"
+    [[ -n "$repo_kind" ]] || repo_kind="control"
+    [[ -n "$ingest_ref" ]] || ingest_ref="refs/heads/master"
 
-while read -r oldrev newrev refname; do
-    [[ "$refname" == "$INGEST_REF" ]] || continue
-    [[ "$newrev" != "$zero" ]] || continue
-
-    args=(
-        ingest "$REPO" "$newrev"
-        --repo-id "$REPO_ID"
-        --repo-kind "$REPO_KIND"
-        --trigger-ref "$refname"
-    )
-
-    if [[ "$oldrev" == "$zero" ]]; then
-        args+=(--full)
-    else
-        args+=(--base "$oldrev")
+    if [[ "$repo_kind" != "control" ]]; then
+      printf 'AutoScribe control hook refused non-control repo_kind=%s repo=%s\n' \
+        "$repo_kind" "$REPO" >&2
+      exit 1
     fi
 
-    "$ASC_BIN" "${args[@]}"
-done
+    if [[ "$ingest_ref" != "refs/heads/master" ]]; then
+      printf 'AutoScribe control hook requires refs/heads/master; got %s\n' \
+        "$ingest_ref" >&2
+      exit 1
+    fi
+
+    [[ -x "$ASC" ]] || {
+      printf 'AutoScribe asc executable not found: %s\n' "$ASC" >&2
+      exit 1
+    }
+
+    zero="0000000000000000000000000000000000000000"
+
+    while read -r oldrev newrev refname; do
+      [[ "$refname" == "$ingest_ref" ]] || continue
+      [[ "$newrev" != "$zero" ]] || continue
+
+      args=(
+        ingest
+        --repo-id "$repo_id"
+        --repo-kind control
+        --trigger-ref "$refname"
+      )
+
+      if [[ "$oldrev" == "$zero" ]]; then
+        args+=(--full)
+      else
+        args+=(--base "$oldrev")
+      fi
+
+      # Typer options precede the positional REPOSITORY REVISION arguments.
+      args+=("$REPO" "$newrev")
+      "$ASC" "${args[@]}"
+    done
