@@ -9,12 +9,11 @@ step_kinds:
   - script
   - rag
 
-# Plan Manager reads the last svc refresh snapshot and writes local plan drafts.
-# It never invokes the Rust service directly.
+# Plan Manager reads the live server component catalogue through asc, overlays
+# project-local instruction Markdown (local duplicate slugs win), and publishes plans via Git.
 plan_manager:
-  state_dir: .autoscribe
-  state_file: control-state.json
-  plan_dir: plans
+  asc_command: /home/jeremy/Python3.13Env/bin/asc
+  push_remote: origin
   default_step_kind: llm
   status_storage_key: autoscribe.plan-manager.status
 

@@ -1,6 +1,7 @@
 import typer
 
 from asc.cli.control import app as control_app
+from asc.cli.components import app as components_app
 from asc.cli.enqueue import app as enqueue_app
 from asc.cli.export import app as export_app
 from asc.cli.run import app as run_app
@@ -56,6 +57,12 @@ app.add_typer(
 
 def main() -> None:
     app()
+
+app.add_typer(
+    components_app,
+    name="components",
+    help="Inspect the live reusable pipeline component catalogue.",
+)
 
 
 if __name__ == "__main__":

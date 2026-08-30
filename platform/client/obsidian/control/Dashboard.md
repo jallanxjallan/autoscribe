@@ -273,7 +273,7 @@ async function renderState({
   refresh.disabled = true;
   refresh.setText("Reloading…");
   refreshStatus.setText(
-    "Reading current Git and last svc refresh state…"
+    "Reading current Git and pipeline state…"
   );
   stateGrid.empty();
 

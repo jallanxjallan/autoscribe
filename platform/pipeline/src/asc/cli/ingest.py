@@ -19,9 +19,20 @@ def ingest(
     revision: str = typer.Argument(...),
     base: str | None = typer.Option(None, "--base", help="Diff from this previously ingested revision."),
     full: bool = typer.Option(False, "--full", help="Rebuild plan/instruction Redis materialization from the snapshot."),
+    repo_id: str | None = typer.Option(None, "--repo-id", help="Stable repository identity; defaults to repository basename."),
+    repo_kind: str = typer.Option("project", "--repo-kind", help="Repository class: project or global."),
+    trigger_ref: str | None = typer.Option(None, "--trigger-ref", help="Git ref whose receive event triggered ingestion."),
 ) -> None:
     try:
-        report = ingest_git_revision(repository, revision, base=base, full=full)
+        report = ingest_git_revision(
+            repository,
+            revision,
+            base=base,
+            full=full,
+            repo_id=repo_id,
+            repo_kind=repo_kind,
+            trigger_ref=trigger_ref,
+        )
     except IngestInputError as exc:
         failure_key = record_failure(stage="ingest.git", exc=exc, target=str(repository))
         typer.echo(f"asc ingest: {exc} failure_key={failure_key}", err=True)

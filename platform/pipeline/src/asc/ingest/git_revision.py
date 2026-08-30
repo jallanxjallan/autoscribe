@@ -22,19 +22,36 @@ class ConfigChange:
     old_path: str | None = None
 
 
+@dataclass(frozen=True, slots=True)
+class RepositoryProvenance:
+    repo_id: str
+    repo_kind: str
+    repo_uri: str
+    trigger_ref: str | None = None
+
+
 def ingest_git_revision(
     repository: str | Path,
     revision: str,
     *,
     base: str | None = None,
     full: bool = False,
+    repo_id: str | None = None,
+    repo_kind: str = "project",
+    trigger_ref: str | None = None,
 ) -> IngestReport:
     repo = _repository(repository)
     commit = _revision(repo, revision)
+    provenance = _provenance(
+        repo,
+        repo_id=repo_id,
+        repo_kind=repo_kind,
+        trigger_ref=trigger_ref,
+    )
 
     if full:
         paths = _config_paths(repo, commit)
-        items = tuple(_ingest_path(repo, commit, path) for path in paths)
+        items = tuple(_ingest_path(repo, commit, path, provenance) for path in paths)
         return _report(items)
 
     base_commit = _revision(repo, base) if base else _parent(repo, commit)
@@ -50,7 +67,7 @@ def ingest_git_revision(
             continue
         if change.status == "R" and change.old_path:
             _delete_path(repo, base_commit, change.old_path)
-        items.append(_ingest_path(repo, commit, change.path))
+        items.append(_ingest_path(repo, commit, change.path, provenance))
     return _report(tuple(items))
 
 
@@ -66,24 +83,41 @@ def _repository(value: str | Path) -> Path:
     if not path.exists():
         raise IngestInputError(f"Git repository does not exist: {path}")
 
-    probe = subprocess.run(
-        ["git", "-C", str(path), "rev-parse", "--is-bare-repository"],
-        stdout=subprocess.PIPE,
-        stderr=subprocess.PIPE,
-        text=True,
-        check=False,
-    )
-    if probe.returncode != 0:
-        message = probe.stderr.strip() or probe.stdout.strip() or f"not a Git repository: {path}"
-        raise IngestInputError(message)
-    if probe.stdout.strip() == "true":
-        git_dir = _git(path, "rev-parse", "--absolute-git-dir").strip()
-        return Path(git_dir)
+    # `git rev-parse --show-toplevel` deliberately fails in a bare repository.
+    # Ingest is a server-side operation, so bare repositories are first-class.
+    git_dir = _git(path, "rev-parse", "--absolute-git-dir").strip()
+    if not git_dir:
+        raise IngestInputError(f"not a Git repository: {path}")
+    bare = _git(path, "rev-parse", "--is-bare-repository").strip().lower() == "true"
+    if bare:
+        return Path(git_dir).resolve()
 
     root = _git(path, "rev-parse", "--show-toplevel").strip()
     if not root:
-        raise IngestInputError(f"not a Git repository: {path}")
-    return Path(root)
+        raise IngestInputError(f"not a Git worktree: {path}")
+    return Path(root).resolve()
+
+
+def _provenance(
+    repo: Path,
+    *,
+    repo_id: str | None,
+    repo_kind: str,
+    trigger_ref: str | None,
+) -> RepositoryProvenance:
+    identity = (repo_id or repo.name.removesuffix(".git")).strip()
+    if not identity:
+        raise IngestInputError("repository identity must be non-empty")
+    kind = str(repo_kind or "project").strip().lower()
+    if kind not in {"project", "global"}:
+        raise IngestInputError(f"unsupported repository kind: {repo_kind!r}")
+    ref = str(trigger_ref).strip() if trigger_ref is not None else None
+    return RepositoryProvenance(
+        repo_id=identity,
+        repo_kind=kind,
+        repo_uri=str(repo),
+        trigger_ref=ref or None,
+    )
 
 
 def _revision(repo: Path, value: str | None) -> str:
@@ -139,17 +173,45 @@ def _is_config_path(path: str) -> bool:
     return path.endswith(".json") and path.startswith(CONFIG_PREFIXES)
 
 
-def _ingest_path(repo: Path, commit: str, path: str) -> IngestedItem:
+def _ingest_path(
+    repo: Path,
+    commit: str,
+    path: str,
+    provenance: RepositoryProvenance,
+) -> IngestedItem:
     record = _record_at(repo, commit, path)
     category = path.split("/", 1)[0]
     try:
         if category == "instructions":
-            return ingest_instruction(_instruction_record(record, path))
+            normalized = _instruction_record(record, path)
+            _attach_provenance(normalized, provenance, commit, path)
+            return ingest_instruction(normalized)
         if category == "plans":
-            return ingest_plan(_plan_record(record, path))
+            normalized = _plan_record(record, path)
+            _attach_provenance(normalized, provenance, commit, path)
+            return ingest_plan(normalized)
     except (TypeError, ValueError, KeyError) as exc:
         raise IngestInputError(f"{path}: {exc}") from exc
     raise IngestInputError(f"unsupported config path: {path}")
+
+
+def _attach_provenance(
+    record: dict[str, Any],
+    provenance: RepositoryProvenance,
+    commit: str,
+    path: str,
+) -> None:
+    extra = dict(record.get("extra") or {})
+    extra.update({
+        "repo_id": provenance.repo_id,
+        "repo_kind": provenance.repo_kind,
+        "repo_uri": provenance.repo_uri,
+        "repo_commit": commit,
+        "repo_path": path,
+    })
+    if provenance.trigger_ref:
+        extra["repo_ref"] = provenance.trigger_ref
+    record["extra"] = extra
 
 
 def _delete_path(repo: Path, commit: str | None, path: str) -> None:
@@ -244,4 +306,4 @@ def _git_optional(repo: Path, *args: str) -> str | None:
     return result.stdout if result.returncode == 0 else None
 
 
-__all__ = ["ConfigChange", "ingest_git_revision"]
+__all__ = ["ConfigChange", "RepositoryProvenance", "ingest_git_revision"]

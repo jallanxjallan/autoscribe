@@ -23,6 +23,7 @@ function el(tag, attrs = {}, children = []) {
 
 function id(record) { return String(record?.slug || record?.record_identity || record?.key || "").trim(); }
 function title(record) { return String(record?.title || record?.label || record?.name || id(record)); }
+function description(record) { return String(record?.description || "").trim(); }
 function selected(records, value) { return records.find((record) => id(record) === String(value || "")) || null; }
 function planSlug(record) { return String(record?.record_identity || record?.slug || record?.key || "").trim(); }
 function byScope(records, scope) { return records.filter((record) => String(record?.scope || "").toLowerCase() === scope); }
@@ -40,7 +41,9 @@ function option(select, record, { titleOnly = false } = {}) {
   const display = title(record);
   select.appendChild(el("option", {
     value: recordId,
-    text: titleOnly || !recordId || display === recordId ? display : `${display} — ${recordId}`,
+    text: titleOnly
+      ? (description(record) ? `${display} — ${description(record)}` : display)
+      : (!recordId || display === recordId ? display : `${display} — ${recordId}`),
   }));
 }
 
@@ -84,7 +87,7 @@ async function renderCreatePlan({ app, container }) {
   const { notify } = load("scripts/lib/notify.js");
   const { buildPlanRecord } = load("scripts/plans/plan-record.js");
   const { readPlanManagerSnapshot, savePlan } = load("scripts/lib/config-git.js");
-  const snapshot = readPlanManagerSnapshot(root);
+  const snapshot = await readPlanManagerSnapshot(root);
 
   const catalogs = catalogsFrom(snapshot);
   const plans = catalogs.plans;
@@ -95,9 +98,9 @@ async function renderCreatePlan({ app, container }) {
   const toolbar = el("div");
   toolbar.style.cssText = "display:flex;gap:.5rem;align-items:center;margin-bottom:.75rem";
   const refresh = el("button", { text: "Reload Git" });
-  const stateText = snapshot.state_available
-    ? `Config state: ${snapshot.config.current ? "synchronized" : "pending synchronization"}${snapshot.refreshed_at ? ` · catalog ${snapshot.refreshed_at}` : ""}`
-    : "No published config state yet; ensure watch-config is running.";
+  const stateText = snapshot.catalog?.available
+    ? `Catalogue: ${snapshot.catalog.server_instructions} server + ${snapshot.catalog.local_instructions} local instruction(s) · local overrides win`
+    : `Catalogue: local instructions only${snapshot.catalog?.warning ? ` · server fetch failed` : ""}`;
   const freshness = el("span", { text: stateText });
   toolbar.append(refresh, freshness);
   container.appendChild(toolbar);
@@ -212,7 +215,7 @@ async function renderCreatePlan({ app, container }) {
   }
 
   refresh.addEventListener("click", async () => {
-    refresh.disabled = true; setStatus("Reloading Git configuration…");
+    refresh.disabled = true; setStatus("Fetching server catalogue and re-reading local instructions…");
     try {
       await renderCreatePlan({ app, container });
     } catch (error) {
@@ -242,8 +245,8 @@ async function renderCreatePlan({ app, container }) {
         };
       }
       const record = buildPlanRecord({ label: name.value, description: description.value, steps, force_slug: planSlug(loaded) || null });
-      const commit = savePlan(root, record);
-      setStatus(`Saved ${planSlug(record)} to autoscribe/config (${String(commit).slice(0, 10)}). Waiting for watch-config synchronization.`);
+      const commit = await savePlan(root, record);
+      setStatus(`Saved ${planSlug(record)} to autoscribe/config (${String(commit).slice(0, 10)}). Pushed for server ingestion.`);
       notify(`Saved plan ${planSlug(record)} to Git.`);
       await renderCreatePlan({ app, container });
     } catch (error) {

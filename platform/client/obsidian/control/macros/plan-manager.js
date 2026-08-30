@@ -23,6 +23,7 @@ function el(tag, attrs = {}, children = []) {
 
 function id(record) { return String(record?.slug || record?.record_identity || record?.key || "").trim(); }
 function title(record) { return String(record?.title || record?.label || record?.name || id(record)); }
+function description(record) { return String(record?.description || "").trim(); }
 function selected(records, value) { return records.find((record) => id(record) === String(value || "")) || null; }
 function missingRecord(value) {
   const slug = String(value || "").trim();
@@ -46,7 +47,9 @@ function option(select, record, { titleOnly = false } = {}) {
   const display = title(record);
   select.appendChild(el("option", {
     value: recordId,
-    text: titleOnly || !recordId || display === recordId ? display : `${display} — ${recordId}`,
+    text: titleOnly
+      ? (description(record) ? `${display} — ${description(record)}` : display)
+      : (!recordId || display === recordId ? display : `${display} — ${recordId}`),
   }));
 }
 
@@ -101,9 +104,9 @@ async function renderCreatePlan({ app, container }) {
   const toolbar = el("div");
   toolbar.style.cssText = "display:flex;gap:.5rem;align-items:center;margin-bottom:.75rem";
   const refresh = el("button", { text: "Reload Git" });
-  const stateText = snapshot.state_available
-    ? `Config state: ${snapshot.config.current ? "synchronized" : "pending synchronization"}${snapshot.refreshed_at ? ` · catalog ${snapshot.refreshed_at}` : ""}`
-    : "No published config state yet; ensure watch-config is running.";
+  const stateText = snapshot.catalog?.available
+    ? `Catalogue: ${snapshot.catalog.server_instructions} server + ${snapshot.catalog.local_instructions} local instruction(s) · local overrides win`
+    : `Catalogue: local instructions only${snapshot.catalog?.warning ? ` · server fetch failed` : ""}`;
   const freshness = el("span", { text: stateText });
   toolbar.append(refresh, freshness);
   container.appendChild(toolbar);
@@ -268,7 +271,7 @@ async function renderCreatePlan({ app, container }) {
   }
 
   refresh.addEventListener("click", async () => {
-    refresh.disabled = true; setStatus("Reloading Git configuration…");
+    refresh.disabled = true; setStatus("Fetching server catalogue and re-reading local instructions…");
     try {
       await renderCreatePlan({ app, container });
     } catch (error) {
@@ -305,7 +308,7 @@ async function renderCreatePlan({ app, container }) {
       clearForm();
       refreshSelect();
       notify(`Deleted plan ${slug} from Git.`);
-      setStatus(`Deleted ${slug} from autoscribe/config (${String(commit).slice(0, 10)}). Waiting for watch-config synchronization.`);
+      setStatus(`Deleted ${slug} from autoscribe/config (${String(commit).slice(0, 10)}). Pushed for server ingestion.`);
     } catch (error) {
       const message = `Delete failed: ${error.message || error}`; setStatus(message); notify(message, 10000);
       disarmDelete();
@@ -333,7 +336,7 @@ async function renderCreatePlan({ app, container }) {
       }
       const record = buildPlanRecord({ label: name.value, description: description.value, steps, force_slug: planSlug(loaded) || null });
       const commit = await savePlan(root, record);
-      setStatus(`Saved ${planSlug(record)} to autoscribe/config (${String(commit).slice(0, 10)}). Waiting for watch-config synchronization.`);
+      setStatus(`Saved ${planSlug(record)} to autoscribe/config (${String(commit).slice(0, 10)}). Pushed for server ingestion.`);
       notify(`Saved plan ${planSlug(record)} to Git.`);
       await renderCreatePlan({ app, container });
     } catch (error) {

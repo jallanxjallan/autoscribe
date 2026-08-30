@@ -53,17 +53,11 @@ asc_snapshots:
     command: control
     subcommand: snapshot
     expected_type: autoscribe.controls
-    label: asc control snapshot
+    label: asc components snapshot
 
 # Service operations used by read/write UI modules. Keeping command names and
 # request versions here lets the Rust/API surface evolve without editing JS.
 service_operations:
-  instructions_state_snapshot:
-    command: instructions-state-snapshot
-    request_version: 1
-  instructions_sync:
-    command: instructions-sync
-    request_version: 1
   git_files:
     command: git-files
     request_version: 1

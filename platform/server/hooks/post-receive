@@ -1,18 +1,39 @@
-#!/bin/sh
-set -eu
+#!/usr/bin/env bash
+set -euo pipefail
 
-ASC_BIN="${ASC_BIN:-asc}"
-CONFIG_REF="${AUTOSCRIBE_CONFIG_REF:-refs/heads/autoscribe/config}"
-ZERO=0000000000000000000000000000000000000000
+# AutoScribe server-side configuration ingestion hook.
+# Git invokes post-receive from the repository that accepted the push. Preserve
+# that repository as the provenance boundary rather than treating incoming JSON
+# as anonymous configuration.
+
+ASC_BIN="${AUTOSCRIBE_ASC_BIN:-asc}"
 REPO="$(git rev-parse --absolute-git-dir)"
+REPO_ID="$(git config --get autoscribe.repo-id || true)"
+REPO_KIND="$(git config --get autoscribe.repo-kind || true)"
+INGEST_REF="$(git config --get autoscribe.ingest-ref || true)"
 
-while read -r old new ref; do
-    [ "$ref" = "$CONFIG_REF" ] || continue
-    [ "$new" != "$ZERO" ] || continue
+[[ -n "$REPO_ID" ]] || REPO_ID="$(basename "$REPO" .git)"
+[[ -n "$REPO_KIND" ]] || REPO_KIND="project"
+[[ -n "$INGEST_REF" ]] || INGEST_REF="refs/heads/autoscribe/config"
 
-    if [ "$old" = "$ZERO" ]; then
-        "$ASC_BIN" ingest "$REPO" "$new" --full
+zero=0000000000000000000000000000000000000000
+
+while read -r oldrev newrev refname; do
+    [[ "$refname" == "$INGEST_REF" ]] || continue
+    [[ "$newrev" != "$zero" ]] || continue
+
+    args=(
+        ingest "$REPO" "$newrev"
+        --repo-id "$REPO_ID"
+        --repo-kind "$REPO_KIND"
+        --trigger-ref "$refname"
+    )
+
+    if [[ "$oldrev" == "$zero" ]]; then
+        args+=(--full)
     else
-        "$ASC_BIN" ingest "$REPO" "$new" --base "$old"
+        args+=(--base "$oldrev")
     fi
+
+    "$ASC_BIN" "${args[@]}"
 done

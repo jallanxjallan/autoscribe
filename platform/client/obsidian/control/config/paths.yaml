@@ -10,7 +10,7 @@
 
 control_mount: _control
 # Canonical shared Instructions vault.
-instructions_vault: $HOME/Work/Loom/instructions
+instructions_vault: $HOME/Work/Studio/Instructions
 
 # Vault-relative runtime/state directories. Renaming these changes where Control
 # reads/writes transient state; it does not migrate an existing directory.

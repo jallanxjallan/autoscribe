@@ -1,46 +1,30 @@
 # AutoScribe Obsidian Control
 
-Control is the Obsidian-facing UI. It does not own Git history and it does not
-maintain a live connection to the Rust service.
+Control is the Obsidian-facing UI. Git is the transport and provenance boundary for plans and instructions; the frontend does not use Redis or SQLite as configuration state.
 
 ## Plan Manager
 
-`macros/plan-manager.js` replaces Define Plan and Dispatch Run.
+`macros/plan-manager.js` builds its instruction catalogue from two Git-native sources:
 
-Plan Manager reads `.autoscribe/control-state.json`, which is written by
-`svc refresh`. It presents all known plans ordered by a decaying frecency score
-based on successful dispatch use. Editing a plan writes an atomic local draft to
-`.autoscribe/plans/<plan-slug>.json`; the next `svc refresh` validates, stores and
-uploads it.
+- lightweight global instruction metadata fetched from the configured server catalogue ref (label/title, slug and brief description); and
+- project-local instruction Markdown read from the current working tree.
 
-`Copy Git Marker` copies two Git trailers:
+When the same slug exists in both places, the local instruction wins. This makes a small project-specific variation of a global instruction an override rather than a second catalogue entry.
 
-    Autoscribe-Plan: plan.example
-    Autoscribe-Plan-Title: Human Readable Hint
+Plans live only on `refs/heads/autoscribe/config` as `plans/<slug>.json`; they are not working-tree files. Saving a plan snapshots the current local instructions as service-facing `instructions/<slug>.json` records on the same config ref, commits the new config snapshot, and pushes that ref. The server receive hook can then hand the pushed revision to `asc ingest`.
 
-Only `Autoscribe-Plan` is machine-significant. Stage the intended target files
-with Obsidian Git, use an ordinary human commit message, paste the marker, and
-commit. An ordinary commit without the marker is ignored by AutoScribe.
+The default Git endpoints are:
+
+- catalogue remote: `origin`
+- catalogue ref: `refs/heads/autoscribe/catalog`
+- config push remote: `origin`
+
+They can be changed in `config/workflow.yaml`, by Git-facing deployment configuration, or with `AUTOSCRIBE_CATALOG_REMOTE`, `AUTOSCRIBE_CATALOG_REF`, and `AUTOSCRIBE_CONFIG_REMOTE`.
 
 ## Git ownership
 
-The editorial/master branch is user-owned. AutoScribe never creates automatic
-master commits. Dispatch and response forensics are committed only to
-`refs/heads/autoscribe/inflight`.
+The editorial/master branch is user-owned. Plan publication uses the machine-owned `refs/heads/autoscribe/config`; dispatch and response forensics use `refs/heads/autoscribe/inflight`.
 
 ## Write Responses
 
-Write Responses first saves the response candidate on the inflight ref. A target
-is automatically writable only when master is clean and byte-identical to the
-source that was dispatched. Dirty or clean-but-diverged targets are reported as
-requiring a decision and are left untouched. A successful write is deliberately
-left dirty for editorial review.
-
-## Durable local state
-
-`.autoscribe/` is operational state and should be excluded through
-`.git/info/exclude`, not committed. The installer adds that exclusion.
-
-Dashboard system state reads the current Git worktree directly and reads
-pipeline/catalogue state from the most recent `.autoscribe/control-state.json`.
-Run `svc refresh` from the vault root when you want AutoScribe to reconcile.
+Write Responses first saves the response candidate on the inflight ref. A target is automatically writable only when master is clean and byte-identical to the source that was dispatched. Dirty or clean-but-diverged targets are reported as requiring a decision and are left untouched. A successful write is deliberately left dirty for editorial review.

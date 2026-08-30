@@ -26,6 +26,8 @@ AUTOSCRIBE_EXTENSIONS_ROOT = Path(
         str(_AUTOSCRIBE_PLATFORM / "extensions"),
     )
 ).expanduser().resolve()
+# AutoScribe Control migration override
+AUTOSCRIBE_EXTENSIONS_ROOT = Path('/home/jeremy/Work/Control').expanduser().resolve()
 AUTOSCRIBE_ENGINE_PACKAGES = ("engines",)
 AUTOSCRIBE_SCRIPT_PACKAGES = ("scripts",)
 
