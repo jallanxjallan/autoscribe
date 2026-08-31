@@ -103,9 +103,9 @@ async function renderCreatePlan({ app, container }) {
   container.appendChild(el("h2", { text: "Define Plan" }));
   const toolbar = el("div");
   toolbar.style.cssText = "display:flex;gap:.5rem;align-items:center;margin-bottom:.75rem";
-  const refresh = el("button", { text: "Reload Git" });
+  const refresh = el("button", { text: "Reload Published Controls" });
   const stateText = snapshot.catalog?.available
-    ? `Control/master: ${snapshot.catalog.committed_instructions} committed instruction(s) · ${snapshot.catalog.plans} plan(s)${snapshot.catalog.unpublished ? " · unpublished commits pending" : ""}`
+    ? `Published: ${snapshot.catalog.committed_instructions} instruction(s) · ${snapshot.catalog.plans} plan(s)`
     : "Control catalogue unavailable";
   const freshness = el("span", { text: stateText });
   toolbar.append(refresh, freshness);
@@ -271,7 +271,7 @@ async function renderCreatePlan({ app, container }) {
   }
 
   refresh.addEventListener("click", async () => {
-    refresh.disabled = true; setStatus("Re-reading committed Control repository…");
+    refresh.disabled = true; setStatus("Reading published server controls…");
     try {
       await renderCreatePlan({ app, container });
     } catch (error) {
@@ -295,7 +295,7 @@ async function renderCreatePlan({ app, container }) {
       deleteArmedSlug = slug;
       deleteButton.textContent = "Confirm Delete";
       deleteButton.classList.add("mod-warning");
-      setStatus(`Press Confirm Delete to remove “${label}” (${slug}) from Control/master. Select another plan or press New Plan to cancel.`);
+      setStatus(`Press Confirm Delete to remove “${label}” (${slug}) from the server plan repository. Select another plan or press New Plan to cancel.`);
       return;
     }
 
@@ -308,7 +308,7 @@ async function renderCreatePlan({ app, container }) {
       clearForm();
       refreshSelect();
       notify(`Deleted plan ${slug} from Git.`);
-      setStatus(`Deleted ${slug} from Control/master (${String(commit).slice(0, 10)}). Published Control/master for server ingestion.`);
+      setStatus(`Deleted ${slug} from the server plan repository (${String(commit).slice(0, 10)}).`);
     } catch (error) {
       const message = `Delete failed: ${error.message || error}`; setStatus(message); notify(message, 10000);
       disarmDelete();
@@ -336,7 +336,7 @@ async function renderCreatePlan({ app, container }) {
       }
       const record = buildPlanRecord({ label: name.value, description: description.value, steps, force_slug: planSlug(loaded) || null });
       const commit = await savePlan(root, record);
-      setStatus(`Saved ${planSlug(record)} to Control/master (${String(commit).slice(0, 10)}). Published Control/master for server ingestion.`);
+      setStatus(`Saved ${planSlug(record)} to the server plan repository (${String(commit).slice(0, 10)}).`);
       notify(`Saved plan ${planSlug(record)} to Control Git.`);
       await renderCreatePlan({ app, container });
     } catch (error) {

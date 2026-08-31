@@ -230,7 +230,7 @@ module.exports = async function dispatch_run(params = {}) {
   const { notify } = loader.requireControl("scripts/lib/notify.js");
   const { readCurrentSelection, clearCurrentSelection } = loader.requireControl("scripts/selections/current-selection.js");
   const { createDispatchCommit } = loader.requireControl("scripts/lib/git-dispatch.js");
-  const { readPlanManagerSnapshot } = loader.requireControl("scripts/lib/config-git.js");
+  const { readPlans } = loader.requireControl("scripts/lib/config-git.js");
 
   async function render(container) {
     container.empty();
@@ -252,8 +252,9 @@ module.exports = async function dispatch_run(params = {}) {
         Promise.resolve(readCurrentSelection(app)),
       ]);
       selection = selectionResult;
-      const snapshot = await readPlanManagerSnapshot(loader.vaultBasePath);
-      plans = (Array.isArray(snapshot?.catalogs?.plans) ? snapshot.catalogs.plans : [])
+      const workflow = loader.requireControl("scripts/lib/config-loader.js").loadConfig("workflow");
+      const scope = String(workflow?.plan_manager?.dispatch_scope || "").trim();
+      plans = (await readPlans(loader.vaultBasePath, scope))
         .filter((record) => identity(record))
         .sort((a, b) =>
           (Number(b?.usage_score || 0) - Number(a?.usage_score || 0)) ||
@@ -278,7 +279,7 @@ module.exports = async function dispatch_run(params = {}) {
     planSelect.style.minWidth = "min(36rem, 80vw)";
 
     if (!plans.length) {
-      const emptyOption = planSelect.createEl("option", { text: "No plans in local catalogue" });
+      const emptyOption = planSelect.createEl("option", { text: "No published plans" });
       emptyOption.value = "";
       planSelect.disabled = true;
     } else {

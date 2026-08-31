@@ -1,7 +1,7 @@
 use autoscribe_service::{
     db::{self, Database},
     git, instruction_sync,
-    pandoc, plan_repository, response_repository,
+    pandoc, response_repository,
     types::{CommitPurpose, CommitRequest, DispatchId, LedgerSnapshotRequest,
         LedgerSource, PandocJob, PlanId, VersionRequest},
 };
@@ -947,7 +947,7 @@ fn publish_control_state(
     refreshed_at: &str,
 ) -> Result<(serde_json::Value, String), Box<dyn std::error::Error>> {
     // State is stored in the same Git history as config, but it must describe
-    // one coherent plans/instructions payload even if Plan Manager writes a
+    // one coherent instruction/state payload even if Plan Manager writes a
     // new plan concurrently. Rebuild the state if the payload changes while
     // the state commit is being appended.
     for _ in 0..4 {
@@ -978,10 +978,7 @@ fn publish_control_state(
         )?;
         let payload_still_matches = match payload_revision.as_ref() {
             Some(revision) => git::config_payload_equal(repository, &revision.0, &commit.0)?,
-            None => {
-                git::config_list_json_at(repository, "plans", &commit.0)?.is_empty()
-                    && git::config_list_json_at(repository, "instructions", &commit.0)?.is_empty()
-            }
+            None => git::config_list_json_at(repository, "instructions", &commit.0)?.is_empty(),
         };
         if payload_still_matches {
             return Ok((state, commit.0));
@@ -1432,23 +1429,8 @@ fn catalogs_with_local_config_at(
     }
     instructions.extend(instruction_by_slug.into_values());
 
-    let plans = catalogs.get_mut("plans")
-        .and_then(serde_json::Value::as_array_mut)
-        .ok_or("catalog plans must be an array")?;
-    let mut by_slug = std::collections::BTreeMap::<String, serde_json::Value>::new();
-    for plan in plans.drain(..) {
-        let slug = ["record_identity", "slug", "key"].into_iter()
-            .find_map(|field| plan.get(field).and_then(serde_json::Value::as_str))
-            .unwrap_or("").to_string();
-        if !slug.is_empty() { by_slug.insert(slug, plan); }
-    }
-    for plan in plan_repository::list_at(repository, revision)? {
-        let slug = ["record_identity", "slug"].into_iter()
-            .find_map(|field| plan.get(field).and_then(serde_json::Value::as_str))
-            .unwrap_or("").to_string();
-        if !slug.is_empty() { by_slug.insert(slug, plan); }
-    }
-    plans.extend(by_slug.into_values());
+    // Plans are server-owned Git records returned by `asc control snapshot`;
+    // project/control source repositories never overlay or persist plans.
     Ok(catalogs)
 }
 

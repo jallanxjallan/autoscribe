@@ -97,7 +97,7 @@ async function renderCreatePlan({ app, container }) {
   container.appendChild(el("h2", { text: "Define Plan" }));
   const toolbar = el("div");
   toolbar.style.cssText = "display:flex;gap:.5rem;align-items:center;margin-bottom:.75rem";
-  const refresh = el("button", { text: "Reload Git" });
+  const refresh = el("button", { text: "Reload Published Controls" });
   const stateText = snapshot.catalog?.available
     ? `Catalogue: ${snapshot.catalog.server_instructions} server + ${snapshot.catalog.local_instructions} local instruction(s) · local overrides win`
     : `Catalogue: local instructions only${snapshot.catalog?.warning ? ` · server fetch failed` : ""}`;
@@ -246,7 +246,7 @@ async function renderCreatePlan({ app, container }) {
       }
       const record = buildPlanRecord({ label: name.value, description: description.value, steps, force_slug: planSlug(loaded) || null });
       const commit = await savePlan(root, record);
-      setStatus(`Saved ${planSlug(record)} to autoscribe/config (${String(commit).slice(0, 10)}). Pushed for server ingestion.`);
+      setStatus(`Saved ${planSlug(record)} to the server plan repository (${String(commit).slice(0, 10)}).`);
       notify(`Saved plan ${planSlug(record)} to Git.`);
       await renderCreatePlan({ app, container });
     } catch (error) {

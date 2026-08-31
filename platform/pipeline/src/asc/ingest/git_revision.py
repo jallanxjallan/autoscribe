@@ -72,6 +72,30 @@ def ingest_git_revision(
     return _report(tuple(items))
 
 
+
+def ingest_path_from_revision(
+    repository: str | Path,
+    revision: str,
+    path: str,
+    *,
+    repo_id: str | None = None,
+    repo_kind: str = "control",
+    trigger_ref: str | None = None,
+) -> IngestedItem:
+    """Materialize one known config path from one Git revision.
+
+    This is the lazy-enqueue entry point. It deliberately shares the same
+    normalization/provenance path as bulk ``asc ingest``.
+    """
+    repo = _repository(repository)
+    commit = _revision(repo, revision)
+    provenance = _provenance(
+        repo, repo_id=repo_id, repo_kind=repo_kind, trigger_ref=trigger_ref
+    )
+    if not _is_config_path(path):
+        raise IngestInputError(f"unsupported config path: {path}")
+    return _ingest_path(repo, commit, path, provenance)
+
 def _report(items: tuple[IngestedItem, ...]) -> IngestReport:
     by_type: dict[str, int] = {}
     for item in items:
@@ -406,4 +430,4 @@ def _git_optional(repo: Path, *args: str) -> str | None:
     return result.stdout if result.returncode == 0 else None
 
 
-__all__ = ["ConfigChange", "RepositoryProvenance", "ingest_git_revision"]
+__all__ = ["ConfigChange", "RepositoryProvenance", "ingest_git_revision", "ingest_path_from_revision"]

@@ -48,7 +48,7 @@ def test_incremental_ingest_reads_only_changed_config_paths(tmp_path, monkeypatc
     head = _commit(repo, "change")
 
     seen = []
-    monkeypatch.setattr(git_revision, "_ingest_path", lambda _repo, _commit, path: seen.append(path) or _item(path))
+    monkeypatch.setattr(git_revision, "_ingest_path", lambda _repo, _commit, path, _provenance: seen.append(path) or _item(path))
     report = git_revision.ingest_git_revision(repo, head, base=base)
 
     assert seen == ["instructions/one.json"]
@@ -64,7 +64,7 @@ def test_ingest_accepts_bare_server_repository(tmp_path, monkeypatch):
     subprocess.run(["git", "clone", "-q", "--bare", str(work), str(bare)], check=True)
 
     seen = []
-    monkeypatch.setattr(git_revision, "_ingest_path", lambda _repo, _commit, path: seen.append(path) or _item(path))
+    monkeypatch.setattr(git_revision, "_ingest_path", lambda _repo, _commit, path, _provenance: seen.append(path) or _item(path))
     report = git_revision.ingest_git_revision(bare, head, full=True)
 
     assert seen == ["plans/one.json"]

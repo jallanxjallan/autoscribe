@@ -13,12 +13,12 @@
             "state": {
               "type": "markdown",
               "state": {
-                "file": "parsing_instruction_files.md",
+                "file": "position-paper-handling-user-input.md",
                 "mode": "source",
                 "source": false
               },
               "icon": "lucide-file",
-              "title": "parsing_instruction_files"
+              "title": "position-paper-handling-user-input"
             }
           }
         ]
@@ -186,6 +186,7 @@
   },
   "active": "cc2c351234909a19",
   "lastOpenFiles": [
+    "parsing_instruction_files.md",
     "orchestrator_schematic.png"
   ]
 }

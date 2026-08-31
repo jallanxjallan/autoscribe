@@ -9,14 +9,11 @@ step_kinds:
   - script
   - rag
 
-# Plan Manager is vault-independent. It reads committed plans/instructions from
-# the unified Control repository and publishes Control/master. Vault repositories
-# remain content/run repositories only.
+# Plan Manager is vault-independent. It reads published controls through
+# `asc control`; plans are persisted in the server-side plan Git repository.
+# The authored Control repository contains no plan files.
 plan_manager:
-  control_root: /home/jeremy/Work/Control
-  branch: master
   asc_command: /home/jeremy/Python3.13Env/bin/asc
-  push_remote: origin
   default_step_kind: llm
   status_storage_key: autoscribe.plan-manager.status
 

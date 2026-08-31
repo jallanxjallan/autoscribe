@@ -1,15 +1,13 @@
-"""Read the live control slug catalog."""
+"""List Git-authoritative control slugs."""
 
-from asc.state.slugmap import SlugMap
+from asc.control.repository import instruction_records, plan_records
 
 
 def list_control_slugs() -> list[str]:
-    """Return current control slugs in stable order.
-
-    ``SlugMap.list()`` is the authoritative live slug -> Redis key mapping.
-    Do not maintain a second listing API or cached control registry here.
-    """
-    return sorted(SlugMap().list())
+    return sorted(
+        [record["slug"] for record in instruction_records()]
+        + [str(record["record_identity"]) for record in plan_records()]
+    )
 
 
 __all__ = ["list_control_slugs"]

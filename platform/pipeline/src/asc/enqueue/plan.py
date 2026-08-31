@@ -3,6 +3,7 @@ from dataclasses import dataclass
 from asc.models.control.plan import Plan
 from asc.redis.key import RedisKey
 from asc.state.slugmap import SlugMap
+from asc.control.repository import materialize_plan
 
 
 @dataclass(frozen=True, slots=True)
@@ -27,9 +28,12 @@ def load_plan(plan_slug: str) -> LoadedPlan:
         raise ValueError("plan must be a non-empty slug")
 
     clean_slug = plan_slug.strip()
+    # Git, not Redis, is authoritative for reusable controls. Refresh the
+    # selected plan and any missing instruction dependencies at enqueue time.
+    materialize_plan(clean_slug)
     resolved = SlugMap().get(clean_slug)
     if not resolved:
-        raise KeyError(f"missing slugmap entry for plan: {clean_slug}")
+        raise KeyError(f"plan did not materialize into slugmap: {clean_slug}")
     key = RedisKey(str(resolved))
     if key.kind != "plan" or key.suffix not in (None, "", "record"):
         raise ValueError(f"plan resolved to non-plan record key: {resolved}")

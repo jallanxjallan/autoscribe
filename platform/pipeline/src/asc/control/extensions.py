@@ -19,37 +19,39 @@ ENGINE_STEP_FIELDS: dict[str, list[str]] = {
 }
 
 
-def build_extension_catalog() -> dict[str, Any]:
+def build_extension_catalog(root: Path | None = None) -> dict[str, Any]:
     """Describe extensions available to the Obsidian plan compiler.
 
     Extension modules are parsed rather than imported, so generating a snapshot
     does not execute provider code or require provider dependencies.
     """
-    engines, models = _engine_and_model_records(AUTOSCRIBE_ENGINE_PACKAGES)
+    extension_root = (root or AUTOSCRIBE_EXTENSIONS_ROOT).expanduser().resolve()
+    engines, models = _engine_and_model_records(AUTOSCRIBE_ENGINE_PACKAGES, extension_root)
     return {
         "schema_version": 2,
         "type": "autoscribe.extensions",
         "sources": {
-            "extension_root": str(AUTOSCRIBE_EXTENSIONS_ROOT),
+            "extension_root": str(extension_root),
             "engine_packages": list(AUTOSCRIBE_ENGINE_PACKAGES),
             "local_script_packages": list(AUTOSCRIBE_SCRIPT_PACKAGES),
         },
         "registries": {
             "engines": engines,
             "models": models,
-            "local_scripts": _script_records(AUTOSCRIBE_SCRIPT_PACKAGES),
-            "rag_profiles": _rag_profile_records(),
+            "local_scripts": _script_records(AUTOSCRIBE_SCRIPT_PACKAGES, extension_root),
+            "rag_profiles": _rag_profile_records(extension_root),
         },
     }
 
 
 def _engine_and_model_records(
     packages: Iterable[str],
+    root: Path,
 ) -> tuple[dict[str, dict[str, Any]], dict[str, dict[str, Any]]]:
     engines: dict[str, dict[str, Any]] = {}
     models: dict[str, dict[str, Any]] = {}
 
-    for key, module, path in _python_extensions(packages):
+    for key, module, path in _python_extensions(packages, root):
         metadata = _literal_module_metadata(path)
         component = metadata.get("ENGINE_COMPONENT")
         component = component if isinstance(component, dict) else {}
@@ -119,9 +121,9 @@ def _add_model_records(
     return keys
 
 
-def _script_records(packages: Iterable[str]) -> dict[str, dict[str, Any]]:
+def _script_records(packages: Iterable[str], root: Path) -> dict[str, dict[str, Any]]:
     records: dict[str, dict[str, Any]] = {}
-    for key, module, path in _python_extensions(packages):
+    for key, module, path in _python_extensions(packages, root):
         metadata = _literal_module_metadata(path)
         label = str(
             metadata.get("REGISTRY_LABEL")
@@ -142,8 +144,8 @@ def _script_records(packages: Iterable[str]) -> dict[str, dict[str, Any]]:
     return records
 
 
-def _rag_profile_records() -> dict[str, dict[str, Any]]:
-    root = AUTOSCRIBE_EXTENSIONS_ROOT / "rag_profiles"
+def _rag_profile_records(extension_root: Path) -> dict[str, dict[str, Any]]:
+    root = extension_root / "rag_profiles"
     if not root.is_dir():
         return {}
 
@@ -155,15 +157,15 @@ def _rag_profile_records() -> dict[str, dict[str, Any]]:
         records[key] = {
             "key": key,
             "label": _title(key),
-            "path": str(path.relative_to(AUTOSCRIBE_EXTENSIONS_ROOT)),
+            "path": str(path.relative_to(extension_root)),
         }
     return records
 
 
 def _python_extensions(
     packages: Iterable[str],
+    root: Path,
 ) -> Iterable[tuple[str, str, Path]]:
-    root = AUTOSCRIBE_EXTENSIONS_ROOT
     for package in packages:
         package = package.strip()
         if not package:
