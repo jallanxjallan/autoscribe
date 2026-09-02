@@ -15,7 +15,6 @@ claim, blocking claim, peek, remove, count, and clear.
 
 from collections.abc import Sequence
 from dataclasses import dataclass
-import os
 from asc.core.timestamp import timestamp
 from asc.redis.index_base import FixedRedisIndex
 from asc.redis.primitives import lists
@@ -56,27 +55,17 @@ def require_queue_key(value: object, *, field_name: str = "key") -> str:
 
 
 def daemon_timeout_seconds(default: int = 5) -> int:
-    value = os.environ.get("AUTOSCRIBE_DAEMON_CLAIM_TIMEOUT")
-    if value is None:
-        return default
-    return max(1, int(value))
+    return max(1, int(default))
 
 
 def daemon_idle_seconds(default: int = 3600) -> int:
     """Seconds a daemon may sit idle before returning None."""
 
-    value = os.environ.get("AUTOSCRIBE_DAEMON_IDLE_SECONDS")
-    if value is None:
-        return default
-    return max(1, int(value))
+    return max(1, int(default))
 
 
 def daemon_empty_limit(*, timeout: int | None = None, default: int | None = None) -> int:
     """Return empty BLPOP cycles before a daemon may exit."""
-
-    value = os.environ.get("AUTOSCRIBE_DAEMON_EMPTY_LIMIT")
-    if value is not None:
-        return max(1, int(value))
 
     cycle_timeout = daemon_timeout_seconds() if timeout is None else max(1, int(timeout))
     if default is not None:

@@ -1,20 +1,13 @@
 # LOCAL RUST SERVICE BOUNDARY
 # ---------------------------
-# Obsidian does not discover/build the Rust service at runtime. The service is
-# installed at a stable path by the Control installer, or overridden by SVC_BIN.
+# Non-secret service configuration lives in this platform tree. External
+# environment variables are not configuration inputs.
 
-environment:
-  source_root: AUTOSCRIBE_ROOT
-  service_binary: SVC_BIN
-  database: AUTOSCRIBE_DATABASE
-  pandoc_filter: AUTOSCRIBE_PANDOC_FILTER
-  pandoc_parallelism: AUTOSCRIBE_PANDOC_PARALLELISM
-  pandoc_bin: PANDOC_BIN
+source_root: /home/jeremy/Work/Loom
+service_binary: /home/jeremy/.local/bin/autoscribe-svc
 
-source_root_default: $HOME/Work/Loom
-service_binary_default: $HOME/.local/bin/autoscribe-svc
-
-database_default: $HOME/.local/share/autoscribe/service.sqlite
-pandoc_filter_relative: platform/pandoc/filters/emit/emit_ndjson.lua
+# The following are runtime targets, not configuration sources.
+database: /home/jeremy/.local/share/autoscribe/service.sqlite
+pandoc_bin: /usr/bin/pandoc
+pandoc_filter: /home/jeremy/Work/Loom/platform/pandoc/filters/emit/emit_ndjson.lua
 pandoc_parallelism_min: 2
-pandoc_bin_default: /usr/bin/pandoc

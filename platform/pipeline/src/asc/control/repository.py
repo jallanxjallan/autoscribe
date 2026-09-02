@@ -1,16 +1,15 @@
-"""Git-backed control catalog and plan store.
+"""Git-backed Control catalog and plan store.
 
-The authored Control repository remains ordinary source Git. Plans live in a
-separate server-side Git repository and are written only through ``asc control``.
-Redis is a materialized cache; enqueue may rebuild the records it needs from
-these repositories at any time.
+One published Control bare repository is authoritative. Authored configuration
+lives on the configured Control branch; plans live on a dedicated plans branch
+of that same repository and are written only through ``asc control``. Redis is
+a materialized cache rebuilt from Git as needed.
 """
 
 from __future__ import annotations
 
 import io
 import json
-import os
 import subprocess
 import tarfile
 import tempfile
@@ -19,26 +18,25 @@ from pathlib import Path
 from typing import Any, Mapping
 
 from asc.ingest.git_revision import ingest_path_from_revision
+from asc.config.repos import CONTROL
 
 
 def control_repository() -> Path:
-    return _repo_path("AUTOSCRIBE_CONTROL_REPO", "~/Work/Control")
+    """Published Control Git repository containing authored configuration."""
+    return _require_repo(CONTROL.path)
 
 
 def plan_repository() -> Path:
-    return _repo_path(
-        "AUTOSCRIBE_PLAN_REPO",
-        "~/.local/share/autoscribe/control-plans.git",
-        create_bare=True,
-    )
+    """Plans are stored on a dedicated branch of the same published Control repo."""
+    return control_repository()
 
 
 def control_ref() -> str:
-    return os.environ.get("AUTOSCRIBE_CONTROL_REF", "master").strip() or "master"
+    return CONTROL.config_branch
 
 
 def plan_ref() -> str:
-    return os.environ.get("AUTOSCRIBE_PLAN_REF", "master").strip() or "master"
+    return CONTROL.plans_branch
 
 
 def control_revision() -> str:
@@ -51,7 +49,7 @@ def plan_revision(*, required: bool = False) -> str | None:
     if result and result.strip():
         return result.strip()
     if required:
-        raise RuntimeError(f"plan repository has no {plan_ref()} revision: {repo}")
+        raise RuntimeError(f"published Control repository has no {plan_ref()} revision: {repo}")
     return None
 
 
@@ -259,8 +257,8 @@ def _commit_plan(identity: str, record: Mapping[str, Any] | None, *, delete: boo
             work.mkdir()
             _run(["git", "-C", str(work), "init", "-q", f"--initial-branch={branch}"])
             _run(["git", "-C", str(work), "remote", "add", "origin", str(repo)])
-        _run(["git", "-C", str(work), "config", "user.name", os.environ.get("AUTOSCRIBE_GIT_NAME", "AutoScribe Control")])
-        _run(["git", "-C", str(work), "config", "user.email", os.environ.get("AUTOSCRIBE_GIT_EMAIL", "autoscribe@localhost")])
+        _run(["git", "-C", str(work), "config", "user.name", CONTROL.git_name])
+        _run(["git", "-C", str(work), "config", "user.email", CONTROL.git_email])
         relative = Path("plans") / f"{identity}.json"
         path = work / relative
         if delete:
@@ -282,16 +280,13 @@ def _commit_plan(identity: str, record: Mapping[str, Any] | None, *, delete: boo
         return _git(work, "rev-parse", "HEAD").strip()
 
 
-def _repo_path(env_name: str, default: str, *, create_bare: bool = False) -> Path:
-    path = Path(os.environ.get(env_name, default)).expanduser().resolve()
-    if path.exists():
-        _git(path, "rev-parse", "--absolute-git-dir")
-        return path
-    if create_bare:
-        path.parent.mkdir(parents=True, exist_ok=True)
-        _run(["git", "init", "-q", "--bare", str(path)])
-        return path
-    raise FileNotFoundError(f"Git repository does not exist: {path} (set {env_name})")
+def _require_repo(path: Path) -> Path:
+    resolved = path.expanduser().resolve()
+    if not resolved.exists():
+        raise FileNotFoundError(f"Git repository does not exist: {resolved}")
+    _git(resolved, "rev-parse", "--absolute-git-dir")
+    return resolved
+
 
 
 def _revision(repo: Path, ref: str) -> str:

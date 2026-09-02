@@ -1,6 +1,7 @@
 'use strict';
 
-const { fail, readRequiredEnvPath, isDirectory, findManagedVaultRoot, shellQuote } = require('./common');
+const { fail, isDirectory, findManagedVaultRoot, shellQuote } = require('./common');
+const { CORE_ROOT } = require('../../config');
 
 const { syncJsonPaths, listCoreJsonPaths } = require('../../lib/core-json');
 const { gitDirtyGuard } = require('../../lib/vault-utils');
@@ -65,7 +66,7 @@ function main(argv = process.argv.slice(2)) {
   }
 
   const vaultRoot = findManagedVaultRoot(startInput);
-  const coreRoot = readRequiredEnvPath('OBSIDIAN_CORE_ROOT', '_OBSIDIAN_CORE_ROOT');
+  const coreRoot = CORE_ROOT;
 
   if (!isDirectory(coreRoot)) {
     fail(`core directory does not exist:\n       ${coreRoot}`);

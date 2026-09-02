@@ -9,9 +9,6 @@
 # changing/recreating the vault symlink before the new value can be read.
 
 control_mount: _control
-# Canonical shared Instructions vault.
-instructions_vault: $HOME/Work/Studio/Instructions
-
 # Vault-relative runtime/state directories. Renaming these changes where Control
 # reads/writes transient state; it does not migrate an existing directory.
 runtime_dir: .autoscribe
@@ -32,9 +29,6 @@ skip_dirs:
 # you know no project vault still relies on them.
 legacy_query_root: _autoscribe
 
-# Environment-variable NAMES, not their values.
-environment:
-  instructions_vault: AUTOSCRIBE_INSTRUCTIONS_VAULT
 
 current_selection_tmp: autoscribe/obsidian/current-selection
 

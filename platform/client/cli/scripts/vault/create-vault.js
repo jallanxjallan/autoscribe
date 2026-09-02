@@ -1,7 +1,6 @@
 'use strict';
 
 const fs = require('node:fs');
-const os = require('node:os');
 const path = require('node:path');
 
 const {
@@ -11,7 +10,6 @@ const {
   warn,
   isDirectory,
   ensureDir,
-  readRequiredEnv,
 } = require('./common');
 
 const {
@@ -20,37 +18,21 @@ const {
 } = require('../../lib/git');
 
 const { openVaultFromCreate } = require('../obsidian/obsidian-open');
-
-const VAULT_REMOTE_NAME =
-  process.env._OBSIDIAN_VAULT_REMOTE_NAME ||
-  process.env._OBSIDIAN_STUDIO_REMOTE_NAME ||
-  'origin';
-
-const DROPBOX_BARE_ROOT =
-  process.env._OBSIDIAN_DROPBOX_BARE_ROOT ||
-  path.join(os.homedir(), 'Dropbox', 'Repos', 'obsidian-vaults');
-
-const VAULT_BRANCH =
-  process.env._OBSIDIAN_VAULT_BRANCH ||
-  'main';
-
-const BARE_REPO_SUFFIX =
-  process.env._OBSIDIAN_BARE_REPO_SUFFIX ||
-  '.git';
+const {
+  CORE_ROOT,
+  CONTROL_ROOT,
+  VAULT_REMOTE_NAME,
+  VAULT_BACKUP_ROOT,
+  VAULT_BRANCH,
+  BARE_REPO_SUFFIX,
+} = require('../../config');
 
 function usage() {
   console.error('Usage: create-vault [--open|--no-open] [path]');
   console.error('Copies the core .obsidian folder into the target directory and initializes vault git.');
   console.error('');
   console.error('Git remote: creates/uses a bare repo in Dropbox.');
-  console.error(`Default bare repo root: ${DROPBOX_BARE_ROOT}`);
-}
-
-function expandHome(input) {
-  if (!input) return input;
-  if (input === '~') return os.homedir();
-  if (input.startsWith('~/')) return path.join(os.homedir(), input.slice(2));
-  return input;
+  console.error(`Default bare repo root: ${VAULT_BACKUP_ROOT}`);
 }
 
 function gitBranchSafeFolderName(folderName) {
@@ -76,7 +58,7 @@ function bareRepoName(target) {
 }
 
 function dropboxBareRepoPath(target) {
-  return path.join(absPath(expandHome(DROPBOX_BARE_ROOT)), bareRepoName(target));
+  return path.join(VAULT_BACKUP_ROOT, bareRepoName(target));
 }
 
 function parseArgs(argv) {
@@ -272,8 +254,8 @@ function main(argv = process.argv.slice(2)) {
   const { openObsidian, targetInput } = parseArgs(argv);
 
   const target = absPath(targetInput);
-  const coreRoot = readRequiredEnv('OBSIDIAN_CORE_ROOT', '_OBSIDIAN_CORE_ROOT');
-  const controlRoot = readRequiredEnv('OBSIDIAN_CONTROL_ROOT', '_OBSIDIAN_CONTROL_ROOT');
+  const coreRoot = CORE_ROOT;
+  const controlRoot = CONTROL_ROOT;
 
   const sourceObsidian = path.join(coreRoot, '.obsidian');
   const targetObsidian = path.join(target, '.obsidian');
@@ -342,9 +324,6 @@ module.exports = {
   vaultBranchName,
   dropboxBareRepoPath,
   gitBranchSafeFolderName,
-
-  // Compatibility alias for older imports/tests.
-  studioBranchName: vaultBranchName,
 };
 
 if (require.main === module) {

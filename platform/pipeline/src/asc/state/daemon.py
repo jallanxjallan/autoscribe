@@ -13,8 +13,8 @@ from typing import Protocol, TypeVar
 
 log = logging.getLogger(__name__)
 
-DEFAULT_CLAIM_TIMEOUT_SECONDS = int(os.environ.get("AUTOSCRIBE_DAEMON_CLAIM_TIMEOUT", "0"))
-DEFAULT_LOG_PATH = Path(os.environ.get("AUTOSCRIBE_DAEMON_LOG", "/tmp/autoscribe/logs/runtime.log"))
+DEFAULT_CLAIM_TIMEOUT_SECONDS = 0
+DEFAULT_LOG_PATH = Path("/tmp/autoscribe/logs/runtime.log")
 
 
 class RunReport(Protocol):
@@ -28,8 +28,8 @@ RunCycle = Callable[..., ReportT]
 def configure_logging() -> None:
     """Shared logging setup for all package daemons."""
 
-    level = os.environ.get("AUTOSCRIBE_LOG_LEVEL", "INFO").upper()
-    log_path = Path(os.environ.get("AUTOSCRIBE_DAEMON_LOG", str(DEFAULT_LOG_PATH)))
+    level = "INFO"
+    log_path = DEFAULT_LOG_PATH
     log_path.parent.mkdir(parents=True, exist_ok=True)
 
     root = logging.getLogger()

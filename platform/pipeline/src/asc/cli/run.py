@@ -36,10 +36,10 @@ app = typer.Typer(
     help="Run and inspect AutoScribe runtime daemons.",
 )
 
-RUN_DIR = Path(os.environ.get("AUTOSCRIBE_RUN_DIR", "/tmp/autoscribe"))
+RUN_DIR = Path("/tmp/autoscribe")
 PID_FILE = RUN_DIR / "runtime-daemons.json"
-LOG_DIR = Path(os.environ.get("AUTOSCRIBE_LOG_DIR", str(RUN_DIR / "logs")))
-LOG_FILE = Path(os.environ.get("AUTOSCRIBE_DAEMON_LOG", str(LOG_DIR / "runtime.log")))
+LOG_DIR = RUN_DIR / "logs"
+LOG_FILE = LOG_DIR / "runtime.log"
 
 
 @dataclass(frozen=True, slots=True)
@@ -138,11 +138,9 @@ def _pid_alive(pid: int) -> bool:
 def _daemon_env() -> dict[str, str]:
     env = os.environ.copy()
     env["PYTHONUNBUFFERED"] = "1"
-    env["AUTOSCRIBE_DAEMON_LOG"] = str(LOG_FILE)
 
     # asc run owns the production daemon processes. Do not let the
     # orchestrator launch another worker and scrivener pair.
-    env["ASC_ORCHESTRATOR_MANAGE_DOWNSTREAM"] = "0"
 
     return env
 

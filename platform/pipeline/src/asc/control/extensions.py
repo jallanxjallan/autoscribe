@@ -6,10 +6,10 @@ import ast
 from pathlib import Path
 from typing import Any, Iterable
 
-from asc.core.config import (
-    AUTOSCRIBE_ENGINE_PACKAGES,
-    AUTOSCRIBE_EXTENSIONS_ROOT,
-    AUTOSCRIBE_SCRIPT_PACKAGES,
+from asc.config import (
+    ENGINE_PACKAGES,
+    EXTENSIONS_ROOT,
+    SCRIPT_PACKAGES,
 )
 
 ENGINE_STEP_FIELDS: dict[str, list[str]] = {
@@ -25,20 +25,20 @@ def build_extension_catalog(root: Path | None = None) -> dict[str, Any]:
     Extension modules are parsed rather than imported, so generating a snapshot
     does not execute provider code or require provider dependencies.
     """
-    extension_root = (root or AUTOSCRIBE_EXTENSIONS_ROOT).expanduser().resolve()
-    engines, models = _engine_and_model_records(AUTOSCRIBE_ENGINE_PACKAGES, extension_root)
+    extension_root = (root or EXTENSIONS_ROOT).expanduser().resolve()
+    engines, models = _engine_and_model_records(ENGINE_PACKAGES, extension_root)
     return {
         "schema_version": 2,
         "type": "autoscribe.extensions",
         "sources": {
             "extension_root": str(extension_root),
-            "engine_packages": list(AUTOSCRIBE_ENGINE_PACKAGES),
-            "local_script_packages": list(AUTOSCRIBE_SCRIPT_PACKAGES),
+            "engine_packages": list(ENGINE_PACKAGES),
+            "local_script_packages": list(SCRIPT_PACKAGES),
         },
         "registries": {
             "engines": engines,
             "models": models,
-            "local_scripts": _script_records(AUTOSCRIBE_SCRIPT_PACKAGES, extension_root),
+            "local_scripts": _script_records(SCRIPT_PACKAGES, extension_root),
             "rag_profiles": _rag_profile_records(extension_root),
         },
     }

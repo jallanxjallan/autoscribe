@@ -3,14 +3,20 @@
 from __future__ import annotations
 
 import importlib.util
+import io
+import shutil
+import subprocess
 import sys
+import tarfile
+import tempfile
 from hashlib import sha256
 from pathlib import Path
 from threading import RLock
 from types import ModuleType
 from typing import Any, Callable
 
-from asc.core.config import AUTOSCRIBE_EXTENSIONS_ROOT
+from asc.config import EXTENSIONS_ROOT
+from asc.control.repository import control_repository, control_revision
 from asc.models.process.result import Transform
 
 
@@ -83,13 +89,13 @@ def load_callable(category: str, component: str, callable_name: str) -> Callable
         try:
             entrypoint = getattr(module, safe_callable)
         except AttributeError as exc:
-            relative = path.relative_to(AUTOSCRIBE_EXTENSIONS_ROOT)
+            relative = path.relative_to(_ensure_extensions_root())
             raise AttributeError(
                 f"extension {relative} does not define {safe_callable!r}"
             ) from exc
 
         if not callable(entrypoint):
-            relative = path.relative_to(AUTOSCRIBE_EXTENSIONS_ROOT)
+            relative = path.relative_to(_ensure_extensions_root())
             raise TypeError(
                 f"extension entry point is not callable: {relative}:{safe_callable}"
             )
@@ -99,7 +105,7 @@ def load_callable(category: str, component: str, callable_name: str) -> Callable
 
 
 def _resolve_path(category: str, component: str) -> Path:
-    root = AUTOSCRIBE_EXTENSIONS_ROOT
+    root = _ensure_extensions_root()
     if not root.is_dir():
         raise FileNotFoundError(f"extensions folder not found: {root}")
 
@@ -115,6 +121,42 @@ def _resolve_path(category: str, component: str) -> Path:
     expected = relative.as_posix()
     raise FileNotFoundError(f"extension not found: {expected}")
 
+
+
+def _ensure_extensions_root() -> Path:
+    """Refresh the executable extension cache from published Control Git.
+
+    The cache is a runtime target only. The authoritative source remains the
+    published Control repository configured in asc.config.repos.
+    """
+    repo = control_repository()
+    revision = control_revision()
+    root = EXTENSIONS_ROOT
+    marker = root / ".control-revision"
+    if marker.is_file() and marker.read_text(encoding="utf-8").strip() == revision:
+        return root
+
+    root.parent.mkdir(parents=True, exist_ok=True)
+    result = subprocess.run(
+        ["git", "-C", str(repo), "archive", "--format=tar", revision],
+        stdout=subprocess.PIPE, stderr=subprocess.PIPE, check=False,
+    )
+    if result.returncode != 0:
+        raise RuntimeError(result.stderr.decode("utf-8", "replace").strip() or "git archive failed")
+
+    with tempfile.TemporaryDirectory(prefix="autoscribe-extensions-", dir=str(root.parent)) as temp:
+        staged = Path(temp) / "tree"
+        staged.mkdir()
+        with tarfile.open(fileobj=io.BytesIO(result.stdout), mode="r:") as archive:
+            archive.extractall(staged, filter="data")
+        (staged / ".control-revision").write_text(revision + "\n", encoding="utf-8")
+        if root.exists():
+            shutil.rmtree(root)
+        shutil.move(str(staged), str(root))
+
+    _MODULES.clear()
+    _CALLABLES.clear()
+    return root
 
 def _strip_category(component: str, category: str) -> str:
     prefix = f"{category}."
@@ -151,7 +193,7 @@ def _validated_path(root: Path, path: Path) -> Path:
 
 
 def _load_module(path: Path) -> ModuleType:
-    relative = path.relative_to(AUTOSCRIBE_EXTENSIONS_ROOT)
+    relative = path.relative_to(_ensure_extensions_root())
     digest = sha256(str(path).encode("utf-8")).hexdigest()[:12]
     stem = relative.parent.parts if path.name == "__init__.py" else relative.with_suffix("").parts
     safe_parts = [part.replace("-", "_") for part in stem]

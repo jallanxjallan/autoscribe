@@ -91,18 +91,23 @@ def list_pending(
     source_identity: str | None = typer.Argument(
         None,
         help=(
-            "Optional source/record identity. With no argument, print a table. "
-            "With an identity, emit matching pending source identities for writeback."
+            "Optional source/record identity. With no argument, emit all pending source slugs. "
+            "With an identity, emit matching pending source identities."
         ),
     ),
     ndjson: bool = typer.Option(
         False,
         "--ndjson",
         "--json",
-        help="Emit pending-export metadata as NDJSON instead of a display table.",
+        help="Emit pending-export metadata as NDJSON.",
+    ),
+    table: bool = typer.Option(
+        False,
+        "--table",
+        help="Render the human-readable pending-export table.",
     ),
 ) -> None:
-    """List pending export/writeback rows by slug and identity."""
+    """Emit pending source slugs; richer output is explicitly opt-in."""
 
     if source_identity is not None:
         source_identity = source_identity.strip()
@@ -115,7 +120,7 @@ def list_pending(
 
     if ndjson:
         _write_pending_exports_ndjson(rows=rows, sink=sys.stdout)
-    elif source_identity is None:
+    elif table:
         _write_pending_exports_table(rows=rows, sink=sys.stdout)
     else:
         _write_source_identity_stream(rows=rows, sink=sys.stdout)
@@ -133,6 +138,11 @@ def extract_selected(
         "--message",
         help="Message to store in each export receipt.",
     ),
+    receipt: bool = typer.Option(
+        True,
+        "--receipt/--no-receipt",
+        help="Record the export receipt immediately; workers use --no-receipt until local materialization succeeds.",
+    ),
 ) -> None:
     """Emit available results by slug and append export receipts."""
 
@@ -148,6 +158,7 @@ def extract_selected(
                 conn=conn,
                 sink=sys.stdout,
                 export_message=export_message,
+                record_receipt=receipt,
             )
         for slug in missing:
             typer.echo(f"No completed result for source slug: {slug}", err=True)

@@ -81,13 +81,15 @@ def write_result_records_by_slugs(
     conn: LedgerConnection,
     sink: TextIO,
     export_message: str = "retrieve-results",
+    record_receipt: bool = True,
 ) -> list[str]:
     """Emit the latest successful result available for each source slug.
 
     Slugs are handled independently. A missing or unfinished result does not
     prevent completed results for the other slugs from being emitted. Each
-    emitted record receives a new row in ``exports``; prior export receipts do
-    not affect selection.
+    With ``record_receipt=True`` each emitted record receives a new row in
+    ``exports``. Workers may disable that receipt until the response has been
+    materialized safely on the client.
 
     Return the slugs for which no successful terminal result currently exists.
     """
@@ -105,13 +107,14 @@ def write_result_records_by_slugs(
             continue
 
         data = _normalize_extract_row(row)
-        insert_export_record_with_connection(
-            conn=conn,
-            result_identity=str(data["identity"]),
-            export_message=export_message,
-            export_mode="retrieve-results",
-        )
-        conn.commit()
+        if record_receipt:
+            insert_export_record_with_connection(
+                conn=conn,
+                result_identity=str(data["identity"]),
+                export_message=export_message,
+                export_mode="retrieve-results",
+            )
+            conn.commit()
         _write_ndjson(data, sink=sink)
 
     return missing

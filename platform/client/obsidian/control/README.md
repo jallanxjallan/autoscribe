@@ -12,4 +12,4 @@ Saving a plan streams its JSON to `asc control save-plan`, which commits `plans/
 
 At dispatch, the selected plan slug is attached to each call record. `asc enqueue` resolves the current plan from server Git and materializes the plan and any missing referenced instructions into Redis before compiling runtimes. Redis is therefore a cache/runtime representation rather than the source of truth.
 
-Server configuration uses `AUTOSCRIBE_CONTROL_REPO` and `AUTOSCRIBE_PLAN_REPO`; revisions default to `master` and can be overridden with `AUTOSCRIBE_CONTROL_REF` and `AUTOSCRIBE_PLAN_REF`.
+Server repository paths and branches are defined in `pipeline/src/asc/config/repos.py`. AutoScribe does not read repository topology from environment variables or external config files.

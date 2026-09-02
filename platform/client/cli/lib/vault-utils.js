@@ -1,9 +1,10 @@
 'use strict';
 
-const fs = require('fs');
-const os = require('os');
-const path = require('path');
-const { spawnSync } = require('child_process');
+const fs = require('node:fs');
+const os = require('node:os');
+const path = require('node:path');
+const { spawnSync } = require('node:child_process');
+const { CONTROL_ROOT } = require('../config');
 
 class CliError extends Error {
   constructor(message, code = 1) {
@@ -36,67 +37,25 @@ function exists(p) {
 }
 
 function isDirectory(p) {
-  try {
-    return fs.statSync(p).isDirectory();
-  } catch (_) {
-    return false;
-  }
+  try { return fs.statSync(p).isDirectory(); } catch (_) { return false; }
 }
 
 function isRegularFile(p) {
-  try {
-    return fs.statSync(p).isFile();
-  } catch (_) {
-    return false;
-  }
-}
-
-function commandExists(bin) {
-  if (bin.includes('/')) {
-    try {
-      fs.accessSync(bin, fs.constants.X_OK);
-      return true;
-    } catch (_) {
-      return false;
-    }
-  }
-
-  const result = spawnSync('which', [bin], {
-    encoding: 'utf8',
-    stdio: 'ignore',
-  });
-
-  return result.status === 0;
-}
-
-function readRequiredEnvPath(...names) {
-  for (const name of names) {
-    const value = process.env[name];
-    if (value) return absPath(value);
-  }
-  fail(`missing required environment variable: ${names.join(' or ')}`);
+  try { return fs.statSync(p).isFile(); } catch (_) { return false; }
 }
 
 function realpathStrict(p, label) {
-  try {
-    return fs.realpathSync(p);
-  } catch (error) {
-    fail(`could not resolve ${label}: ${p}\n       ${error.message}`);
-  }
+  try { return fs.realpathSync(p); }
+  catch (error) { fail(`could not resolve ${label}: ${p}\n       ${error.message}`); }
 }
 
 function findManagedVaultRoot(startInput = '.') {
-  const controlRoot = readRequiredEnvPath('OBSIDIAN_CONTROL_ROOT', '_OBSIDIAN_CONTROL_ROOT');
-  const expectedControl = realpathStrict(controlRoot, 'configured control root');
-
+  const expectedControl = realpathStrict(CONTROL_ROOT, 'Control root');
   let current = absPath(startInput);
 
   try {
-    const stat = fs.statSync(current);
-    if (stat.isFile()) current = path.dirname(current);
-  } catch (_) {
-    // Let the upward search fail naturally below.
-  }
+    if (fs.statSync(current).isFile()) current = path.dirname(current);
+  } catch (_) {}
 
   while (true) {
     const obsidianDir = path.join(current, '.obsidian');
@@ -104,26 +63,16 @@ function findManagedVaultRoot(startInput = '.') {
 
     if (isDirectory(obsidianDir)) {
       let linkStat;
-      try {
-        linkStat = fs.lstatSync(controlPath);
-      } catch (_) {
-        fail(
-          `refusing to update unmanaged Obsidian vault:\n` +
-          `       ${current}\n` +
-          `       missing _control symlink`
-        );
+      try { linkStat = fs.lstatSync(controlPath); }
+      catch (_) {
+        fail(`refusing to update unmanaged Obsidian vault:\n       ${current}\n       missing _control symlink`);
       }
 
       if (!linkStat.isSymbolicLink()) {
-        fail(
-          `refusing to update unmanaged Obsidian vault:\n` +
-          `       ${current}\n` +
-          `       _control exists but is not a symlink`
-        );
+        fail(`refusing to update unmanaged Obsidian vault:\n       ${current}\n       _control exists but is not a symlink`);
       }
 
       const actualControl = realpathStrict(controlPath, '_control symlink');
-
       if (actualControl !== expectedControl) {
         fail(
           `refusing to update vault with unexpected _control target:\n` +
@@ -132,7 +81,6 @@ function findManagedVaultRoot(startInput = '.') {
           `       expected: ${expectedControl}`
         );
       }
-
       return current;
     }
 
@@ -141,10 +89,7 @@ function findManagedVaultRoot(startInput = '.') {
     current = parent;
   }
 
-  fail(
-    `not inside a managed Obsidian vault.\n` +
-    `       No .obsidian directory found above: ${absPath(startInput)}`
-  );
+  fail(`not inside a managed Obsidian vault.\n       No .obsidian directory found above: ${absPath(startInput)}`);
 }
 
 function shellQuote(value) {
@@ -152,40 +97,26 @@ function shellQuote(value) {
 }
 
 function gitDirtyGuard(repoRoot, label = 'repository') {
-  const gitBin = process.env.OBSIDIAN_GIT_BIN || process.env._OBSIDIAN_GIT_BIN || 'git';
   const gitDir = path.join(repoRoot, '.git');
-
   if (!exists(gitDir)) {
     warn(`no .git directory found for ${label}; skipping dirty guard: ${repoRoot}`);
     return;
   }
 
-  if (!commandExists(gitBin)) {
-    fail(`git executable not found: ${gitBin}`);
-  }
-
-  const result = spawnSync(gitBin, ['status', '--porcelain'], {
+  const result = spawnSync('/usr/bin/git', ['status', '--porcelain'], {
     cwd: repoRoot,
     encoding: 'utf8',
     stdio: ['ignore', 'pipe', 'pipe'],
   });
 
-  if (result.error) {
-    fail(`git dirty guard failed for ${repoRoot}: ${result.error.message}`);
-  }
-
-  if (result.status !== 0) {
-    fail(
-      `git dirty guard failed for ${repoRoot}\n` +
-      `       ${result.stderr || ''}`.trimEnd()
-    );
+  if (result.error || result.status !== 0) {
+    fail(`git dirty guard failed for ${repoRoot}: ${result.error?.message || result.stderr || 'unknown error'}`);
   }
 
   if (result.stdout.trim() !== '') {
     console.error(`ERROR: refusing to update dirty ${label}:`);
     console.error(`       ${repoRoot}`);
-    console.error('       Review or commit/stash changes first:');
-    console.error(`       ${gitBin} -C ${shellQuote(repoRoot)} status --short`);
+    console.error(`       /usr/bin/git -C ${shellQuote(repoRoot)} status --short`);
     process.exit(2);
   }
 }
@@ -199,8 +130,6 @@ module.exports = {
   exists,
   isDirectory,
   isRegularFile,
-  commandExists,
-  readRequiredEnvPath,
   findManagedVaultRoot,
   gitDirtyGuard,
   shellQuote,

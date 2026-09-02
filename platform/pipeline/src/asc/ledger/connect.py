@@ -2,7 +2,7 @@ import sqlite3
 from pathlib import Path
 from typing import Any, Protocol, runtime_checkable
 
-from asc.core.config import config
+from asc.config import config
 
 
 @runtime_checkable

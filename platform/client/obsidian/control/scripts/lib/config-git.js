@@ -5,13 +5,11 @@ const fs = require("node:fs");
 const { loadConfig } = require("./config-loader");
 
 function workflow() { return loadConfig("workflow").plan_manager || {}; }
-function configured(key, envKey, fallback) {
-  const fromEnv = String(process.env[envKey] || "").trim();
-  if (fromEnv) return fromEnv;
+function configured(key, fallback) {
   return String(workflow()[key] || fallback || "").trim();
 }
 function ascCommand() {
-  const command = configured("asc_command", "AUTOSCRIBE_ASC", "");
+  const command = configured("asc_command", "");
   if (command) return command;
   const local = "/home/jeremy/Python3.13Env/bin/asc";
   return fs.existsSync(local) ? local : "asc";

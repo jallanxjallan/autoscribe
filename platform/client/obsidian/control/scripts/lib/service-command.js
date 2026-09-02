@@ -12,16 +12,14 @@ const vaultRoot = requireVaultBasePath;
 
 function autoscribeRoot() {
   const cfg = serviceConfig();
-  const envName = String(cfg.environment?.source_root || "AUTOSCRIBE_ROOT");
-  return path.resolve(process.env[envName] || expandHome(cfg.source_root_default));
+  return path.resolve(expandHome(cfg.source_root));
 }
 
 function serviceCommand() {
   const cfg = serviceConfig();
-  const envName = String(cfg.environment?.service_binary || "SVC_BIN");
-  const command = path.resolve(process.env[envName] || expandHome(cfg.service_binary_default));
+  const command = path.resolve(expandHome(cfg.service_binary));
   if (!fs.existsSync(command)) {
-    throw new Error(`Rust service binary not found: ${command}. Re-run the Control installer or set ${envName}.`);
+    throw new Error(`Rust service binary not found: ${command}. Re-run the Control installer.`);
   }
   return command;
 }
@@ -48,20 +46,11 @@ function run(command, args, { cwd, input = "", env = {} } = {}) {
 }
 
 function serviceEnvironment() {
-  const root = autoscribeRoot();
-  const cfg = serviceConfig();
-  const env = cfg.environment || {};
-  const databaseName = String(env.database || "AUTOSCRIBE_DATABASE");
-  const filterName = String(env.pandoc_filter || "AUTOSCRIBE_PANDOC_FILTER");
-  const parallelName = String(env.pandoc_parallelism || "AUTOSCRIBE_PANDOC_PARALLELISM");
-  const pandocName = String(env.pandoc_bin || "PANDOC_BIN");
-  return {
-    [databaseName]: process.env[databaseName] || expandHome(cfg.database_default),
-    [filterName]: process.env[filterName] || path.join(root, ...String(cfg.pandoc_filter_relative).split("/")),
-    [parallelName]: String(Math.max(Number(cfg.pandoc_parallelism_min || 2), Number(process.env[parallelName]) || os.cpus().length)),
-    [pandocName]: path.resolve(process.env[pandocName] || String(cfg.pandoc_bin_default || "/usr/bin/pandoc")),
-  };
+  // AutoScribe configuration is compiled/configured inside the platform tree.
+  // Preserve the ambient environment only so provider credentials remain available.
+  return {};
 }
+
 
 async function serviceCall(app, command, input) {
   return run(serviceCommand(), [command], {

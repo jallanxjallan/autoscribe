@@ -1,0 +1,18 @@
+[Unit]
+Description=AutoScribe UI-agnostic repository worker
+After=default.target
+
+[Service]
+Type=simple
+Environment=PATH=%h/.local/bin:/usr/local/bin:/usr/bin:/bin
+Environment=AUTOSCRIBE_ASC=asc
+Environment=AUTOSCRIBE_PANDOC=/usr/bin/pandoc
+Environment=AUTOSCRIBE_PANDOC_FILTER=%h/Work/Loom/platform/pandoc/filters/emit/emit_ndjson.lua
+Environment=AUTOSCRIBE_WORKER_POLL_MS=2000
+Environment=AUTOSCRIBE_REPOSITORY_TTL_SECS=3600
+ExecStart=%h/.local/bin/svc worker
+Restart=on-failure
+RestartSec=5
+
+[Install]
+WantedBy=default.target

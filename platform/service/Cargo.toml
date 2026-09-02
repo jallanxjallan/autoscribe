@@ -1,8 +1,8 @@
 [package]
 name = "autoscribe-service"
-version = "0.1.0"
+version = "0.2.0"
 edition = "2024"
-description = "Client-side AutoScribe service contract and implementation scaffold"
+description = "UI-agnostic system-wide AutoScribe worker"
 license = "Proprietary"
 
 [lib]

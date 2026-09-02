@@ -1,3 +1,0 @@
-# Comments for $name$
-
-$body$

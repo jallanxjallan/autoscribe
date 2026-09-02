@@ -1,17 +1,15 @@
-# Obsidian vault CLI
+# AutoScribe managed-vault CLI
 
-This package now contains only operations that manage the Obsidian vault
-itself or its Git remote:
+This package is a small lifecycle/convenience layer for managed Obsidian vaults.
+It does not implement dispatch, plan handling, content scanning, response writeback,
+or background Git synchronization.
 
-- `create-vault`
-- `open-vault`
-- `push-vault`
-- `update-vault`
-- `update-core`
+Retained commands:
 
-AutoScribe content scanning, selection, uploads, plan handling, dispatch,
-writeback, and generated-state maintenance have moved to the Python `feeder`
-package. Use `obs` or the Obsidian control-panel IPC bridge for those tasks.
+- `create-vault` — install the shared Obsidian core, attach `_control`, initialize the vault Git repository, create its bare backup remote, and optionally open Obsidian.
+- `update-vault` — copy the whitelisted shared `.obsidian` JSON configuration into a managed vault.
+- `update-core` — copy the same whitelisted JSON configuration from a managed vault back into the shared core template.
 
-Source `zsh/vault.zsh` for the direct command functions, or
-`zsh/frontend.zsh` for the compact `cli <command>` dispatcher.
+Source `zsh/vault.zsh` for direct functions. Source `zsh/frontend.zsh` as well if the compact `cli <command>` dispatcher is useful.
+
+All client constants are defined in `config.js`. The CLI does not read AutoScribe path configuration from shell environment variables or external config files. External paths in `config.js` are runtime targets/resources such as vault backup repositories and the Obsidian executable.

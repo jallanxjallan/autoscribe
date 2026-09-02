@@ -1,71 +1,71 @@
-# AutoScribe Rust service
+# AutoScribe Service
 
-`svc` provides command-line reconciliation plus foreground watcher processes.
-There is no live Obsidian IPC requirement.
+`autoscribe-service` is one permanent, UI-agnostic system worker. It knows Git
+repositories, Markdown files, dispatch commits, `autoscribe/inflight`, Pandoc,
+`asc enqueue`, and `asc export`. It contains no editor-specific discovery or
+state.
 
-## Dispatch watcher
+## Commands
 
-Run from a vault Git worktree:
+```sh
+svc worker
+svc attention /absolute/path/to/repository [...]
+svc scan /absolute/path/to/repository [...]
+```
 
-    svc watch-dispatch
+`svc worker` owns a user-scoped Unix socket and waits safely with no registered
+repositories. A UI adapter periodically calls `svc attention`; the path is only
+a candidate hint. The worker canonicalises it, requires the path to be a Git
+root, and then owns all scanning and reconciliation.
 
-The watcher consumes editorial commits in branch order. A dispatch commit must
-carry exactly one plan trailer and one or more document trailers:
+`svc scan` is the one-pass diagnostic form. It does not use the attention
+socket, but it does perform normal dispatch and response reconciliation.
 
-    Editorial commit
+## Repository sessions and activity
 
-    Autoscribe-Plan: plan.example
-    Autoscribe-Document: cnt.first
-    Autoscribe-Document: psg.second
+Repository sessions are transient working memory. Each pass:
 
-Each document value is an immutable document slug. The watcher opens a detached
-worktree at the marked commit, resolves each slug to its filepath within that
-snapshot, saves the exact bytes on `refs/heads/autoscribe/inflight`, and only
-then runs Pandoc, uploads calls, and enqueues the plan. Live working-tree paths
-and edits are never used.
+1. drains new attention hints;
+2. expires quiet sessions after the configured TTL;
+3. visits repositories in descending rolling activity score;
+4. scans meaningful Markdown changes and global slug integrity;
+5. reconciles dispatch commits;
+6. reconciles pending exports.
 
-The branch cursor and per-commit receipts are durable in the service SQLite
-database. A failed commit does not advance the cursor; the foreground watcher
-reports the failure and retries it after 30 seconds. `Ctrl-C` stops the watcher.
-Only one watcher may run for a vault at a time. For testing or manual polling:
+New, removed, or renamed Markdown files add more activity than a modification.
+Repeated writes with unchanged bytes add nothing. Scores decay every pass, so
+recent distinct work wins without allowing autosave chatter to dominate.
 
-    svc watch-dispatch --once
+The in-memory SQLite schema is structured process memory only. Git is the
+durable recovery record.
 
-Polling defaults to two seconds. `AUTOSCRIBE_DISPATCH_POLL_MS` and
-`AUTOSCRIBE_DISPATCH_RETRY_MS` override the normal and failed-pass intervals.
+## Ownership boundaries
 
-## Refresh
+- `master` is user-owned and read-only to the service.
+- `refs/heads/autoscribe/inflight` is service-owned.
+- Plans and instructions are authored and published by Control, not stored or
+  validated by this service.
+- A dispatch commit carries a plan identity and document identities.
+- `asc enqueue` resolves/materialises the published plan and its referenced
+  entities, producing pipeline failure state when resolution fails.
+- Response candidates are reconstructed from the exact inflight source and
+  written only to inflight for later user review.
 
-Run from a vault Git worktree:
+The worker records a submitted Git event only after `asc enqueue` exits
+successfully. UI actions can still return immediately because submission runs
+inside this background service.
 
-    svc refresh
+## Configuration
 
-`svc refresh` also ensures `/.autoscribe/` is present in the repository-local `.git/info/exclude`, so Plan Manager drafts and Control state never appear in normal Git/Obsidian Git status.
+| Variable | Default | Meaning |
+| --- | --- | --- |
+| `AUTOSCRIBE_ASC` | `asc` | Pipeline CLI executable |
+| `AUTOSCRIBE_PANDOC` | `/usr/bin/pandoc` | Pandoc executable |
+| `AUTOSCRIBE_PANDOC_FILTER` | platform emit filter path | NDJSON emit filter |
+| `AUTOSCRIBE_WORKER_POLL_MS` | `2000` | Worker pass interval |
+| `AUTOSCRIBE_REPOSITORY_TTL_SECS` | `3600` | Quiet-session expiry |
+| `AUTOSCRIBE_SERVICE_SOCKET` | `$XDG_RUNTIME_DIR/autoscribe-service.sock` | Attention socket |
 
-One refresh pass:
-
-1. builds the vault-wide slug index;
-2. synchronizes changed local instructions without committing master;
-3. ingests locally edited plans from `.autoscribe/plans/`;
-4. refreshes the cached server catalog; and
-5. atomically writes `.autoscribe/control-state.json` for Obsidian Control.
-
-Dispatch commit scanning belongs exclusively to `watch-dispatch`; refresh does
-not upload or enqueue editorial documents.
-
-## Git boundary
-
-AutoScribe makes no automatic commits on the editorial/master branch. Human
-commits made through Obsidian Git or the normal Git CLI are authoritative.
-Machine forensics live on `refs/heads/autoscribe/inflight`.
-
-The private `__dispatch-run` command is an implementation detail used only by
-`watch-dispatch` inside a detached worktree so the existing Pandoc/dispatch path
-operates on the exact source commit. It is not an interactive dispatch API.
-
-## Responses
-
-The existing `write-responses` command remains the writeback boundary. Response
-candidates are saved on the inflight ref before master is inspected. Clean,
-unchanged targets may be written and are left dirty; dirty or committed-diverged
-targets are left untouched and reported as decision-required.
+An adapter must only discover candidate repository paths and send attention.
+It must not implement scanning, activity scoring, Git, dispatch, or response
+logic.

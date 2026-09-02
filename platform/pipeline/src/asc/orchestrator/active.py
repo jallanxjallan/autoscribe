@@ -3,20 +3,19 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-import os
 import time
 
 from asc.redis.key import RedisKey
 
 ACTIVE_JOBS_KEY = RedisKey("state:active:index")
-IDLE_SLEEP_SECONDS = float(os.environ.get("ASC_ORCHESTRATOR_IDLE_SLEEP", "5"))
-INFLIGHT_OFFSET_SECONDS = float(os.environ.get("ASC_INFLIGHT_OFFSET", "60"))
-MAX_PROCESS_RETRIES = int(os.environ.get("ASC_PROCESS_RETRIES", "3"))
+IDLE_SLEEP_SECONDS = 5.0
+INFLIGHT_OFFSET_SECONDS = 60.0
+MAX_PROCESS_RETRIES = 3
 
 # Failure jobs are visible only to evaluate. Successful jobs are parked beyond it.
-FAILURE_WINDOW_OFFSET = float(os.environ.get("ASC_FAILURE_WINDOW_OFFSET", str(10 * 365 * 24 * 60 * 60)))
-FAILURE_WINDOW_WIDTH = float(os.environ.get("ASC_FAILURE_WINDOW_WIDTH", str(365 * 24 * 60 * 60)))
-SUCCESS_WINDOW_OFFSET = float(os.environ.get("ASC_SUCCESS_WINDOW_OFFSET", str(20 * 365 * 24 * 60 * 60)))
+FAILURE_WINDOW_OFFSET = float(10 * 365 * 24 * 60 * 60)
+FAILURE_WINDOW_WIDTH = float(365 * 24 * 60 * 60)
+SUCCESS_WINDOW_OFFSET = float(20 * 365 * 24 * 60 * 60)
 
 
 @dataclass(frozen=True, slots=True)
