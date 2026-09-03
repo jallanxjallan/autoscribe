@@ -15,6 +15,7 @@ from pathlib import Path
 class ControlRepoConfig:
     path: Path
     config_branch: str
+    plans_branch: str
     git_name: str
     git_email: str
 
@@ -22,6 +23,7 @@ class ControlRepoConfig:
 CONTROL = ControlRepoConfig(
     path=Path("/home/jeremy/.local/share/autoscribe/control.git"),
     config_branch="master",
+    plans_branch="autoscribe/plans",
     git_name="AutoScribe Control",
     git_email="autoscribe@localhost",
 )

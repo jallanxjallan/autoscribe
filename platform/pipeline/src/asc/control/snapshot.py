@@ -1,29 +1,25 @@
-"""Build the Git-authoritative control snapshot consumed by clients."""
+"""Build the Git-authoritative Control snapshot consumed by clients."""
 
 from typing import Any
 
-from asc.control.extensions import build_extension_catalog
-from asc.control.repository import control_checkout, instruction_records, plan_records
+from asc.control.repository import instruction_records, plan_records
 
 
 def build_control_snapshot() -> dict[str, Any]:
-    """Return the current published control catalog from Git, not Redis."""
+    """Return the current published Control catalog from Git.
+
+    Control contains authored instructions and plans only. Executable engines,
+    scripts, models, and other runtime extensions are published separately.
+    """
     instructions = {record["slug"]: record for record in instruction_records()}
     plans = {str(record["record_identity"]): record for record in plan_records()}
-    with control_checkout() as published_control:
-        extension_catalog = build_extension_catalog(published_control)
-    extension_registries = extension_catalog.get("registries", {})
     return {
         "schema_version": 3,
         "type": "autoscribe.controls",
-        "source": {"authority": "git", "extensions": extension_catalog.get("sources", {})},
+        "source": {"authority": "git"},
         "registries": {
             "instructions": instructions,
             "plans": plans,
-            "engines": dict(extension_registries.get("engines", {})),
-            "models": dict(extension_registries.get("models", {})),
-            "local_scripts": dict(extension_registries.get("local_scripts", {})),
-            "rag_profiles": dict(extension_registries.get("rag_profiles", {})),
         },
         "stale": {},
     }

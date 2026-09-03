@@ -1,9 +1,9 @@
-"""Git-backed published Control catalog.
+"""Git-backed Control catalog and plan store.
 
-One published Control bare repository and branch are authoritative for both
-``instructions/`` and ``plans/``. Plans are authored in Control alongside
-instructions; ``asc`` reads but does not author or mutate published Control.
-Redis is a disposable materialized cache rebuilt from Git as needed.
+One published Control bare repository is authoritative. Authored configuration
+lives on the configured Control branch; plans live on a dedicated plans branch
+of that same repository and are written only through ``asc control``. Redis is
+a materialized cache rebuilt from Git as needed.
 """
 
 from __future__ import annotations
@@ -27,7 +27,7 @@ def control_repository() -> Path:
 
 
 def plan_repository() -> Path:
-    """Plans live in the same published Control repository as instructions."""
+    """Plans are stored on a dedicated branch of the same published Control repo."""
     return control_repository()
 
 
@@ -36,8 +36,7 @@ def control_ref() -> str:
 
 
 def plan_ref() -> str:
-    """Compatibility alias: plans use the published Control ref."""
-    return control_ref()
+    return CONTROL.plans_branch
 
 
 def control_revision() -> str:
@@ -45,13 +44,13 @@ def control_revision() -> str:
 
 
 def plan_revision(*, required: bool = False) -> str | None:
-    """Compatibility alias: plans use the published Control revision."""
-    try:
-        return control_revision()
-    except Exception:
-        if required:
-            raise
-        return None
+    repo = plan_repository()
+    result = _git_optional(repo, "rev-parse", "--verify", f"{plan_ref()}^{{commit}}")
+    if result and result.strip():
+        return result.strip()
+    if required:
+        raise RuntimeError(f"published Control repository has no {plan_ref()} revision: {repo}")
+    return None
 
 
 
@@ -113,8 +112,10 @@ def instruction_records() -> list[dict[str, Any]]:
 
 
 def plan_records(scope: str | None = None) -> list[dict[str, Any]]:
-    revision = control_revision()
-    repo = control_repository()
+    revision = plan_revision()
+    if revision is None:
+        return []
+    repo = plan_repository()
     listing = _git(repo, "ls-tree", "-r", "--name-only", revision, "--", "plans/")
     records: list[dict[str, Any]] = []
     for raw_path in listing.splitlines():
@@ -128,7 +129,7 @@ def plan_records(scope: str | None = None) -> list[dict[str, Any]]:
         record = dict(record)
         record.setdefault("record_identity", identity)
         record.setdefault("slug", identity)
-        record.setdefault("source", "control-git")
+        record.setdefault("source", "plan-git")
         record.setdefault("repo_commit", revision)
         records.append(record)
     selected = sorted(records, key=lambda item: _plan_identity(item))
@@ -139,22 +140,24 @@ def plan_records(scope: str | None = None) -> list[dict[str, Any]]:
 
 
 def save_plan(record: Mapping[str, Any]) -> dict[str, str]:
-    raise RuntimeError(
-        "plans are authored in the Control repository; commit and push plans/*.json through the Control authoring workflow"
-    )
+    plan = _validated_plan_dict(record)
+    identity = _plan_identity(plan)
+    commit = _commit_plan(identity, plan, delete=False)
+    return {"record_identity": identity, "commit": commit}
 
 
 def delete_plan(identity: str) -> dict[str, str]:
-    raise RuntimeError(
-        "plans are authored in the Control repository; delete and publish plans/*.json through the Control authoring workflow"
-    )
+    clean = _safe_identity(identity)
+    commit = _commit_plan(clean, None, delete=True)
+    return {"record_identity": clean, "commit": commit}
 
 
 def materialize_plan(plan_slug: str) -> None:
     """Materialize the current Git plan and every instruction it references."""
     slug = _safe_identity(plan_slug)
-    plan_repo = control_repository()
-    plan_commit = control_revision()
+    plan_repo = plan_repository()
+    plan_commit = plan_revision(required=True)
+    assert plan_commit is not None
     plan_path = f"plans/{slug}.json"
     plan = _json_at(plan_repo, plan_commit, plan_path)
     if _plan_identity(plan) != slug:
@@ -184,7 +187,7 @@ def materialize_plan(plan_slug: str) -> None:
         plan_path,
         repo_id=plan_repo.name.removesuffix(".git"),
         repo_kind="control",
-        trigger_ref=control_ref(),
+        trigger_ref=plan_ref(),
     )
 
 
@@ -193,8 +196,10 @@ def _instruction_path_index() -> dict[str, str]:
 
 
 def _instruction_slugs(plan: Mapping[str, Any]) -> tuple[str, ...]:
-    content = _plan_content(plan)
-    steps = content.get("steps")
+    payload = plan.get("payload")
+    if not isinstance(payload, Mapping):
+        raise ValueError("plan payload must be an object")
+    steps = payload.get("steps")
     if not isinstance(steps, Mapping) or not steps:
         raise ValueError("plan requires steps")
     found: list[str] = []
@@ -227,8 +232,10 @@ def _instruction_slugs(plan: Mapping[str, Any]) -> tuple[str, ...]:
 def _validated_plan_dict(record: Mapping[str, Any]) -> dict[str, Any]:
     value = dict(record)
     identity = _safe_identity(_plan_identity(value))
-    content = _plan_content(value)
-    steps = content.get("steps")
+    payload = value.get("payload")
+    if not isinstance(payload, Mapping):
+        raise ValueError(f"{identity}: plan payload must be an object")
+    steps = payload.get("steps")
     if not isinstance(steps, Mapping) or not steps:
         raise ValueError(f"{identity}: plan requires steps")
     value["record_identity"] = identity
@@ -319,26 +326,13 @@ def _split_frontmatter(text: str, path: str) -> tuple[dict[str, str], str]:
 
 
 
-def _plan_content(record: Mapping[str, Any]) -> Mapping[str, Any]:
-    """Return the compact plan content, accepting legacy ``payload`` records."""
-    content = record.get("record_content")
-    if not isinstance(content, Mapping):
-        content = record.get("payload")
-    if not isinstance(content, Mapping):
-        identity = _plan_identity(record) or "(unknown plan)"
-        raise ValueError(f"{identity}: plan record_content must be an object")
-    return content
-
-
 def _plan_scope(record: Mapping[str, Any]) -> str:
     direct = record.get("scope")
     if isinstance(direct, str) and direct.strip():
         return direct.strip()
-    content = record.get("record_content")
-    if not isinstance(content, Mapping):
-        content = record.get("payload")
-    if isinstance(content, Mapping):
-        value = content.get("scope")
+    payload = record.get("payload")
+    if isinstance(payload, Mapping):
+        value = payload.get("scope")
         if isinstance(value, str):
             return value.strip()
     return ""

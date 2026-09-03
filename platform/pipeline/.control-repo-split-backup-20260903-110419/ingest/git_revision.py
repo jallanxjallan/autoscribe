@@ -391,13 +391,10 @@ def _plan_record(record: Mapping[str, Any], path: str) -> dict[str, Any]:
             "extra": dict(record.get("extra") or {}),
         }
     slug = record.get("record_identity") or record.get("identity") or record.get("slug")
-    content = record.get("record_content")
-    if not isinstance(content, Mapping):
-        content = record.get("payload")
     return {
         "type": "plan",
         "identity": _required_text(slug, path, "plan identity"),
-        "content": content,
+        "content": record.get("payload"),
         "extra": {},
     }
 

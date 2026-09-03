@@ -1,28 +1,30 @@
 import json
+import sys
 
 import typer
 
 from asc.control.list import list_control_slugs
-from asc.control.repository import plan_records
+from asc.control.repository import delete_plan as delete_plan_record
+from asc.control.repository import plan_records, save_plan as save_plan_record
 from asc.control.snapshot import build_control_snapshot
 
 
 app = typer.Typer(
     no_args_is_help=True,
     add_completion=False,
-    help="Read Git-authoritative instructions and plans from published Control.",
+    help="Read Git-authoritative controls and persist server-side plans.",
 )
 
 
 @app.command("snapshot")
 def snapshot() -> None:
-    """Emit the published Git Control snapshot as JSON."""
+    """Emit the published Git control snapshot as JSON."""
     _json_command("snapshot", build_control_snapshot)
 
 
 @app.command("list")
 def list_control() -> None:
-    """List published instruction and plan slugs from Control Git."""
+    """List published plan and instruction slugs from Git."""
     try:
         for slug in list_control_slugs():
             typer.echo(slug)
@@ -32,13 +34,34 @@ def list_control() -> None:
 
 @app.command("plans")
 def plans(scope: str | None = typer.Option(None, "--scope", help="Optional plan scope.")) -> None:
-    """Emit published plans from Control Git, optionally restricted by scope."""
+    """Emit current server-side plans, optionally restricted by scope."""
     _json_command("plans", lambda: plan_records(scope=scope))
+
+
+@app.command("save-plan")
+def save_plan() -> None:
+    """Read one plan JSON object from stdin and commit it to the plan repo."""
+    try:
+        value = json.load(sys.stdin)
+        if not isinstance(value, dict):
+            raise TypeError("plan input must be a JSON object")
+        typer.echo(json.dumps(save_plan_record(value), sort_keys=True))
+    except Exception as exc:
+        _fail("save-plan", exc)
+
+
+@app.command("delete-plan")
+def delete_plan(identity: str = typer.Argument(..., help="Plan slug to delete.")) -> None:
+    """Delete one plan from the server-side plan repository."""
+    try:
+        typer.echo(json.dumps(delete_plan_record(identity), sort_keys=True))
+    except Exception as exc:
+        _fail("delete-plan", exc)
 
 
 @app.command("instruction-manifest")
 def instruction_manifest() -> None:
-    """Emit lightweight instruction synchronization metadata from Control Git."""
+    """Emit lightweight instruction synchronization metadata from Git."""
     try:
         snapshot_value = build_control_snapshot()
         typer.echo(json.dumps({
