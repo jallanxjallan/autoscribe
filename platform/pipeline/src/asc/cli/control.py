@@ -36,20 +36,6 @@ def plans(scope: str | None = typer.Option(None, "--scope", help="Optional plan 
     _json_command("plans", lambda: plan_records(scope=scope))
 
 
-@app.command("instruction-manifest")
-def instruction_manifest() -> None:
-    """Emit lightweight instruction synchronization metadata from Control Git."""
-    try:
-        snapshot_value = build_control_snapshot()
-        typer.echo(json.dumps({
-            "schema_version": 2,
-            "type": "autoscribe.instruction-manifest",
-            "instructions": snapshot_value.get("registries", {}).get("instructions", {}),
-        }, sort_keys=True))
-    except Exception as exc:
-        _fail("instruction-manifest", exc)
-
-
 def _json_command(name: str, function) -> None:
     try:
         typer.echo(json.dumps(function(), indent=2, sort_keys=True))

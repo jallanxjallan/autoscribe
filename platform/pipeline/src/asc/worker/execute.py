@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
+from asc.config.runtime import FAILURE_TTL_SECONDS, RESPONSE_TTL_SECONDS
 from asc.models.process.result import (
     Failure,
     Response,
@@ -50,7 +51,7 @@ class WorkerExecutor:
             artifact = engine_call(engine_input)
 
             _validate_engine_artifact(artifact=artifact, runtime=runtime)
-            artifact_key = artifact.save()
+            artifact_key = artifact.save(ttl=RESPONSE_TTL_SECONDS)
 
         except Exception as exc:
             if runtime is None:
@@ -78,7 +79,7 @@ class WorkerExecutor:
                 runtime_key=runtime_key,
                 exc=exc,
             )
-            artifact_key = artifact.save()
+            artifact_key = artifact.save(ttl=FAILURE_TTL_SECONDS)
             return WorkerResult(
                 processed=1,
                 runtime_key=runtime_key,

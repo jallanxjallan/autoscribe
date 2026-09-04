@@ -1,12 +1,10 @@
 import json
 from collections.abc import Mapping
-from typing import Any, ClassVar
+from typing import Any
 
-from pydantic import ConfigDict, Field, field_serializer, field_validator, model_validator
+from pydantic import BaseModel, ConfigDict, Field, field_serializer, field_validator, model_validator
 
 from asc.core.identity import generate_identity
-from asc.redis.key import RedisKey
-from asc.redis.model_base import RedisModel
 
 
 def _json_text(value: object, *, default: str) -> str:
@@ -60,11 +58,8 @@ def _indexed_object(value: object, *, field_name: str) -> dict[int, dict[str, An
     return dict(sorted(result.items()))
 
 
-class Plan(RedisModel):
-    """Uploaded reusable plan control asset."""
-
-    kind: ClassVar[str] = "plan"
-    component: ClassVar[str] = "record"
+class Plan(BaseModel):
+    """Git-backed reusable plan control asset."""
 
     model_config = ConfigDict(extra="ignore")
 
@@ -171,18 +166,6 @@ class Plan(RedisModel):
         return value
 
     @property
-    def key(self) -> RedisKey:
-        return self.redis_key
-
-    @property
-    def record_key(self) -> str:
-        return f"plan:{self.identity}:record"
-
-    @property
-    def index_key(self) -> str:
-        return f"plan:{self.identity}:index"
-
-    @property
     def total_steps(self) -> int:
         return len(self.steps)
 
@@ -232,7 +215,7 @@ class Plan(RedisModel):
 
     def dump_json(self) -> dict[str, str]:
         return {
-            "type": self.kind,
+            "type": "plan",
             "identity": self.identity,
             "slug": self.slug,
             "instructions_json": self.instructions_json,

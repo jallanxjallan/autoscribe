@@ -3,7 +3,8 @@
 One published Control bare repository and branch are authoritative for both
 ``instructions/`` and ``plans/``. Plans are authored in Control alongside
 instructions; ``asc`` reads but does not author or mutate published Control.
-Redis is a disposable materialized cache rebuilt from Git as needed.
+Plans are always read from Git. Redis may cache instructions only as needed by
+enqueue; it is never a durable Control store.
 """
 
 from __future__ import annotations
@@ -14,11 +15,31 @@ import subprocess
 import tarfile
 import tempfile
 from contextlib import contextmanager
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Mapping
 
-from asc.ingest.git_revision import ingest_path_from_revision
 from asc.config.repos import CONTROL
+from asc.models.control.plan import Plan
+
+
+@dataclass(frozen=True, slots=True)
+class GitInstruction:
+    slug: str
+    title: str
+    content: str
+    path: str
+    revision: str
+    commit_timestamp: int
+    extra: dict[str, Any]
+
+
+@dataclass(frozen=True, slots=True)
+class GitPlan:
+    slug: str
+    path: str
+    revision: str
+    plan: Plan
 
 
 def control_repository() -> Path:
@@ -75,7 +96,16 @@ def control_checkout():
 def instruction_records() -> list[dict[str, Any]]:
     repo = control_repository()
     revision = control_revision()
-    listing = _git(repo, "ls-tree", "-r", "--name-only", revision, "--", "instructions/")
+    listing = _git(
+        repo,
+        "ls-tree",
+        "-r",
+        "--name-only",
+        revision,
+        "--",
+        "instructions/",
+        "context/",
+    )
     records: list[dict[str, Any]] = []
     seen: set[str] = set()
     for raw_path in listing.splitlines():
@@ -150,127 +180,105 @@ def delete_plan(identity: str) -> dict[str, str]:
     )
 
 
-def materialize_plan(plan_slug: str) -> None:
-    """Materialize the current Git plan and every instruction it references."""
+def read_plan(plan_slug: str) -> GitPlan:
+    """Read and validate the current plan directly from published Control Git."""
     slug = _safe_identity(plan_slug)
-    plan_repo = control_repository()
-    plan_commit = control_revision()
-    plan_path = f"plans/{slug}.json"
-    plan = _json_at(plan_repo, plan_commit, plan_path)
-    if _plan_identity(plan) != slug:
-        raise RuntimeError(f"plan slug mismatch at {plan_path}: expected {slug}")
-
-    instructions = _instruction_path_index()
-    source_repo = control_repository()
-    source_commit = control_revision()
-    for instruction_slug in _instruction_slugs(plan):
-        path = instructions.get(instruction_slug)
-        if not path:
-            raise KeyError(f"plan {slug} references unavailable instruction: {instruction_slug}")
-        ingest_path_from_revision(
-            source_repo,
-            source_commit,
-            path,
-            repo_id=source_repo.name.removesuffix(".git"),
-            repo_kind="control",
-            trigger_ref=control_ref(),
+    repo = control_repository()
+    revision = control_revision()
+    listing = _git(repo, "ls-tree", "-r", "--name-only", revision, "--", "plans/")
+    matches = [
+        (path, record)
+        for path in (raw.strip() for raw in listing.splitlines())
+        if path.endswith(".json")
+        for record in (_json_at(repo, revision, path),)
+        if _plan_identity(record) == slug
+    ]
+    if not matches:
+        raise KeyError(f"plan not found in Control Git: {slug}")
+    if len(matches) != 1:
+        raise RuntimeError(f"duplicate committed plan slug: {slug}")
+    path, record = matches[0]
+    content = _plan_content(record)
+    try:
+        plan = Plan.from_content(
+            content,
+            slug=slug,
+            extra={"repo_commit": revision, "repo_path": path},
         )
+        plan.identity = slug
+    except (TypeError, ValueError) as exc:
+        raise ValueError(f"{path}: invalid plan: {exc}") from exc
+    if not plan.steps:
+        raise ValueError(f"plan has no embedded steps: {path}")
+    return GitPlan(slug=slug, path=path, revision=revision, plan=plan)
 
-    # Re-ingesting the plan is content-addressed and refreshes its TTL while
-    # ensuring Redis reflects the current plan Git revision.
-    ingest_path_from_revision(
-        plan_repo,
-        plan_commit,
-        plan_path,
-        repo_id=plan_repo.name.removesuffix(".git"),
-        repo_kind="control",
-        trigger_ref=control_ref(),
+
+def read_instruction(instruction_slug: str) -> GitInstruction:
+    """Read one current instruction and its last Git change timestamp."""
+    slug = _safe_identity(instruction_slug)
+    repo = control_repository()
+    revision = control_revision()
+    listing = _git(
+        repo,
+        "ls-tree",
+        "-r",
+        "--name-only",
+        revision,
+        "--",
+        "instructions/",
+        "context/",
     )
-
-
-def _instruction_path_index() -> dict[str, str]:
-    return {record["slug"]: record["path"] for record in instruction_records()}
-
-
-def _instruction_slugs(plan: Mapping[str, Any]) -> tuple[str, ...]:
-    content = _plan_content(plan)
-    steps = content.get("steps")
-    if not isinstance(steps, Mapping) or not steps:
-        raise ValueError("plan requires steps")
-    found: list[str] = []
-    seen: set[str] = set()
-    for step in steps.values():
-        if not isinstance(step, Mapping):
+    matches: list[tuple[str, dict[str, str], str]] = []
+    for path in (raw.strip() for raw in listing.splitlines()):
+        if not path.endswith(".md"):
             continue
-        refs = step.get("instruction_slugs") or step.get("instructions") or {}
-        if isinstance(refs, Mapping):
-            values = refs.values()
-        elif isinstance(refs, list):
-            values = refs
-        else:
-            values = ()
-        for value in values:
-            entries = value if isinstance(value, list) else [value]
-            for entry in entries:
-                if isinstance(entry, str) and entry.strip() and entry.strip() not in seen:
-                    clean = entry.strip()
-                    seen.add(clean)
-                    found.append(clean)
-        legacy = step.get("instruction")
-        if isinstance(legacy, str) and legacy.strip() and legacy.strip() not in seen:
-            clean = legacy.strip()
-            seen.add(clean)
-            found.append(clean)
-    return tuple(found)
-
-
-def _validated_plan_dict(record: Mapping[str, Any]) -> dict[str, Any]:
-    value = dict(record)
-    identity = _safe_identity(_plan_identity(value))
-    content = _plan_content(value)
-    steps = content.get("steps")
-    if not isinstance(steps, Mapping) or not steps:
-        raise ValueError(f"{identity}: plan requires steps")
-    value["record_identity"] = identity
-    value.setdefault("record_type", "plan")
-    if value.get("record_type") != "plan":
-        raise ValueError(f"{identity}: record_type must be plan")
-    return value
-
-
-def _commit_plan(identity: str, record: Mapping[str, Any] | None, *, delete: bool) -> str:
-    repo = plan_repository()
-    branch = plan_ref()
-    with tempfile.TemporaryDirectory(prefix="autoscribe-plan-") as temp:
-        work = Path(temp) / "work"
-        head = plan_revision()
-        if head:
-            _run(["git", "clone", "-q", "--branch", branch, str(repo), str(work)])
-        else:
-            work.mkdir()
-            _run(["git", "-C", str(work), "init", "-q", f"--initial-branch={branch}"])
-            _run(["git", "-C", str(work), "remote", "add", "origin", str(repo)])
-        _run(["git", "-C", str(work), "config", "user.name", CONTROL.git_name])
-        _run(["git", "-C", str(work), "config", "user.email", CONTROL.git_email])
-        relative = Path("plans") / f"{identity}.json"
-        path = work / relative
-        if delete:
-            if not path.exists():
-                raise KeyError(f"plan not found: {identity}")
-            path.unlink()
-            _run(["git", "-C", str(work), "add", "-A", "--", str(relative)])
-            message = f"Delete plan {identity}"
-        else:
-            path.parent.mkdir(parents=True, exist_ok=True)
-            path.write_text(json.dumps(record, indent=2, sort_keys=True) + "\n", encoding="utf-8")
-            _run(["git", "-C", str(work), "add", "--", str(relative)])
-            message = f"Update plan {identity}"
-        changed = _run_optional(["git", "-C", str(work), "diff", "--cached", "--quiet"])
-        if changed.returncode == 0:
-            return _git(work, "rev-parse", "HEAD").strip()
-        _run(["git", "-C", str(work), "commit", "-q", "-m", message])
-        _run(["git", "-C", str(work), "push", "-q", "origin", f"HEAD:{branch}"])
-        return _git(work, "rev-parse", "HEAD").strip()
+        frontmatter, body = _split_frontmatter(
+            _git(repo, "show", f"{revision}:{path}"), path
+        )
+        if str(frontmatter.get("slug") or "").strip() == slug:
+            matches.append((path, frontmatter, body))
+    if not matches:
+        raise KeyError(f"instruction not found in Control Git: {slug}")
+    if len(matches) != 1:
+        raise RuntimeError(f"duplicate committed instruction slug: {slug}")
+    path, frontmatter, body = matches[0]
+    actual_slug = str(frontmatter.get("slug") or "").strip()
+    if actual_slug != slug:
+        raise RuntimeError(
+            f"instruction slug mismatch at {path}: expected {slug}, "
+            f"got {actual_slug or '(blank)'}"
+        )
+    changed_at = _git(
+        repo, "log", "-1", "--format=%ct", revision, "--", path
+    ).strip()
+    if not changed_at:
+        raise RuntimeError(f"instruction has no Git commit timestamp: {path}")
+    component = str(
+        frontmatter.get("component")
+        or frontmatter.get("class")
+        or _component_from_slug(slug)
+    ).strip()
+    title = str(
+        frontmatter.get("title") or frontmatter.get("label") or Path(path).stem
+    ).strip()
+    return GitInstruction(
+        slug=slug,
+        title=title or slug,
+        content=body,
+        path=path,
+        revision=revision,
+        commit_timestamp=int(changed_at),
+        extra={
+            "description": str(
+                frontmatter.get("description") or frontmatter.get("summary") or ""
+            ).strip(),
+            "scope": component,
+            "component": component,
+            "repo_commit": revision,
+            "repo_path": path,
+            "repo_ref": control_ref(),
+        },
+    )
 
 
 def _require_repo(path: Path) -> Path:
@@ -368,24 +376,12 @@ def _git(repo: Path, *args: str) -> str:
     return result.stdout
 
 
-def _git_optional(repo: Path, *args: str) -> str | None:
-    result = _run_optional(["git", "-C", str(repo), *args])
-    return result.stdout if result.returncode == 0 else None
-
-
-def _run(args: list[str]) -> subprocess.CompletedProcess[str]:
-    result = _run_optional(args)
-    if result.returncode != 0:
-        raise RuntimeError((result.stderr or result.stdout or "command failed").strip())
-    return result
-
-
 def _run_optional(args: list[str]) -> subprocess.CompletedProcess[str]:
     return subprocess.run(args, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, check=False)
 
 
 __all__ = [
     "control_checkout", "control_ref", "control_repository", "control_revision", "delete_plan",
-    "instruction_records", "materialize_plan", "plan_records", "plan_ref",
-    "plan_repository", "plan_revision", "save_plan",
+    "GitInstruction", "GitPlan", "instruction_records", "plan_records", "plan_ref",
+    "plan_repository", "plan_revision", "read_instruction", "read_plan", "save_plan",
 ]

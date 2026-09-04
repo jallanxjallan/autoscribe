@@ -5,9 +5,9 @@ from __future__ import annotations
 from collections.abc import Mapping
 from typing import Any
 
+from asc.enqueue.instruction import resolve_instruction_key
 from asc.models.control.instruction import Instruction
 from asc.models.process.runtime import Runtime
-from asc.state.slugmap import SlugMap
 
 RUNTIME_TTL_SECONDS = 60 * 60 * 24
 DIRECTIVE_TTL_SECONDS = 60 * 60
@@ -33,6 +33,7 @@ def materialize_runtimes(
 
     runtimes: list[Runtime] = []
     directive_instruction: Instruction | None = None
+    instruction_cache: dict[str, str] = {}
     total_steps = plan.total_steps
     try:
         if directive:
@@ -47,7 +48,9 @@ def materialize_runtimes(
             engine = _engine(step, args=args, ordinal=ordinal)
             engine_kind = _engine_kind(step, args=args, ordinal=ordinal)
             instruction_keys = _resolve_instruction_keys(
-                step, ordinal=ordinal
+                step,
+                ordinal=ordinal,
+                instruction_cache=instruction_cache,
             )
             if ordinal == 1 and directive_instruction is not None:
                 instruction_keys["directive"] = directive_instruction.raw_key
@@ -134,6 +137,7 @@ def _resolve_instruction_keys(
     step: Mapping[str, Any],
     *,
     ordinal: int,
+    instruction_cache: dict[str, str] | None = None,
 ) -> dict[str, str | list[str]]:
     raw = step.get("instruction_slugs", step.get("instructions"))
     if raw in (None, ""):
@@ -153,6 +157,15 @@ def _resolve_instruction_keys(
         }
     if not isinstance(raw, Mapping):
         raise ValueError(f"plan step {ordinal} instruction references must be a labeled object")
+
+    raw = dict(raw)
+    legacy_task = raw.pop("instructions", None)
+    if legacy_task not in (None, "", []) and raw.get("task") not in (None, "", []):
+        raise ValueError(
+            f"plan step {ordinal} cannot provide both task and instructions labels"
+        )
+    if legacy_task not in (None, "", []):
+        raw["task"] = legacy_task
 
     resolved: dict[str, str | list[str]] = {}
     for label in INSTRUCTION_ORDER[:-1]:
@@ -178,8 +191,12 @@ def _resolve_instruction_keys(
                 f"plan step {ordinal} instruction {label} contains an empty slug"
             )
 
-        slugmap = SlugMap()
-        keys = [slugmap.resolve(item, expected_kind="instruction") for item in clean]
+        cache = instruction_cache if instruction_cache is not None else {}
+        keys = []
+        for item in clean:
+            if item not in cache:
+                cache[item] = resolve_instruction_key(item)
+            keys.append(cache[item])
         # Preserve the representation supplied by the plan. Older plans and
         # consumers continue to receive one key as a string; current plans can
         # carry an ordered list of keys under any instruction label.

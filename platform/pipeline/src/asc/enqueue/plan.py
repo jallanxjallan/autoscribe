@@ -1,22 +1,30 @@
 from dataclasses import dataclass
 
+from asc.control.repository import read_plan
 from asc.models.control.plan import Plan
-from asc.redis.key import RedisKey
-from asc.state.slugmap import SlugMap
-from asc.control.repository import materialize_plan
 
 
 @dataclass(frozen=True, slots=True)
 class LoadedPlan:
-    """Current immutable plan version resolved directly through the slug map."""
+    """Current immutable plan version read directly from Control Git."""
 
     slug: str
-    plan_key: str
+    revision: str
+    path: str
     plan: Plan
 
     @property
     def raw_key(self) -> str:
-        return self.plan_key
+        return self.source_ref
+
+    @property
+    def source_ref(self) -> str:
+        return f"control-git@{self.revision}:{self.path}"
+
+    @property
+    def plan_key(self) -> str:
+        """Compatibility field for reports; this is a Git ref, not a Redis key."""
+        return self.source_ref
 
     @property
     def step_count(self) -> int:
@@ -28,24 +36,14 @@ def load_plan(plan_slug: str) -> LoadedPlan:
         raise ValueError("plan must be a non-empty slug")
 
     clean_slug = plan_slug.strip()
-    # Git, not Redis, is authoritative for reusable controls. Refresh the
-    # selected plan and any missing instruction dependencies at enqueue time.
-    materialize_plan(clean_slug)
-    resolved = SlugMap().get(clean_slug)
-    if not resolved:
-        raise KeyError(f"plan did not materialize into slugmap: {clean_slug}")
-    key = RedisKey(str(resolved))
-    if key.kind != "plan" or key.suffix not in (None, "", "record"):
-        raise ValueError(f"plan resolved to non-plan record key: {resolved}")
-
-    plan_key = str(RedisKey(kind="plan", identity=key.identity, suffix="record"))
-    plan = Plan.load(plan_key)
+    source = read_plan(clean_slug)
+    plan = source.plan
     if plan.slug != clean_slug:
         raise ValueError(
             f"plan slug mismatch: requested {clean_slug}, record contains {plan.slug}"
         )
     if not plan.steps:
-        raise ValueError(f"plan has no embedded steps: {plan_key}")
+        raise ValueError(f"plan has no embedded steps: {source.path}")
 
     expected = list(range(1, plan.total_steps + 1))
     actual = list(plan.steps)
@@ -54,10 +52,16 @@ def load_plan(plan_slug: str) -> LoadedPlan:
             f"plan step ordinals must be contiguous from 1: expected {expected}, got {actual}"
         )
 
-    return LoadedPlan(slug=clean_slug, plan_key=plan_key, plan=plan)
+    return LoadedPlan(
+        slug=clean_slug,
+        revision=source.revision,
+        path=source.path,
+        plan=plan,
+    )
 
 
 def resolve_plan_record_key(plan_slug: str) -> str:
+    """Compatibility alias returning the authoritative Git source reference."""
     return load_plan(plan_slug).plan_key
 
 

@@ -1,8 +1,8 @@
-# Publication-domain removal
+# Git-authoritative Control materialization
 
-- Plans now use deterministic SHA-256 identities derived from their slug and canonical content.
-- Instructions now use deterministic SHA-256 identities derived from their slug and normalized content.
-- Upload no longer requires `publication_ulid`.
-- Enqueue resolves the current plan and instruction record directly through `state:slugmap:index`.
-- `asc/state/publications.py` is removed by `install.sh`.
-- Timestamps remain ordinary upload metadata rather than part of record identity.
+- Plans are read directly from the current published Control Git revision at enqueue time and cannot be persisted through the plan model.
+- Instructions are lazily materialized with ULID identities and a configurable three-day Redis TTL.
+- A cached instruction is reused only when its ULID is newer than the instruction's latest Git commit and at least 24 hours of TTL remain.
+- The instruction slugmap points to the preferred materialization; superseded keys are left untouched to expire naturally.
+- The plan/instruction synchronization command, plan Redis handler, and publication-version index have been removed.
+- Successful execution artifacts and failures now receive configurable seven-day Redis TTLs.

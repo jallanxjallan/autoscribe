@@ -14,6 +14,7 @@ from pydantic import (
 
 from asc.core.identity import generate_identity
 from asc.core.timestamp import timestamp
+from asc.config.runtime import FAILURE_TTL_SECONDS
 from asc.models.helpers.plain import redis_key_segment_text
 from asc.redis.key import RedisKey
 from asc.redis.message_base import RedisMessage
@@ -360,7 +361,7 @@ def record_failure(
         boundary=stage,
         raw_json=raw_json,
     )
-    return failure.save()
+    return failure.save(ttl=FAILURE_TTL_SECONDS)
 
 
 class Committed(RedisMessage):

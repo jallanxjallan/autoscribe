@@ -8,12 +8,8 @@ from asc.state.slugmap import SlugMap
 
 CONTROL_KIND_TO_REGISTRY = {
     "instruction": "instructions",
-    "plan": "plans",
 }
 
-# Instructions need only catalogue metadata. Plans are few and small, and the
-# current client has no separate pipeline read command, so the control snapshot
-# also carries the persisted plan definition required by Define Plan.
 SNAPSHOT_FIELDS = {
     "instruction": (
         "record_identity",
@@ -23,25 +19,15 @@ SNAPSHOT_FIELDS = {
         "source_modified_ns",
         "source_size",
     ),
-    "plan": (
-        "record_identity",
-        "label",
-        "description",
-        "total_steps",
-        "created_at",
-        "metadata_json",
-        "steps_json",
-    ),
 }
 
 
 def build_control_snapshot() -> dict[str, Any]:
-    """Return a live catalog of uploaded plans and instructions.
+    """Return a live catalog of lazily cached instructions.
 
     The slugmap is authoritative. Stale slug pointers are removed while the
-    snapshot is built. Plan entries include their stored definition because the
-    Define Plan client must be able to reopen them and there is currently no
-    separate control-read command.
+    snapshot is built. Plans are intentionally absent because they are read
+    directly from Control Git rather than materialized in Redis.
     """
     slugmap = SlugMap()
     registries: dict[str, dict[str, Any]] = {

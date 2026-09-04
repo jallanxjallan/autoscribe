@@ -4,11 +4,17 @@ import json
 import subprocess
 from pathlib import Path
 
+from asc.config.repos import ControlRepoConfig
 from asc.control import repository
 
 
 def _git(repo: Path, *args: str) -> str:
-    result = subprocess.run(["git", "-C", str(repo), *args], check=True, text=True, stdout=subprocess.PIPE)
+    result = subprocess.run(
+        ["git", "-C", str(repo), *args],
+        check=True,
+        text=True,
+        stdout=subprocess.PIPE,
+    )
     return result.stdout.strip()
 
 
@@ -19,84 +25,91 @@ def _control_repo(tmp_path: Path) -> Path:
     _git(repo, "config", "user.email", "tests@autoscribe.local")
     _git(repo, "config", "user.name", "AutoScribe Tests")
     (repo / "instructions").mkdir()
-    (repo / "engines").mkdir()
+    (repo / "context").mkdir()
+    (repo / "plans").mkdir()
     (repo / "instructions/task.md").write_text(
         "---\nrecord: instruction\nslug: tsk.one\ntitle: Task One\ncomponent: task\n---\nDo the thing.\n"
     )
-    (repo / "engines/chatgpt.py").write_text(
-        'ENGINE_COMPONENT = {"kind":"llm","label":"ChatGPT","models":{"sol":"gpt-test"}}\n'
+    (repo / "context/project.md").write_text(
+        "---\ntype: instruction\nslug: ctx.project\ntitle: Project Context\ncomponent: context\n---\nProject facts.\n"
+    )
+    (repo / "plans/one.json").write_text(
+        json.dumps({
+            "record_type": "plan",
+            "record_identity": "plan.one",
+            "record_content": {
+                "steps": {
+                    "1": {
+                        "kind": "llm",
+                        "engine": "chatgpt",
+                        "instruction_slugs": {"task": "tsk.one"},
+                    }
+                }
+            },
+        })
     )
     _git(repo, "add", ".")
     _git(repo, "commit", "-q", "-m", "control")
     return repo
 
 
-def _plan() -> dict:
-    return {
-        "record_type": "plan",
-        "record_identity": "plan.one",
-        "payload": {
-            "label": "One",
-            "steps": {
-                "1": {
-                    "index": 1,
-                    "kind": "llm",
-                    "engine": "chatgpt",
-                    "model": "sol",
-                    "instruction_slugs": {"task": ["tsk.one"]},
-                }
-            },
-        },
-    }
+def _configure(monkeypatch, repo: Path) -> None:
+    monkeypatch.setattr(
+        repository,
+        "CONTROL",
+        ControlRepoConfig(repo, "master", "AutoScribe Tests", "tests@autoscribe.local"),
+    )
 
 
-def test_plan_save_is_separate_from_authored_control_repo(tmp_path, monkeypatch):
+def test_plan_is_read_directly_from_current_control_git(tmp_path, monkeypatch):
     control = _control_repo(tmp_path)
-    plans = tmp_path / "plans.git"
-    monkeypatch.setenv("AUTOSCRIBE_CONTROL_REPO", str(control))
-    monkeypatch.setenv("AUTOSCRIBE_PLAN_REPO", str(plans))
-    monkeypatch.setenv("AUTOSCRIBE_CONTROL_REF", "master")
-    monkeypatch.setenv("AUTOSCRIBE_PLAN_REF", "master")
+    _configure(monkeypatch, control)
 
-    result = repository.save_plan(_plan())
+    loaded = repository.read_plan("plan.one")
 
-    assert result["record_identity"] == "plan.one"
-    assert not (control / "plans").exists()
-    assert _git(control, "status", "--porcelain") == ""
-    stored = repository.plan_records()
-    assert [record["record_identity"] for record in stored] == ["plan.one"]
+    assert loaded.slug == "plan.one"
+    assert loaded.path == "plans/one.json"
+    assert loaded.revision == _git(control, "rev-parse", "HEAD")
+    assert loaded.plan.identity == "plan.one"
+    assert loaded.plan.step_definition(1)["instruction_slugs"] == {"task": "tsk.one"}
 
 
-def test_instruction_catalog_reads_committed_git_not_redis(tmp_path, monkeypatch):
+def test_plan_read_observes_new_commit_without_redis_refresh(tmp_path, monkeypatch):
     control = _control_repo(tmp_path)
-    monkeypatch.setenv("AUTOSCRIBE_CONTROL_REPO", str(control))
-    monkeypatch.setenv("AUTOSCRIBE_CONTROL_REF", "master")
+    _configure(monkeypatch, control)
+    first = repository.read_plan("plan.one")
+    path = control / "plans/one.json"
+    record = json.loads(path.read_text())
+    record["record_content"]["steps"]["1"]["model"] = "new-model"
+    path.write_text(json.dumps(record))
+    _git(control, "add", "plans/one.json")
+    _git(control, "commit", "-q", "-m", "update plan")
 
-    records = repository.instruction_records()
+    second = repository.read_plan("plan.one")
 
-    assert records == [{
-        "type": "instruction",
-        "slug": "tsk.one",
-        "record_identity": "tsk.one",
-        "title": "Task One",
-        "label": "Task One",
-        "description": "",
-        "scope": "task",
-        "component": "task",
-        "path": "instructions/task.md",
-        "source": "control-git",
-        "repo_commit": _git(control, "rev-parse", "HEAD"),
-    }]
+    assert second.revision != first.revision
+    assert second.plan.step_definition(1)["model"] == "new-model"
 
 
-def test_delete_plan_commits_only_to_plan_repo(tmp_path, monkeypatch):
+def test_instruction_read_includes_last_git_change_timestamp(tmp_path, monkeypatch):
     control = _control_repo(tmp_path)
-    plans = tmp_path / "plans.git"
-    monkeypatch.setenv("AUTOSCRIBE_CONTROL_REPO", str(control))
-    monkeypatch.setenv("AUTOSCRIBE_PLAN_REPO", str(plans))
-    repository.save_plan(_plan())
+    _configure(monkeypatch, control)
 
-    repository.delete_plan("plan.one")
+    instruction = repository.read_instruction("tsk.one")
 
-    assert repository.plan_records() == []
-    assert not (control / "plans").exists()
+    assert instruction.content == "Do the thing."
+    assert instruction.path == "instructions/task.md"
+    assert instruction.commit_timestamp == int(
+        _git(control, "log", "-1", "--format=%ct", "HEAD", "--", instruction.path)
+    )
+
+
+def test_context_instruction_is_read_from_current_control_git(tmp_path, monkeypatch):
+    control = _control_repo(tmp_path)
+    _configure(monkeypatch, control)
+
+    instruction = repository.read_instruction("ctx.project")
+
+    assert instruction.content == "Project facts."
+    assert instruction.path == "context/project.md"
+    assert instruction.extra["component"] == "context"

@@ -6,7 +6,6 @@ from asc.cli.enqueue import app as enqueue_app
 from asc.cli.export import app as export_app
 from asc.cli.run import app as run_app
 from asc.cli.storage import app as storage_app
-from asc.cli.ingest import app as ingest_app
 
 
 app = typer.Typer(
@@ -21,12 +20,6 @@ app.add_typer(
     control_app,
     name="control",
     help="Manage reusable control assets.",
-)
-
-app.add_typer(
-    ingest_app,
-    name="ingest",
-    help="Materialize Git-authored configuration into Redis.",
 )
 
 app.add_typer(
