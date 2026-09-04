@@ -52,11 +52,13 @@ pub fn run_parallel(
             let jobs = Arc::clone(&jobs);
             let next = Arc::clone(&next);
             let outcomes = Arc::clone(&outcomes);
-            scope.spawn(move || loop {
-                let index = next.fetch_add(1, Ordering::Relaxed);
-                let Some(job) = jobs.get(index) else { break };
-                let outcome = execute(executable, job);
-                outcomes.lock().expect("Pandoc result lock poisoned")[index] = Some(outcome);
+            scope.spawn(move || {
+                loop {
+                    let index = next.fetch_add(1, Ordering::Relaxed);
+                    let Some(job) = jobs.get(index) else { break };
+                    let outcome = execute(executable, job);
+                    outcomes.lock().expect("Pandoc result lock poisoned")[index] = Some(outcome);
+                }
             });
         }
     });
@@ -66,7 +68,9 @@ pub fn run_parallel(
         .map_err(|_| ServiceError::Io("Pandoc result lock poisoned".into()))?;
     guard
         .drain(..)
-        .map(|outcome| outcome.ok_or_else(|| ServiceError::Io("Pandoc worker returned no result".into())))
+        .map(|outcome| {
+            outcome.ok_or_else(|| ServiceError::Io("Pandoc worker returned no result".into()))
+        })
         .collect()
 }
 

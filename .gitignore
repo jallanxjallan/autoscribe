@@ -15,6 +15,7 @@ env/
 build/
 dist/
 *.egg-info/
+**/target/
 
 # Test / coverage
 
@@ -92,3 +93,7 @@ exports/
 *.xz
 *.7z
 *.rar
+
+# Local refactor snapshots
+
+platform/service.pre-*/

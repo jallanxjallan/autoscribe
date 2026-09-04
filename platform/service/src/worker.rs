@@ -1,9 +1,7 @@
 use crate::{
     ServiceError, ServiceResult,
-    attention::AttentionListener,
     db::{self, Database},
-    git,
-    pandoc,
+    git, pandoc,
     types::{DispatchId, LedgerSnapshotRequest, LedgerSource, PandocJob, PlanId, VersionRequest},
 };
 use serde_json::Value;
@@ -19,7 +17,6 @@ use std::{
 pub struct Worker {
     db: Database,
     repositories: RefCell<BTreeMap<PathBuf, RepositorySession>>,
-    attention: Option<AttentionListener>,
     asc: PathBuf,
     pandoc: PathBuf,
     pandoc_filter: PathBuf,
@@ -49,37 +46,19 @@ struct DispatchTrailers {
 }
 
 impl Worker {
-    /// Create the permanent system worker. Repositories are acquired later
-    /// through generic attention messages from UI adapters or the CLI.
-    pub fn system(
-        asc: PathBuf,
-        poll: Duration,
-        repository_ttl: Duration,
-    ) -> ServiceResult<Self> {
-        Self::create(
-            asc,
-            poll,
-            repository_ttl,
-            Some(AttentionListener::bind()?),
-        )
-    }
-
     /// Create a one-pass worker for diagnostics without opening the system
     /// attention socket.
-    pub fn diagnostic(
-        repositories: Vec<PathBuf>,
-        asc: PathBuf,
-    ) -> ServiceResult<Self> {
+    pub fn diagnostic(repositories: Vec<PathBuf>, asc: PathBuf) -> ServiceResult<Self> {
         if repositories.is_empty() {
             return Err(ServiceError::InvalidInput(
                 "scan requires at least one repository path".into(),
             ));
         }
         let worker = Self::create(
+            Database::memory()?,
             asc,
             Duration::ZERO,
             Duration::from_secs(u64::MAX),
-            None,
         )?;
         for path in repositories {
             worker.register_repository(&path)?;
@@ -88,16 +67,11 @@ impl Worker {
     }
 
     fn create(
+        db: Database,
         asc: PathBuf,
         poll: Duration,
         repository_ttl: Duration,
-        attention: Option<AttentionListener>,
     ) -> ServiceResult<Self> {
-        if attention.is_some() && poll.is_zero() {
-            return Err(ServiceError::InvalidInput(
-                "worker poll interval must be greater than zero".into(),
-            ));
-        }
         if repository_ttl.is_zero() {
             return Err(ServiceError::InvalidInput(
                 "repository TTL must be greater than zero".into(),
@@ -115,9 +89,8 @@ impl Worker {
                     .join("Work/Loom/platform/pandoc/filters/emit/emit_ndjson.lua")
             });
         Ok(Self {
-            db: Database::memory()?,
+            db,
             repositories: RefCell::new(BTreeMap::new()),
-            attention,
             asc,
             pandoc,
             pandoc_filter,
@@ -126,15 +99,39 @@ impl Worker {
         })
     }
 
+    /// Create a one-vault worker backed by that vault's permanent client database.
+    pub fn persistent(repository: &Path, asc: PathBuf) -> ServiceResult<Self> {
+        let root = git::root(repository)?;
+        let db = Database::client()?;
+        let worker = Self::create(db, asc, Duration::ZERO, Duration::from_secs(u64::MAX))?;
+        worker.register_repository(&root)?;
+        Ok(worker)
+    }
+
+    /// Inspect a signalled vault and submit any newly declared dispatches.
+    pub fn dispatch_once(&self) -> ServiceResult<()> {
+        self.scan_all()?;
+        self.reconcile_dispatches()
+    }
+
+    /// Inspect a signalled vault, load pending export-ready slugs, and materialize responses.
+    pub fn responses_once(&self) -> ServiceResult<()> {
+        self.scan_all()?;
+        let ready = pending_export_slugs(&self.asc)?;
+        db::replace_export_ready(&self.db, ready.iter())?;
+        self.reconcile_exports()
+    }
+
     pub fn register_repository(&self, path: &Path) -> ServiceResult<PathBuf> {
         let root = git::root(path)?;
         let now = Instant::now();
+        let previously_seen = db::latest_repository_head(&self.db, &root)?.is_some();
         self.repositories
             .borrow_mut()
             .entry(root.clone())
             .and_modify(|session| session.last_attention = now)
             .or_insert(RepositorySession {
-                initialized: false,
+                initialized: previously_seen,
                 activity_score: 0,
                 last_attention: now,
                 last_activity: now,
@@ -148,7 +145,6 @@ impl Worker {
 
     pub fn startup(&self) -> ServiceResult<()> {
         db::worker_event(&self.db, "started", None)?;
-        self.acquire_attention()?;
         self.scan_all()?;
         if self.repository_paths().is_empty() {
             return Ok(());
@@ -170,7 +166,6 @@ impl Worker {
     }
 
     pub fn pass(&self) -> ServiceResult<()> {
-        self.acquire_attention()?;
         self.expire_repositories()?;
         self.scan_all()?;
         if self.repository_paths().is_empty() {
@@ -179,27 +174,6 @@ impl Worker {
         self.reconcile_dispatches()?;
         self.reconcile_exports()?;
         db::worker_event(&self.db, "pass_completed", None)
-    }
-
-    fn acquire_attention(&self) -> ServiceResult<()> {
-        let Some(listener) = &self.attention else {
-            return Ok(());
-        };
-        for path in listener.drain()? {
-            match self.register_repository(&path) {
-                Ok(root) => db::worker_event(
-                    &self.db,
-                    "repository_attention",
-                    Some(&root.to_string_lossy()),
-                )?,
-                Err(error) => db::worker_event(
-                    &self.db,
-                    "repository_attention_rejected",
-                    Some(&format!("{}: {error}", path.display())),
-                )?,
-            }
-        }
-        Ok(())
     }
 
     fn expire_repositories(&self) -> ServiceResult<()> {
@@ -232,9 +206,14 @@ impl Worker {
             .map(|(path, session)| (path.clone(), session.activity_score))
             .collect::<Vec<_>>();
         repositories.sort_by(|(left_path, left_score), (right_path, right_score)| {
-            right_score.cmp(left_score).then_with(|| left_path.cmp(right_path))
+            right_score
+                .cmp(left_score)
+                .then_with(|| left_path.cmp(right_path))
         });
-        repositories.into_iter().map(|(path, _score)| path).collect()
+        repositories
+            .into_iter()
+            .map(|(path, _score)| path)
+            .collect()
     }
 
     fn scan_all(&self) -> ServiceResult<()> {
@@ -254,12 +233,7 @@ impl Worker {
                 if activity > 0 {
                     session.last_activity = now;
                 }
-                db::repository_activity(
-                    &self.db,
-                    repository,
-                    session.activity_score,
-                    activity,
-                )?;
+                db::repository_activity(&self.db, repository, session.activity_score, activity)?;
             }
         }
         for (slug, copies) in db::duplicate_slugs(&self.db)? {
@@ -291,13 +265,7 @@ impl Worker {
                 )?;
             }
             self.missing_slug_neighbors(repository, &scanned)?;
-            db::repository_event(
-                &self.db,
-                repository,
-                "startup_observed",
-                Some(&head),
-                None,
-            )?;
+            db::repository_event(&self.db, repository, "startup_observed", Some(&head), None)?;
             return Ok(0);
         }
 
@@ -333,12 +301,17 @@ impl Worker {
             let prior = previous.get(&path);
             let changed_value = prior
                 .map(|(old_slug, old_blob)| {
-                    old_slug.as_deref() != slug.as_deref()
-                        || old_blob.as_deref() != blob.as_deref()
+                    old_slug.as_deref() != slug.as_deref() || old_blob.as_deref() != blob.as_deref()
                 })
                 .unwrap_or(true);
             if changed_value {
-                db::file_seen(&self.db, repository, &path, slug.as_deref(), blob.as_deref())?;
+                db::file_seen(
+                    &self.db,
+                    repository,
+                    &path,
+                    slug.as_deref(),
+                    blob.as_deref(),
+                )?;
                 activity = activity.saturating_add(if prior.is_some() { 10 } else { 15 });
                 if let Some(slug) = slug.as_deref() {
                     self.once_only_duplicate_check(slug)?;
@@ -364,7 +337,9 @@ impl Worker {
         for entry in entries {
             let entry = entry.map_err(io)?;
             let sibling = entry.path();
-            if sibling.extension().and_then(|value| value.to_str()) != Some("md") || !sibling.is_file() {
+            if sibling.extension().and_then(|value| value.to_str()) != Some("md")
+                || !sibling.is_file()
+            {
                 continue;
             }
             let text = std::fs::read_to_string(&sibling).map_err(io)?;
@@ -428,7 +403,9 @@ impl Worker {
                 }
             }
         }
-        if hits.len() > 1 && !db::integrity_event_seen(&self.db, "duplicate_slug", Some(slug), None, None)? {
+        if hits.len() > 1
+            && !db::integrity_event_seen(&self.db, "duplicate_slug", Some(slug), None, None)?
+        {
             db::integrity_event(
                 &self.db,
                 "duplicate_slug",
@@ -445,7 +422,11 @@ impl Worker {
         Ok(())
     }
 
-    fn missing_slug_neighbors(&self, repository: &Path, files: &[ScannedFile]) -> ServiceResult<()> {
+    fn missing_slug_neighbors(
+        &self,
+        repository: &Path,
+        files: &[ScannedFile],
+    ) -> ServiceResult<()> {
         let mut dirs: BTreeMap<PathBuf, Vec<&ScannedFile>> = BTreeMap::new();
         for file in files {
             dirs.entry(file.path.parent().unwrap_or(Path::new("")).to_path_buf())
@@ -511,12 +492,8 @@ impl Worker {
                 }
 
                 let sources = source_records_at(&repository, &commit, &trailers.documents)?;
-                let inflight_commit = self.ensure_inflight_snapshot(
-                    &repository,
-                    &dispatch,
-                    &plan,
-                    &sources,
-                )?;
+                let inflight_commit =
+                    self.ensure_inflight_snapshot(&repository, &dispatch, &plan, &sources)?;
                 for (slug, path, blob, _bytes) in &sources {
                     db::dispatch_source(
                         &self.db,
@@ -544,14 +521,17 @@ impl Worker {
                     continue;
                 }
 
-                match self.submit_dispatch(&repository, &commit, &dispatch, &plan, &trailers.documents) {
+                match self.submit_dispatch(
+                    &repository,
+                    &commit,
+                    &dispatch,
+                    &plan,
+                    &trailers.documents,
+                ) {
                     Ok(()) => {
-                        let event_commit = git::append_dispatch_event(
-                            &repository,
-                            &dispatch,
-                            "submitted",
-                            None,
-                        )?;
+                        db::expect_dispatch_responses(&self.db, &dispatch)?;
+                        let event_commit =
+                            git::append_dispatch_event(&repository, &dispatch, "submitted", None)?;
                         db::dispatch_event(
                             &self.db,
                             &repository,
@@ -653,11 +633,13 @@ impl Worker {
             )));
         }
 
-        let result = self.build_calls(&worktree, plan, documents).and_then(|calls| {
-            let bytes = ndjson(&calls)?;
-            run_asc(&self.asc, &["enqueue"], &bytes)?;
-            Ok(())
-        });
+        let result = self
+            .build_calls(&worktree, plan, documents)
+            .and_then(|calls| {
+                let bytes = ndjson(&calls)?;
+                run_asc(&self.asc, &["enqueue"], &bytes)?;
+                Ok(())
+            });
 
         let _ = Command::new("git")
             .arg("-C")
@@ -669,7 +651,12 @@ impl Worker {
         result
     }
 
-    fn build_calls(&self, worktree: &Path, plan: &str, documents: &[String]) -> ServiceResult<Vec<Value>> {
+    fn build_calls(
+        &self,
+        worktree: &Path,
+        plan: &str,
+        documents: &[String],
+    ) -> ServiceResult<Vec<Value>> {
         if !self.pandoc_filter.is_file() {
             return Err(ServiceError::InvalidInput(format!(
                 "Pandoc filter not found: {}",
@@ -713,10 +700,12 @@ impl Worker {
             let line = text
                 .lines()
                 .find(|line| line.trim_start().starts_with('{'))
-                .ok_or_else(|| ServiceError::InvalidInput(format!(
-                    "{}: Pandoc emitted no NDJSON record",
-                    relative.display()
-                )))?;
+                .ok_or_else(|| {
+                    ServiceError::InvalidInput(format!(
+                        "{}: Pandoc emitted no NDJSON record",
+                        relative.display()
+                    ))
+                })?;
             let record: Value = serde_json::from_str(line)
                 .map_err(|error| ServiceError::InvalidInput(error.to_string()))?;
             let identity = record
@@ -735,13 +724,12 @@ impl Worker {
             let payload = record
                 .get("payload")
                 .and_then(Value::as_object)
-                .ok_or_else(|| ServiceError::InvalidInput(format!(
-                    "{identity}: Pandoc payload must be an object"
-                )))?;
-            let content = payload
-                .get("content")
-                .and_then(Value::as_str)
-                .unwrap_or("");
+                .ok_or_else(|| {
+                    ServiceError::InvalidInput(format!(
+                        "{identity}: Pandoc payload must be an object"
+                    ))
+                })?;
+            let content = payload.get("content").and_then(Value::as_str).unwrap_or("");
             if content.trim().is_empty() {
                 return Err(ServiceError::InvalidInput(format!(
                     "{identity}: Pandoc content is blank"
@@ -815,7 +803,8 @@ impl Worker {
             )?;
             let records = extract_slug(&self.asc, &slug)?;
             for record in records {
-                let result = first_string(&record, &["result_identity", "identity", "call_identity"])?;
+                let result =
+                    first_string(&record, &["result_identity", "identity", "call_identity"])?;
                 let call = first_string(&record, &["call_identity", "identity"])?;
                 let content = first_string(&record, &["record_content", "content"])?;
                 let source_bytes = git::read_version(
@@ -838,8 +827,11 @@ impl Worker {
                     )?;
                     continue;
                 }
-                let replacement = set_document_review_metadata(&preserve_frontmatter(&source, &content)?)?;
-                let snapshot = if let Some(existing) = response_snapshot_for_result(&route.repository_root, &result)? {
+                let replacement =
+                    set_document_review_metadata(&preserve_frontmatter(&source, &content)?)?;
+                let snapshot = if let Some(existing) =
+                    response_snapshot_for_result(&route.repository_root, &result)?
+                {
                     existing
                 } else {
                     git::append_response_snapshot(
@@ -850,7 +842,8 @@ impl Worker {
                         "saved",
                         &route.source_path,
                         replacement.as_bytes(),
-                    )?.0
+                    )?
+                    .0
                 };
                 db::response_event(
                     &self.db,
@@ -862,6 +855,7 @@ impl Worker {
                     Some(&snapshot),
                     None,
                 )?;
+                db::response_observed(&self.db, dispatch, &slug, true)?;
                 run_asc(&self.asc, &["export", "update-exports", &result], &[])?;
                 db::response_event(
                     &self.db,
@@ -946,15 +940,26 @@ fn preserve_frontmatter(old: &str, response: &str) -> ServiceResult<String> {
         return Ok(response.to_string());
     };
     let frontmatter = &old[..3 + end + 4];
-    Ok(format!("{}\n\n{}", frontmatter.trim_end(), response.trim_start()))
+    Ok(format!(
+        "{}\n\n{}",
+        frontmatter.trim_end(),
+        response.trim_start()
+    ))
 }
 
 fn set_document_review_metadata(text: &str) -> ServiceResult<String> {
     if !text.starts_with("---\n") && !text.starts_with("---\r\n") {
         return Ok(text.to_string());
     }
-    let newline = if text.starts_with("---\r\n") { "\r\n" } else { "\n" };
-    let first_end = text.find(newline).ok_or_else(|| ServiceError::InvalidInput("malformed frontmatter".into()))? + newline.len();
+    let newline = if text.starts_with("---\r\n") {
+        "\r\n"
+    } else {
+        "\n"
+    };
+    let first_end = text
+        .find(newline)
+        .ok_or_else(|| ServiceError::InvalidInput("malformed frontmatter".into()))?
+        + newline.len();
     let marker = format!("{newline}---");
     let rest = &text[first_end..];
     let Some(relative_end) = rest.find(&marker) else {
@@ -964,7 +969,10 @@ fn set_document_review_metadata(text: &str) -> ServiceResult<String> {
     let mut fields = text[first_end..end]
         .lines()
         .filter(|line| {
-            let key = line.split_once(':').map(|(key, _)| key.trim()).unwrap_or("");
+            let key = line
+                .split_once(':')
+                .map(|(key, _)| key.trim())
+                .unwrap_or("");
             !matches!(key, "status" | "producer")
         })
         .map(str::to_string)
@@ -972,14 +980,23 @@ fn set_document_review_metadata(text: &str) -> ServiceResult<String> {
     fields.push("status: needs-review".into());
     fields.push("producer: ai".into());
     let suffix = &text[end + newline.len()..];
-    Ok(format!("---{newline}{}{newline}{suffix}", fields.join(newline)))
+    Ok(format!(
+        "---{newline}{}{newline}{suffix}",
+        fields.join(newline)
+    ))
 }
 
 fn dispatch_commits(repository: &Path) -> ServiceResult<Vec<String>> {
     let output = Command::new("git")
         .arg("-C")
         .arg(repository)
-        .args(["log", "--reverse", "--format=%H", "--grep=Autoscribe-Plan:", "master"])
+        .args([
+            "log",
+            "--reverse",
+            "--format=%H",
+            "--grep=Autoscribe-Plan:",
+            "master",
+        ])
         .output()
         .map_err(io)?;
     if !output.status.success() {
@@ -1061,7 +1078,9 @@ fn source_records_at(
         let path = resolve_slug_at(repository, commit, slug)?;
         let spec = format!("{commit}:{}", path.to_string_lossy());
         let bytes = git_bytes(repository, &["show", &spec])?;
-        let blob = git_text(repository, &["rev-parse", &spec])?.trim().to_string();
+        let blob = git_text(repository, &["rev-parse", &spec])?
+            .trim()
+            .to_string();
         records.push((slug.clone(), path, blob, bytes));
     }
     Ok(records)
@@ -1083,7 +1102,11 @@ fn resolve_slug_at(repository: &Path, commit: &str, slug: &str) -> ServiceResult
     }
     let mut matches = Vec::new();
     for raw in String::from_utf8_lossy(&output.stdout).lines() {
-        let path_text = raw.split_once(':').map(|(_, path)| path).unwrap_or(raw).trim();
+        let path_text = raw
+            .split_once(':')
+            .map(|(_, path)| path)
+            .unwrap_or(raw)
+            .trim();
         if path_text.is_empty() {
             continue;
         }
@@ -1105,7 +1128,10 @@ fn resolve_slug_at(repository: &Path, commit: &str, slug: &str) -> ServiceResult
     }
 }
 
-fn resolve_slugs_in_tree(tree: &Path, documents: &[String]) -> ServiceResult<Vec<(String, PathBuf)>> {
+fn resolve_slugs_in_tree(
+    tree: &Path,
+    documents: &[String],
+) -> ServiceResult<Vec<(String, PathBuf)>> {
     let scanned = scan_markdown(tree)?;
     let mut by_slug: BTreeMap<String, Vec<PathBuf>> = BTreeMap::new();
     for file in scanned {
@@ -1115,15 +1141,17 @@ fn resolve_slugs_in_tree(tree: &Path, documents: &[String]) -> ServiceResult<Vec
     }
     documents
         .iter()
-        .map(|slug| match by_slug.get(slug).map(Vec::as_slice).unwrap_or(&[]) {
-            [path] => Ok((slug.clone(), path.clone())),
-            [] => Err(ServiceError::Conflict(format!(
-                "document slug was not found: {slug}"
-            ))),
-            _ => Err(ServiceError::Conflict(format!(
-                "document slug is duplicated: {slug}"
-            ))),
-        })
+        .map(
+            |slug| match by_slug.get(slug).map(Vec::as_slice).unwrap_or(&[]) {
+                [path] => Ok((slug.clone(), path.clone())),
+                [] => Err(ServiceError::Conflict(format!(
+                    "document slug was not found: {slug}"
+                ))),
+                _ => Err(ServiceError::Conflict(format!(
+                    "document slug is duplicated: {slug}"
+                ))),
+            },
+        )
         .collect()
 }
 
@@ -1149,7 +1177,11 @@ fn dirty_markdown_paths(repository: &Path) -> ServiceResult<BTreeSet<PathBuf>> {
         )));
     }
     let mut paths = BTreeSet::new();
-    for record in output.stdout.split(|byte| *byte == 0).filter(|record| !record.is_empty()) {
+    for record in output
+        .stdout
+        .split(|byte| *byte == 0)
+        .filter(|record| !record.is_empty())
+    {
         if record.len() < 4 {
             continue;
         }
@@ -1162,7 +1194,11 @@ fn dirty_markdown_paths(repository: &Path) -> ServiceResult<BTreeSet<PathBuf>> {
     Ok(paths)
 }
 
-fn changed_markdown_paths(repository: &Path, old: &str, new: &str) -> ServiceResult<BTreeSet<PathBuf>> {
+fn changed_markdown_paths(
+    repository: &Path,
+    old: &str,
+    new: &str,
+) -> ServiceResult<BTreeSet<PathBuf>> {
     let range = format!("{old}..{new}");
     let output = Command::new("git")
         .arg("-C")
@@ -1176,7 +1212,8 @@ fn changed_markdown_paths(repository: &Path, old: &str, new: &str) -> ServiceRes
             String::from_utf8_lossy(&output.stderr).trim()
         )));
     }
-    Ok(output.stdout
+    Ok(output
+        .stdout
         .split(|byte| *byte == 0)
         .filter(|record| !record.is_empty())
         .map(|record| PathBuf::from(String::from_utf8_lossy(record).into_owned()))
@@ -1235,14 +1272,14 @@ fn first_string(record: &Value, fields: &[&str]) -> ServiceResult<String> {
         .filter(|value| !value.is_empty())
         .map(str::to_string)
         .ok_or_else(|| {
-            ServiceError::InvalidInput(format!(
-                "export record is missing {}",
-                fields.join("/")
-            ))
+            ServiceError::InvalidInput(format!("export record is missing {}", fields.join("/")))
         })
 }
 
-fn inflight_snapshot_for_dispatch(repository: &Path, dispatch: &str) -> ServiceResult<Option<String>> {
+fn inflight_snapshot_for_dispatch(
+    repository: &Path,
+    dispatch: &str,
+) -> ServiceResult<Option<String>> {
     git_log_match(repository, &format!("AUTOSCRIBE INFLIGHT {dispatch}"))
 }
 
@@ -1254,7 +1291,12 @@ fn dispatch_submitted_in_git(repository: &Path, dispatch: &str) -> ServiceResult
     let exists = Command::new("git")
         .arg("-C")
         .arg(repository)
-        .args(["show-ref", "--verify", "--quiet", "refs/heads/autoscribe/inflight"])
+        .args([
+            "show-ref",
+            "--verify",
+            "--quiet",
+            "refs/heads/autoscribe/inflight",
+        ])
         .status()
         .map_err(io)?;
     if !exists.success() {
@@ -1290,7 +1332,12 @@ fn git_log_match(repository: &Path, needle: &str) -> ServiceResult<Option<String
     let exists = Command::new("git")
         .arg("-C")
         .arg(repository)
-        .args(["show-ref", "--verify", "--quiet", "refs/heads/autoscribe/inflight"])
+        .args([
+            "show-ref",
+            "--verify",
+            "--quiet",
+            "refs/heads/autoscribe/inflight",
+        ])
         .status()
         .map_err(io)?;
     if !exists.success() {

@@ -1,6 +1,6 @@
 #![forbid(unsafe_code)]
 
-pub mod attention;
+pub mod daemon;
 pub mod db;
 pub mod error;
 pub mod git;

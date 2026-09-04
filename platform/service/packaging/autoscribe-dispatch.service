@@ -1,0 +1,13 @@
+[Unit]
+Description=AutoScribe global dispatch daemon
+After=network.target
+
+[Service]
+Type=simple
+EnvironmentFile=%h/.config/autoscribe/client.env
+ExecStart=%h/.local/bin/svc dispatch
+Restart=on-failure
+RestartSec=2
+
+[Install]
+WantedBy=default.target

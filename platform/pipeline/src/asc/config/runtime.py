@@ -12,7 +12,7 @@ from pathlib import Path
 
 REDIS_URL = "redis://127.0.0.1:6379/0"
 SQL_LEDGER_PATH = Path("/home/jeremy/.local/share/autoscribe/db/ledger.sql")
-EXTENSIONS_ROOT = Path("/home/jeremy/.local/share/autoscribe/cache/control")
+EXTENSIONS_ROOT = Path("/home/jeremy/Work/Extensions")
 ENGINE_PACKAGES = ("engines",)
 SCRIPT_PACKAGES = ("scripts",)
 

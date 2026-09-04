@@ -3,12 +3,7 @@
 from __future__ import annotations
 
 import importlib.util
-import io
-import shutil
-import subprocess
 import sys
-import tarfile
-import tempfile
 from hashlib import sha256
 from pathlib import Path
 from threading import RLock
@@ -16,7 +11,6 @@ from types import ModuleType
 from typing import Any, Callable
 
 from asc.config import EXTENSIONS_ROOT
-from asc.control.repository import control_repository, control_revision
 from asc.models.process.result import Transform
 
 
@@ -122,41 +116,13 @@ def _resolve_path(category: str, component: str) -> Path:
     raise FileNotFoundError(f"extension not found: {expected}")
 
 
-
 def _ensure_extensions_root() -> Path:
-    """Refresh the executable extension cache from published Control Git.
-
-    The cache is a runtime target only. The authoritative source remains the
-    published Control repository configured in asc.config.repos.
-    """
-    repo = control_repository()
-    revision = control_revision()
-    root = EXTENSIONS_ROOT
-    marker = root / ".control-revision"
-    if marker.is_file() and marker.read_text(encoding="utf-8").strip() == revision:
-        return root
-
-    root.parent.mkdir(parents=True, exist_ok=True)
-    result = subprocess.run(
-        ["git", "-C", str(repo), "archive", "--format=tar", revision],
-        stdout=subprocess.PIPE, stderr=subprocess.PIPE, check=False,
-    )
-    if result.returncode != 0:
-        raise RuntimeError(result.stderr.decode("utf-8", "replace").strip() or "git archive failed")
-
-    with tempfile.TemporaryDirectory(prefix="autoscribe-extensions-", dir=str(root.parent)) as temp:
-        staged = Path(temp) / "tree"
-        staged.mkdir()
-        with tarfile.open(fileobj=io.BytesIO(result.stdout), mode="r:") as archive:
-            archive.extractall(staged, filter="data")
-        (staged / ".control-revision").write_text(revision + "\n", encoding="utf-8")
-        if root.exists():
-            shutil.rmtree(root)
-        shutil.move(str(staged), str(root))
-
-    _MODULES.clear()
-    _CALLABLES.clear()
+    """Return the configured authoritative Extensions checkout."""
+    root = EXTENSIONS_ROOT.expanduser().resolve()
+    if not root.is_dir():
+        raise FileNotFoundError(f"extensions folder not found: {root}")
     return root
+
 
 def _strip_category(component: str, category: str) -> str:
     prefix = f"{category}."

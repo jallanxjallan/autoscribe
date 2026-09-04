@@ -61,9 +61,8 @@ pub fn append_inflight_snapshot(
             let tree = text(&git_with_env(&repo, ["write-tree"], &temporary_index)?)
                 .trim()
                 .to_string();
-            let mut message = format!(
-                "AUTOSCRIBE INFLIGHT {dispatch}\n\nDispatch: {dispatch}\nPlan: {plan}"
-            );
+            let mut message =
+                format!("AUTOSCRIBE INFLIGHT {dispatch}\n\nDispatch: {dispatch}\nPlan: {plan}");
             for source in &request.sources {
                 message.push_str(&format!(
                     "\nRecord: {}\t{}",
@@ -99,9 +98,7 @@ pub fn append_inflight_snapshot(
         })();
         let _ = fs::remove_file(&temporary_index);
         match result {
-            Err(ServiceError::Conflict(message))
-                if message.contains("advanced concurrently") =>
-            {
+            Err(ServiceError::Conflict(message)) if message.contains("advanced concurrently") => {
                 continue;
             }
             other => return other,
@@ -132,9 +129,8 @@ pub fn append_response_snapshot(
         ));
     }
     for _ in 0..4 {
-        let old = optional_revision(&repo, INFLIGHT_REF)?.ok_or_else(|| {
-            ServiceError::Conflict("inflight ledger does not exist".into())
-        })?;
+        let old = optional_revision(&repo, INFLIGHT_REF)?
+            .ok_or_else(|| ServiceError::Conflict("inflight ledger does not exist".into()))?;
         let temporary_index = temporary_index_path();
         let attempt = (|| {
             git_with_env(&repo, ["read-tree", old.as_str()], &temporary_index)?;
@@ -178,9 +174,7 @@ pub fn append_response_snapshot(
         })();
         let _ = fs::remove_file(&temporary_index);
         match attempt {
-            Err(ServiceError::Conflict(message))
-                if message.contains("advanced concurrently") =>
-            {
+            Err(ServiceError::Conflict(message)) if message.contains("advanced concurrently") => {
                 continue;
             }
             other => return other,
@@ -205,15 +199,13 @@ pub fn append_dispatch_event(
         ));
     }
     for _ in 0..4 {
-        let old = optional_revision(&repo, INFLIGHT_REF)?.ok_or_else(|| {
-            ServiceError::Conflict("inflight ledger does not exist".into())
-        })?;
+        let old = optional_revision(&repo, INFLIGHT_REF)?
+            .ok_or_else(|| ServiceError::Conflict("inflight ledger does not exist".into()))?;
         let tree = text(&git(&repo, ["show", "-s", "--format=%T", old.as_str()])?)
             .trim()
             .to_string();
-        let mut message = format!(
-            "AUTOSCRIBE DISPATCH {outcome}\n\nDispatch: {dispatch}\nOutcome: {outcome}"
-        );
+        let mut message =
+            format!("AUTOSCRIBE DISPATCH {outcome}\n\nDispatch: {dispatch}\nOutcome: {outcome}");
         if let Some(reason) = reason {
             message.push_str(&format!(
                 "\nReason: {}",
@@ -255,7 +247,7 @@ fn repository_root(repo: &Path) -> ServiceResult<PathBuf> {
             "Git repository path is not a directory".into(),
         ));
     }
-    let root = text(&git(&requested, ["rev-parse", "--show-toplevel"])? )
+    let root = text(&git(&requested, ["rev-parse", "--show-toplevel"])?)
         .trim()
         .to_string();
     let root = PathBuf::from(root).canonicalize().map_err(io)?;
@@ -291,9 +283,9 @@ fn ref_component(label: &str, value: &str) -> ServiceResult<String> {
     if value.starts_with('.')
         || value.ends_with('.')
         || value.contains("..")
-        || !value
-            .chars()
-            .all(|character| character.is_ascii_alphanumeric() || matches!(character, '-' | '_' | '.'))
+        || !value.chars().all(|character| {
+            character.is_ascii_alphanumeric() || matches!(character, '-' | '_' | '.')
+        })
     {
         return Err(ServiceError::InvalidInput(format!(
             "invalid {label}: {value}"
@@ -316,7 +308,11 @@ fn revision(repo: &Path, value: &str) -> ServiceResult<String> {
     let value = one_line("Git revision", value)?;
     Ok(text(&git(
         repo,
-        ["rev-parse", "--verify", format!("{value}^{{commit}}").as_str()],
+        [
+            "rev-parse",
+            "--verify",
+            format!("{value}^{{commit}}").as_str(),
+        ],
     )?)
     .trim()
     .to_string())
@@ -363,10 +359,7 @@ fn temporary_index_path() -> PathBuf {
         .duration_since(std::time::UNIX_EPOCH)
         .unwrap_or_default()
         .as_nanos();
-    std::env::temp_dir().join(format!(
-        "autoscribe-index-{}-{nanos}",
-        std::process::id()
-    ))
+    std::env::temp_dir().join(format!("autoscribe-index-{}-{nanos}", std::process::id()))
 }
 
 fn git_with_env<I, S>(repo: &Path, args: I, index: &Path) -> ServiceResult<Output>

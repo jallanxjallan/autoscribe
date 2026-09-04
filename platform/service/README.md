@@ -1,43 +1,43 @@
 # AutoScribe Service
 
-`autoscribe-service` is one permanent, UI-agnostic system worker. It knows Git
-repositories, Markdown files, dispatch commits, `autoscribe/inflight`, Pandoc,
-`asc enqueue`, and `asc export`. It contains no editor-specific discovery or
-state.
+`autoscribe-service` provides UI-agnostic dispatch and response daemons plus
+small run-once client commands. It knows Git repositories, Markdown files,
+dispatch commits, `autoscribe/inflight`, Pandoc, `asc enqueue`, and
+`asc export`. It contains no editor-specific discovery or state.
 
 ## Commands
 
 ```sh
-svc worker
-svc attention /absolute/path/to/repository [...]
+svc post-commit /absolute/path/to/repository
+svc dispatch
+svc responses
+svc plans
+svc dispatch-once /absolute/path/to/repository
+svc status
 svc scan /absolute/path/to/repository [...]
 ```
 
-`svc worker` owns a user-scoped Unix socket and waits safely with no registered
-repositories. A UI adapter periodically calls `svc attention`; the path is only
-a candidate hint. The worker canonicalises it, requires the path to be a Git
-root, and then owns all scanning and reconciliation.
+`svc post-commit` is the Git-hook client. It canonicalises the repository,
+records a coalescing attention hint in the client ledger, and returns without
+performing dispatch work. The hook passes only the repository path.
+
+`svc dispatch` drains persistent attention hints and reconciles matching
+commits from `master` against durable records on `autoscribe/inflight`.
+`svc responses` reconciles pending exports for known repositories.
+
+`svc plans` is a run-once refresh that writes the published plan catalogue
+atomically to `$XDG_CACHE_HOME/autoscribe/plans.json` (or
+`$HOME/.cache/autoscribe/plans.json`). It is intended for an explicit UI
+refresh action and is not a startup daemon.
 
 `svc scan` is the one-pass diagnostic form. It does not use the attention
-socket, but it does perform normal dispatch and response reconciliation.
+ledger, but it does perform normal dispatch and response reconciliation.
 
 ## Repository sessions and activity
 
-Repository sessions are transient working memory. Each pass:
-
-1. drains new attention hints;
-2. expires quiet sessions after the configured TTL;
-3. visits repositories in descending rolling activity score;
-4. scans meaningful Markdown changes and global slug integrity;
-5. reconciles dispatch commits;
-6. reconciles pending exports.
-
-New, removed, or renamed Markdown files add more activity than a modification.
-Repeated writes with unchanged bytes add nothing. Scores decay every pass, so
-recent distinct work wins without allowing autosave chatter to dominate.
-
-The in-memory SQLite schema is structured process memory only. Git is the
-durable recovery record.
+The client SQLite ledger keeps the repository registry, coalescing attention
+hints, and operational observations across daemon restarts. Git remains the
+durable recovery authority for source snapshots and submission receipts.
 
 ## Ownership boundaries
 
@@ -62,10 +62,8 @@ inside this background service.
 | `AUTOSCRIBE_ASC` | `asc` | Pipeline CLI executable |
 | `AUTOSCRIBE_PANDOC` | `/usr/bin/pandoc` | Pandoc executable |
 | `AUTOSCRIBE_PANDOC_FILTER` | platform emit filter path | NDJSON emit filter |
-| `AUTOSCRIBE_WORKER_POLL_MS` | `2000` | Worker pass interval |
-| `AUTOSCRIBE_REPOSITORY_TTL_SECS` | `3600` | Quiet-session expiry |
-| `AUTOSCRIBE_SERVICE_SOCKET` | `$XDG_RUNTIME_DIR/autoscribe-service.sock` | Attention socket |
+| `AUTOSCRIBE_WORKER_POLL_MS` | `250` | Dispatch/response poll interval |
+| `AUTOSCRIBE_CLIENT_DB` | `$HOME/.local/share/autoscribe/service.sqlite` | Client ledger |
 
-An adapter must only discover candidate repository paths and send attention.
-It must not implement scanning, activity scoring, Git, dispatch, or response
-logic.
+A post-commit adapter must only pass a candidate repository path. It must not
+inspect commit trailers or implement Git, dispatch, or response logic.
