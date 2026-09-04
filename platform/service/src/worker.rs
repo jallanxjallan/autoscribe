@@ -8,8 +8,11 @@ use serde_json::Value;
 use std::{
     cell::RefCell,
     collections::{BTreeMap, BTreeSet},
+    fs::{File, OpenOptions},
+    io::Write,
     path::{Path, PathBuf},
     process::{Command, Stdio},
+    sync::atomic::{AtomicU64, Ordering},
     time::{Duration, Instant},
 };
 
@@ -19,7 +22,8 @@ pub struct Worker {
     repositories: RefCell<BTreeMap<PathBuf, RepositorySession>>,
     asc: PathBuf,
     pandoc: PathBuf,
-    pandoc_filter: PathBuf,
+    pandoc_dispatch_defaults: PathBuf,
+    pandoc_directory: PathBuf,
     poll: Duration,
     repository_ttl: Duration,
 }
@@ -80,20 +84,26 @@ impl Worker {
         let pandoc = std::env::var_os("AUTOSCRIBE_PANDOC")
             .map(PathBuf::from)
             .unwrap_or_else(|| PathBuf::from("/usr/bin/pandoc"));
-        let pandoc_filter = std::env::var_os("AUTOSCRIBE_PANDOC_FILTER")
+        let pandoc_dispatch_defaults = std::env::var_os("AUTOSCRIBE_PANDOC_DISPATCH_DEFAULTS")
             .map(PathBuf::from)
             .unwrap_or_else(|| {
                 std::env::var_os("HOME")
                     .map(PathBuf::from)
                     .unwrap_or_default()
-                    .join("Work/Loom/platform/pandoc/filters/emit/emit_ndjson.lua")
+                    .join("Work/Extensions/pandoc/defaults/dispatch.yaml")
             });
+        let pandoc_directory = pandoc_dispatch_defaults
+            .parent()
+            .and_then(Path::parent)
+            .map(Path::to_path_buf)
+            .unwrap_or_default();
         Ok(Self {
             db,
             repositories: RefCell::new(BTreeMap::new()),
             asc,
             pandoc,
-            pandoc_filter,
+            pandoc_dispatch_defaults,
+            pandoc_directory,
             poll,
             repository_ttl,
         })
@@ -491,7 +501,8 @@ impl Worker {
                     )?;
                 }
 
-                let sources = source_records_at(&repository, &commit, &trailers.documents)?;
+                let sources =
+                    source_records_at(&self.db, &repository, &commit, &trailers.documents)?;
                 let inflight_commit =
                     self.ensure_inflight_snapshot(&repository, &dispatch, &plan, &sources)?;
                 for (slug, path, blob, _bytes) in &sources {
@@ -521,13 +532,7 @@ impl Worker {
                     continue;
                 }
 
-                match self.submit_dispatch(
-                    &repository,
-                    &commit,
-                    &dispatch,
-                    &plan,
-                    &trailers.documents,
-                ) {
+                match self.submit_dispatch(&repository, &commit, &dispatch, &plan, &sources) {
                     Ok(()) => {
                         db::expect_dispatch_responses(&self.db, &dispatch)?;
                         let event_commit =
@@ -595,11 +600,12 @@ impl Worker {
         commit: &str,
         _dispatch: &str,
         plan: &str,
-        documents: &[String],
+        sources: &[(String, PathBuf, String, Vec<u8>)],
     ) -> ServiceResult<()> {
         let pending = pending_export_slugs(&self.asc)?;
-        let blocked = documents
+        let blocked = sources
             .iter()
+            .map(|(slug, _, _, _)| slug)
             .filter(|slug| pending.contains(slug.as_str()))
             .cloned()
             .collect::<Vec<_>>();
@@ -634,7 +640,7 @@ impl Worker {
         }
 
         let result = self
-            .build_calls(&worktree, plan, documents)
+            .build_calls(&worktree, plan, sources)
             .and_then(|calls| {
                 let bytes = ndjson(&calls)?;
                 run_asc(&self.asc, &["enqueue"], &bytes)?;
@@ -655,29 +661,28 @@ impl Worker {
         &self,
         worktree: &Path,
         plan: &str,
-        documents: &[String],
+        sources: &[(String, PathBuf, String, Vec<u8>)],
     ) -> ServiceResult<Vec<Value>> {
-        if !self.pandoc_filter.is_file() {
+        if !self.pandoc_dispatch_defaults.is_file() {
             return Err(ServiceError::InvalidInput(format!(
-                "Pandoc filter not found: {}",
-                self.pandoc_filter.display()
+                "Pandoc dispatch defaults not found: {}",
+                self.pandoc_dispatch_defaults.display()
             )));
         }
-        let resolved = resolve_slugs_in_tree(worktree, documents)?;
         let mut jobs = Vec::new();
-        for (slug, relative) in &resolved {
+        let mut runtime_defaults = Vec::new();
+        for (slug, relative, _, _) in sources {
             let source = worktree.join(relative);
+            let temporary_defaults = DispatchDefaultsFile::create(&source, plan)?;
             jobs.push(PandocJob {
                 identity: slug.clone(),
-                working_directory: worktree.to_path_buf(),
-                arguments: vec![
-                    source.to_string_lossy().into_owned(),
-                    "--from=markdown+yaml_metadata_block+fenced_divs".into(),
-                    format!("--lua-filter={}", self.pandoc_filter.display()),
-                    "--to=native".into(),
-                    "--output=/dev/null".into(),
-                ],
+                working_directory: self.pandoc_directory.clone(),
+                arguments: dispatch_pandoc_arguments(
+                    &self.pandoc_dispatch_defaults,
+                    temporary_defaults.path(),
+                ),
             });
+            runtime_defaults.push(temporary_defaults);
         }
         let parallelism = std::thread::available_parallelism()
             .map(usize::from)
@@ -685,7 +690,7 @@ impl Worker {
             .max(2);
         let outcomes = pandoc::run_parallel(&self.pandoc, jobs, parallelism)?;
         let mut calls = Vec::new();
-        for ((expected_slug, relative), outcome) in resolved.iter().zip(outcomes) {
+        for ((expected_slug, relative, _, _), outcome) in sources.iter().zip(outcomes) {
             if outcome.exit_code != Some(0) || outcome.error.is_some() {
                 let detail = outcome
                     .error
@@ -695,72 +700,14 @@ impl Worker {
                     relative.display()
                 )));
             }
-            let text = std::str::from_utf8(&outcome.stdout)
-                .map_err(|error| ServiceError::InvalidInput(error.to_string()))?;
-            let line = text
-                .lines()
-                .find(|line| line.trim_start().starts_with('{'))
-                .ok_or_else(|| {
-                    ServiceError::InvalidInput(format!(
-                        "{}: Pandoc emitted no NDJSON record",
-                        relative.display()
-                    ))
-                })?;
-            let record: Value = serde_json::from_str(line)
-                .map_err(|error| ServiceError::InvalidInput(error.to_string()))?;
-            let identity = record
-                .get("record_identity")
-                .and_then(Value::as_str)
-                .unwrap_or("")
-                .trim();
-            if identity != expected_slug {
-                return Err(ServiceError::Conflict(format!(
-                    "{}: expected slug {}, Pandoc emitted {}",
-                    relative.display(),
-                    expected_slug,
-                    identity
-                )));
-            }
-            let payload = record
-                .get("payload")
-                .and_then(Value::as_object)
-                .ok_or_else(|| {
-                    ServiceError::InvalidInput(format!(
-                        "{identity}: Pandoc payload must be an object"
-                    ))
-                })?;
-            let content = payload.get("content").and_then(Value::as_str).unwrap_or("");
-            if content.trim().is_empty() {
-                return Err(ServiceError::InvalidInput(format!(
-                    "{identity}: Pandoc content is blank"
-                )));
-            }
-            let metadata = payload
-                .iter()
-                .filter(|(key, _)| key.as_str() != "content")
-                .map(|(key, value)| (key.clone(), value.clone()))
-                .collect::<serde_json::Map<_, _>>();
-            let mut call = serde_json::json!({
-                "type":"call",
-                "identity":identity,
-                "content":content,
-                "plan":plan,
-                "extra":{
-                    "filename_hint":relative.file_name().and_then(|name|name.to_str()).unwrap_or(expected_slug),
-                    "source_path":relative.to_string_lossy().replace('\\',"/"),
-                    "metadata":metadata
-                }
-            });
-            if let Some(directive) = record
-                .get("directive")
-                .and_then(Value::as_str)
-                .map(str::trim)
-                .filter(|value| !value.is_empty())
-            {
-                call["directive"] = Value::String(directive.into());
-            }
-            calls.push(call);
+            calls.extend(validate_completed_calls(
+                &outcome.stdout,
+                expected_slug,
+                plan,
+                relative,
+            )?);
         }
+        drop(runtime_defaults);
         Ok(calls)
     }
 
@@ -871,6 +818,184 @@ impl Worker {
         }
         Ok(())
     }
+}
+
+static DISPATCH_DEFAULTS_SEQUENCE: AtomicU64 = AtomicU64::new(0);
+
+struct DispatchDefaultsFile {
+    path: PathBuf,
+}
+
+impl DispatchDefaultsFile {
+    fn create(source: &Path, plan: &str) -> ServiceResult<Self> {
+        if !source.is_absolute() {
+            return Err(ServiceError::InvalidInput(format!(
+                "dispatch source path must be absolute: {}",
+                source.display()
+            )));
+        }
+        if !valid_dispatch_slug(plan) {
+            return Err(ServiceError::InvalidInput(
+                "dispatch plan must be a valid slug".into(),
+            ));
+        }
+
+        for _ in 0..128 {
+            let sequence = DISPATCH_DEFAULTS_SEQUENCE.fetch_add(1, Ordering::Relaxed);
+            let timestamp = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_nanos();
+            let path = std::env::temp_dir().join(format!(
+                "autoscribe-dispatch-{}-{timestamp}-{sequence}.yaml",
+                std::process::id()
+            ));
+            let mut options = OpenOptions::new();
+            options.write(true).create_new(true);
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::OpenOptionsExt;
+                options.mode(0o600);
+            }
+            let mut file = match options.open(&path) {
+                Ok(file) => file,
+                Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => continue,
+                Err(error) => return Err(io(error)),
+            };
+            let temporary = Self { path };
+            write_dispatch_defaults(&mut file, source, plan)?;
+            file.flush().map_err(io)?;
+            file.sync_all().map_err(io)?;
+            return Ok(temporary);
+        }
+        Err(ServiceError::Io(
+            "could not allocate a unique dispatch defaults file".into(),
+        ))
+    }
+
+    fn path(&self) -> &Path {
+        &self.path
+    }
+}
+
+impl Drop for DispatchDefaultsFile {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_file(&self.path);
+    }
+}
+
+fn write_dispatch_defaults(file: &mut File, source: &Path, plan: &str) -> ServiceResult<()> {
+    let source = serde_json::to_string(&source.to_string_lossy().into_owned())
+        .map_err(|error| ServiceError::InvalidInput(error.to_string()))?;
+    let plan = serde_json::to_string(plan)
+        .map_err(|error| ServiceError::InvalidInput(error.to_string()))?;
+    write!(
+        file,
+        "input-files:\n  - {source}\nmetadata:\n  plan: {plan}\n"
+    )
+    .map_err(io)
+}
+
+fn dispatch_pandoc_arguments(static_defaults: &Path, runtime_defaults: &Path) -> Vec<String> {
+    vec![
+        format!("--defaults={}", static_defaults.display()),
+        format!("--defaults={}", runtime_defaults.display()),
+    ]
+}
+
+fn validate_completed_calls(
+    bytes: &[u8],
+    expected_slug: &str,
+    expected_plan: &str,
+    source: &Path,
+) -> ServiceResult<Vec<Value>> {
+    let text = std::str::from_utf8(bytes)
+        .map_err(|error| ServiceError::InvalidInput(error.to_string()))?;
+    let mut calls = Vec::new();
+    for (index, line) in text
+        .lines()
+        .filter(|line| !line.trim().is_empty())
+        .enumerate()
+    {
+        let record: Value = serde_json::from_str(line).map_err(|error| {
+            ServiceError::InvalidInput(format!(
+                "{}: Pandoc NDJSON row {} is invalid: {error}",
+                source.display(),
+                index + 1
+            ))
+        })?;
+        let object = record.as_object().ok_or_else(|| {
+            ServiceError::InvalidInput(format!(
+                "{}: Pandoc NDJSON row {} must be an object",
+                source.display(),
+                index + 1
+            ))
+        })?;
+        if object.get("type").and_then(Value::as_str) != Some("call") {
+            return Err(ServiceError::InvalidInput(format!(
+                "{}: Pandoc NDJSON row {} must have type call",
+                source.display(),
+                index + 1
+            )));
+        }
+        let identity = object
+            .get("identity")
+            .and_then(Value::as_str)
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .ok_or_else(|| {
+                ServiceError::InvalidInput(format!(
+                    "{}: Pandoc NDJSON row {} has no identity",
+                    source.display(),
+                    index + 1
+                ))
+            })?;
+        if identity != expected_slug {
+            return Err(ServiceError::Conflict(format!(
+                "{}: dispatch requested slug {}, Pandoc emitted {}",
+                source.display(),
+                expected_slug,
+                identity
+            )));
+        }
+        let content = object.get("content").and_then(Value::as_str).unwrap_or("");
+        if content.trim().is_empty() {
+            return Err(ServiceError::InvalidInput(format!(
+                "{identity}: Pandoc call content is blank"
+            )));
+        }
+        let plan = object
+            .get("plan")
+            .and_then(Value::as_str)
+            .map(str::trim)
+            .unwrap_or("");
+        if plan != expected_plan {
+            return Err(ServiceError::Conflict(format!(
+                "{identity}: Pandoc emitted plan {plan:?}, expected {expected_plan:?}"
+            )));
+        }
+        if !object.get("extra").is_some_and(Value::is_object) {
+            return Err(ServiceError::InvalidInput(format!(
+                "{identity}: Pandoc call extra must be an object"
+            )));
+        }
+        if object
+            .get("directive")
+            .is_some_and(|value| !value.is_string())
+        {
+            return Err(ServiceError::InvalidInput(format!(
+                "{identity}: Pandoc call directive must be a string"
+            )));
+        }
+        calls.push(record);
+    }
+    if calls.is_empty() {
+        return Err(ServiceError::InvalidInput(format!(
+            "{}: Pandoc emitted no call records",
+            source.display()
+        )));
+    }
+    Ok(calls)
 }
 
 fn scan_markdown(repository: &Path) -> ServiceResult<Vec<ScannedFile>> {
@@ -994,6 +1119,7 @@ fn dispatch_commits(repository: &Path) -> ServiceResult<Vec<String>> {
             "log",
             "--reverse",
             "--format=%H",
+            "--grep=Autoscribe-Dispatch:",
             "--grep=Autoscribe-Plan:",
             "master",
         ])
@@ -1019,9 +1145,12 @@ fn dispatch_trailers(message: &str) -> ServiceResult<DispatchTrailers> {
     for line in message.lines() {
         if let Some(value) = line.strip_prefix("Autoscribe-Plan:") {
             let value = value.trim();
-            if !value.is_empty() {
-                plans.push(value.to_string());
+            if value.is_empty() || !valid_dispatch_slug(value) {
+                return Err(ServiceError::InvalidInput(
+                    "Autoscribe-Plan trailer requires one valid slug".into(),
+                ));
             }
+            plans.push(value.to_string());
         }
         if let Some(value) = line.strip_prefix("Autoscribe-Document:") {
             let value = value.trim();
@@ -1030,16 +1159,18 @@ fn dispatch_trailers(message: &str) -> ServiceResult<DispatchTrailers> {
             }
         }
     }
-    plans.sort();
-    plans.dedup();
     documents.sort();
     documents.dedup();
     let plan = match plans.len() {
-        0 => None,
+        0 => {
+            return Err(ServiceError::InvalidInput(
+                "dispatch commit is missing Autoscribe-Plan trailer".into(),
+            ));
+        }
         1 => plans.into_iter().next(),
         _ => {
             return Err(ServiceError::InvalidInput(
-                "a commit may contain only one distinct Autoscribe-Plan trailer".into(),
+                "a dispatch commit must contain exactly one Autoscribe-Plan trailer".into(),
             ));
         }
     };
@@ -1049,6 +1180,13 @@ fn dispatch_trailers(message: &str) -> ServiceResult<DispatchTrailers> {
         ));
     }
     Ok(DispatchTrailers { plan, documents })
+}
+
+fn valid_dispatch_slug(value: &str) -> bool {
+    !value.is_empty()
+        && value
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'.' | b'-' | b'_'))
 }
 
 fn safe_dispatch_part(value: &str) -> String {
@@ -1069,13 +1207,31 @@ fn safe_dispatch_part(value: &str) -> String {
 }
 
 fn source_records_at(
+    database: &Database,
     repository: &Path,
     commit: &str,
     documents: &[String],
 ) -> ServiceResult<Vec<(String, PathBuf, String, Vec<u8>)>> {
+    let duplicates = db::duplicate_slugs(database)?
+        .into_iter()
+        .map(|(slug, _)| slug)
+        .collect::<BTreeSet<_>>();
+    let indexed = db::active_files(database, repository)?
+        .into_iter()
+        .filter_map(|(path, slug, _)| slug.map(|slug| (slug, path)))
+        .collect::<BTreeMap<_, _>>();
     let mut records = Vec::new();
     for slug in documents {
-        let path = resolve_slug_at(repository, commit, slug)?;
+        if duplicates.contains(slug) {
+            return Err(ServiceError::Conflict(format!(
+                "document slug is duplicated: {slug}"
+            )));
+        }
+        let path = indexed.get(slug).cloned().ok_or_else(|| {
+            ServiceError::Conflict(format!(
+                "document slug has no unique indexed filepath: {slug}"
+            ))
+        })?;
         let spec = format!("{commit}:{}", path.to_string_lossy());
         let bytes = git_bytes(repository, &["show", &spec])?;
         let blob = git_text(repository, &["rev-parse", &spec])?
@@ -1084,75 +1240,6 @@ fn source_records_at(
         records.push((slug.clone(), path, blob, bytes));
     }
     Ok(records)
-}
-
-fn resolve_slug_at(repository: &Path, commit: &str, slug: &str) -> ServiceResult<PathBuf> {
-    let needle = format!("slug: {slug}");
-    let output = Command::new("git")
-        .arg("-C")
-        .arg(repository)
-        .args(["grep", "-l", "-F", &needle, commit, "--", "*.md"])
-        .output()
-        .map_err(io)?;
-    if !output.status.success() && output.status.code() != Some(1) {
-        return Err(ServiceError::Storage(format!(
-            "git grep failed for {slug}: {}",
-            String::from_utf8_lossy(&output.stderr).trim()
-        )));
-    }
-    let mut matches = Vec::new();
-    for raw in String::from_utf8_lossy(&output.stdout).lines() {
-        let path_text = raw
-            .split_once(':')
-            .map(|(_, path)| path)
-            .unwrap_or(raw)
-            .trim();
-        if path_text.is_empty() {
-            continue;
-        }
-        let spec = format!("{commit}:{path_text}");
-        let text = String::from_utf8(git_bytes(repository, &["show", &spec])?)
-            .map_err(|error| ServiceError::InvalidInput(error.to_string()))?;
-        if frontmatter_slug(&text).as_deref() == Some(slug) {
-            matches.push(PathBuf::from(path_text));
-        }
-    }
-    match matches.as_slice() {
-        [path] => Ok(path.clone()),
-        [] => Err(ServiceError::Conflict(format!(
-            "document slug was not found at {commit}: {slug}"
-        ))),
-        _ => Err(ServiceError::Conflict(format!(
-            "document slug is duplicated at {commit}: {slug}"
-        ))),
-    }
-}
-
-fn resolve_slugs_in_tree(
-    tree: &Path,
-    documents: &[String],
-) -> ServiceResult<Vec<(String, PathBuf)>> {
-    let scanned = scan_markdown(tree)?;
-    let mut by_slug: BTreeMap<String, Vec<PathBuf>> = BTreeMap::new();
-    for file in scanned {
-        if let Some(slug) = file.slug {
-            by_slug.entry(slug).or_default().push(file.path);
-        }
-    }
-    documents
-        .iter()
-        .map(
-            |slug| match by_slug.get(slug).map(Vec::as_slice).unwrap_or(&[]) {
-                [path] => Ok((slug.clone(), path.clone())),
-                [] => Err(ServiceError::Conflict(format!(
-                    "document slug was not found: {slug}"
-                ))),
-                _ => Err(ServiceError::Conflict(format!(
-                    "document slug is duplicated: {slug}"
-                ))),
-            },
-        )
-        .collect()
 }
 
 fn dirty_markdown_paths(repository: &Path) -> ServiceResult<BTreeSet<PathBuf>> {
@@ -1439,4 +1526,308 @@ fn ndjson(records: &[Value]) -> ServiceResult<Vec<u8>> {
 
 fn io(error: impl std::fmt::Display) -> ServiceError {
     ServiceError::Io(error.to_string())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::{
+        fs,
+        sync::Mutex,
+        time::{SystemTime, UNIX_EPOCH},
+    };
+
+    static TEST_SEQUENCE: AtomicU64 = AtomicU64::new(0);
+    static ENV_LOCK: Mutex<()> = Mutex::new(());
+
+    struct TestDirectory(PathBuf);
+
+    impl TestDirectory {
+        fn new(label: &str) -> Self {
+            let sequence = TEST_SEQUENCE.fetch_add(1, Ordering::Relaxed);
+            let timestamp = SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap()
+                .as_nanos();
+            let path = std::env::temp_dir().join(format!(
+                "autoscribe-dispatch-test-{label}-{}-{timestamp}-{sequence}",
+                std::process::id()
+            ));
+            fs::create_dir_all(&path).unwrap();
+            Self(path)
+        }
+
+        fn path(&self) -> &Path {
+            &self.0
+        }
+    }
+
+    impl Drop for TestDirectory {
+        fn drop(&mut self) {
+            let _ = fs::remove_dir_all(&self.0);
+        }
+    }
+
+    fn worker(root: &Path, pandoc: PathBuf) -> Worker {
+        let defaults = root.join("defaults/dispatch.yaml");
+        fs::create_dir_all(defaults.parent().unwrap()).unwrap();
+        fs::write(&defaults, "fixture\n").unwrap();
+        Worker {
+            db: Database::memory().unwrap(),
+            repositories: RefCell::new(BTreeMap::new()),
+            asc: PathBuf::from("/bin/true"),
+            pandoc,
+            pandoc_dispatch_defaults: defaults,
+            pandoc_directory: root.to_path_buf(),
+            poll: Duration::ZERO,
+            repository_ttl: Duration::from_secs(1),
+        }
+    }
+
+    fn executable(path: &Path, contents: &str) {
+        fs::write(path, contents).unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let mut permissions = fs::metadata(path).unwrap().permissions();
+            permissions.set_mode(0o755);
+            fs::set_permissions(path, permissions).unwrap();
+        }
+    }
+
+    fn git(root: &Path, arguments: &[&str]) {
+        let output = Command::new("git")
+            .arg("-C")
+            .arg(root)
+            .args(arguments)
+            .output()
+            .unwrap();
+        assert!(
+            output.status.success(),
+            "git {} failed: {}",
+            arguments.join(" "),
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
+
+    fn source(root: &Path) -> (String, PathBuf, String, Vec<u8>) {
+        let relative = PathBuf::from("Content/One.md");
+        fs::create_dir_all(root.join("Content")).unwrap();
+        fs::write(root.join(&relative), "---\nslug: cnt.one\n---\nBody\n").unwrap();
+        ("cnt.one".into(), relative, "blob".into(), Vec::new())
+    }
+
+    #[test]
+    fn dispatch_trailers_require_one_valid_plan() {
+        let valid =
+            dispatch_trailers("Autoscribe-Plan: plan.test-1\nAutoscribe-Document: cnt.one\n")
+                .unwrap();
+        assert_eq!(valid.plan.as_deref(), Some("plan.test-1"));
+        assert_eq!(valid.documents, ["cnt.one"]);
+
+        for message in [
+            "Autoscribe-Document: cnt.one\n",
+            "Autoscribe-Plan:\nAutoscribe-Document: cnt.one\n",
+            "Autoscribe-Plan: not a slug\nAutoscribe-Document: cnt.one\n",
+            "Autoscribe-Plan: plan.one\nAutoscribe-Plan: plan.one\nAutoscribe-Document: cnt.one\n",
+            "Autoscribe-Plan: plan.one\nAutoscribe-Plan: plan.two\nAutoscribe-Document: cnt.one\n",
+        ] {
+            assert!(dispatch_trailers(message).is_err(), "accepted {message:?}");
+        }
+    }
+
+    #[test]
+    fn temporary_defaults_are_exact_private_unique_and_cleaned_up() {
+        let source = Path::new("/tmp/Source with spaces.md");
+        let temporary = DispatchDefaultsFile::create(source, "plan.test").unwrap();
+        let path = temporary.path().to_path_buf();
+        assert_eq!(
+            fs::read_to_string(&path).unwrap(),
+            "input-files:\n  - \"/tmp/Source with spaces.md\"\nmetadata:\n  plan: \"plan.test\"\n"
+        );
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            assert_eq!(
+                fs::metadata(&path).unwrap().permissions().mode() & 0o777,
+                0o600
+            );
+        }
+        let other = DispatchDefaultsFile::create(source, "plan.test").unwrap();
+        assert_ne!(path, other.path());
+        drop(temporary);
+        assert!(!path.exists());
+    }
+
+    #[test]
+    fn concurrent_defaults_never_collide() {
+        let guards = (0..16)
+            .map(|_| {
+                std::thread::spawn(|| {
+                    let guard = DispatchDefaultsFile::create(
+                        Path::new("/tmp/concurrent.md"),
+                        "plan.concurrent",
+                    )
+                    .unwrap();
+                    (guard.path().to_path_buf(), guard)
+                })
+            })
+            .map(|thread| thread.join().unwrap())
+            .collect::<Vec<_>>();
+        let paths = guards
+            .iter()
+            .map(|(path, _)| path.clone())
+            .collect::<BTreeSet<_>>();
+        assert_eq!(paths.len(), guards.len());
+        assert!(paths.iter().all(|path| path.is_file()));
+        drop(guards);
+        assert!(paths.iter().all(|path| !path.exists()));
+    }
+
+    #[test]
+    fn pandoc_receives_only_static_and_runtime_defaults() {
+        let _lock = ENV_LOCK.lock().unwrap();
+        let root = TestDirectory::new("success");
+        let worktree = root.path().join("worktree");
+        fs::create_dir(&worktree).unwrap();
+        let arguments_log = root.path().join("arguments");
+        let defaults_copy = root.path().join("runtime.yaml");
+        let runtime_path_log = root.path().join("runtime-path");
+        let pandoc = root.path().join("pandoc");
+        executable(
+            &pandoc,
+            &format!(
+                "#!/bin/sh\nprintf '%s\\n' \"$@\" > '{}'\nruntime=${{2#--defaults=}}\nprintf '%s' \"$runtime\" > '{}'\ncp -- \"$runtime\" '{}'\nprintf '%s\\n' '{{\"type\":\"call\",\"identity\":\"cnt.one\",\"content\":\"Body\",\"plan\":\"plan.test\",\"extra\":{{}}}}'\n",
+                arguments_log.display(),
+                runtime_path_log.display(),
+                defaults_copy.display()
+            ),
+        );
+        let worker = worker(root.path(), pandoc);
+        let calls = worker
+            .build_calls(&worktree, "plan.test", &[source(&worktree)])
+            .unwrap();
+        assert_eq!(calls.len(), 1);
+        let arguments = fs::read_to_string(arguments_log).unwrap();
+        let lines = arguments.lines().collect::<Vec<_>>();
+        assert_eq!(lines.len(), 2);
+        assert_eq!(
+            lines[0],
+            format!("--defaults={}", worker.pandoc_dispatch_defaults.display())
+        );
+        assert!(lines[1].starts_with("--defaults=/tmp/autoscribe-dispatch-"));
+        assert_eq!(
+            fs::read_to_string(defaults_copy).unwrap(),
+            format!(
+                "input-files:\n  - {}\nmetadata:\n  plan: \"plan.test\"\n",
+                serde_json::to_string(&worktree.join("Content/One.md").to_string_lossy()).unwrap()
+            )
+        );
+        let runtime_path = PathBuf::from(fs::read_to_string(runtime_path_log).unwrap());
+        assert!(!runtime_path.exists());
+    }
+
+    #[test]
+    fn temporary_defaults_are_cleaned_after_pandoc_failure() {
+        let root = TestDirectory::new("failure");
+        let worktree = root.path().join("worktree");
+        fs::create_dir(&worktree).unwrap();
+        let runtime_path_log = root.path().join("runtime-path");
+        let pandoc = root.path().join("pandoc");
+        executable(
+            &pandoc,
+            &format!(
+                "#!/bin/sh\nruntime=${{2#--defaults=}}\nprintf '%s' \"$runtime\" > '{}'\nexit 9\n",
+                runtime_path_log.display()
+            ),
+        );
+        let worker = worker(root.path(), pandoc);
+        assert!(
+            worker
+                .build_calls(&worktree, "plan.test", &[source(&worktree)])
+                .is_err()
+        );
+        let runtime_path = PathBuf::from(fs::read_to_string(runtime_path_log).unwrap());
+        assert!(!runtime_path.exists());
+    }
+
+    #[test]
+    fn structurally_valid_multiple_calls_are_forwarded_without_reconstruction() {
+        let bytes = br#"{"type":"call","identity":"cnt.one","content":"First","plan":"plan.test","extra":{}}
+{"type":"call","identity":"cnt.one","content":"Second","plan":"plan.test","extra":{}}
+"#;
+        let calls =
+            validate_completed_calls(bytes, "cnt.one", "plan.test", Path::new("Content/One.md"))
+                .unwrap();
+        assert_eq!(calls.len(), 2);
+        assert_eq!(calls[1]["content"], "Second");
+    }
+
+    #[test]
+    fn fixture_dispatch_indexes_path_and_enqueues_completed_pandoc_call() {
+        let root = TestDirectory::new("end-to-end");
+        git(root.path(), &["init", "--quiet", "--initial-branch=master"]);
+        git(
+            root.path(),
+            &["config", "user.email", "tests@autoscribe.local"],
+        );
+        git(root.path(), &["config", "user.name", "AutoScribe Tests"]);
+        let document = root.path().join("Content/One.md");
+        fs::create_dir_all(document.parent().unwrap()).unwrap();
+        fs::write(
+            &document,
+            "---\nslug: cnt.one\ntitle: Fixture\n---\nCommitted body\n",
+        )
+        .unwrap();
+        git(root.path(), &["add", "Content/One.md"]);
+        git(root.path(), &["commit", "--quiet", "-m", "Fixture source"]);
+        git(
+            root.path(),
+            &[
+                "commit",
+                "--quiet",
+                "--allow-empty",
+                "-m",
+                "Dispatch fixture",
+                "-m",
+                "Autoscribe-Dispatch: 1\nAutoscribe-Plan: plan.test\nAutoscribe-Document: cnt.one",
+            ],
+        );
+
+        let runtime_copy = root.path().join("runtime.yaml");
+        let pandoc = root.path().join("pandoc");
+        executable(
+            &pandoc,
+            &format!(
+                "#!/bin/sh\nruntime=${{2#--defaults=}}\ncp -- \"$runtime\" '{}'\nprintf '%s\\n' '{{\"type\":\"call\",\"identity\":\"cnt.one\",\"content\":\"Committed body\",\"plan\":\"plan.test\",\"extra\":{{\"metadata\":{{\"title\":\"Fixture\"}}}}}}'\n",
+                runtime_copy.display()
+            ),
+        );
+        let enqueue = root.path().join("enqueue.ndjson");
+        let asc = root.path().join("asc");
+        executable(
+            &asc,
+            &format!(
+                "#!/bin/sh\nif [ \"$1 $2\" = \"export list-pending\" ]; then exit 0; fi\nif [ \"$1\" = \"enqueue\" ]; then cat > '{}'; exit 0; fi\nexit 1\n",
+                enqueue.display()
+            ),
+        );
+
+        let mut worker = worker(root.path(), pandoc);
+        worker.asc = asc;
+        worker.register_repository(root.path()).unwrap();
+        worker.dispatch_once().unwrap();
+
+        let runtime = fs::read_to_string(runtime_copy).unwrap();
+        assert!(runtime.lines().any(|line| {
+            line.starts_with("  - \"") && line.ends_with("/worktree/Content/One.md\"")
+        }));
+        assert!(runtime.contains("  plan: \"plan.test\""));
+        let call: Value =
+            serde_json::from_str(fs::read_to_string(enqueue).unwrap().trim()).unwrap();
+        assert_eq!(call["type"], "call");
+        assert_eq!(call["identity"], "cnt.one");
+        assert_eq!(call["plan"], "plan.test");
+        assert_eq!(call["content"], "Committed body");
+    }
 }

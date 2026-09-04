@@ -61,7 +61,7 @@ inside this background service.
 | --- | --- | --- |
 | `AUTOSCRIBE_ASC` | `asc` | Pipeline CLI executable |
 | `AUTOSCRIBE_PANDOC` | `/usr/bin/pandoc` | Pandoc executable |
-| `AUTOSCRIBE_PANDOC_FILTER` | platform emit filter path | NDJSON emit filter |
+| `AUTOSCRIBE_PANDOC_DISPATCH_DEFAULTS` | `~/Work/Extensions/pandoc/defaults/dispatch.yaml` | Static dispatch defaults; runtime input and plan use a second temporary defaults file |
 | `AUTOSCRIBE_WORKER_POLL_MS` | `250` | Dispatch/response poll interval |
 | `AUTOSCRIBE_CLIENT_DB` | `$HOME/.local/share/autoscribe/service.sqlite` | Client ledger |
 
