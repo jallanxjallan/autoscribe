@@ -2,7 +2,7 @@ import json
 
 import typer
 
-from asc.control.list import list_control_slugs
+from asc.control.list import list_control_identities
 from asc.control.repository import plan_records
 from asc.control.snapshot import build_control_snapshot
 
@@ -22,9 +22,9 @@ def snapshot() -> None:
 
 @app.command("list")
 def list_control() -> None:
-    """List published instruction and plan slugs from Control Git."""
+    """List published instruction identities and plan slugs from Control Git."""
     try:
-        for slug in list_control_slugs():
+        for slug in list_control_identities():
             typer.echo(slug)
     except Exception as exc:
         _fail("list", exc)

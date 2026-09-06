@@ -1,11 +1,13 @@
 """Persisted reusable instruction records."""
 
 import json
+import re
 from typing import ClassVar
 
-from pydantic import ConfigDict, Field, field_validator
+from pydantic import ConfigDict, Field, field_validator, model_validator
 
 from asc.core.identity import generate_identity
+from asc.models.control.plan import instruction_scope
 from asc.redis.model_base import RedisModel
 
 
@@ -39,15 +41,31 @@ class Instruction(RedisModel):
     model_config = ConfigDict(extra="forbid")
 
     identity: str = Field(default_factory=generate_identity)
-    slug: str
+    control_identity: str = ""
+    source_fingerprint: str = ""
     title: str
     content: str
     content_sha256: str = ""
-    source_modified_ns: int = 0
-    source_size: int = 0
     extra_json: str = "{}"
 
-    @field_validator("identity", "slug", "title", mode="before")
+    @classmethod
+    def load_redis(cls, data: dict[str, str]):
+        # Drain already-enqueued calls across deployment. These retired fields
+        # never participate in Control resolution or materialization reuse.
+        data = dict(data)
+        for field in ("slug", "source_modified_ns", "source_size"):
+            data.pop(field, None)
+        return cls.model_validate(data)
+
+    @model_validator(mode="after")
+    def validate_source_version(self):
+        if self.control_identity or self.source_fingerprint:
+            instruction_scope(self.control_identity)
+            if not re.fullmatch(r"[0-9a-f]{40}|[0-9a-f]{64}", self.source_fingerprint):
+                raise ValueError("source_fingerprint must be a Git blob object ID")
+        return self
+
+    @field_validator("identity", "title", mode="before")
     @classmethod
     def validate_identity_text(cls, value: object, info):
         return _required_text(value, info.field_name)
@@ -55,7 +73,8 @@ class Instruction(RedisModel):
     @field_validator("content", mode="before")
     @classmethod
     def validate_content(cls, value: object) -> str:
-        return _required_text(value, "content")
+        _required_text(value, "content")
+        return value
 
     @field_validator("content_sha256", mode="before")
     @classmethod
@@ -66,14 +85,6 @@ class Instruction(RedisModel):
         if len(text) != 64 or any(ch not in "0123456789abcdef" for ch in text):
             raise ValueError("content_sha256 must be a lowercase SHA-256 hex digest")
         return text
-
-    @field_validator("source_modified_ns", "source_size", mode="before")
-    @classmethod
-    def validate_source_metadata(cls, value: object, info) -> int:
-        number = int(value or 0)
-        if number < 0:
-            raise ValueError(f"{info.field_name} must not be negative")
-        return number
 
     @field_validator("extra_json", mode="before")
     @classmethod

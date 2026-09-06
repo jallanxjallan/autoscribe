@@ -32,12 +32,13 @@ def iter_enqueue_records(stream: TextIO) -> Iterator[EnqueueRecord]:
             raise TypeError(f"row {parsed.line_number} must be a JSON object")
         plan_slug = _required_slug(raw, "plan", parsed.line_number)
         directive = _optional_directive(raw, parsed.line_number)
+        plan = load_plan(plan_slug)
         call_key, call = store_call(raw)
         yield EnqueueRecord(
             call_slug=str(call.source_identity),
             plan_slug=plan_slug,
             call_key=call_key,
-            plan=load_plan(plan_slug),
+            plan=plan,
             call=call,
             raw_record=raw,
             directive=directive,

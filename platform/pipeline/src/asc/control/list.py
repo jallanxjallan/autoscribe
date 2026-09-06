@@ -1,13 +1,8 @@
-"""List Git-authoritative control slugs."""
+"""List permanent Control instruction identities and plan slugs."""
 
-from asc.control.repository import instruction_records, plan_records
-
-
-def list_control_slugs() -> list[str]:
-    return sorted(
-        [record["slug"] for record in instruction_records()]
-        + [str(record["record_identity"]) for record in plan_records()]
-    )
+from asc.control.repository import accept_revision
 
 
-__all__ = ["list_control_slugs"]
+def list_control_identities() -> list[str]:
+    snapshot = accept_revision()
+    return sorted([*snapshot.instructions, *snapshot.plans])

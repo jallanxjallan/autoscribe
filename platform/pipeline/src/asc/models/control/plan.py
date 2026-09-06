@@ -1,231 +1,111 @@
-import json
-from collections.abc import Mapping
+"""Strict, canonical Git plan model. Runtime identities belong elsewhere."""
+
 from typing import Any
+import re
 
-from pydantic import BaseModel, ConfigDict, Field, field_serializer, field_validator, model_validator
+from pydantic import BaseModel, ConfigDict, field_validator
 
-from asc.core.identity import generate_identity
-
-
-def _json_text(value: object, *, default: str) -> str:
-    if value is None:
-        return default
-    if isinstance(value, str):
-        return value
-    return json.dumps(value, ensure_ascii=False, separators=(",", ":"))
+INSTRUCTION_PATTERN = re.compile(r"(?:rol|ctx|spc)_[0-9A-HJKMNP-TV-Z]{16}")
+SCOPES = {"rol": "role", "ctx": "context", "spc": "task"}
 
 
-def _json_list(value: object, *, field_name: str) -> list[Any]:
-    if value is None:
-        return []
-    if isinstance(value, str):
-        value = json.loads(value or "[]")
-    if not isinstance(value, list):
-        raise ValueError(f"plan {field_name} must be a list")
+def instruction_scope(identity: str) -> str:
+    if not isinstance(identity, str) or not INSTRUCTION_PATTERN.fullmatch(identity):
+        raise ValueError(f"invalid instruction identity: {identity!r}")
+    return SCOPES[identity[:3]]
+
+
+def validate_references(value: Any) -> dict[str, list[str]]:
+    if not isinstance(value, dict) or set(value) != set(SCOPES.values()):
+        raise ValueError("instructions must contain role, context, and task arrays")
+    for scope, identities in value.items():
+        if not isinstance(identities, list):
+            raise ValueError(f"instruction {scope} must be an array")
+        for identity in identities:
+            if instruction_scope(identity) != scope:
+                raise ValueError(f"instruction {identity} is incompatible with {scope}")
     return value
 
 
-def _indexed_object(value: object, *, field_name: str) -> dict[int, dict[str, Any]]:
-    """Normalize a 1-based indexed object, accepting legacy lists at intake."""
-
-    if value is None:
-        return {}
-    if isinstance(value, str):
-        value = json.loads(value or "{}")
-
-    if isinstance(value, list):
-        value = {index: item for index, item in enumerate(value, start=1)}
-
-    if not isinstance(value, Mapping):
-        raise ValueError(f"plan {field_name} must be an indexed object")
-
-    result: dict[int, dict[str, Any]] = {}
-    for raw_index, raw_item in value.items():
-        if isinstance(raw_index, bool):
-            raise ValueError(f"plan {field_name} key must be a positive integer")
-        try:
-            index = int(raw_index)
-        except (TypeError, ValueError) as exc:
-            raise ValueError(f"plan {field_name} key must be a positive integer: {raw_index!r}") from exc
-        if index < 1:
-            raise ValueError(f"plan {field_name} key must be positive: {index}")
-        if index in result:
-            raise ValueError(f"plan {field_name} contains duplicate index: {index}")
-        if not isinstance(raw_item, Mapping):
-            raise ValueError(f"plan {field_name}[{index}] must be an object")
-        result[index] = dict(raw_item)
-
-    return dict(sorted(result.items()))
-
-
 class Plan(BaseModel):
-    """Git-backed reusable plan control asset."""
+    model_config = ConfigDict(extra="forbid", strict=True, frozen=True)
 
-    model_config = ConfigDict(extra="ignore")
-
-    identity: str = Field(default_factory=generate_identity)
     slug: str
-    instructions: list[Any] = Field(default_factory=list, exclude=True)
-    instructions_json: str = ""
+    title: str
+    description: str
+    steps: dict[str, dict[str, Any]]
+    capabilities: dict[str, dict[str, dict[str, Any]]]
+    scope: str | None = None
 
-    metadata_json: str = "{}"
-    extra_json: str = "{}"
-
-    steps: dict[int, dict[str, Any]] = Field(default_factory=dict, exclude=True)
-    steps_json: str = ""
-
+    @field_validator("slug")
     @classmethod
-    def from_content(cls, content: Mapping[str, Any], *, slug: str, extra: Mapping[str, Any] | None = None) -> "Plan":
-        data = dict(content)
-        data.pop("identity", None)
-        data["slug"] = slug
-        data["extra_json"] = dict(extra or {})
-        return cls.model_validate(data)
-
-    @classmethod
-    def from_payload(cls, payload: Mapping[str, Any], *, slug: str) -> "Plan":
-        """Compatibility alias for internal callers; uploads use from_content()."""
-        return cls.from_content(payload, slug=slug)
-
-    @model_validator(mode="before")
-    @classmethod
-    def normalize_payload(cls, value: object) -> object:
-        if not isinstance(value, Mapping):
-            return value
-
-        data = dict(value)
-        declared = {
-            "type",
-            "identity",
-            "slug",
-            "instructions",
-            "instructions_json",
-            "metadata_json",
-            "extra_json",
-            "steps",
-            "steps_json",
-        }
-
-        if "instructions" in data and "instructions_json" not in data:
-            data["instructions_json"] = data["instructions"]
-        if "steps" in data and "steps_json" not in data:
-            data["steps_json"] = data["steps"]
-        if "steps" not in data and "steps_json" in data:
-            data["steps"] = data["steps_json"]
-
-        metadata: dict[str, Any] = {}
-        existing_metadata = data.get("metadata_json")
-        if isinstance(existing_metadata, str) and existing_metadata.strip():
-            parsed = json.loads(existing_metadata)
-            if not isinstance(parsed, dict):
-                raise ValueError("plan metadata_json must decode to an object")
-            metadata.update(parsed)
-        elif isinstance(existing_metadata, Mapping):
-            metadata.update(dict(existing_metadata))
-
-        for key in list(data):
-            if key not in declared:
-                metadata[key] = data.pop(key)
-
-        data["metadata_json"] = metadata
-        return data
-
-    @field_validator("instructions", mode="before")
-    @classmethod
-    def validate_instructions(cls, value: object) -> list[Any]:
-        return _json_list(value, field_name="instructions")
-
-    @field_validator("instructions_json", mode="before")
-    @classmethod
-    def validate_instructions_json(cls, value: object) -> str:
-        return _json_text(value, default="[]")
-
-    @field_validator("metadata_json", "extra_json", mode="before")
-    @classmethod
-    def validate_metadata_json(cls, value: object) -> str:
-        return _json_text(value, default="{}")
-
-    @field_validator("steps", mode="before")
-    @classmethod
-    def validate_steps(cls, value: object) -> dict[int, dict[str, Any]]:
-        return _indexed_object(value, field_name="steps")
-
-    @field_validator("steps_json", mode="before")
-    @classmethod
-    def validate_steps_json(cls, value: object) -> str:
-        return _json_text(value, default="[]")
-
-    @field_serializer(
-        "instructions_json",
-        "metadata_json",
-        "extra_json",
-        "steps_json",
-        when_used="json",
-    )
-    def serialize_json_text(self, value: str) -> str:
+    def valid_slug(cls, value: str) -> str:
+        if not re.fullmatch(r"[a-zA-Z0-9][a-zA-Z0-9._-]*", value):
+            raise ValueError("invalid plan slug")
         return value
+
+    @field_validator("title")
+    @classmethod
+    def valid_title(cls, value: str) -> str:
+        if not value.strip() or "\x00" in value:
+            raise ValueError("plan title must be non-empty text")
+        return value
+
+    @field_validator("steps")
+    @classmethod
+    def valid_steps(cls, value):
+        if not value or set(value) != {str(i) for i in range(1, len(value) + 1)}:
+            raise ValueError("plan step ordinals must be contiguous from 1")
+        allowed = {
+            "engine",
+            "engine_kind",
+            "instructions",
+            "args",
+            "label",
+            "model",
+            "script",
+            "rag_profile",
+            "temperature",
+            "max_output_tokens",
+        }
+        for ordinal, step in value.items():
+            if set(step) - allowed:
+                raise ValueError(
+                    f"step {ordinal}: unsupported fields {set(step) - allowed}"
+                )
+            if not {"engine", "engine_kind", "instructions", "args"} <= set(step):
+                raise ValueError(f"step {ordinal}: missing canonical fields")
+            if (
+                not isinstance(step["engine"], str)
+                or not step["engine"]
+                or step["engine"] != step["engine"].strip()
+            ):
+                raise ValueError(f"step {ordinal}: engine must be an explicit key")
+            if step["engine_kind"] not in {"llm", "script", "rag"}:
+                raise ValueError(f"step {ordinal}: invalid engine_kind")
+            if not isinstance(step["args"], dict):
+                raise ValueError(f"step {ordinal}: args must be an object")
+            if "label" in step and not isinstance(step["label"], str):
+                raise ValueError(f"step {ordinal}: label must be text")
+            validate_references(step["instructions"])
+        return value
+
+    @property
+    def identity(self) -> str:
+        return self.slug
 
     @property
     def total_steps(self) -> int:
         return len(self.steps)
 
     def step_definition(self, step_number: int) -> dict[str, Any]:
-        if step_number < 1:
-            raise IndexError(f"step_number must be >= 1, got {step_number}")
-        try:
-            return dict(self.steps[step_number])
-        except KeyError as exc:
-            raise IndexError(f"plan {self.slug} has no step {step_number}; total_steps={self.total_steps}") from exc
+        return dict(self.steps[str(step_number)])
 
     def step_args(self, step_number: int) -> dict[str, Any]:
-        args = self.step_definition(step_number).get("args", {})
-        if args is None:
-            return {}
-        if not isinstance(args, Mapping):
-            raise ValueError(f"plan step {step_number} args must be an object")
-        return dict(args)
+        return dict(self.step_definition(step_number)["args"])
 
     def step_engine(self, step_number: int) -> str:
-        step = self.step_definition(step_number)
-        args = self.step_args(step_number)
-
-        engine = step.get("engine", args.get("engine"))
-        if isinstance(engine, Mapping):
-            engine = engine.get("key") or engine.get("module")
-        if isinstance(engine, str) and engine.strip():
-            return engine.strip()
-
-        kind = step.get("engine_kind", step.get("kind", args.get("engine_kind")))
-        if isinstance(kind, str) and kind.strip() == "script":
-            return "engines.local"
-
-        raise ValueError(f"plan step {step_number} must provide an engine")
+        return self.step_definition(step_number)["engine"]
 
     def plan_dict(self) -> dict[str, Any]:
-        data: dict[str, Any] = {
-            "slug": self.slug,
-            "instructions": list(self.instructions),
-            "steps": {str(index): dict(step) for index, step in self.steps.items()},
-        }
-
-        metadata = json.loads(self.metadata_json or "{}")
-        if isinstance(metadata, dict):
-            data.update(metadata)
-        return data
-
-    def dump_json(self) -> dict[str, str]:
-        return {
-            "type": "plan",
-            "identity": self.identity,
-            "slug": self.slug,
-            "instructions_json": self.instructions_json,
-            "metadata_json": self.metadata_json,
-            "extra_json": self.extra_json,
-            "steps_json": self.steps_json,
-        }
-
-
-PlanRecord = Plan
-
-
-__all__ = ["Plan", "PlanRecord"]
+        return self.model_dump()

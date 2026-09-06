@@ -1,36 +1,32 @@
-"""Git-backed published Control catalog.
-
-One published Control bare repository and branch are authoritative for both
-``instructions/`` and ``plans/``. Plans are authored in Control alongside
-instructions; ``asc`` reads but does not author or mutate published Control.
-Plans are always read from Git. Redis may cache instructions only as needed by
-enqueue; it is never a durable Control store.
-"""
+"""Read and accept complete canonical Control snapshots directly from Git objects."""
 
 from __future__ import annotations
 
-import io
 import json
+import re
 import subprocess
-import tarfile
-import tempfile
-from contextlib import contextmanager
+import sys
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Mapping
+from typing import Any
+
+import yaml
+from jsonschema import Draft202012Validator
 
 from asc.config.repos import CONTROL
-from asc.models.control.plan import Plan
+from asc.models.control.plan import Plan, instruction_scope
+
+GIT = Path(__file__).with_name("git.py").resolve()
 
 
 @dataclass(frozen=True, slots=True)
 class GitInstruction:
-    slug: str
+    identity: str
     title: str
     content: str
     path: str
     revision: str
-    commit_timestamp: int
+    fingerprint: str
     extra: dict[str, Any]
 
 
@@ -42,346 +38,322 @@ class GitPlan:
     plan: Plan
 
 
+@dataclass(frozen=True, slots=True)
+class ControlSnapshot:
+    revision: str
+    instructions: dict[str, GitInstruction]
+    plans: dict[str, GitPlan]
+    capabilities: dict[str, dict[str, dict[str, Any]]]
+
+
+def _git(repo: Path, *args: str) -> str:
+    result = subprocess.run(
+        [sys.executable, str(GIT), "-C", str(repo), *args],
+        capture_output=True,
+        check=False,
+    )
+    if result.returncode:
+        raise RuntimeError((result.stderr or result.stdout).decode("utf-8").strip())
+    return result.stdout.decode("utf-8")
+
+
 def control_repository() -> Path:
-    """Published Control Git repository containing authored configuration."""
-    return _require_repo(CONTROL.path)
-
-
-def plan_repository() -> Path:
-    """Plans live in the same published Control repository as instructions."""
-    return control_repository()
+    repo = CONTROL.path.expanduser().resolve()
+    if not repo.exists():
+        raise FileNotFoundError(f"Git repository does not exist: {repo}")
+    return repo
 
 
 def control_ref() -> str:
     return CONTROL.config_branch
 
 
-def plan_ref() -> str:
-    """Compatibility alias: plans use the published Control ref."""
-    return control_ref()
-
-
 def control_revision() -> str:
-    return _revision(control_repository(), control_ref())
+    return _git(
+        control_repository(), "rev-parse", "--verify", f"{control_ref()}^{{commit}}"
+    ).strip()
 
 
-def plan_revision(*, required: bool = False) -> str | None:
-    """Compatibility alias: plans use the published Control revision."""
+def _immutable_revision(revision: str) -> str:
+    if not isinstance(revision, str) or not re.fullmatch(
+        r"[0-9a-f]{40}|[0-9a-f]{64}", revision
+    ):
+        raise ValueError("Control revision must be a complete immutable commit ID")
+    actual = _git(
+        control_repository(), "rev-parse", "--verify", f"{revision}^{{commit}}"
+    ).strip()
+    if actual != revision:
+        raise ValueError("Control revision must identify a commit")
+    return revision
+
+
+class _UniqueLoader(yaml.SafeLoader):
+    pass
+
+
+def _unique_mapping(loader, node):
+    pairs = loader.construct_pairs(node, deep=True)
+    return _unique_object(pairs)
+
+
+def _unique_object(pairs):
+    result = {}
+    for key, value in pairs:
+        if key in result:
+            raise ValueError(f"duplicate field: {key}")
+        result[key] = value
+    return result
+
+
+_UniqueLoader.add_constructor(
+    yaml.resolver.BaseResolver.DEFAULT_MAPPING_TAG, _unique_mapping
+)
+
+
+def _split_frontmatter(text: str, path: str) -> tuple[dict[str, Any], str]:
+    lines = text.splitlines(keepends=True)
+    if not lines or lines[0].rstrip("\r\n") != "---":
+        raise ValueError(f"{path}: instruction requires YAML frontmatter")
+    end = next(
+        (i for i in range(1, len(lines)) if lines[i].rstrip("\r\n") == "---"), None
+    )
+    if end is None:
+        raise ValueError(f"{path}: unterminated YAML frontmatter")
     try:
-        return control_revision()
-    except Exception:
-        if required:
-            raise
-        return None
+        fields = yaml.load("".join(lines[1:end]), Loader=_UniqueLoader)
+    except yaml.YAMLError as exc:
+        raise ValueError(f"{path}: invalid YAML") from exc
+    if not isinstance(fields, dict) or set(fields) != {
+        "identity",
+        "title",
+        "description",
+    }:
+        raise ValueError(
+            f"{path}: required instruction fields are identity, title, description"
+        )
+    instruction_scope(fields["identity"])
+    for key in ("title", "description"):
+        if not isinstance(fields[key], str) or "\x00" in fields[key]:
+            raise ValueError(f"{path}: {key} must be text")
+    body = "".join(lines[end + 1 :])
+    if not fields["title"].strip() or not body.strip() or "\x00" in body:
+        raise ValueError(f"{path}: title and body must be non-empty text")
+    return fields, body
 
 
+def _objects(repo: Path, revision: str, *paths: str):
+    listing = _git(repo, "ls-tree", "-rz", revision, "--", *paths)
+    for entry in listing.split("\x00"):
+        if not entry:
+            continue
+        metadata, path = entry.split("\t", 1)
+        mode, kind, oid = metadata.split()
+        if kind != "blob" or mode not in {"100644", "100755"}:
+            raise ValueError(f"{path}: Control requires ordinary files")
+        yield path, oid
 
-@contextmanager
-def control_checkout():
-    """Materialize the published Control Git tree into a temporary directory."""
-    repo = control_repository()
-    revision = control_revision()
-    result = subprocess.run(
-        ["git", "-C", str(repo), "archive", "--format=tar", revision],
-        stdout=subprocess.PIPE, stderr=subprocess.PIPE, check=False,
+
+def accept_revision(revision: str | None = None) -> ControlSnapshot:
+    """Reject the entire revision if any instruction, plan, or reference is invalid."""
+    revision = (
+        _immutable_revision(revision) if revision is not None else control_revision()
     )
-    if result.returncode != 0:
-        raise RuntimeError(result.stderr.decode("utf-8", "replace").strip() or "git archive failed")
-    with tempfile.TemporaryDirectory(prefix="autoscribe-control-") as temp:
-        root = Path(temp)
-        with tarfile.open(fileobj=io.BytesIO(result.stdout), mode="r:") as archive:
-            archive.extractall(root, filter="data")
-        yield root
-
-def instruction_records() -> list[dict[str, Any]]:
     repo = control_repository()
-    revision = control_revision()
-    listing = _git(
-        repo,
-        "ls-tree",
-        "-r",
-        "--name-only",
-        revision,
-        "--",
-        "instructions/",
-        "context/",
-    )
-    records: list[dict[str, Any]] = []
-    seen: set[str] = set()
-    for raw_path in listing.splitlines():
-        path = raw_path.strip()
+    instructions = {}
+    plans = {}
+    capabilities = {
+        name: {} for name in ("engines", "models", "local_scripts", "rag_profiles")
+    }
+    for path, oid in _objects(repo, revision, "instructions/", "context/"):
         if not path.endswith(".md"):
             continue
-        text = _git(repo, "show", f"{revision}:{path}")
-        frontmatter, _body = _split_frontmatter(text, path)
-        kind = str(frontmatter.get("record") or frontmatter.get("type") or frontmatter.get("kind") or "").strip().lower()
-        if kind and kind != "instruction":
-            continue
-        slug = str(frontmatter.get("slug") or "").strip()
-        if not slug:
-            continue
-        if slug in seen:
-            raise RuntimeError(f"duplicate committed instruction slug: {slug}")
-        seen.add(slug)
-        component = str(frontmatter.get("component") or frontmatter.get("class") or _component_from_slug(slug)).strip()
-        title = str(frontmatter.get("title") or frontmatter.get("label") or Path(path).stem).strip()
-        description = str(frontmatter.get("description") or frontmatter.get("summary") or "").strip()
-        records.append({
-            "type": "instruction",
-            "slug": slug,
-            "record_identity": slug,
-            "title": title or slug,
-            "label": title or slug,
-            "description": description,
-            "scope": component,
-            "component": component,
-            "path": path,
-            "source": "control-git",
-            "repo_commit": revision,
-        })
-    return sorted(records, key=lambda item: item["slug"])
-
-
-def plan_records(scope: str | None = None) -> list[dict[str, Any]]:
-    revision = control_revision()
-    repo = control_repository()
-    listing = _git(repo, "ls-tree", "-r", "--name-only", revision, "--", "plans/")
-    records: list[dict[str, Any]] = []
-    for raw_path in listing.splitlines():
-        path = raw_path.strip()
+        fields, body = _split_frontmatter(_git(repo, "show", oid), path)
+        identity = fields["identity"]
+        if identity in instructions:
+            raise ValueError(f"duplicate instruction identity: {identity}")
+        instructions[identity] = GitInstruction(
+            identity,
+            fields["title"],
+            body,
+            path,
+            revision,
+            oid,
+            {
+                "description": fields["description"],
+                "scope": instruction_scope(identity),
+                "repo_commit": revision,
+                "repo_path": path,
+            },
+        )
+    for path, oid in _objects(repo, revision, "plans/"):
         if not path.endswith(".json"):
             continue
-        record = _json_at(repo, revision, path)
-        identity = _plan_identity(record)
-        if not identity:
-            raise RuntimeError(f"{path}: plan requires record_identity")
-        record = dict(record)
-        record.setdefault("record_identity", identity)
-        record.setdefault("slug", identity)
-        record.setdefault("source", "control-git")
-        record.setdefault("repo_commit", revision)
-        records.append(record)
-    selected = sorted(records, key=lambda item: _plan_identity(item))
-    clean_scope = str(scope or "").strip()
-    if not clean_scope:
-        return selected
-    return [record for record in selected if _plan_scope(record) == clean_scope]
+        try:
+            record = json.loads(
+                _git(repo, "show", oid),
+                object_pairs_hook=_unique_object,
+                parse_constant=_invalid_constant,
+            )
+            plan = Plan.model_validate(record)
+            _validate_capabilities(plan)
+        except (TypeError, ValueError) as exc:
+            raise ValueError(f"{path}: invalid plan: {exc}") from exc
+        if plan.slug in plans:
+            raise ValueError(f"duplicate plan slug: {plan.slug}")
+        for step in plan.steps.values():
+            for identities in step["instructions"].values():
+                for identity in identities:
+                    if identity not in instructions:
+                        raise ValueError(
+                            f"{path}: missing instruction identity: {identity}"
+                        )
+        for registry, records in plan.capabilities.items():
+            for key, metadata in records.items():
+                previous = capabilities[registry].get(key)
+                if previous is not None and previous != metadata:
+                    raise ValueError(
+                        f"conflicting capability metadata: {registry}.{key}"
+                    )
+                capabilities[registry][key] = metadata
+        plans[plan.slug] = GitPlan(plan.slug, path, revision, plan)
+    return ControlSnapshot(revision, instructions, plans, capabilities)
 
 
-def save_plan(record: Mapping[str, Any]) -> dict[str, str]:
-    raise RuntimeError(
-        "plans are authored in the Control repository; commit and push plans/*.json through the Control authoring workflow"
-    )
+def _invalid_constant(value: str):
+    raise ValueError(f"non-JSON numeric constant: {value}")
 
 
-def delete_plan(identity: str) -> dict[str, str]:
-    raise RuntimeError(
-        "plans are authored in the Control repository; delete and publish plans/*.json through the Control authoring workflow"
-    )
+def _validate_args_schema(schema: Any) -> None:
+    if not isinstance(schema, dict) or schema.get("type") != "object":
+        raise ValueError("capability requires an object args_schema")
+
+    def check_refs(value):
+        if isinstance(value, dict):
+            for key in ("$ref", "$dynamicRef", "$recursiveRef", "$id"):
+                if key in value and not str(value[key]).startswith("#"):
+                    raise ValueError("capability schemas may only use local references")
+            for item in value.values():
+                check_refs(item)
+        elif isinstance(value, list):
+            for item in value:
+                check_refs(item)
+
+    check_refs(schema)
+    Draft202012Validator.check_schema(schema)
 
 
-def read_plan(plan_slug: str) -> GitPlan:
-    """Read and validate the current plan directly from published Control Git."""
-    slug = _safe_identity(plan_slug)
-    repo = control_repository()
-    revision = control_revision()
-    listing = _git(repo, "ls-tree", "-r", "--name-only", revision, "--", "plans/")
-    matches = [
-        (path, record)
-        for path in (raw.strip() for raw in listing.splitlines())
-        if path.endswith(".json")
-        for record in (_json_at(repo, revision, path),)
-        if _plan_identity(record) == slug
+def _validate_capabilities(plan: Plan) -> None:
+    registries = plan.capabilities
+    if set(registries) != {"engines", "models", "local_scripts", "rag_profiles"}:
+        raise ValueError(
+            "capabilities requires engines, models, local_scripts, rag_profiles registries"
+        )
+    for registry, records in registries.items():
+        for key, metadata in records.items():
+            if not key or key != key.strip():
+                raise ValueError("capability keys must be non-empty canonical strings")
+            _validate_args_schema(metadata.get("args_schema"))
+            if registry == "engines":
+                if metadata.get("kind") not in {"llm", "script", "rag"}:
+                    raise ValueError(f"invalid engine kind: {key}")
+                fields = metadata.get("step_fields")
+                if not isinstance(fields, list) or any(
+                    not isinstance(f, str) for f in fields
+                ):
+                    raise ValueError("engine requires step_fields array")
+            if (
+                registry == "models"
+                and metadata.get("engine") not in registries["engines"]
+            ):
+                raise ValueError(f"model {key} references a missing engine")
+    for step in plan.steps.values():
+        engine = registries["engines"].get(step["engine"])
+        if engine is None or engine.get("kind") != step["engine_kind"]:
+            raise ValueError(f"missing or incompatible engine: {step['engine']}")
+        fields = engine.get("step_fields")
+        if not isinstance(fields, list) or any(not isinstance(f, str) for f in fields):
+            raise ValueError("engine requires step_fields array")
+        parameters = set(step) - {
+            "engine",
+            "engine_kind",
+            "instructions",
+            "args",
+            "label",
+        }
+        if parameters - set(fields):
+            raise ValueError(
+                f"unsupported engine parameters: {parameters - set(fields)}"
+            )
+        field, registry = {
+            "llm": ("model", "models"),
+            "script": ("script", "local_scripts"),
+            "rag": ("rag_profile", "rag_profiles"),
+        }[step["engine_kind"]]
+        if (set(step) & {"model", "script", "rag_profile"}) != {field}:
+            raise ValueError("step must reference only its engine kind capability")
+        reference = step.get(field)
+        if not isinstance(reference, str) or reference not in registries[registry]:
+            raise ValueError(f"missing {field} reference: {reference}")
+        capability = registries[registry][reference]
+        if field == "model" and capability.get("engine") != step["engine"]:
+            raise ValueError("model belongs to a different engine")
+        for metadata in (engine, capability):
+            schema = metadata.get("args_schema")
+            errors = list(Draft202012Validator(schema).iter_errors(step["args"]))
+            if errors:
+                raise ValueError(f"invalid capability args: {errors[0].message}")
+        if "temperature" in step and (
+            type(step["temperature"]) not in {int, float}
+            or not 0 <= step["temperature"] <= 2
+        ):
+            raise ValueError("temperature must be numeric between 0 and 2")
+        if "max_output_tokens" in step and (
+            type(step["max_output_tokens"]) is not int or step["max_output_tokens"] < 1
+        ):
+            raise ValueError("max_output_tokens must be a positive integer")
+
+
+def read_plan(plan_slug: str, revision: str | None = None) -> GitPlan:
+    snapshot = accept_revision(revision)
+    try:
+        return snapshot.plans[plan_slug]
+    except KeyError:
+        raise KeyError(f"plan not found in Control Git: {plan_slug}") from None
+
+
+def read_instruction(instruction_identity: str, revision: str) -> GitInstruction:
+    instruction_scope(instruction_identity)
+    snapshot = accept_revision(revision)
+    try:
+        return snapshot.instructions[instruction_identity]
+    except KeyError:
+        raise KeyError(
+            f"instruction not found in Control Git: {instruction_identity}"
+        ) from None
+
+
+def instruction_records(
+    snapshot: ControlSnapshot | None = None,
+) -> list[dict[str, Any]]:
+    snapshot = snapshot if snapshot is not None else accept_revision()
+    return [
+        {
+            "identity": item.identity,
+            "title": item.title,
+            "path": item.path,
+            "source_fingerprint": item.fingerprint,
+            **item.extra,
+        }
+        for _, item in sorted(snapshot.instructions.items())
     ]
-    if not matches:
-        raise KeyError(f"plan not found in Control Git: {slug}")
-    if len(matches) != 1:
-        raise RuntimeError(f"duplicate committed plan slug: {slug}")
-    path, record = matches[0]
-    content = _plan_content(record)
-    try:
-        plan = Plan.from_content(
-            content,
-            slug=slug,
-            extra={"repo_commit": revision, "repo_path": path},
-        )
-        plan.identity = slug
-    except (TypeError, ValueError) as exc:
-        raise ValueError(f"{path}: invalid plan: {exc}") from exc
-    if not plan.steps:
-        raise ValueError(f"plan has no embedded steps: {path}")
-    return GitPlan(slug=slug, path=path, revision=revision, plan=plan)
 
 
-def read_instruction(instruction_slug: str) -> GitInstruction:
-    """Read one current instruction and its last Git change timestamp."""
-    slug = _safe_identity(instruction_slug)
-    repo = control_repository()
-    revision = control_revision()
-    listing = _git(
-        repo,
-        "ls-tree",
-        "-r",
-        "--name-only",
-        revision,
-        "--",
-        "instructions/",
-        "context/",
-    )
-    matches: list[tuple[str, dict[str, str], str]] = []
-    for path in (raw.strip() for raw in listing.splitlines()):
-        if not path.endswith(".md"):
-            continue
-        frontmatter, body = _split_frontmatter(
-            _git(repo, "show", f"{revision}:{path}"), path
-        )
-        if str(frontmatter.get("slug") or "").strip() == slug:
-            matches.append((path, frontmatter, body))
-    if not matches:
-        raise KeyError(f"instruction not found in Control Git: {slug}")
-    if len(matches) != 1:
-        raise RuntimeError(f"duplicate committed instruction slug: {slug}")
-    path, frontmatter, body = matches[0]
-    actual_slug = str(frontmatter.get("slug") or "").strip()
-    if actual_slug != slug:
-        raise RuntimeError(
-            f"instruction slug mismatch at {path}: expected {slug}, "
-            f"got {actual_slug or '(blank)'}"
-        )
-    changed_at = _git(
-        repo, "log", "-1", "--format=%ct", revision, "--", path
-    ).strip()
-    if not changed_at:
-        raise RuntimeError(f"instruction has no Git commit timestamp: {path}")
-    component = str(
-        frontmatter.get("component")
-        or frontmatter.get("class")
-        or _component_from_slug(slug)
-    ).strip()
-    title = str(
-        frontmatter.get("title") or frontmatter.get("label") or Path(path).stem
-    ).strip()
-    return GitInstruction(
-        slug=slug,
-        title=title or slug,
-        content=body,
-        path=path,
-        revision=revision,
-        commit_timestamp=int(changed_at),
-        extra={
-            "description": str(
-                frontmatter.get("description") or frontmatter.get("summary") or ""
-            ).strip(),
-            "scope": component,
-            "component": component,
-            "repo_commit": revision,
-            "repo_path": path,
-            "repo_ref": control_ref(),
-        },
-    )
-
-
-def _require_repo(path: Path) -> Path:
-    resolved = path.expanduser().resolve()
-    if not resolved.exists():
-        raise FileNotFoundError(f"Git repository does not exist: {resolved}")
-    _git(resolved, "rev-parse", "--absolute-git-dir")
-    return resolved
-
-
-
-def _revision(repo: Path, ref: str) -> str:
-    return _git(repo, "rev-parse", "--verify", f"{ref}^{{commit}}").strip()
-
-
-def _json_at(repo: Path, revision: str, path: str) -> Mapping[str, Any]:
-    try:
-        value = json.loads(_git(repo, "show", f"{revision}:{path}"))
-    except json.JSONDecodeError as exc:
-        raise ValueError(f"{path}: invalid JSON: {exc}") from exc
-    if not isinstance(value, Mapping):
-        raise ValueError(f"{path}: expected JSON object")
-    return value
-
-
-def _split_frontmatter(text: str, path: str) -> tuple[dict[str, str], str]:
-    lines = str(text).replace("\r\n", "\n").split("\n")
-    if not lines or lines[0].strip() != "---":
-        raise ValueError(f"{path}: instruction Markdown requires YAML frontmatter")
-    try:
-        end = next(index for index, line in enumerate(lines[1:], 1) if line.strip() == "---")
-    except StopIteration as exc:
-        raise ValueError(f"{path}: unterminated YAML frontmatter") from exc
-    frontmatter: dict[str, str] = {}
-    for line in lines[1:end]:
-        if ":" not in line:
-            continue
-        key, raw = line.split(":", 1)
-        key = key.strip()
-        value = raw.strip()
-        if len(value) >= 2 and value[0] == value[-1] and value[0] in {"'", '"'}:
-            value = value[1:-1]
-        if key:
-            frontmatter[key] = value
-    return frontmatter, "\n".join(lines[end + 1 :]).strip()
-
-
-
-def _plan_content(record: Mapping[str, Any]) -> Mapping[str, Any]:
-    """Return the compact plan content, accepting legacy ``payload`` records."""
-    content = record.get("record_content")
-    if not isinstance(content, Mapping):
-        content = record.get("payload")
-    if not isinstance(content, Mapping):
-        identity = _plan_identity(record) or "(unknown plan)"
-        raise ValueError(f"{identity}: plan record_content must be an object")
-    return content
-
-
-def _plan_scope(record: Mapping[str, Any]) -> str:
-    direct = record.get("scope")
-    if isinstance(direct, str) and direct.strip():
-        return direct.strip()
-    content = record.get("record_content")
-    if not isinstance(content, Mapping):
-        content = record.get("payload")
-    if isinstance(content, Mapping):
-        value = content.get("scope")
-        if isinstance(value, str):
-            return value.strip()
-    return ""
-
-def _plan_identity(record: Mapping[str, Any]) -> str:
-    return str(record.get("record_identity") or record.get("slug") or record.get("identity") or "").strip()
-
-
-def _safe_identity(value: str) -> str:
-    clean = str(value or "").strip()
-    if not clean or any(character not in "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789._-" for character in clean):
-        raise ValueError(f"invalid control identity: {clean or '(blank)'}")
-    return clean
-
-
-def _component_from_slug(slug: str) -> str:
-    return {
-        "std": "standing", "rul": "rule", "rol": "role", "ctx": "context",
-        "tsk": "task", "ins": "task", "spc": "task",
-    }.get(str(slug).split(".", 1)[0], "")
-
-
-def _git(repo: Path, *args: str) -> str:
-    result = _run_optional(["git", "-C", str(repo), *args])
-    if result.returncode != 0:
-        raise RuntimeError((result.stderr or result.stdout or "Git command failed").strip())
-    return result.stdout
-
-
-def _run_optional(args: list[str]) -> subprocess.CompletedProcess[str]:
-    return subprocess.run(args, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, check=False)
-
-
-__all__ = [
-    "control_checkout", "control_ref", "control_repository", "control_revision", "delete_plan",
-    "GitInstruction", "GitPlan", "instruction_records", "plan_records", "plan_ref",
-    "plan_repository", "plan_revision", "read_instruction", "read_plan", "save_plan",
-]
+def plan_records(
+    scope: str | None = None, *, snapshot: ControlSnapshot | None = None
+) -> list[dict[str, Any]]:
+    snapshot = snapshot if snapshot is not None else accept_revision()
+    return [
+        item.plan.plan_dict() | {"repo_commit": snapshot.revision, "path": item.path}
+        for _, item in sorted(snapshot.plans.items())
+        if scope is None or item.plan.scope == scope
+    ]

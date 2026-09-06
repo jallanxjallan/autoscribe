@@ -46,7 +46,7 @@ def load_plan(plan_slug: str) -> LoadedPlan:
         raise ValueError(f"plan has no embedded steps: {source.path}")
 
     expected = list(range(1, plan.total_steps + 1))
-    actual = list(plan.steps)
+    actual = sorted(int(index) for index in plan.steps)
     if actual != expected:
         raise ValueError(
             f"plan step ordinals must be contiguous from 1: expected {expected}, got {actual}"

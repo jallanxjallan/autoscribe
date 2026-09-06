@@ -44,6 +44,7 @@ def enqueue_record(record: EnqueueRecord) -> EnqueuedCall:
         runtimes = materialize_runtimes(
             call_identity=call.identity,
             plan=record.plan.plan,
+            control_revision=record.plan.revision,
             directive=record.directive,
         )
         job = create_job(
