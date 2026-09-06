@@ -6,7 +6,7 @@ import json
 from collections.abc import Mapping
 from typing import Any, ClassVar, Literal
 
-from pydantic import AliasChoices, ConfigDict, Field, field_validator, model_validator
+from pydantic import ConfigDict, Field, field_validator, model_validator
 
 from asc.redis.model_base import RedisModel
 
@@ -26,9 +26,9 @@ class Runtime(RedisModel):
 
     identity: str
     plan_identity: str
-    ordinal: int = Field(validation_alias=AliasChoices("ordinal", "step_number", "number", "index"))
+    ordinal: int
     total_steps: int
-    engine_kind: Literal["llm", "script", "rag"] = Field(validation_alias=AliasChoices("engine_kind", "kind"))
+    engine_kind: Literal["llm", "script", "rag"]
     engine: str
     label: str = ""
     instruction_keys: dict[str, str | list[str]] = Field(default_factory=dict)
@@ -39,24 +39,6 @@ class Runtime(RedisModel):
     temperature: float | None = None
     max_output_tokens: int | None = None
     args: dict[str, Any] = Field(default_factory=dict)
-
-    @model_validator(mode="before")
-    @classmethod
-    def normalize_shape(cls, value: object) -> object:
-        if not isinstance(value, Mapping):
-            return value
-        data = dict(value)
-        if "engine_kind" not in data and "kind" in data:
-            data["engine_kind"] = data["kind"]
-        data.pop("kind", None)
-        if "ordinal" not in data:
-            for alias in ("step_number", "number", "index"):
-                if alias in data:
-                    data["ordinal"] = data[alias]
-                    break
-        for alias in ("step_number", "number", "index"):
-            data.pop(alias, None)
-        return data
 
     @model_validator(mode="after")
     def validate_engine_contract(self) -> "Runtime":
@@ -139,7 +121,9 @@ class Runtime(RedisModel):
             elif isinstance(value, (str, int, float)):
                 result[field_name] = str(value)
             else:
-                result[field_name] = json.dumps(value, ensure_ascii=False, separators=(",", ":"))
+                result[field_name] = json.dumps(
+                    value, ensure_ascii=False, separators=(",", ":")
+                )
         return result
 
 

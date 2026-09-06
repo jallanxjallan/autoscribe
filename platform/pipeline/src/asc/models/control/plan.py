@@ -1,15 +1,20 @@
 """Trusted canonical Git plan record. Runtime identities belong elsewhere."""
 
-from typing import Any
-import re
-
 from dataclasses import asdict, dataclass
+import re
+from typing import Any
 
-INSTRUCTION_PATTERN = re.compile(r"(?:rol|ctx|spc)_[0-9A-HJKMNP-TV-Z]{16}")
-SCOPES = {"rol": "role", "ctx": "context", "spc": "task"}
+INSTRUCTION_PATTERN = re.compile(r"(?:rol|ctx|tsk)_[0-9A-HJKMNP-TV-Z]{16}")
+SCOPES = {"rol": "role", "ctx": "context", "tsk": "task"}
 
 
-def instruction_scope(identity: str) -> str:
+def instruction_scope(identity: str, *, published: bool = False) -> str:
+    if (
+        published
+        and isinstance(identity, str)
+        and re.fullmatch(r"(?:rol|ctx|tsk)\.[a-z0-9-]+\.[a-z0-9]+", identity)
+    ):
+        return SCOPES[identity[:3]]
     if not isinstance(identity, str) or not INSTRUCTION_PATTERN.fullmatch(identity):
         raise ValueError(f"invalid instruction identity: {identity!r}")
     return SCOPES[identity[:3]]
@@ -17,16 +22,18 @@ def instruction_scope(identity: str) -> str:
 
 @dataclass(frozen=True, slots=True)
 class Plan:
-    slug: str
+    """Canonical plan authored by the trusted Control producer."""
+
+    identity: str
     title: str
     description: str
     steps: dict[str, dict[str, Any]]
     capabilities: dict[str, dict[str, dict[str, Any]]]
     scope: str | None = None
 
-    @property
-    def identity(self) -> str:
-        return self.slug
+    @classmethod
+    def from_record(cls, record: dict[str, Any]) -> "Plan":
+        return cls(**record)
 
     @property
     def total_steps(self) -> int:

@@ -2,7 +2,9 @@ import sys
 from collections.abc import Iterable
 from typing import TextIO
 
+from asc.control.repository import control_revision
 from asc.enqueue.job import activate_job, create_job, deactivate_job
+from asc.enqueue.plan import load_plan
 from asc.enqueue.reader import EnqueueRecord, iter_enqueue_records
 from asc.enqueue.report import EnqueuedCall, EnqueueReport
 from asc.enqueue.runtime import delete_ephemeral_instructions, materialize_runtimes
@@ -39,19 +41,23 @@ def enqueue_record(record: EnqueueRecord) -> EnqueuedCall:
     runtimes = ()
     job = None
     job_activated = False
+    plan_key = record.plan_slug
 
     try:
+        revision = control_revision()
+        plan = load_plan(record.plan_slug, revision=revision)
+        plan_key = plan.plan_key
         runtimes = materialize_runtimes(
             call_identity=call.identity,
-            plan=record.plan.plan,
-            control_revision=record.plan.revision,
+            plan=plan.plan,
+            control_revision=revision,
             directive=record.directive,
-            instruction_sources=record.plan.instructions,
+            instruction_sources=plan.instructions,
         )
         job = create_job(
             call_identity=call.identity,
-            plan_identity=str(record.plan.plan.identity),
-            total_steps=record.plan.step_count,
+            plan_identity=str(plan.plan.identity),
+            total_steps=plan.step_count,
         )
         activate_job(job)
         job_activated = True
@@ -70,7 +76,7 @@ def enqueue_record(record: EnqueueRecord) -> EnqueuedCall:
             process_identity=call.identity,
             source_identity=record.source_identity,
             call_key=call_key,
-            plan_key=record.plan.plan_key,
+            plan_key=plan_key,
         )
         raise
 
@@ -80,8 +86,8 @@ def enqueue_record(record: EnqueueRecord) -> EnqueuedCall:
         call_key=call_key,
         runtime_keys=tuple(runtime.raw_key for runtime in runtimes),
         job_key=job.raw_key,
-        plan_key=record.plan.plan_key,
-        step_count=record.plan.step_count,
+        plan_key=plan_key,
+        step_count=plan.step_count,
     )
 
 

@@ -13,7 +13,7 @@ from typing import Any
 import yaml
 
 from asc.config.repos import CONTROL
-from asc.models.control.plan import Plan, SCOPES
+from asc.models.control.plan import Plan, instruction_scope
 
 GIT = Path(__file__).with_name("git.py").resolve()
 
@@ -117,9 +117,10 @@ def _objects(repo: Path, revision: str, *paths: str):
 
 
 class ControlRepository:
-    """A small read-through view of one commit; no authoring validation.
+    """A read-through view of one commit with canonical record shape checks.
 
-    Filenames are nonsemantic in Control. Git searches locate declarations;
+    Plans use canonical identity filenames; instruction filenames are descriptive.
+    Git searches locate instruction declarations;
     only requested records are parsed, and each blob is read once per view.
     """
 
@@ -167,15 +168,22 @@ class ControlRepository:
                 raise ValueError(
                     f"{path} at {self.revision}: cannot parse canonical JSON"
                 ) from exc
-            plan = Plan(**record)
-            self._plans[path] = GitPlan(plan.slug, path, self.revision, plan)
+            plan = Plan.from_record(record)
+            self._plans[path] = GitPlan(plan.identity, path, self.revision, plan)
         return self._plans[path]
 
     def _instruction(self, path: str) -> GitInstruction:
         if path not in self._instructions:
             oid, text = self._blob(path)
             fields, body = _split_frontmatter(text, path)
-            identity = fields["identity"]
+            if not isinstance(fields, dict):
+                raise ValueError(f"{path}: instruction frontmatter must be a mapping")
+            identity = fields.get("identity", fields.get("slug"))
+            if identity is None:
+                raise ValueError(f"{path}: missing instruction identity declaration")
+            scope = instruction_scope(identity, published="identity" not in fields)
+            if not isinstance(fields.get("title"), str) or not fields["title"].strip():
+                raise ValueError(f"{path}: instruction requires title")
             self._instructions[path] = GitInstruction(
                 identity,
                 fields["title"],
@@ -184,8 +192,8 @@ class ControlRepository:
                 self.revision,
                 oid,
                 {
-                    "description": fields["description"],
-                    "scope": SCOPES[identity[:3]],
+                    "description": fields.get("description", ""),
+                    "scope": scope,
                     "repo_commit": self.revision,
                     "repo_path": path,
                 },
@@ -193,23 +201,32 @@ class ControlRepository:
         return self._instructions[path]
 
     def read_plan(self, slug: str) -> GitPlan:
-        pattern = r'"slug"[[:space:]]*:[[:space:]]*' + re.escape(json.dumps(slug))
-        for path in self._find(pattern, "plans/*.json"):
-            source = self._plan(path)
-            if source.slug == slug:
-                return source
-        raise KeyError(f"missing plan: {slug} at Control revision {self.revision}")
+        if not isinstance(slug, str) or not re.fullmatch(r"[A-Za-z0-9_.-]+", slug):
+            raise ValueError(f"invalid plan identity: {slug!r}")
+        path = f"plans/{slug}.json"
+        # Test object existence separately: parser/schema errors are never missing.
+        if path not in dict(_objects(self.repo, self.revision, path)):
+            raise KeyError(f"missing plan: {slug} at Control revision {self.revision}")
+        source = self._plan(path)
+        if source.slug != slug:
+            raise ValueError(
+                f"{path}: plan identity mismatch: requested {slug!r}, found {source.slug!r}"
+            )
+        return source
 
     def read_instruction(self, identity: str) -> GitInstruction:
         pattern = (
-            r"^identity:[[:space:]]*['\"]?"
+            r"^(identity|slug):[[:space:]]*['\"]?"
             + re.escape(identity)
             + r"['\"]?[[:space:]]*$"
         )
         for path in self._find(pattern, "instructions/*.md", "context/*.md"):
             source = self._instruction(path)
-            if source.identity == identity:
-                return source
+            if source.identity != identity:
+                raise ValueError(
+                    f"{path}: instruction identity mismatch: requested {identity!r}, found {source.identity!r}"
+                )
+            return source
         raise KeyError(
             f"missing instruction: {identity} at Control revision {self.revision}"
         )
@@ -271,8 +288,14 @@ def plan_records(
     scope: str | None = None, *, snapshot: ControlSnapshot | None = None
 ) -> list[dict[str, Any]]:
     snapshot = snapshot if snapshot is not None else list_revision()
+    # Preserve the administrative NDJSON contract; canonical input uses identity.
     return [
-        item.plan.plan_dict() | {"repo_commit": snapshot.revision, "path": item.path}
+        {
+            "slug": item.plan.identity,
+            **{k: v for k, v in item.plan.plan_dict().items() if k != "identity"},
+            "repo_commit": snapshot.revision,
+            "path": item.path,
+        }
         for _, item in sorted(snapshot.plans.items())
         if scope is None or item.plan.scope == scope
     ]

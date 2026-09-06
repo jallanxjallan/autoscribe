@@ -33,7 +33,7 @@ def _json_object_text(value: object, field_name: str) -> str:
 
 
 class Instruction(RedisModel):
-    """Instruction content stored independently of its upload envelope."""
+    """Reusable content materialized from a pinned Git instruction blob."""
 
     kind: ClassVar[str] = "instruction"
     component: ClassVar[str] = "record"
@@ -48,19 +48,10 @@ class Instruction(RedisModel):
     content_sha256: str = ""
     extra_json: str = "{}"
 
-    @classmethod
-    def load_redis(cls, data: dict[str, str]):
-        # Drain already-enqueued calls across deployment. These retired fields
-        # never participate in Control resolution or materialization reuse.
-        data = dict(data)
-        for field in ("slug", "source_modified_ns", "source_size"):
-            data.pop(field, None)
-        return cls.model_validate(data)
-
     @model_validator(mode="after")
     def validate_source_version(self):
         if self.control_identity or self.source_fingerprint:
-            instruction_scope(self.control_identity)
+            instruction_scope(self.control_identity, published=True)
             if not re.fullmatch(r"[0-9a-f]{40}|[0-9a-f]{64}", self.source_fingerprint):
                 raise ValueError("source_fingerprint must be a Git blob object ID")
         return self

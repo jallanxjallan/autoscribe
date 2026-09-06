@@ -1,150 +1,68 @@
 # Canonical Control identity and enqueue revisions
 
 Control is read directly from immutable Git objects through `asc/control/git.py`.
-`accept_revision()` resolves the configured branch once and validates every
-instruction, plan, reference, and capability declaration before returning a
-snapshot. Invalid revisions fail, including when the invalid plan is not selected.
-No checkout, archive, temporary extraction, Redis refresh, normalization, or
-fallback to an earlier revision is performed.
-
-`LoadedPlan.revision` is explicitly forwarded by enqueue to runtime construction
-and instruction materialization. Instruction reads require a full immutable
-commit ID and never resolve the branch. Each read validates that exact snapshot;
-there is no persistent acceptance cache or working-tree dependency.
+Enqueue resolves the configured branch once and passes that commit to plan and
+instruction reads. Only selected records and their dependencies are resolved.
+No checkout, extraction, Redis plan materialization, or revision fallback occurs.
 
 ## Canonical source contract
 
-Instructions remain Markdown under the existing `instructions/` and `context/`
-paths. Their frontmatter contains exactly these fields:
+Each `plans/<identity>.json` contains one flat object with required `identity`,
+`title`, `description`, `steps`, and `capabilities`, plus optional `scope`.
+Plan `slug` aliases and `record_type`/`record_identity`/`record_content` envelopes
+are rejected. Missing paths, invalid JSON/schema, and identity mismatches remain
+distinct failures. Historical revisions are read as authored, never normalized.
 
-```yaml
----
-identity: spc_3N6K8R2V7M4Q9D1X
-title: Line edit
-description: Preserve the author's meaning.
----
-Edit the supplied prose.
-```
+Steps are keyed by consecutive string ordinals starting at `"1"`. Required fields
+are `engine`, `engine_kind`, `instructions`, and `args`. Instructions contain
+`role`, `context`, and `task` arrays. Kind `llm` requires `model`, `script` requires
+`script`, and `rag` requires `rag_profile`; capability families cannot be mixed.
+Optional fields are `label`, `temperature`, and `max_output_tokens`. Obsolete
+`kind`, `index`, `instruction`, and `instruction_slugs` fields are rejected.
 
-`identity` is client-supplied, unique across both directories, and matches
-`(rol|ctx|spc)_[0-9A-HJKMNP-TV-Z]{16}`. The prefixes mean role, context, and task.
-Identity changes represent replacement with a different instruction; ordinary
-edits retain the identity. No identity is generated, inferred, or migrated by the
-pipeline. Filenames and titles do not participate in identity resolution.
-Duplicate YAML/JSON fields, aliases, absent fields, empty bodies and symlinks fail.
-Bodies are retained without stripping whitespace.
+Capability metadata remains embedded in each plan under `engines`, `models`,
+`local_scripts`, and `rag_profiles`. Enqueue requires selected declarations to
+exist and checks installed execution artifacts. It does not validate capability
+JSON Schemas or merge all plans for authoring validation. Git pins metadata, not
+extension code. Runtime construction carries the selected component names and
+arguments; the worker resolves executable files from Extensions. The retained
+HHP plans declare the installed ChatGPT engine and its supported `sol` model.
 
-Plans remain JSON under `plans/`, with this single representation:
+Instructions remain ordinary Markdown under `instructions/` and `context/`.
+Descriptive filenames require declaration lookup. Current authoring frontmatter
+contains `identity`, `title`, and `description`. Opaque identities use
+`(rol|ctx|tsk)_[0-9A-HJKMNP-TV-Z]{16}`. The obsolete `spc_` prefix is rejected.
+Published dotted `slug` declarations remain explicitly supported for instruction
+reads and materialization reloads. This is a declaration format, not a transport
+envelope. Bodies are read directly from the pinned blob with whitespace intact.
+The local HHP instruction bodies and frontmatter were not changed by this
+follow-on migration.
 
-```json
-{
-  "slug": "line-edit",
-  "title": "Line edit",
-  "description": "Edit prose",
-  "steps": {
-    "1": {
-      "engine": "chatgpt",
-      "engine_kind": "llm",
-      "model": "cheap",
-      "instructions": {
-        "role": [],
-        "context": [],
-        "task": ["spc_3N6K8R2V7M4Q9D1X"]
-      },
-      "args": {}
-    }
-  },
-  "capabilities": {
-    "engines": {
-      "chatgpt": {
-        "kind": "llm",
-        "step_fields": ["model", "temperature", "max_output_tokens"],
-        "args_schema": {"type": "object", "additionalProperties": false}
-      }
-    },
-    "models": {
-      "cheap": {
-        "engine": "chatgpt",
-        "args_schema": {"type": "object", "additionalProperties": false}
-      }
-    },
-    "local_scripts": {},
-    "rag_profiles": {}
-  }
-}
-```
+## Runtime and stream boundaries
 
-An optional plan `scope` supports catalog filtering. Step keys must be contiguous
-positive ordinals beginning at `1`; steps must be an object, not a list or JSON
-string. Every step explicitly supplies `engine`, `engine_kind`, `instructions`
-(with all three scope arrays), and `args`. Runtime parameters use their canonical
-step fields, not aliases inside `args`. `model`, `script`, or `rag_profile` is
-required according to engine kind. Step `label` is optional display text.
+Instruction materializations receive server-generated ULIDs. Reuse requires a
+matching Control identity and Git blob fingerprint and sufficient remaining TTL.
+Supplied instruction sources must match the requested identity and revision.
+The old Redis instruction adapter discarding transport-era `slug`,
+`source_modified_ns`, and `source_size` fields was removed. Runtime readers no
+longer accept `kind`, `step_number`, `number`, or `index` aliases. Scalar directive
+keys remain valid runtime data; authored instruction references are arrays.
 
-Capability metadata is embedded in each plan so its Git version is pinned
-without introducing a new Control directory. The compiler must supply all four
-registries. Every capability requires an object `args_schema` (JSON Schema
-2020-12); both engine and selected capability schemas validate `args` without
-coercion or inserting defaults. Only local schema references are allowed.
-Engine `step_fields` declares allowed runtime parameters. Model metadata names
-its owning engine. Conflicting declarations across plans reject the revision.
-`control snapshot` schema version 4 exports the accepted commit's metadata;
-`components` continues to describe installed extensions for authoring purposes.
-Executable extension code remains in the configured Extensions installation;
-this change pins capability metadata, not executable binaries.
+NDJSON remains the call input and administrative output protocol. It is not the
+Control storage format. Existing administrative plan output retains its `slug`
+field as an explicit projection from canonical `identity`; this is not an input
+alias. The shared source-document/call slugmap remains outside Control lookup.
 
-Existing legacy Control publications must be republished in this canonical
-format by the client before enqueue can accept them. This work does not edit
-Control authoring files or Obsidian/client machinery.
+## Migration and validation boundary
 
-## Materializations and identities
+All three retained HHP source plans now declare `identity`; their existing modern
+steps and real capability declarations are retained. The plan template and
+Control guidance use the same schema. The historical published revision contains
+wrapped plans with `kind` and `instruction_slugs` and lacks capability metadata;
+it must not be accepted through compatibility parsing. Publishing migrated
+Control is a separate operation and was not performed.
 
-- Source documents and plans keep their existing human-readable slugs.
-- Instructions have permanent opaque Control identities.
-- Git commits select snapshots; Git blob IDs fingerprint exact instruction files.
-- Server-generated ULIDs identify Redis instruction materializations.
-
-`state:instruction_materializations:index` is a preferred-materialization cache
-keyed by permanent instruction identity. Reuse requires a loadable record of the
-correct kind, matching Control identity and blob fingerprint, and the configured
-minimum remaining TTL. ULID timestamps and filesystem timestamps are never used.
-A changed blob, expired/missing record, mismatched identity, or low TTL creates a
-new ULID record with the configured instruction TTL. Existing records and their
-TTLs are not modified. Concurrent enqueues may create independent valid versions;
-the pointer is a hint, so no CAS protocol is needed for correctness. Old calls
-continue using their recorded keys until those keys expire naturally.
-
-## Removed and retained code
-
-Removed `control_checkout`, archive/extraction imports, plan content/identity
-aliases, server-generated plan identities, legacy instruction reference parsing,
-engine inference/default repair, and instruction usage of the slugmap.
-Removed obsolete modules:
-
-- `asc/models/control/step.py`
-- `asc/streams/control/list.py`
-- `asc/streams/control/snapshot.py`
-
-The shared `asc/state/slugmap.py` remains for source document and call slugs only.
-This preserves ingest, source matching, reconciliation, and writeback identity.
-
-One narrowly scoped durable-data adapter remains in `Instruction.load_redis`:
-it discards old `slug`, `source_modified_ns`, and `source_size` fields while
-loading already-materialized Redis records. This allows in-flight calls from
-before deployment to finish. It does not accept legacy Control input or resolve
-slugs, and those records cannot be reused because they lack source fingerprints.
-The persisted Runtime reader still accepts its prior field aliases and scalar
-instruction keys to drain existing records and handle call directives; canonical
-Control validation rejects those authoring shapes before enqueue. Report-only
-Git-reference properties in `LoadedPlan` remain to preserve the NDJSON contract.
-
-## Change inventory
-
-Modified `pyproject.toml` (JSON Schema dependency), this document,
-`asc/cli/control.py`, `asc/control/{list,repository,snapshot}.py`,
-`asc/enqueue/{instruction,plan,reader,runtime,service}.py`,
-`asc/models/control/{__init__,instruction,plan}.py`, and
-`tests/test_{control_git_repository,enqueue_instruction_materialization}.py`.
-Added `asc/control/git.py` and `asc/state/instruction_materializations.py`.
-The three deleted modules are listed above. Source/document writers and client
-files were not changed.
+The user waived further tests during this follow-on. Repository test changes
+were not applied. Existing tests still include the superseded schema and require
+updating before the suite can be treated as the current contract. Production
+failure records, services, queues, and Redis state were not modified by this work.

@@ -24,6 +24,10 @@ def resolve_instruction_key(
         if source is not None
         else read_instruction(instruction_identity, control_revision)
     )
+    if source.identity != instruction_identity:
+        raise ValueError("instruction identity mismatch at materialization")
+    if source.revision != control_revision:
+        raise ValueError("instruction revision mismatch at materialization")
     materializations = InstructionMaterializations()
     current_key = materializations.get(source.identity)
     if current_key and _can_reuse(current_key, source):

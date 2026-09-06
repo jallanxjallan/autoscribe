@@ -3,19 +3,17 @@ from dataclasses import dataclass
 from typing import Any, TextIO
 
 from asc.enqueue.call import store_call
-from asc.enqueue.plan import LoadedPlan, load_plan
 from asc.models.process.call import CallRecord
 from asc.streams.ndjson import iter_ndjson_records
 
 
 @dataclass(frozen=True, slots=True)
 class EnqueueRecord:
-    """One inline call record plus its plan, resolved at the enqueue boundary."""
+    """One inline call record plus the plan identity to resolve on enqueue."""
 
     call_slug: str
     plan_slug: str
     call_key: str
-    plan: LoadedPlan
     call: CallRecord
     raw_record: Mapping[str, Any]
     directive: str | None = None
@@ -32,13 +30,11 @@ def iter_enqueue_records(stream: TextIO) -> Iterator[EnqueueRecord]:
             raise TypeError(f"row {parsed.line_number} must be a JSON object")
         plan_slug = _required_slug(raw, "plan", parsed.line_number)
         directive = _optional_directive(raw, parsed.line_number)
-        plan = load_plan(plan_slug)
         call_key, call = store_call(raw)
         yield EnqueueRecord(
             call_slug=str(call.source_identity),
             plan_slug=plan_slug,
             call_key=call_key,
-            plan=plan,
             call=call,
             raw_record=raw,
             directive=directive,
