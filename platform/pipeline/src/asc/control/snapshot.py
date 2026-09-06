@@ -2,12 +2,12 @@
 
 from typing import Any
 
-from asc.control.repository import accept_revision, instruction_records, plan_records
+from asc.control.repository import list_revision, instruction_records, plan_records
 
 
 def build_control_snapshot() -> dict[str, Any]:
-    """Return one accepted Git snapshot, including pinned capability metadata."""
-    snapshot = accept_revision()
+    """Return one Git listing, including pinned capability metadata."""
+    snapshot = list_revision()
     instructions = {
         record["identity"]: record for record in instruction_records(snapshot)
     }

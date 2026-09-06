@@ -1,4 +1,4 @@
-"""Read and accept complete canonical Control snapshots directly from Git objects."""
+"""Read trusted canonical Control directly from immutable Git objects."""
 
 from __future__ import annotations
 
@@ -11,10 +11,9 @@ from pathlib import Path
 from typing import Any
 
 import yaml
-from jsonschema import Draft202012Validator
 
 from asc.config.repos import CONTROL
-from asc.models.control.plan import Plan, instruction_scope
+from asc.models.control.plan import Plan, SCOPES
 
 GIT = Path(__file__).with_name("git.py").resolve()
 
@@ -46,12 +45,14 @@ class ControlSnapshot:
     capabilities: dict[str, dict[str, dict[str, Any]]]
 
 
-def _git(repo: Path, *args: str) -> str:
+def _git(repo: Path, *args: str, missing_ok: bool = False) -> str:
     result = subprocess.run(
         [sys.executable, str(GIT), "-C", str(repo), *args],
         capture_output=True,
         check=False,
     )
+    if missing_ok and result.returncode == 1:
+        return ""
     if result.returncode:
         raise RuntimeError((result.stderr or result.stdout).decode("utf-8").strip())
     return result.stdout.decode("utf-8")
@@ -87,29 +88,6 @@ def _immutable_revision(revision: str) -> str:
     return revision
 
 
-class _UniqueLoader(yaml.SafeLoader):
-    pass
-
-
-def _unique_mapping(loader, node):
-    pairs = loader.construct_pairs(node, deep=True)
-    return _unique_object(pairs)
-
-
-def _unique_object(pairs):
-    result = {}
-    for key, value in pairs:
-        if key in result:
-            raise ValueError(f"duplicate field: {key}")
-        result[key] = value
-    return result
-
-
-_UniqueLoader.add_constructor(
-    yaml.resolver.BaseResolver.DEFAULT_MAPPING_TAG, _unique_mapping
-)
-
-
 def _split_frontmatter(text: str, path: str) -> tuple[dict[str, Any], str]:
     lines = text.splitlines(keepends=True)
     if not lines or lines[0].rstrip("\r\n") != "---":
@@ -120,25 +98,10 @@ def _split_frontmatter(text: str, path: str) -> tuple[dict[str, Any], str]:
     if end is None:
         raise ValueError(f"{path}: unterminated YAML frontmatter")
     try:
-        fields = yaml.load("".join(lines[1:end]), Loader=_UniqueLoader)
+        fields = yaml.safe_load("".join(lines[1:end]))
     except yaml.YAMLError as exc:
-        raise ValueError(f"{path}: invalid YAML") from exc
-    if not isinstance(fields, dict) or set(fields) != {
-        "identity",
-        "title",
-        "description",
-    }:
-        raise ValueError(
-            f"{path}: required instruction fields are identity, title, description"
-        )
-    instruction_scope(fields["identity"])
-    for key in ("title", "description"):
-        if not isinstance(fields[key], str) or "\x00" in fields[key]:
-            raise ValueError(f"{path}: {key} must be text")
-    body = "".join(lines[end + 1 :])
-    if not fields["title"].strip() or not body.strip() or "\x00" in body:
-        raise ValueError(f"{path}: title and body must be non-empty text")
-    return fields, body
+        raise ValueError(f"{path}: cannot parse canonical YAML") from exc
+    return fields, "".join(lines[end + 1 :])
 
 
 def _objects(repo: Path, revision: str, *paths: str):
@@ -153,189 +116,145 @@ def _objects(repo: Path, revision: str, *paths: str):
         yield path, oid
 
 
-def accept_revision(revision: str | None = None) -> ControlSnapshot:
-    """Reject the entire revision if any instruction, plan, or reference is invalid."""
-    revision = (
-        _immutable_revision(revision) if revision is not None else control_revision()
-    )
-    repo = control_repository()
-    instructions = {}
-    plans = {}
-    capabilities = {
-        name: {} for name in ("engines", "models", "local_scripts", "rag_profiles")
-    }
-    for path, oid in _objects(repo, revision, "instructions/", "context/"):
-        if not path.endswith(".md"):
-            continue
-        fields, body = _split_frontmatter(_git(repo, "show", oid), path)
-        identity = fields["identity"]
-        if identity in instructions:
-            raise ValueError(f"duplicate instruction identity: {identity}")
-        instructions[identity] = GitInstruction(
-            identity,
-            fields["title"],
-            body,
-            path,
-            revision,
-            oid,
-            {
-                "description": fields["description"],
-                "scope": instruction_scope(identity),
-                "repo_commit": revision,
-                "repo_path": path,
-            },
+class ControlRepository:
+    """A small read-through view of one commit; no authoring validation.
+
+    Filenames are nonsemantic in Control. Git searches locate declarations;
+    only requested records are parsed, and each blob is read once per view.
+    """
+
+    def __init__(self, revision: str | None = None):
+        self.revision = (
+            control_revision() if revision is None else _immutable_revision(revision)
         )
-    for path, oid in _objects(repo, revision, "plans/"):
-        if not path.endswith(".json"):
-            continue
-        try:
-            record = json.loads(
-                _git(repo, "show", oid),
-                object_pairs_hook=_unique_object,
-                parse_constant=_invalid_constant,
+        self.repo = control_repository()
+        self._plans: dict[str, GitPlan] = {}
+        self._instructions: dict[str, GitInstruction] = {}
+
+    @classmethod
+    def at_revision(cls, revision: str) -> ControlRepository:
+        return cls(revision)
+
+    def _find(self, pattern: str, *paths: str):
+        output = _git(
+            self.repo,
+            "grep",
+            "-l",
+            "-z",
+            "-E",
+            "-e",
+            pattern,
+            self.revision,
+            "--",
+            *paths,
+            missing_ok=True,
+        )
+        for match in output.split("\0"):
+            if match:
+                yield match.removeprefix(self.revision + ":")
+
+    def _blob(self, path: str) -> tuple[str, str]:
+        entries = dict(_objects(self.repo, self.revision, path))
+        oid = entries[path]
+        return oid, _git(self.repo, "show", oid)
+
+    def _plan(self, path: str) -> GitPlan:
+        if path not in self._plans:
+            _, text = self._blob(path)
+            try:
+                record = json.loads(text, parse_constant=_invalid_constant)
+            except ValueError as exc:
+                raise ValueError(
+                    f"{path} at {self.revision}: cannot parse canonical JSON"
+                ) from exc
+            plan = Plan(**record)
+            self._plans[path] = GitPlan(plan.slug, path, self.revision, plan)
+        return self._plans[path]
+
+    def _instruction(self, path: str) -> GitInstruction:
+        if path not in self._instructions:
+            oid, text = self._blob(path)
+            fields, body = _split_frontmatter(text, path)
+            identity = fields["identity"]
+            self._instructions[path] = GitInstruction(
+                identity,
+                fields["title"],
+                body,
+                path,
+                self.revision,
+                oid,
+                {
+                    "description": fields["description"],
+                    "scope": SCOPES[identity[:3]],
+                    "repo_commit": self.revision,
+                    "repo_path": path,
+                },
             )
-            plan = Plan.model_validate(record)
-            _validate_capabilities(plan)
-        except (TypeError, ValueError) as exc:
-            raise ValueError(f"{path}: invalid plan: {exc}") from exc
-        if plan.slug in plans:
-            raise ValueError(f"duplicate plan slug: {plan.slug}")
-        for step in plan.steps.values():
-            for identities in step["instructions"].values():
-                for identity in identities:
-                    if identity not in instructions:
-                        raise ValueError(
-                            f"{path}: missing instruction identity: {identity}"
-                        )
-        for registry, records in plan.capabilities.items():
-            for key, metadata in records.items():
-                previous = capabilities[registry].get(key)
-                if previous is not None and previous != metadata:
-                    raise ValueError(
-                        f"conflicting capability metadata: {registry}.{key}"
-                    )
-                capabilities[registry][key] = metadata
-        plans[plan.slug] = GitPlan(plan.slug, path, revision, plan)
-    return ControlSnapshot(revision, instructions, plans, capabilities)
+        return self._instructions[path]
+
+    def read_plan(self, slug: str) -> GitPlan:
+        pattern = r'"slug"[[:space:]]*:[[:space:]]*' + re.escape(json.dumps(slug))
+        for path in self._find(pattern, "plans/*.json"):
+            source = self._plan(path)
+            if source.slug == slug:
+                return source
+        raise KeyError(f"missing plan: {slug} at Control revision {self.revision}")
+
+    def read_instruction(self, identity: str) -> GitInstruction:
+        pattern = (
+            r"^identity:[[:space:]]*['\"]?"
+            + re.escape(identity)
+            + r"['\"]?[[:space:]]*$"
+        )
+        for path in self._find(pattern, "instructions/*.md", "context/*.md"):
+            source = self._instruction(path)
+            if source.identity == identity:
+                return source
+        raise KeyError(
+            f"missing instruction: {identity} at Control revision {self.revision}"
+        )
 
 
 def _invalid_constant(value: str):
     raise ValueError(f"non-JSON numeric constant: {value}")
 
 
-def _validate_args_schema(schema: Any) -> None:
-    if not isinstance(schema, dict) or schema.get("type") != "object":
-        raise ValueError("capability requires an object args_schema")
-
-    def check_refs(value):
-        if isinstance(value, dict):
-            for key in ("$ref", "$dynamicRef", "$recursiveRef", "$id"):
-                if key in value and not str(value[key]).startswith("#"):
-                    raise ValueError("capability schemas may only use local references")
-            for item in value.values():
-                check_refs(item)
-        elif isinstance(value, list):
-            for item in value:
-                check_refs(item)
-
-    check_refs(schema)
-    Draft202012Validator.check_schema(schema)
-
-
-def _validate_capabilities(plan: Plan) -> None:
-    registries = plan.capabilities
-    if set(registries) != {"engines", "models", "local_scripts", "rag_profiles"}:
-        raise ValueError(
-            "capabilities requires engines, models, local_scripts, rag_profiles registries"
-        )
-    for registry, records in registries.items():
-        for key, metadata in records.items():
-            if not key or key != key.strip():
-                raise ValueError("capability keys must be non-empty canonical strings")
-            _validate_args_schema(metadata.get("args_schema"))
-            if registry == "engines":
-                if metadata.get("kind") not in {"llm", "script", "rag"}:
-                    raise ValueError(f"invalid engine kind: {key}")
-                fields = metadata.get("step_fields")
-                if not isinstance(fields, list) or any(
-                    not isinstance(f, str) for f in fields
-                ):
-                    raise ValueError("engine requires step_fields array")
-            if (
-                registry == "models"
-                and metadata.get("engine") not in registries["engines"]
-            ):
-                raise ValueError(f"model {key} references a missing engine")
-    for step in plan.steps.values():
-        engine = registries["engines"].get(step["engine"])
-        if engine is None or engine.get("kind") != step["engine_kind"]:
-            raise ValueError(f"missing or incompatible engine: {step['engine']}")
-        fields = engine.get("step_fields")
-        if not isinstance(fields, list) or any(not isinstance(f, str) for f in fields):
-            raise ValueError("engine requires step_fields array")
-        parameters = set(step) - {
-            "engine",
-            "engine_kind",
-            "instructions",
-            "args",
-            "label",
-        }
-        if parameters - set(fields):
-            raise ValueError(
-                f"unsupported engine parameters: {parameters - set(fields)}"
-            )
-        field, registry = {
-            "llm": ("model", "models"),
-            "script": ("script", "local_scripts"),
-            "rag": ("rag_profile", "rag_profiles"),
-        }[step["engine_kind"]]
-        if (set(step) & {"model", "script", "rag_profile"}) != {field}:
-            raise ValueError("step must reference only its engine kind capability")
-        reference = step.get(field)
-        if not isinstance(reference, str) or reference not in registries[registry]:
-            raise ValueError(f"missing {field} reference: {reference}")
-        capability = registries[registry][reference]
-        if field == "model" and capability.get("engine") != step["engine"]:
-            raise ValueError("model belongs to a different engine")
-        for metadata in (engine, capability):
-            schema = metadata.get("args_schema")
-            errors = list(Draft202012Validator(schema).iter_errors(step["args"]))
-            if errors:
-                raise ValueError(f"invalid capability args: {errors[0].message}")
-        if "temperature" in step and (
-            type(step["temperature"]) not in {int, float}
-            or not 0 <= step["temperature"] <= 2
-        ):
-            raise ValueError("temperature must be numeric between 0 and 2")
-        if "max_output_tokens" in step and (
-            type(step["max_output_tokens"]) is not int or step["max_output_tokens"] < 1
-        ):
-            raise ValueError("max_output_tokens must be a positive integer")
-
-
 def read_plan(plan_slug: str, revision: str | None = None) -> GitPlan:
-    snapshot = accept_revision(revision)
-    try:
-        return snapshot.plans[plan_slug]
-    except KeyError:
-        raise KeyError(f"plan not found in Control Git: {plan_slug}") from None
+    return ControlRepository(revision).read_plan(plan_slug)
 
 
 def read_instruction(instruction_identity: str, revision: str) -> GitInstruction:
-    instruction_scope(instruction_identity)
-    snapshot = accept_revision(revision)
-    try:
-        return snapshot.instructions[instruction_identity]
-    except KeyError:
-        raise KeyError(
-            f"instruction not found in Control Git: {instruction_identity}"
-        ) from None
+    return ControlRepository.at_revision(revision).read_instruction(
+        instruction_identity
+    )
+
+
+def list_revision(revision: str | None = None) -> ControlSnapshot:
+    """Enumerate Control for administrative displays, separately from enqueue."""
+    control = ControlRepository(revision)
+    instructions = {}
+    plans = {}
+    capabilities = {
+        name: {} for name in ("engines", "models", "local_scripts", "rag_profiles")
+    }
+    for path, _ in _objects(
+        control.repo, control.revision, "instructions/", "context/", "plans/"
+    ):
+        if path.endswith(".md"):
+            source = control._instruction(path)
+            instructions[source.identity] = source
+        elif path.endswith(".json"):
+            source = control._plan(path)
+            plans[source.slug] = source
+            for name, records in source.plan.capabilities.items():
+                capabilities[name].update(records)
+    return ControlSnapshot(control.revision, instructions, plans, capabilities)
 
 
 def instruction_records(
     snapshot: ControlSnapshot | None = None,
 ) -> list[dict[str, Any]]:
-    snapshot = snapshot if snapshot is not None else accept_revision()
+    snapshot = snapshot if snapshot is not None else list_revision()
     return [
         {
             "identity": item.identity,
@@ -351,7 +270,7 @@ def instruction_records(
 def plan_records(
     scope: str | None = None, *, snapshot: ControlSnapshot | None = None
 ) -> list[dict[str, Any]]:
-    snapshot = snapshot if snapshot is not None else accept_revision()
+    snapshot = snapshot if snapshot is not None else list_revision()
     return [
         item.plan.plan_dict() | {"repo_commit": snapshot.revision, "path": item.path}
         for _, item in sorted(snapshot.plans.items())

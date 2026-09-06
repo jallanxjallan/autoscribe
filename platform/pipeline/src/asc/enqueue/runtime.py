@@ -7,12 +7,12 @@ from typing import Any
 
 from asc.enqueue.instruction import resolve_instruction_key
 from asc.models.control.instruction import Instruction
-from asc.models.control.plan import validate_references
+from asc.control.repository import ControlRepository, GitInstruction
+from asc.enqueue.plan import resolve_components
 from asc.models.process.runtime import Runtime
 
 RUNTIME_TTL_SECONDS = 60 * 60 * 24
 DIRECTIVE_TTL_SECONDS = 60 * 60
-INSTRUCTION_ORDER = ("role", "context", "task", "directive")
 
 
 def materialize_runtimes(
@@ -21,6 +21,7 @@ def materialize_runtimes(
     plan: Any,
     control_revision: str,
     directive: str | None = None,
+    instruction_sources: dict[str, GitInstruction] | None = None,
 ) -> tuple[Runtime, ...]:
     """Compile and save every embedded plan step for one call.
 
@@ -33,6 +34,10 @@ def materialize_runtimes(
     call identity and ordinal.
     """
 
+    if instruction_sources is None:
+        instruction_sources = resolve_components(
+            plan, ControlRepository.at_revision(control_revision)
+        )
     runtimes: list[Runtime] = []
     directive_instruction: Instruction | None = None
     instruction_cache: dict[str, str] = {}
@@ -51,9 +56,9 @@ def materialize_runtimes(
             engine_kind = step["engine_kind"]
             instruction_keys = _resolve_instruction_keys(
                 step,
-                ordinal=ordinal,
                 instruction_cache=instruction_cache,
                 control_revision=control_revision,
+                instruction_sources=instruction_sources,
             )
             if ordinal == 1 and directive_instruction is not None:
                 instruction_keys["directive"] = directive_instruction.raw_key
@@ -71,7 +76,8 @@ def materialize_runtimes(
             }
             payload.pop("instructions", None)
 
-            runtime = Runtime.model_validate(payload)
+            # Control is already authored; Redis deserialization keeps its own parser.
+            runtime = Runtime.model_construct(**payload)
             runtime.save(ttl=RUNTIME_TTL_SECONDS)
             runtimes.append(runtime)
     except Exception:
@@ -108,13 +114,11 @@ def _save_directive_instruction(*, call_identity: str, content: str) -> Instruct
 def _resolve_instruction_keys(
     step: Mapping[str, Any],
     *,
-    ordinal: int,
     control_revision: str,
     instruction_cache: dict[str, str] | None = None,
+    instruction_sources: dict[str, GitInstruction] | None = None,
 ) -> dict[str, list[str]]:
-    if {"instruction", "instruction_slugs"} & set(step):
-        raise ValueError(f"step {ordinal}: deprecated instruction references")
-    references = validate_references(step.get("instructions"))
+    references = step["instructions"]
     cache = instruction_cache if instruction_cache is not None else {}
     resolved = {}
     for scope, identities in references.items():
@@ -124,7 +128,13 @@ def _resolve_instruction_keys(
         for identity in identities:
             if identity not in cache:
                 cache[identity] = resolve_instruction_key(
-                    identity, control_revision=control_revision
+                    identity,
+                    control_revision=control_revision,
+                    **(
+                        {"source": instruction_sources[identity]}
+                        if instruction_sources is not None
+                        else {}
+                    ),
                 )
             keys.append(cache[identity])
         resolved[scope] = keys

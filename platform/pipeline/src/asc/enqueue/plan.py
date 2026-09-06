@@ -1,6 +1,7 @@
 from dataclasses import dataclass
 
-from asc.control.repository import read_plan
+from asc.control.repository import ControlRepository, GitInstruction
+from asc import extensions
 from asc.models.control.plan import Plan
 
 
@@ -12,10 +13,7 @@ class LoadedPlan:
     revision: str
     path: str
     plan: Plan
-
-    @property
-    def raw_key(self) -> str:
-        return self.source_ref
+    instructions: dict[str, GitInstruction]
 
     @property
     def source_ref(self) -> str:
@@ -23,7 +21,7 @@ class LoadedPlan:
 
     @property
     def plan_key(self) -> str:
-        """Compatibility field for reports; this is a Git ref, not a Redis key."""
+        """Git source reference retained in the enqueue report contract."""
         return self.source_ref
 
     @property
@@ -32,37 +30,68 @@ class LoadedPlan:
 
 
 def load_plan(plan_slug: str) -> LoadedPlan:
-    if not isinstance(plan_slug, str) or not plan_slug.strip():
-        raise ValueError("plan must be a non-empty slug")
-
-    clean_slug = plan_slug.strip()
-    source = read_plan(clean_slug)
-    plan = source.plan
-    if plan.slug != clean_slug:
-        raise ValueError(
-            f"plan slug mismatch: requested {clean_slug}, record contains {plan.slug}"
-        )
-    if not plan.steps:
-        raise ValueError(f"plan has no embedded steps: {source.path}")
-
-    expected = list(range(1, plan.total_steps + 1))
-    actual = sorted(int(index) for index in plan.steps)
-    if actual != expected:
-        raise ValueError(
-            f"plan step ordinals must be contiguous from 1: expected {expected}, got {actual}"
-        )
-
+    control = ControlRepository()
+    source = control.read_plan(plan_slug)
+    instructions = resolve_components(source.plan, control)
     return LoadedPlan(
-        slug=clean_slug,
-        revision=source.revision,
+        slug=plan_slug,
+        revision=control.revision,
         path=source.path,
-        plan=plan,
+        plan=source.plan,
+        instructions=instructions,
     )
 
 
-def resolve_plan_record_key(plan_slug: str) -> str:
-    """Compatibility alias returning the authoritative Git source reference."""
-    return load_plan(plan_slug).plan_key
+def resolve_components(
+    plan: Plan, control: ControlRepository
+) -> dict[str, GitInstruction]:
+    """Resolve only selected dependencies before any runtime state is written."""
+    instructions = {}
+    for step in plan.steps.values():
+        engine = step["engine"]
+        _component(plan, "engines", "engine", engine, control.revision)
+        for field, registry, label in (
+            ("model", "models", "model"),
+            ("script", "local_scripts", "local script"),
+            ("rag_profile", "rag_profiles", "RAG profile"),
+        ):
+            if field in step:
+                metadata = _component(
+                    plan, registry, label, step[field], control.revision
+                )
+                if field == "script":
+                    _execution_file("scripts", step[field], label)
+                elif field == "rag_profile":
+                    path = extensions.EXTENSIONS_ROOT / metadata["path"]
+                    if not path.is_file():
+                        raise FileNotFoundError(
+                            f"missing RAG profile: {step[field]} ({path})"
+                        )
+        if step["engine_kind"] != "script":
+            _execution_file("engines", engine, "engine")
+        for identities in step["instructions"].values():
+            for identity in identities:
+                if identity not in instructions:
+                    instructions[identity] = control.read_instruction(identity)
+    return instructions
 
 
-__all__ = ["LoadedPlan", "load_plan", "resolve_plan_record_key"]
+def _component(plan: Plan, registry: str, label: str, name: str, revision: str):
+    try:
+        return plan.capabilities[registry][name]
+    except KeyError:
+        raise KeyError(
+            f"missing {label}: {name} at Control revision {revision}"
+        ) from None
+
+
+def _execution_file(category: str, name: str, label: str) -> None:
+    try:
+        extensions._resolve_path(category, name)
+    except FileNotFoundError as exc:
+        raise FileNotFoundError(
+            f"missing {label}: {name} (execution artifact unavailable)"
+        ) from exc
+
+
+__all__ = ["LoadedPlan", "load_plan", "resolve_components"]
