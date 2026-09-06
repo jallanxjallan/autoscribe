@@ -50,6 +50,7 @@ impl Database {
         Ok(db)
     }
 
+    #[cfg(test)]
     pub(crate) fn connection(&self) -> &Connection {
         &self.connection
     }
@@ -208,7 +209,36 @@ impl Database {
             FROM latest_dispatch_for_slug d
             LEFT JOIN export_ready e ON e.source_slug=d.source_slug
             WHERE e.source_slug IS NULL;
-        "#).map_err(storage)
+        "#).map_err(storage)?;
+        // Serialize additive upgrades when both daemons start together.
+        let transaction = rusqlite::Transaction::new_unchecked(
+            &self.connection,
+            rusqlite::TransactionBehavior::Immediate,
+        )
+        .map_err(storage)?;
+        // Additive migration keeps existing attention and historical ledger rows.
+        let columns = self
+            .connection
+            .prepare("PRAGMA table_info(repository_attention)")
+            .map_err(storage)?
+            .query_map([], |row| row.get::<_, String>(1))
+            .map_err(storage)?
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(storage)?;
+        for (name, definition) in [
+            ("generation", "INTEGER NOT NULL DEFAULT 1"),
+            ("failures", "INTEGER NOT NULL DEFAULT 0"),
+            ("next_attempt_ms", "INTEGER NOT NULL DEFAULT 0"),
+        ] {
+            if !columns.iter().any(|column| column == name) {
+                self.connection
+                    .execute_batch(&format!(
+                        "ALTER TABLE repository_attention ADD COLUMN {name} {definition}"
+                    ))
+                    .map_err(storage)?;
+            }
+        }
+        transaction.commit().map_err(storage)
     }
 }
 
@@ -219,21 +249,53 @@ pub fn record_attention(db: &Database, root: &Path, head: Option<&str>) -> Servi
         [root.as_ref()],
     ).map_err(storage)?;
     db.connection.execute(
-        "INSERT INTO repository_attention(repository_id,last_commit_seen) SELECT repository_id,?2 FROM repositories WHERE canonical_root=?1 ON CONFLICT(repository_id) DO UPDATE SET last_commit_seen=excluded.last_commit_seen",
+        "INSERT INTO repository_attention(repository_id,last_commit_seen) SELECT repository_id,?2 FROM repositories WHERE canonical_root=?1 ON CONFLICT(repository_id) DO UPDATE SET last_commit_seen=excluded.last_commit_seen, generation=repository_attention.generation+1",
         params![root.as_ref(), head],
     ).map_err(storage)?;
     Ok(())
 }
 
-pub fn pending_repositories(db: &Database) -> ServiceResult<Vec<PathBuf>> {
-    let mut statement = db.connection.prepare(
-        "SELECT r.canonical_root FROM repository_attention a JOIN repositories r USING(repository_id) ORDER BY a.attention_created_at"
+#[derive(Debug)]
+pub struct Attention {
+    pub root: PathBuf,
+    pub generation: i64,
+    pub failures: u32,
+}
+
+/// Recover known repositories without resetting a pending retry deadline.
+pub fn recover_attention(db: &Database) -> ServiceResult<()> {
+    db.connection.execute(
+        "INSERT OR IGNORE INTO repository_attention(repository_id) SELECT repository_id FROM repositories",
+        [],
+    ).map_err(storage)?;
+    Ok(())
+}
+
+pub fn due_attention(db: &Database, now_ms: i64) -> ServiceResult<Vec<Attention>> {
+    let mut statement = db.connection.prepare_cached(
+        "SELECT r.canonical_root,a.generation,a.failures FROM repository_attention a JOIN repositories r USING(repository_id) WHERE a.next_attempt_ms<=?1 ORDER BY a.attention_created_at"
     ).map_err(storage)?;
     statement
-        .query_map([], |row| row.get::<_, String>(0))
+        .query_map([now_ms], |row| {
+            Ok(Attention {
+                root: PathBuf::from(row.get::<_, String>(0)?),
+                generation: row.get(1)?,
+                failures: row.get(2)?,
+            })
+        })
         .map_err(storage)?
-        .map(|row| row.map(PathBuf::from).map_err(storage))
+        .map(|row| row.map_err(storage))
         .collect()
+}
+
+pub fn defer_attention(db: &Database, attention: &Attention, now_ms: i64) -> ServiceResult<()> {
+    let delay_ms = (1_000_i64 << attention.failures.min(6)).min(60_000);
+    // Keep newer attention too, but do not allow repeated hooks to bypass backoff.
+    db.connection.execute(
+        "UPDATE repository_attention SET failures=?2,next_attempt_ms=?3 WHERE repository_id=(SELECT repository_id FROM repositories WHERE canonical_root=?1)",
+        params![attention.root.to_string_lossy(), attention.failures.saturating_add(1).min(7), now_ms.saturating_add(delay_ms)],
+    ).map_err(storage)?;
+    Ok(())
 }
 
 pub fn known_repositories(db: &Database) -> ServiceResult<Vec<PathBuf>> {
@@ -248,10 +310,10 @@ pub fn known_repositories(db: &Database) -> ServiceResult<Vec<PathBuf>> {
         .collect()
 }
 
-pub fn clear_attention(db: &Database, root: &Path) -> ServiceResult<()> {
+pub fn clear_attention(db: &Database, attention: &Attention) -> ServiceResult<()> {
     db.connection.execute(
-        "DELETE FROM repository_attention WHERE repository_id=(SELECT repository_id FROM repositories WHERE canonical_root=?1)",
-        [root.to_string_lossy().as_ref()],
+        "DELETE FROM repository_attention WHERE repository_id=(SELECT repository_id FROM repositories WHERE canonical_root=?1) AND generation=?2",
+        params![attention.root.to_string_lossy(), attention.generation],
     ).map_err(storage)?;
     Ok(())
 }
@@ -279,21 +341,6 @@ pub fn repository_event(
             params![root.to_string_lossy(), event, head, detail],
         )
         .map_err(storage)?;
-    Ok(())
-}
-
-pub fn repository_activity(
-    db: &Database,
-    root: &Path,
-    score: u64,
-    delta: u64,
-) -> ServiceResult<()> {
-    let score = score.min(i64::MAX as u64) as i64;
-    let delta = delta.min(i64::MAX as u64) as i64;
-    db.connection.execute(
-        "INSERT INTO repository_activity(repository_root,activity_score,activity_delta) VALUES(?1,?2,?3)",
-        params![root.to_string_lossy(), score, delta],
-    ).map_err(storage)?;
     Ok(())
 }
 
@@ -484,25 +531,26 @@ pub fn replace_export_ready<'a>(
     db: &Database,
     slugs: impl IntoIterator<Item = &'a String>,
 ) -> ServiceResult<()> {
+    let slugs = slugs.into_iter().collect::<std::collections::BTreeSet<_>>();
+    let existing = db
+        .connection
+        .prepare("SELECT source_slug FROM export_ready")
+        .map_err(storage)?
+        .query_map([], |row| row.get::<_, String>(0))
+        .map_err(storage)?
+        .collect::<Result<std::collections::BTreeSet<_>, _>>()
+        .map_err(storage)?;
+    if existing.iter().collect::<std::collections::BTreeSet<_>>() == slugs {
+        return Ok(());
+    }
+    let transaction = db.connection.unchecked_transaction().map_err(storage)?;
     db.connection
         .execute("DELETE FROM export_ready", [])
         .map_err(storage)?;
     for slug in slugs {
         db.connection.execute("INSERT OR REPLACE INTO export_ready(source_slug,observed_at) VALUES(?1,CURRENT_TIMESTAMP)", [slug]).map_err(storage)?;
     }
-    Ok(())
-}
-
-pub fn missing_response_slugs(db: &Database) -> ServiceResult<Vec<String>> {
-    let mut statement = db
-        .connection
-        .prepare("SELECT source_slug FROM missing_responses ORDER BY source_slug")
-        .map_err(storage)?;
-    statement
-        .query_map([], |row| row.get(0))
-        .map_err(storage)?
-        .map(|row| row.map_err(storage))
-        .collect()
+    transaction.commit().map_err(storage)
 }
 
 pub fn snapshot(db: &Database) -> ServiceResult<serde_json::Value> {
@@ -529,7 +577,7 @@ fn storage(error: rusqlite::Error) -> ServiceError {
     ServiceError::Storage(error.to_string())
 }
 
-/// Deterministic vault-scoped state path. No registry is required.
+/// Installation-wide client ledger path.
 pub fn client_database_path() -> ServiceResult<PathBuf> {
     if let Some(path) = env::var_os("AUTOSCRIBE_CLIENT_DB") {
         return Ok(PathBuf::from(path));
@@ -540,47 +588,73 @@ pub fn client_database_path() -> ServiceResult<PathBuf> {
     Ok(home.join(".local/share/autoscribe/service.sqlite"))
 }
 
-pub fn vault_key(repository_root: &Path) -> ServiceResult<String> {
-    let name = repository_root
-        .file_name()
-        .and_then(|v| v.to_str())
-        .ok_or_else(|| {
-            ServiceError::InvalidInput(format!(
-                "vault has no usable directory name: {}",
-                repository_root.display()
-            ))
-        })?;
-    let snake = snake_case(name);
-    if snake.is_empty() {
-        Err(ServiceError::InvalidInput(
-            "empty normalized vault name".into(),
-        ))
-    } else {
-        Ok(snake)
-    }
-}
+#[cfg(test)]
+mod tests {
+    use super::*;
 
-fn snake_case(value: &str) -> String {
-    let mut out = String::new();
-    let mut prev_sep = false;
-    for ch in value.chars() {
-        if ch.is_ascii_alphanumeric() {
-            if ch.is_ascii_uppercase()
-                && !out.is_empty()
-                && !prev_sep
-                && out.chars().last().is_some_and(|c| c.is_ascii_lowercase())
-            {
-                out.push('_');
-            }
-            out.push(ch.to_ascii_lowercase());
-            prev_sep = false;
-        } else if !out.is_empty() && !prev_sep {
-            out.push('_');
-            prev_sep = true;
+    #[test]
+    fn attention_backoff_survives_migration_restart_and_concurrent_hook() {
+        let path = env::temp_dir().join(format!(
+            "autoscribe-retry-{}-{}.sqlite",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let connection = Connection::open(&path).unwrap();
+        connection
+            .execute_batch(
+                "CREATE TABLE repository_attention (
+            repository_id INTEGER PRIMARY KEY,
+            attention_created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+            last_commit_seen TEXT);",
+            )
+            .unwrap();
+        let db = Database::from_connection(connection).unwrap();
+        let root = Path::new("/tmp/retry-repository");
+        record_attention(&db, root, Some("first")).unwrap();
+        let original = due_attention(&db, 0).unwrap().remove(0);
+        record_attention(&db, root, Some("second")).unwrap();
+        clear_attention(&db, &original).unwrap();
+        assert_eq!(due_attention(&db, 0).unwrap()[0].generation, 2);
+        defer_attention(&db, &original, 0).unwrap();
+        assert!(due_attention(&db, 999).unwrap().is_empty());
+        drop(db);
+        let db = Database::from_connection(Connection::open(&path).unwrap()).unwrap();
+        recover_attention(&db).unwrap();
+        assert!(due_attention(&db, 999).unwrap().is_empty());
+        let mut now = 1_000;
+        for delay in [2_000, 4_000, 8_000, 16_000, 32_000, 60_000, 60_000] {
+            let attention = due_attention(&db, now).unwrap().remove(0);
+            defer_attention(&db, &attention, now).unwrap();
+            // Repeated post-commit hints cannot cause a rapid retry loop.
+            record_attention(&db, root, Some("new-head")).unwrap();
+            assert!(due_attention(&db, now + delay - 1).unwrap().is_empty());
+            now += delay;
         }
+        let attention = due_attention(&db, now).unwrap().remove(0);
+        clear_attention(&db, &attention).unwrap();
+        assert!(due_attention(&db, i64::MAX).unwrap().is_empty());
+        drop(db);
+        fs::remove_file(path).unwrap();
     }
-    while out.ends_with('_') {
-        out.pop();
+
+    #[test]
+    fn unchanged_export_set_does_not_write_database() {
+        let db = Database::memory().unwrap();
+        let ready = ["cnt.one".to_string()];
+        replace_export_ready(&db, ready.iter()).unwrap();
+        let before = db.connection.total_changes();
+        for _ in 0..100 {
+            replace_export_ready(&db, ready.iter()).unwrap();
+        }
+        assert_eq!(db.connection.total_changes(), before);
+        replace_export_ready(&db, [].iter()).unwrap();
+        let empty = db.connection.total_changes();
+        for _ in 0..100 {
+            replace_export_ready(&db, [].iter()).unwrap();
+        }
+        assert_eq!(db.connection.total_changes(), empty);
     }
-    out
 }

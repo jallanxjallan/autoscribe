@@ -18,11 +18,6 @@ pub fn run_parallel(
     jobs: Vec<PandocJob>,
     max_parallel: usize,
 ) -> ServiceResult<Vec<PandocOutcome>> {
-    if !executable.is_absolute() {
-        return Err(ServiceError::InvalidInput(
-            "Pandoc executable must be an absolute path".into(),
-        ));
-    }
     if jobs.len() > 1 && max_parallel < 2 {
         return Err(ServiceError::InvalidInput(
             "Pandoc batches require parallelism of at least two".into(),

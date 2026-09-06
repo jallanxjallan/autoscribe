@@ -8,7 +8,7 @@ use std::{
     io::Write,
     path::{Path, PathBuf},
     process::Command,
-    time::Duration,
+    time::{Duration, SystemTime, UNIX_EPOCH},
 };
 
 #[derive(Debug, Clone, Copy)]
@@ -32,39 +32,65 @@ pub fn run(kind: DaemonKind, asc: PathBuf, poll: Duration) -> ServiceResult<()> 
             "daemon poll interval must be greater than zero".into(),
         ));
     }
-    let database = Database::client()?;
+    let worker = Worker::create(Database::client()?, asc)?;
     if matches!(kind, DaemonKind::Dispatch) {
-        for root in db::known_repositories(&database)? {
-            db::record_attention(&database, &root, None)?;
-        }
+        db::recover_attention(worker.database())?;
     }
+    let mut responses = ResponseSchedule::default();
     loop {
-        match kind {
-            DaemonKind::Dispatch => dispatch_pass(&database, &asc)?,
-            DaemonKind::Responses => responses_pass(&database, &asc),
-        }
-        std::thread::sleep(poll);
+        let delay = match kind {
+            DaemonKind::Dispatch => {
+                dispatch_pass(&worker, now_ms)?;
+                poll
+            }
+            DaemonKind::Responses => {
+                let result = worker.responses_once();
+                if let Err(error) = &result {
+                    eprintln!("svc: responses: {error}");
+                }
+                responses.after_pass(&result)
+            }
+        };
+        std::thread::sleep(delay);
     }
 }
 
-fn dispatch_pass(database: &Database, asc: &Path) -> ServiceResult<()> {
-    for root in db::pending_repositories(database)? {
-        eprintln!("svc: dispatch: inspecting {}", root.display());
-        match Worker::persistent(&root, asc.to_path_buf())?.dispatch_once() {
-            Ok(()) => db::clear_attention(database, &root)?,
-            Err(error) => eprintln!("svc: dispatch: {}: {error}", root.display()),
+fn now_ms() -> i64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_millis()
+        .min(i64::MAX as u128) as i64
+}
+
+pub(crate) fn dispatch_pass(worker: &Worker, mut clock: impl FnMut() -> i64) -> ServiceResult<()> {
+    for attention in db::due_attention(worker.database(), clock())? {
+        eprintln!("svc: dispatch: inspecting {}", attention.root.display());
+        match worker.dispatch_repository(&attention.root) {
+            Ok(()) => db::clear_attention(worker.database(), &attention)?,
+            Err(error) => {
+                // Construction and reconciliation failures share the same durable retry.
+                db::defer_attention(worker.database(), &attention, clock())?;
+                eprintln!("svc: dispatch: {}: {error}", attention.root.display());
+            }
         }
     }
     Ok(())
 }
 
-fn responses_pass(database: &Database, asc: &Path) {
-    for root in db::known_repositories(database).unwrap_or_default() {
-        if let Err(error) =
-            Worker::persistent(&root, asc.to_path_buf()).and_then(|w| w.responses_once())
-        {
-            eprintln!("svc: responses: {}: {error}", root.display());
-        }
+#[derive(Default)]
+struct ResponseSchedule {
+    delay_secs: u64,
+}
+
+impl ResponseSchedule {
+    fn after_pass(&mut self, result: &ServiceResult<bool>) -> Duration {
+        self.delay_secs = if matches!(result, Ok(true)) {
+            1
+        } else {
+            self.delay_secs.saturating_mul(2).clamp(1, 30)
+        };
+        Duration::from_secs(self.delay_secs)
     }
 }
 
@@ -104,4 +130,27 @@ pub fn refresh_plans(asc: &Path) -> ServiceResult<()> {
     fs::rename(&temporary, &target).map_err(|e| ServiceError::Io(e.to_string()))?;
     eprintln!("svc: plans: refreshed {}", target.display());
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn response_idle_and_failure_delays_are_bounded_and_work_resets_delay() {
+        let mut schedule = ResponseSchedule::default();
+        for expected in [1, 2, 4, 8, 16, 30, 30] {
+            assert_eq!(
+                schedule.after_pass(&Ok(false)),
+                Duration::from_secs(expected)
+            );
+        }
+        assert_eq!(schedule.after_pass(&Ok(true)), Duration::from_secs(1));
+        for expected in [2, 4, 8, 16, 30, 30] {
+            assert_eq!(
+                schedule.after_pass(&Err(ServiceError::Io("offline".into()))),
+                Duration::from_secs(expected)
+            );
+        }
+    }
 }

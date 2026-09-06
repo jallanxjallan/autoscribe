@@ -8,7 +8,7 @@ the persistent client ledger.
 
 The message means only:
 
-> This Git repository may deserve attention; ensure a transient session exists.
+> This Git repository may deserve attention; schedule repository inspection.
 
 It does not assert that any editor is running or that a repository is open.
 The hook does not parse or pass commit data. The dispatch daemon owns inspection
@@ -39,9 +39,11 @@ asc export extract-selected <slug> --no-receipt
 asc export update-exports <result-identity>
 ```
 
-It preserves the exact dispatched frontmatter, marks the reconstructed document
-as an AI-produced review candidate, and commits it to `autoscribe/inflight`.
-It never writes or commits `master`.
+It preserves the raw dispatched frontmatter bytes and replaces only content,
+committing the candidate to `autoscribe/inflight`. Review state belongs to the
+inflight history and client ledger; the writer does not rewrite document metadata.
+A source-slug mismatch is an error before extraction, response writes, or receipts.
+It never writes or commits `master` or changes the user's index/working files.
 
 ## Plan catalogue
 
@@ -56,3 +58,9 @@ The client SQLite ledger preserves repository registration and operational
 attention across daemon restarts. Inflight Git commit messages and source blobs
 remain the durable facts used to recover snapshots, submissions, and saved
 responses.
+
+Pending dispatch attention is acknowledged only after successful reconciliation.
+Failure retains attention with a persistent, capped retry deadline. A concurrent
+post-commit hint cannot be removed by acknowledging an older generation.
+Repository failures are isolated within each daemon. Response failures leave
+exports unreceipted for later reconciliation.

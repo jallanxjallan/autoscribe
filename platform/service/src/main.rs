@@ -61,7 +61,7 @@ fn main() -> ExitCode {
     // command is intentionally retired so systemd cannot silently run both designs.
     if command == "scan" && !repositories.is_empty() {
         return finish(Worker::diagnostic(repositories, asc).and_then(|worker| {
-            worker.run(true)?;
+            worker.startup()?;
             println!("{}", db::snapshot(worker.database())?);
             Ok(())
         }));

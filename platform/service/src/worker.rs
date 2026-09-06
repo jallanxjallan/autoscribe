@@ -13,7 +13,6 @@ use std::{
     path::{Path, PathBuf},
     process::{Command, Stdio},
     sync::atomic::{AtomicU64, Ordering},
-    time::{Duration, Instant},
 };
 
 #[derive(Debug)]
@@ -23,17 +22,11 @@ pub struct Worker {
     asc: PathBuf,
     pandoc: PathBuf,
     pandoc_dispatch_defaults: PathBuf,
-    pandoc_directory: PathBuf,
-    poll: Duration,
-    repository_ttl: Duration,
 }
 
 #[derive(Debug)]
 struct RepositorySession {
     initialized: bool,
-    activity_score: u64,
-    last_attention: Instant,
-    last_activity: Instant,
 }
 
 #[derive(Debug)]
@@ -50,101 +43,103 @@ struct DispatchTrailers {
 }
 
 impl Worker {
-    /// Create a one-pass worker for diagnostics without opening the system
-    /// attention socket.
+    /// Create an isolated one-pass diagnostic worker.
     pub fn diagnostic(repositories: Vec<PathBuf>, asc: PathBuf) -> ServiceResult<Self> {
         if repositories.is_empty() {
             return Err(ServiceError::InvalidInput(
                 "scan requires at least one repository path".into(),
             ));
         }
-        let worker = Self::create(
-            Database::memory()?,
-            asc,
-            Duration::ZERO,
-            Duration::from_secs(u64::MAX),
-        )?;
+        let worker = Self::create(Database::memory()?, asc)?;
         for path in repositories {
             worker.register_repository(&path)?;
         }
         Ok(worker)
     }
 
-    fn create(
-        db: Database,
-        asc: PathBuf,
-        poll: Duration,
-        repository_ttl: Duration,
-    ) -> ServiceResult<Self> {
-        if repository_ttl.is_zero() {
-            return Err(ServiceError::InvalidInput(
-                "repository TTL must be greater than zero".into(),
-            ));
-        }
-        let pandoc = std::env::var_os("AUTOSCRIBE_PANDOC")
-            .map(PathBuf::from)
-            .unwrap_or_else(|| PathBuf::from("/usr/bin/pandoc"));
-        let pandoc_dispatch_defaults = std::env::var_os("AUTOSCRIBE_PANDOC_DISPATCH_DEFAULTS")
-            .map(PathBuf::from)
-            .unwrap_or_else(|| {
-                std::env::var_os("HOME")
-                    .map(PathBuf::from)
-                    .unwrap_or_default()
-                    .join("Work/Extensions/pandoc/defaults/dispatch.yaml")
-            });
-        let pandoc_directory = pandoc_dispatch_defaults
-            .parent()
-            .and_then(Path::parent)
-            .map(Path::to_path_buf)
-            .unwrap_or_default();
+    pub(crate) fn create(db: Database, asc: PathBuf) -> ServiceResult<Self> {
         Ok(Self {
             db,
             repositories: RefCell::new(BTreeMap::new()),
             asc,
-            pandoc,
-            pandoc_dispatch_defaults,
-            pandoc_directory,
-            poll,
-            repository_ttl,
+            pandoc: std::env::var_os("AUTOSCRIBE_PANDOC")
+                .map(PathBuf::from)
+                .unwrap_or_else(|| PathBuf::from("pandoc")),
+            pandoc_dispatch_defaults: std::env::var_os("AUTOSCRIBE_PANDOC_DISPATCH_DEFAULTS")
+                .map(PathBuf::from)
+                .unwrap_or_else(|| PathBuf::from("dispatch.yaml")),
         })
     }
 
-    /// Create a one-vault worker backed by that vault's permanent client database.
+    /// Create a one-repository worker using the central client ledger.
     pub fn persistent(repository: &Path, asc: PathBuf) -> ServiceResult<Self> {
-        let root = git::root(repository)?;
-        let db = Database::client()?;
-        let worker = Self::create(db, asc, Duration::ZERO, Duration::from_secs(u64::MAX))?;
-        worker.register_repository(&root)?;
+        let worker = Self::create(Database::client()?, asc)?;
+        worker.register_repository(repository)?;
         Ok(worker)
     }
 
-    /// Inspect a signalled vault and submit any newly declared dispatches.
-    pub fn dispatch_once(&self) -> ServiceResult<()> {
-        self.scan_all()?;
-        self.reconcile_dispatches()
+    pub(crate) fn dispatch_repository(&self, repository: &Path) -> ServiceResult<()> {
+        let root = self.register_repository(repository)?;
+        self.scan_registered(&root)?;
+        self.reconcile_dispatches(&root)
     }
 
-    /// Inspect a signalled vault, load pending export-ready slugs, and materialize responses.
-    pub fn responses_once(&self) -> ServiceResult<()> {
-        self.scan_all()?;
+    pub fn dispatch_once(&self) -> ServiceResult<()> {
+        for root in self.repository_paths() {
+            self.dispatch_repository(&root)?;
+        }
+        Ok(())
+    }
+
+    /// Query exports once globally; no repository work while the result is empty.
+    pub fn responses_once(&self) -> ServiceResult<bool> {
         let ready = pending_export_slugs(&self.asc)?;
         db::replace_export_ready(&self.db, ready.iter())?;
-        self.reconcile_exports()
+        if ready.is_empty() {
+            return Ok(false);
+        }
+        let mut failed_roots = BTreeSet::new();
+        let mut failure = None;
+        // Refresh routes only when there is response work. Keep duplicate-slug
+        // checks across the registry; a stale/missing root never routes a write.
+        let roots = db::known_repositories(&self.db)?
+            .into_iter()
+            .chain(self.repository_paths())
+            .collect::<BTreeSet<_>>();
+        for root in roots {
+            if let Err(error) = self
+                .register_repository(&root)
+                .and_then(|root| self.scan_registered(&root))
+            {
+                eprintln!("svc: responses: {}: {error}", root.display());
+                failed_roots.insert(root);
+                failure = Some(error);
+            }
+        }
+        for slug in ready {
+            let result = self.reconcile_export(&slug, &failed_roots);
+            if let Err(error) = result {
+                eprintln!("svc: responses: {slug}: {error}");
+                failure = Some(error);
+            }
+        }
+        match failure {
+            Some(error) => Err(error),
+            None => Ok(true),
+        }
     }
 
     pub fn register_repository(&self, path: &Path) -> ServiceResult<PathBuf> {
+        if self.repositories.borrow().contains_key(path) {
+            return Ok(path.to_path_buf());
+        }
         let root = git::root(path)?;
-        let now = Instant::now();
         let previously_seen = db::latest_repository_head(&self.db, &root)?.is_some();
         self.repositories
             .borrow_mut()
             .entry(root.clone())
-            .and_modify(|session| session.last_attention = now)
             .or_insert(RepositorySession {
                 initialized: previously_seen,
-                activity_score: 0,
-                last_attention: now,
-                last_activity: now,
             });
         Ok(root)
     }
@@ -155,96 +150,24 @@ impl Worker {
 
     pub fn startup(&self) -> ServiceResult<()> {
         db::worker_event(&self.db, "started", None)?;
-        self.scan_all()?;
-        if self.repository_paths().is_empty() {
-            return Ok(());
-        }
-        self.reconcile_dispatches()?;
-        self.reconcile_exports()?;
-        Ok(())
-    }
-
-    pub fn run(&self, once: bool) -> ServiceResult<()> {
-        self.startup()?;
-        if once {
-            return Ok(());
-        }
-        loop {
-            self.pass()?;
-            std::thread::sleep(self.poll);
-        }
-    }
-
-    pub fn pass(&self) -> ServiceResult<()> {
-        self.expire_repositories()?;
-        self.scan_all()?;
-        if self.repository_paths().is_empty() {
-            return db::worker_event(&self.db, "pass_completed", Some("no repositories"));
-        }
-        self.reconcile_dispatches()?;
-        self.reconcile_exports()?;
-        db::worker_event(&self.db, "pass_completed", None)
-    }
-
-    fn expire_repositories(&self) -> ServiceResult<()> {
-        let now = Instant::now();
-        let mut expired = Vec::new();
-        self.repositories.borrow_mut().retain(|path, session| {
-            let last_signal = session.last_attention.max(session.last_activity);
-            let keep = now.duration_since(last_signal) < self.repository_ttl;
-            if !keep {
-                expired.push(path.clone());
-            }
-            keep
-        });
-        for path in expired {
-            db::repository_removed(&self.db, &path)?;
-            db::worker_event(
-                &self.db,
-                "repository_expired",
-                Some(&path.to_string_lossy()),
-            )?;
-        }
+        self.dispatch_once()?;
+        self.responses_once()?;
         Ok(())
     }
 
     fn repository_paths(&self) -> Vec<PathBuf> {
-        let mut repositories = self
-            .repositories
-            .borrow()
-            .iter()
-            .map(|(path, session)| (path.clone(), session.activity_score))
-            .collect::<Vec<_>>();
-        repositories.sort_by(|(left_path, left_score), (right_path, right_score)| {
-            right_score
-                .cmp(left_score)
-                .then_with(|| left_path.cmp(right_path))
-        });
-        repositories
-            .into_iter()
-            .map(|(path, _score)| path)
-            .collect()
+        self.repositories.borrow().keys().cloned().collect()
     }
 
-    fn scan_all(&self) -> ServiceResult<()> {
-        let repositories = self.repository_paths();
-        for repository in &repositories {
-            let startup = self
-                .repositories
-                .borrow()
-                .get(repository)
-                .is_some_and(|session| !session.initialized);
-            let activity = self.scan_repository(repository, startup)?;
-            let now = Instant::now();
-            if let Some(session) = self.repositories.borrow_mut().get_mut(repository) {
-                session.initialized = true;
-                session.activity_score = session.activity_score.saturating_mul(3) / 4;
-                session.activity_score = session.activity_score.saturating_add(activity);
-                if activity > 0 {
-                    session.last_activity = now;
-                }
-                db::repository_activity(&self.db, repository, session.activity_score, activity)?;
-            }
+    fn scan_registered(&self, repository: &Path) -> ServiceResult<()> {
+        let startup = self
+            .repositories
+            .borrow()
+            .get(repository)
+            .is_some_and(|session| !session.initialized);
+        self.scan_repository(repository, startup)?;
+        if let Some(session) = self.repositories.borrow_mut().get_mut(repository) {
+            session.initialized = true;
         }
         for (slug, copies) in db::duplicate_slugs(&self.db)? {
             if !db::integrity_event_seen(&self.db, "duplicate_slug", Some(&slug), None, None)? {
@@ -261,7 +184,7 @@ impl Worker {
         Ok(())
     }
 
-    fn scan_repository(&self, repository: &Path, startup: bool) -> ServiceResult<u64> {
+    fn scan_repository(&self, repository: &Path, startup: bool) -> ServiceResult<()> {
         let head = git::head(repository)?.0;
         if startup {
             let scanned = scan_markdown(repository)?;
@@ -276,7 +199,7 @@ impl Worker {
             }
             self.missing_slug_neighbors(repository, &scanned)?;
             db::repository_event(&self.db, repository, "startup_observed", Some(&head), None)?;
-            return Ok(0);
+            return Ok(());
         }
 
         let previous_head = db::latest_repository_head(&self.db, repository)?;
@@ -294,13 +217,11 @@ impl Worker {
             .map(|(path, slug, blob)| (path, (slug, blob)))
             .collect::<BTreeMap<_, _>>();
 
-        let mut activity = 0_u64;
         for path in changed {
             let absolute = repository.join(&path);
             if !absolute.is_file() {
                 if previous.contains_key(&path) {
                     db::file_removed(&self.db, repository, &path)?;
-                    activity = activity.saturating_add(15);
                 }
                 continue;
             }
@@ -322,9 +243,8 @@ impl Worker {
                     slug.as_deref(),
                     blob.as_deref(),
                 )?;
-                activity = activity.saturating_add(if prior.is_some() { 10 } else { 15 });
                 if let Some(slug) = slug.as_deref() {
-                    self.once_only_duplicate_check(slug)?;
+                    self.once_only_duplicate_check(repository, slug)?;
                 }
                 self.check_neighbor_dir(repository, &path)?;
             }
@@ -333,7 +253,7 @@ impl Worker {
         if previous_head.as_deref() != Some(head.as_str()) {
             db::repository_event(&self.db, repository, "head_observed", Some(&head), None)?;
         }
-        Ok(activity)
+        Ok(())
     }
 
     fn check_neighbor_dir(&self, repository: &Path, path: &Path) -> ServiceResult<()> {
@@ -387,30 +307,28 @@ impl Worker {
         Ok(())
     }
 
-    fn once_only_duplicate_check(&self, slug: &str) -> ServiceResult<()> {
+    fn once_only_duplicate_check(&self, repository: &Path, slug: &str) -> ServiceResult<()> {
         let needle = format!("slug: {slug}");
         let mut hits = Vec::new();
-        for repository in self.repository_paths() {
-            let output = Command::new("rg")
-                .current_dir(&repository)
-                .args(["-l", "-F", &needle, "-g", "*.md", "-g", "!.git/**"])
-                .output()
-                .map_err(io)?;
-            if !output.status.success() && output.status.code() != Some(1) {
-                return Err(ServiceError::Storage(
-                    String::from_utf8_lossy(&output.stderr).trim().into(),
-                ));
-            }
-            for relative in String::from_utf8_lossy(&output.stdout).lines() {
-                let path = repository.join(relative);
-                if std::fs::read_to_string(&path)
-                    .ok()
-                    .and_then(|text| frontmatter_slug(&text))
-                    .as_deref()
-                    == Some(slug)
-                {
-                    hits.push(path);
-                }
+        let output = Command::new("rg")
+            .current_dir(&repository)
+            .args(["-l", "-F", &needle, "-g", "*.md", "-g", "!.git/**"])
+            .output()
+            .map_err(io)?;
+        if !output.status.success() && output.status.code() != Some(1) {
+            return Err(ServiceError::Storage(
+                String::from_utf8_lossy(&output.stderr).trim().into(),
+            ));
+        }
+        for relative in String::from_utf8_lossy(&output.stdout).lines() {
+            let path = repository.join(relative);
+            if std::fs::read_to_string(&path)
+                .ok()
+                .and_then(|text| frontmatter_slug(&text))
+                .as_deref()
+                == Some(slug)
+            {
+                hits.push(path);
             }
         }
         if hits.len() > 1
@@ -470,100 +388,102 @@ impl Worker {
         Ok(())
     }
 
-    fn reconcile_dispatches(&self) -> ServiceResult<()> {
-        for repository in self.repository_paths() {
-            for commit in dispatch_commits(&repository)? {
-                let message = git_text(&repository, &["show", "-s", "--format=%B", &commit])?;
-                let trailers = dispatch_trailers(&message)?;
-                let Some(plan) = trailers.plan else {
-                    continue;
-                };
-                let dispatch = format!(
-                    "git-{}-{}",
-                    &commit[..commit.len().min(16)],
-                    safe_dispatch_part(&plan)
-                );
-                if db::dispatch_event_seen(&self.db, &dispatch, "submitted")?
-                    || db::dispatch_event_seen(&self.db, &dispatch, "submitted_recovered")?
-                {
-                    continue;
-                }
-                if !db::dispatch_event_seen(&self.db, &dispatch, "observed")? {
+    fn reconcile_dispatches(&self, repository: &Path) -> ServiceResult<()> {
+        let mut failure = None;
+        for commit in dispatch_commits(&repository)? {
+            let message = git_text(&repository, &["show", "-s", "--format=%B", &commit])?;
+            let trailers = dispatch_trailers(&message)?;
+            let Some(plan) = trailers.plan else {
+                continue;
+            };
+            let dispatch = format!(
+                "git-{}-{}",
+                &commit[..commit.len().min(16)],
+                safe_dispatch_part(&plan)
+            );
+            if db::dispatch_event_seen(&self.db, &dispatch, "submitted")?
+                || db::dispatch_event_seen(&self.db, &dispatch, "submitted_recovered")?
+            {
+                continue;
+            }
+            if !db::dispatch_event_seen(&self.db, &dispatch, "observed")? {
+                db::dispatch_event(
+                    &self.db,
+                    &repository,
+                    &dispatch,
+                    "observed",
+                    Some(&plan),
+                    Some(&commit),
+                    None,
+                    None,
+                )?;
+            }
+
+            let sources = source_records_at(&self.db, &repository, &commit, &trailers.documents)?;
+            let inflight_commit =
+                self.ensure_inflight_snapshot(&repository, &dispatch, &plan, &sources)?;
+            for (slug, path, blob, _bytes) in &sources {
+                db::dispatch_source(
+                    &self.db,
+                    &dispatch,
+                    &repository,
+                    slug,
+                    path,
+                    blob,
+                    &commit,
+                    &inflight_commit,
+                )?;
+            }
+
+            if dispatch_submitted_in_git(&repository, &dispatch)? {
+                db::dispatch_event(
+                    &self.db,
+                    &repository,
+                    &dispatch,
+                    "submitted_recovered",
+                    Some(&plan),
+                    Some(&commit),
+                    Some(&inflight_commit),
+                    None,
+                )?;
+                continue;
+            }
+
+            match self.submit_dispatch(&repository, &commit, &dispatch, &plan, &sources) {
+                Ok(()) => {
+                    db::expect_dispatch_responses(&self.db, &dispatch)?;
+                    let event_commit =
+                        git::append_dispatch_event(&repository, &dispatch, "submitted", None)?;
                     db::dispatch_event(
                         &self.db,
                         &repository,
                         &dispatch,
-                        "observed",
+                        "submitted",
                         Some(&plan),
                         Some(&commit),
-                        None,
+                        Some(&event_commit.0),
                         None,
                     )?;
                 }
-
-                let sources =
-                    source_records_at(&self.db, &repository, &commit, &trailers.documents)?;
-                let inflight_commit =
-                    self.ensure_inflight_snapshot(&repository, &dispatch, &plan, &sources)?;
-                for (slug, path, blob, _bytes) in &sources {
-                    db::dispatch_source(
-                        &self.db,
-                        &dispatch,
-                        &repository,
-                        slug,
-                        path,
-                        blob,
-                        &commit,
-                        &inflight_commit,
-                    )?;
-                }
-
-                if dispatch_submitted_in_git(&repository, &dispatch)? {
+                Err(error) => {
                     db::dispatch_event(
                         &self.db,
                         &repository,
                         &dispatch,
-                        "submitted_recovered",
+                        "submit_failed",
                         Some(&plan),
                         Some(&commit),
                         Some(&inflight_commit),
-                        None,
+                        Some(&error.to_string()),
                     )?;
-                    continue;
-                }
-
-                match self.submit_dispatch(&repository, &commit, &dispatch, &plan, &sources) {
-                    Ok(()) => {
-                        db::expect_dispatch_responses(&self.db, &dispatch)?;
-                        let event_commit =
-                            git::append_dispatch_event(&repository, &dispatch, "submitted", None)?;
-                        db::dispatch_event(
-                            &self.db,
-                            &repository,
-                            &dispatch,
-                            "submitted",
-                            Some(&plan),
-                            Some(&commit),
-                            Some(&event_commit.0),
-                            None,
-                        )?;
-                    }
-                    Err(error) => {
-                        db::dispatch_event(
-                            &self.db,
-                            &repository,
-                            &dispatch,
-                            "submit_failed",
-                            Some(&plan),
-                            Some(&commit),
-                            Some(&inflight_commit),
-                            Some(&error.to_string()),
-                        )?;
-                    }
+                    failure = Some(error);
                 }
             }
         }
-        Ok(())
+        match failure {
+            Some(error) => Err(error),
+            None => Ok(()),
+        }
     }
 
     fn ensure_inflight_snapshot(
@@ -663,12 +583,6 @@ impl Worker {
         plan: &str,
         sources: &[(String, PathBuf, String, Vec<u8>)],
     ) -> ServiceResult<Vec<Value>> {
-        if !self.pandoc_dispatch_defaults.is_file() {
-            return Err(ServiceError::InvalidInput(format!(
-                "Pandoc dispatch defaults not found: {}",
-                self.pandoc_dispatch_defaults.display()
-            )));
-        }
         let mut jobs = Vec::new();
         let mut runtime_defaults = Vec::new();
         for (slug, relative, _, _) in sources {
@@ -676,7 +590,7 @@ impl Worker {
             let temporary_defaults = DispatchDefaultsFile::create(&source, plan)?;
             jobs.push(PandocJob {
                 identity: slug.clone(),
-                working_directory: self.pandoc_directory.clone(),
+                working_directory: std::env::temp_dir(),
                 arguments: dispatch_pandoc_arguments(
                     &self.pandoc_dispatch_defaults,
                     temporary_defaults.path(),
@@ -711,110 +625,90 @@ impl Worker {
         Ok(calls)
     }
 
-    fn reconcile_exports(&self) -> ServiceResult<()> {
-        for slug in pending_export_slugs(&self.asc)? {
-            let Some(route) = db::route_slug(&self.db, &slug)? else {
-                db::integrity_event(
-                    &self.db,
-                    "unroutable_export",
-                    Some(&slug),
-                    None,
-                    None,
-                    "pending export slug did not resolve to exactly one active repository",
-                )?;
-                continue;
-            };
-            let Some(dispatch) = route.dispatch_identity.as_deref() else {
-                db::integrity_event(
-                    &self.db,
-                    "unroutable_export",
-                    Some(&slug),
-                    Some(&route.repository_root),
-                    Some(&route.source_path),
-                    "slug has no dispatch lineage in worker memory",
-                )?;
-                continue;
-            };
-            let Some(inflight_source_commit) = route.inflight_commit.as_deref() else {
-                continue;
+    fn reconcile_export(&self, slug: &str, failed_roots: &BTreeSet<PathBuf>) -> ServiceResult<()> {
+        let route = db::route_slug(&self.db, slug)?.ok_or_else(|| {
+            ServiceError::Conflict(format!("pending export {slug} has no unique active route"))
+        })?;
+        if failed_roots.contains(&route.repository_root) {
+            return Err(ServiceError::Storage(format!(
+                "repository unavailable: {}",
+                route.repository_root.display()
+            )));
+        }
+        let dispatch = route
+            .dispatch_identity
+            .as_deref()
+            .ok_or_else(|| ServiceError::Conflict(format!("{slug}: no dispatch lineage")))?;
+        let revision = route
+            .inflight_commit
+            .as_deref()
+            .ok_or_else(|| ServiceError::Conflict(format!("{slug}: no inflight source")))?;
+        let source = String::from_utf8(git::read_version(
+            &route.repository_root,
+            VersionRequest {
+                revision: revision.to_string(),
+                path: route.source_path.clone(),
+            },
+        )?)
+        .map_err(|error| ServiceError::InvalidInput(error.to_string()))?;
+        // Validate before extraction, response events, Git writes, or receipts.
+        if frontmatter_slug(&source).as_deref() != Some(slug) {
+            return Err(ServiceError::InvalidInput(format!(
+                "{slug}: dispatch snapshot slug does not match pending export"
+            )));
+        }
+        let records = extract_slug(&self.asc, slug)?;
+        for record in records {
+            let result = first_string(&record, &["result_identity", "identity", "call_identity"])?;
+            let call = first_string(&record, &["call_identity", "identity"])?;
+            let content = record
+                .get("record_content")
+                .or_else(|| record.get("content"))
+                .and_then(Value::as_str)
+                .ok_or_else(|| {
+                    ServiceError::InvalidInput(
+                        "export record is missing record_content/content".into(),
+                    )
+                })?;
+            let replacement = preserve_frontmatter(&source, content)?;
+            let snapshot = if let Some(existing) =
+                response_snapshot_for_result(&route.repository_root, &result)?
+            {
+                existing
+            } else {
+                git::append_response_snapshot(
+                    &route.repository_root,
+                    dispatch,
+                    &result,
+                    slug,
+                    "saved",
+                    &route.source_path,
+                    replacement.as_bytes(),
+                )?
+                .0
             };
             db::response_event(
                 &self.db,
                 &route.repository_root,
-                &slug,
-                "export_seen",
-                None,
-                None,
-                None,
+                slug,
+                "materialized",
+                Some(&result),
+                Some(&call),
+                Some(&snapshot),
                 None,
             )?;
-            let records = extract_slug(&self.asc, &slug)?;
-            for record in records {
-                let result =
-                    first_string(&record, &["result_identity", "identity", "call_identity"])?;
-                let call = first_string(&record, &["call_identity", "identity"])?;
-                let content = first_string(&record, &["record_content", "content"])?;
-                let source_bytes = git::read_version(
-                    &route.repository_root,
-                    VersionRequest {
-                        revision: inflight_source_commit.to_string(),
-                        path: route.source_path.clone(),
-                    },
-                )?;
-                let source = String::from_utf8(source_bytes)
-                    .map_err(|error| ServiceError::InvalidInput(error.to_string()))?;
-                if frontmatter_slug(&source).as_deref() != Some(slug.as_str()) {
-                    db::integrity_event(
-                        &self.db,
-                        "response_source_mismatch",
-                        Some(&slug),
-                        Some(&route.repository_root),
-                        Some(&route.source_path),
-                        "dispatch snapshot slug does not match pending export",
-                    )?;
-                    continue;
-                }
-                let replacement =
-                    set_document_review_metadata(&preserve_frontmatter(&source, &content)?)?;
-                let snapshot = if let Some(existing) =
-                    response_snapshot_for_result(&route.repository_root, &result)?
-                {
-                    existing
-                } else {
-                    git::append_response_snapshot(
-                        &route.repository_root,
-                        dispatch,
-                        &result,
-                        &slug,
-                        "saved",
-                        &route.source_path,
-                        replacement.as_bytes(),
-                    )?
-                    .0
-                };
-                db::response_event(
-                    &self.db,
-                    &route.repository_root,
-                    &slug,
-                    "materialized",
-                    Some(&result),
-                    Some(&call),
-                    Some(&snapshot),
-                    None,
-                )?;
-                db::response_observed(&self.db, dispatch, &slug, true)?;
-                run_asc(&self.asc, &["export", "update-exports", &result], &[])?;
-                db::response_event(
-                    &self.db,
-                    &route.repository_root,
-                    &slug,
-                    "receipt_recorded",
-                    Some(&result),
-                    Some(&call),
-                    Some(&snapshot),
-                    None,
-                )?;
-            }
+            db::response_observed(&self.db, dispatch, slug, true)?;
+            run_asc(&self.asc, &["export", "update-exports", &result], &[])?;
+            db::response_event(
+                &self.db,
+                &route.repository_root,
+                slug,
+                "receipt_recorded",
+                Some(&result),
+                Some(&call),
+                Some(&snapshot),
+                None,
+            )?;
         }
         Ok(())
     }
@@ -899,7 +793,13 @@ fn write_dispatch_defaults(file: &mut File, source: &Path, plan: &str) -> Servic
 fn dispatch_pandoc_arguments(static_defaults: &Path, runtime_defaults: &Path) -> Vec<String> {
     vec![
         format!("--defaults={}", static_defaults.display()),
-        format!("--defaults={}", runtime_defaults.display()),
+        format!(
+            "--defaults={}",
+            runtime_defaults
+                .file_name()
+                .expect("runtime filename")
+                .to_string_lossy()
+        ),
     ]
 }
 
@@ -1054,60 +954,26 @@ fn markdown_frontmatter_value(text: &str, key: &str) -> Option<String> {
 }
 
 fn preserve_frontmatter(old: &str, response: &str) -> ServiceResult<String> {
-    let Some(start) = old.find("---") else {
-        return Ok(response.to_string());
-    };
-    if start != 0 {
-        return Ok(response.to_string());
+    let mut lines = old.split_inclusive('\n');
+    if !lines
+        .next()
+        .is_some_and(|line| line.trim_end_matches(['\r', '\n']) == "---")
+    {
+        return Err(ServiceError::InvalidInput(
+            "source has no YAML frontmatter".into(),
+        ));
     }
-    let rest = &old[3..];
-    let Some(end) = rest.find("\n---") else {
-        return Ok(response.to_string());
-    };
-    let frontmatter = &old[..3 + end + 4];
-    Ok(format!(
-        "{}\n\n{}",
-        frontmatter.trim_end(),
-        response.trim_start()
-    ))
-}
-
-fn set_document_review_metadata(text: &str) -> ServiceResult<String> {
-    if !text.starts_with("---\n") && !text.starts_with("---\r\n") {
-        return Ok(text.to_string());
+    let mut end = old.find('\n').map_or(old.len(), |index| index + 1);
+    for line in lines {
+        end += line.len();
+        if line.trim_end_matches(['\r', '\n']) == "---" {
+            // Keep the complete raw YAML block, including its original newline bytes.
+            let separator = if old[..end].ends_with('\n') { "" } else { "\n" };
+            return Ok(format!("{}{separator}{response}", &old[..end]));
+        }
     }
-    let newline = if text.starts_with("---\r\n") {
-        "\r\n"
-    } else {
-        "\n"
-    };
-    let first_end = text
-        .find(newline)
-        .ok_or_else(|| ServiceError::InvalidInput("malformed frontmatter".into()))?
-        + newline.len();
-    let marker = format!("{newline}---");
-    let rest = &text[first_end..];
-    let Some(relative_end) = rest.find(&marker) else {
-        return Err(ServiceError::InvalidInput("malformed frontmatter".into()));
-    };
-    let end = first_end + relative_end;
-    let mut fields = text[first_end..end]
-        .lines()
-        .filter(|line| {
-            let key = line
-                .split_once(':')
-                .map(|(key, _)| key.trim())
-                .unwrap_or("");
-            !matches!(key, "status" | "producer")
-        })
-        .map(str::to_string)
-        .collect::<Vec<_>>();
-    fields.push("status: needs-review".into());
-    fields.push("producer: ai".into());
-    let suffix = &text[end + newline.len()..];
-    Ok(format!(
-        "---{newline}{}{newline}{suffix}",
-        fields.join(newline)
+    Err(ServiceError::InvalidInput(
+        "source has unterminated YAML frontmatter".into(),
     ))
 }
 
@@ -1234,6 +1100,11 @@ fn source_records_at(
         })?;
         let spec = format!("{commit}:{}", path.to_string_lossy());
         let bytes = git_bytes(repository, &["show", &spec])?;
+        if frontmatter_slug(&String::from_utf8_lossy(&bytes)).as_deref() != Some(slug.as_str()) {
+            return Err(ServiceError::InvalidInput(format!(
+                "{slug}: committed source slug does not match dispatch"
+            )));
+        }
         let blob = git_text(repository, &["rev-parse", &spec])?
             .trim()
             .to_string();
@@ -1244,6 +1115,7 @@ fn source_records_at(
 
 fn dirty_markdown_paths(repository: &Path) -> ServiceResult<BTreeSet<PathBuf>> {
     let output = Command::new("git")
+        .env("GIT_OPTIONAL_LOCKS", "0")
         .arg("-C")
         .arg(repository)
         .args([
@@ -1578,9 +1450,6 @@ mod tests {
             asc: PathBuf::from("/bin/true"),
             pandoc,
             pandoc_dispatch_defaults: defaults,
-            pandoc_directory: root.to_path_buf(),
-            poll: Duration::ZERO,
-            repository_ttl: Duration::from_secs(1),
         }
     }
 
@@ -1715,7 +1584,7 @@ mod tests {
             lines[0],
             format!("--defaults={}", worker.pandoc_dispatch_defaults.display())
         );
-        assert!(lines[1].starts_with("--defaults=/tmp/autoscribe-dispatch-"));
+        assert!(lines[1].starts_with("--defaults=autoscribe-dispatch-"));
         assert_eq!(
             fs::read_to_string(defaults_copy).unwrap(),
             format!(
@@ -1723,7 +1592,7 @@ mod tests {
                 serde_json::to_string(&worktree.join("Content/One.md").to_string_lossy()).unwrap()
             )
         );
-        let runtime_path = PathBuf::from(fs::read_to_string(runtime_path_log).unwrap());
+        let runtime_path = std::env::temp_dir().join(fs::read_to_string(runtime_path_log).unwrap());
         assert!(!runtime_path.exists());
     }
 
@@ -1747,7 +1616,7 @@ mod tests {
                 .build_calls(&worktree, "plan.test", &[source(&worktree)])
                 .is_err()
         );
-        let runtime_path = PathBuf::from(fs::read_to_string(runtime_path_log).unwrap());
+        let runtime_path = std::env::temp_dir().join(fs::read_to_string(runtime_path_log).unwrap());
         assert!(!runtime_path.exists());
     }
 
@@ -1829,5 +1698,339 @@ mod tests {
         assert_eq!(call["identity"], "cnt.one");
         assert_eq!(call["plan"], "plan.test");
         assert_eq!(call["content"], "Committed body");
+    }
+    fn committed_repository(root: &Path, slug: &str) -> String {
+        git(root, &["init", "--quiet", "--initial-branch=master"]);
+        git(root, &["config", "user.email", "tests@autoscribe.local"]);
+        git(root, &["config", "user.name", "AutoScribe Tests"]);
+        let text = format!(
+            "---\r\nslug: {slug}\r\n# retain this comment\r\nstatus: draft\r\nproducer: human\r\ntitle: 'Raw: title'\r\n---\r\nOriginal body\r\n"
+        );
+        fs::write(root.join("One.md"), &text).unwrap();
+        git(root, &["add", "One.md"]);
+        git(root, &["commit", "--quiet", "-m", "Original"]);
+        text
+    }
+
+    #[test]
+    fn empty_exports_do_not_construct_repositories_or_write_database() {
+        let root = TestDirectory::new("idle");
+        let asc = root.path().join("asc");
+        let log = root.path().join("calls");
+        executable(
+            &asc,
+            &format!("#!/bin/sh\nprintf '%s\\n' \"$*\" >> '{}'\n", log.display()),
+        );
+        let worker = Worker::create(Database::memory().unwrap(), asc).unwrap();
+        for index in 0..32 {
+            db::record_attention(
+                &worker.db,
+                &root.path().join(format!("missing-{index}")),
+                None,
+            )
+            .unwrap();
+        }
+        let before = worker.db.connection().total_changes();
+        for _ in 0..10 {
+            assert!(!worker.responses_once().unwrap());
+        }
+        assert!(worker.repositories.borrow().is_empty());
+        assert_eq!(worker.db.connection().total_changes(), before);
+        let calls = fs::read_to_string(log).unwrap();
+        assert_eq!(calls.lines().count(), 10);
+        assert!(calls.lines().all(|line| line == "export list-pending"));
+        println!(
+            "idle: 32 registered roots, 10 response checks, 10 asc calls, 0 repository sessions, 0 SQLite row changes"
+        );
+    }
+
+    #[test]
+    fn persistent_submission_failure_is_backed_off_and_missing_repo_is_isolated() {
+        for fail_pandoc in [true, false] {
+            let root = TestDirectory::new("retry-dispatch");
+            let original = committed_repository(root.path(), "cnt.one");
+            git(
+                root.path(),
+                &[
+                    "commit",
+                    "--quiet",
+                    "--allow-empty",
+                    "-m",
+                    "Dispatch\n\nAutoscribe-Plan: plan.test\nAutoscribe-Document: cnt.one",
+                ],
+            );
+            let master = git::head(root.path()).unwrap().0;
+            // Include dirty user bytes to verify scans and detached worktrees never alter them.
+            fs::write(root.path().join("One.md"), format!("{original}User edit\n")).unwrap();
+            let user_bytes = fs::read(root.path().join("One.md")).unwrap();
+            let index = fs::read(root.path().join(".git/index")).unwrap();
+            let pandoc = root.path().join("pandoc");
+            let log = root.path().join("attempts");
+            executable(
+                &pandoc,
+                &format!(
+                    "#!/bin/sh\nprintf 'pandoc\\n' >> '{}'\n{}\n",
+                    log.display(),
+                    if fail_pandoc {
+                        "exit 9"
+                    } else {
+                        "printf '%s\\n' '{\"type\":\"call\",\"identity\":\"cnt.one\",\"content\":\"Body\",\"plan\":\"plan.test\",\"extra\":{}}'"
+                    }
+                ),
+            );
+            let mut worker = worker(root.path(), pandoc);
+            worker.asc = root.path().join("asc");
+            executable(
+                &worker.asc,
+                &format!(
+                    "#!/bin/sh\nif [ \"$1\" = enqueue ]; then printf 'enqueue\\n' >> '{}'; cat >/dev/null; exit 7; fi\nexit 0\n",
+                    log.display()
+                ),
+            );
+            let healthy = TestDirectory::new("healthy");
+            committed_repository(healthy.path(), "cnt.healthy");
+            let missing = root.path().join("missing");
+            for repository in [
+                &missing,
+                &root.path().to_path_buf(),
+                &healthy.path().to_path_buf(),
+            ] {
+                db::record_attention(&worker.db, repository, None).unwrap();
+            }
+            crate::daemon::dispatch_pass(&worker, || 0).unwrap();
+            let pending = db::due_attention(&worker.db, 1_000).unwrap();
+            assert_eq!(pending.len(), 2);
+            assert!(
+                pending
+                    .iter()
+                    .all(|attention| attention.root != healthy.path())
+            );
+            let first = fs::read_to_string(&log).unwrap();
+            assert_eq!(first.lines().filter(|line| *line == "pandoc").count(), 1);
+            for now in [0, 250, 500, 999] {
+                crate::daemon::dispatch_pass(&worker, || now).unwrap();
+            }
+            assert_eq!(fs::read_to_string(&log).unwrap(), first);
+            crate::daemon::dispatch_pass(&worker, || 1_000).unwrap();
+            assert!(db::due_attention(&worker.db, 2_999).unwrap().is_empty());
+            assert_eq!(db::due_attention(&worker.db, 3_000).unwrap().len(), 2);
+            assert_eq!(
+                fs::read_to_string(&log)
+                    .unwrap()
+                    .lines()
+                    .filter(|line| *line == "pandoc")
+                    .count(),
+                2
+            );
+            // Repair the dependency and prove due work is acknowledged, not lost
+            // or submitted again once it succeeds.
+            executable(
+                &worker.pandoc,
+                "#!/bin/sh\nprintf '%s\\n' '{\"type\":\"call\",\"identity\":\"cnt.one\",\"content\":\"Body\",\"plan\":\"plan.test\",\"extra\":{}}'\n",
+            );
+            executable(
+                &worker.asc,
+                "#!/bin/sh\nif [ \"$1\" = enqueue ]; then cat >/dev/null; fi\n",
+            );
+            crate::daemon::dispatch_pass(&worker, || 3_000).unwrap();
+            let remaining = db::due_attention(&worker.db, i64::MAX).unwrap();
+            assert_eq!(remaining.len(), 1);
+            assert_eq!(remaining[0].root, missing);
+            let inflight = git_text(root.path(), &["rev-parse", "autoscribe/inflight"]).unwrap();
+            crate::daemon::dispatch_pass(&worker, || 3_250).unwrap();
+            assert_eq!(
+                git_text(root.path(), &["rev-parse", "autoscribe/inflight"]).unwrap(),
+                inflight
+            );
+            assert_eq!(git::head(root.path()).unwrap().0, master);
+            assert_eq!(fs::read(root.path().join("One.md")).unwrap(), user_bytes);
+            assert_eq!(fs::read(root.path().join(".git/index")).unwrap(), index);
+            assert_eq!(
+                worker
+                    .db
+                    .connection()
+                    .query_row(
+                        "SELECT COUNT(*) FROM dispatch_events WHERE event='submitted'",
+                        [],
+                        |row| row.get::<_, i64>(0)
+                    )
+                    .unwrap(),
+                1
+            );
+        }
+    }
+
+    fn response_route(worker: &Worker, root: &Path, slug: &str, snapshot_slug: &str) -> String {
+        let bytes = format!(
+            "---\r\nslug: {snapshot_slug}\r\n# exact\r\nstatus: draft\r\nproducer: human\r\n---\r\nOriginal\r\n"
+        );
+        let snapshot = git::append_inflight_snapshot(
+            root,
+            &LedgerSnapshotRequest {
+                dispatch: DispatchId(format!("dispatch-{slug}")),
+                plan: PlanId("plan.test".into()),
+                sources: vec![LedgerSource {
+                    slug: slug.into(),
+                    path: "One.md".into(),
+                    bytes: bytes.as_bytes().to_vec(),
+                }],
+            },
+        )
+        .unwrap();
+        db::record_attention(&worker.db, root, None).unwrap();
+        db::file_seen(
+            &worker.db,
+            root,
+            Path::new("One.md"),
+            Some(slug),
+            Some("blob"),
+        )
+        .unwrap();
+        db::dispatch_source(
+            &worker.db,
+            &format!("dispatch-{slug}"),
+            root,
+            slug,
+            Path::new("One.md"),
+            "blob",
+            &git::head(root).unwrap().0,
+            &snapshot.commit.0,
+        )
+        .unwrap();
+        bytes
+    }
+
+    #[test]
+    fn mismatch_fails_before_any_response_write_and_other_repositories_continue() {
+        let bad = TestDirectory::new("bad-response");
+        committed_repository(bad.path(), "cnt.bad");
+        let good = TestDirectory::new("good-response");
+        committed_repository(good.path(), "cnt.good");
+        let mut worker = worker(good.path(), PathBuf::from("pandoc"));
+        let calls = good.path().join("asc-calls");
+        worker.asc = good.path().join("asc");
+        executable(
+            &worker.asc,
+            &format!(
+                r#"#!/bin/sh
+printf '%s\n' "$*" >> '{}'
+case "$2" in
+list-pending) printf 'cnt.bad\ncnt.good\ncnt.missing\n' ;;
+extract-selected) printf '%s\n' '{{"result_identity":"result.good","call_identity":"call.good","record_content":"Replacement\n"}}' ;;
+update-exports) exit 0 ;;
+esac
+"#,
+                calls.display()
+            ),
+        );
+        response_route(&worker, bad.path(), "cnt.bad", "cnt.wrong");
+        let source = response_route(&worker, good.path(), "cnt.good", "cnt.good");
+        let missing = TestDirectory::new("missing-response");
+        let former = missing.path().join("repository");
+        fs::create_dir(&former).unwrap();
+        committed_repository(&former, "cnt.missing");
+        response_route(&worker, &former, "cnt.missing", "cnt.missing");
+        worker.register_repository(&former).unwrap();
+        fs::rename(&former, missing.path().join("renamed")).unwrap();
+        let bad_ref = git_text(bad.path(), &["rev-parse", "autoscribe/inflight"]).unwrap();
+        let before = worker.db.connection().total_changes();
+        assert!(
+            worker
+                .reconcile_export("cnt.bad", &BTreeSet::new())
+                .is_err()
+        );
+        assert_eq!(worker.db.connection().total_changes(), before);
+        assert!(!calls.exists());
+        let master = git::head(good.path()).unwrap().0;
+        let index = fs::read(good.path().join(".git/index")).unwrap();
+        let user_bytes = fs::read(good.path().join("One.md")).unwrap();
+        assert!(worker.responses_once().is_err());
+        assert_eq!(
+            git_text(bad.path(), &["rev-parse", "autoscribe/inflight"]).unwrap(),
+            bad_ref
+        );
+        let log = fs::read_to_string(&calls).unwrap();
+        assert_eq!(
+            log.lines()
+                .filter(|line| *line == "export list-pending")
+                .count(),
+            1
+        );
+        assert!(!log.contains("extract-selected cnt.bad"));
+        assert!(!log.contains("extract-selected cnt.missing"));
+        assert!(log.contains("update-exports result.good"));
+        let output = git::read_version(
+            good.path(),
+            VersionRequest {
+                revision: "autoscribe/inflight".into(),
+                path: "One.md".into(),
+            },
+        )
+        .unwrap();
+        let expected = source.replace("Original\r\n", "Replacement\n");
+        assert_eq!(output, expected.as_bytes());
+        assert_eq!(git::head(good.path()).unwrap().0, master);
+        assert_eq!(fs::read(good.path().join(".git/index")).unwrap(), index);
+        assert_eq!(fs::read(good.path().join("One.md")).unwrap(), user_bytes);
+        assert_eq!(
+            worker
+                .db
+                .connection()
+                .query_row(
+                    "SELECT COUNT(*) FROM response_events WHERE source_slug='cnt.bad'",
+                    [],
+                    |row| row.get::<_, i64>(0)
+                )
+                .unwrap(),
+            0
+        );
+    }
+
+    #[test]
+    fn frontmatter_bytes_are_preserved_and_malformed_blocks_fail() {
+        for source in [
+            "---\nslug: cnt.one\n# comment\nstatus: draft\n---\nold",
+            "---\r\nslug: cnt.one\r\nquoted: 'a: b'\r\n---\r\nold",
+        ] {
+            assert_eq!(
+                preserve_frontmatter(source, " new\n").unwrap(),
+                source.replace("old", " new\n")
+            );
+        }
+        assert!(preserve_frontmatter("---\nslug: cnt.one\n", "body").is_err());
+    }
+    #[test]
+    fn dispatch_source_mismatch_fails_before_inflight_write() {
+        let root = TestDirectory::new("dispatch-mismatch");
+        committed_repository(root.path(), "cnt.original");
+        git(
+            root.path(),
+            &[
+                "commit",
+                "--quiet",
+                "--allow-empty",
+                "-m",
+                "Dispatch\n\nAutoscribe-Plan: plan.test\nAutoscribe-Document: cnt.one",
+            ],
+        );
+        fs::write(
+            root.path().join("One.md"),
+            "---\nslug: cnt.one\n---\nUser edit\n",
+        )
+        .unwrap();
+        let worker = worker(root.path(), PathBuf::from("pandoc"));
+        worker.register_repository(root.path()).unwrap();
+        let error = worker.dispatch_once().unwrap_err().to_string();
+        assert!(
+            error.contains("committed source slug does not match"),
+            "{error}"
+        );
+        assert!(
+            git_text(
+                root.path(),
+                &["rev-parse", "--verify", "autoscribe/inflight"]
+            )
+            .is_err()
+        );
     }
 }

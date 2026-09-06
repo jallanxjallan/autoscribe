@@ -125,3 +125,66 @@ impl Drop for TestRepository {
         let _ = fs::remove_dir_all(&self.0);
     }
 }
+
+#[test]
+fn dispatch_cli_uses_path_pandoc_and_two_relative_defaults() {
+    let repository = TestRepository::new();
+    let root = repository.path();
+    fs::write(root.join("One.md"), "---\nslug: cnt.one\n---\nOriginal\n").unwrap();
+    repository.git(["add", "One.md"]);
+    repository.git([
+        "commit",
+        "--quiet",
+        "-m",
+        "Dispatch\n\nAutoscribe-Plan: plan.test\nAutoscribe-Document: cnt.one",
+    ]);
+    let bin = root.join("bin");
+    fs::create_dir(&bin).unwrap();
+    let pandoc = bin.join("pandoc");
+    let asc = bin.join("asc");
+    fs::write(&pandoc, format!(r#"#!/bin/sh
+printf '%s\n' "$@" > '{}'
+printf '%s\n' "$PWD" > '{}'
+cat "${{2#--defaults=}}" > '{}'
+printf '%s\n' '{{"type":"call","identity":"cnt.one","content":"Body","plan":"plan.test","extra":{{}}}}'
+"#, root.join("arguments").display(), root.join("cwd").display(), root.join("runtime.yaml").display())).unwrap();
+    fs::write(
+        &asc,
+        "#!/bin/sh\nif [ \"$1\" = enqueue ]; then cat >/dev/null; fi\n",
+    )
+    .unwrap();
+    use std::os::unix::fs::PermissionsExt;
+    for path in [&pandoc, &asc] {
+        fs::set_permissions(path, fs::Permissions::from_mode(0o700)).unwrap();
+    }
+    let output = Command::new(env!("CARGO_BIN_EXE_svc"))
+        .args(["dispatch-once", root.to_str().unwrap()])
+        .env("HOME", root)
+        .env("AUTOSCRIBE_CLIENT_DB", root.join("client.sqlite"))
+        .env("AUTOSCRIBE_ASC", &asc)
+        .env("PATH", format!("{}:/usr/bin:/bin", bin.display()))
+        .env_remove("AUTOSCRIBE_PANDOC")
+        .env_remove("AUTOSCRIBE_PANDOC_DISPATCH_DEFAULTS")
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let arguments = fs::read_to_string(root.join("arguments")).unwrap();
+    let args = arguments.lines().collect::<Vec<_>>();
+    assert_eq!(args.len(), 2);
+    assert_eq!(args[0], "--defaults=dispatch.yaml");
+    assert!(args[1].starts_with("--defaults=autoscribe-dispatch-"));
+    assert!(!args[1].contains('/'));
+    let cwd = fs::read_to_string(root.join("cwd")).unwrap();
+    assert!(
+        !Path::new(cwd.trim())
+            .join(args[1].trim_start_matches("--defaults="))
+            .exists()
+    );
+    let runtime = fs::read_to_string(root.join("runtime.yaml")).unwrap();
+    assert!(runtime.contains("/worktree/One.md"));
+    assert!(runtime.contains("plan: \"plan.test\""));
+}
