@@ -20,11 +20,10 @@ class ControlRepoConfig:
 
 
 CONTROL = ControlRepoConfig(
-    path=Path("/home/jeremy/.local/share/autoscribe/control.git"),
+    path=Path("/home/jeremy/Work/Control"),
     config_branch="master",
     git_name="AutoScribe Control",
     git_email="autoscribe@localhost",
 )
-
 
 __all__ = ["CONTROL", "ControlRepoConfig"]
