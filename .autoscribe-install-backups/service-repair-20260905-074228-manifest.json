@@ -1,0 +1,37 @@
+{
+  "label": "service-repair-20260905-074228",
+  "backup_directory": "/home/jeremy/Work/Loom/.autoscribe-install-backups",
+  "pandoc_link_backup": "/home/jeremy/Work/Loom/.autoscribe-install-backups/service-repair-20260905-074228-pandoc-link",
+  "dispatch_defaults_backup": "/home/jeremy/Work/Loom/.autoscribe-install-backups/service-repair-20260905-074228-dispatch.yaml",
+  "previous_symlink_target": "/home/jeremy/AutoScribe/extensions/pandoc",
+  "new_symlink_target": "/home/jeremy/Work/Extensions/pandoc",
+  "defaults_original_sha256": "8add77cce69dd098b5ea839b3ceed2ad134746b825acdbd562572f7560d6034d",
+  "pre_migration_database_backup": "/home/jeremy/Work/Loom/.autoscribe-install-backups/service-repair-20260905-074228-service.sqlite",
+  "binary_backup": "/home/jeremy/Work/Loom/.autoscribe-install-backups/service-repair-20260905-074228-svc",
+  "old_binary_sha256": "75fc681708e9da1c47493bd69fbe493f7837245a0f97ebea44cda6c6c2e07dde",
+  "installed_binary_sha256": "dd967a9853c21179a4c9f0e70e5dcf4152ebb73e4df1daf7e8043da2dce4587d",
+  "installed_binary": "/home/jeremy/.local/bin/svc",
+  "validated_build": "/tmp/autoscribe-repair-target/release/svc",
+  "validation": "cargo test --release --offline: 19 tests passed",
+  "client_env_sha256": "69c8c2ebe8524faa14afcecee729d96da29a15080eac4fbca43a0c99530d138c",
+  "responses_validation": {
+    "elapsed_seconds": 125.002,
+    "cpu_seconds": 3.868365,
+    "average_cpu_percent_one_core": 3.095,
+    "observed_subprocesses": {
+      "asc export list-pending": 9
+    },
+    "healthy": true,
+    "final_state": {
+      "MainPID": "175054",
+      "NRestarts": "0",
+      "ControlGroup": "/user.slice/user-1000.slice/user@1000.service/app.slice/autoscribe-responses.service",
+      "CPUUsageNSec": "3868365000",
+      "Id": "autoscribe-responses.service",
+      "ActiveState": "active",
+      "SubState": "running",
+      "InvocationID": "fd6b09c82f234f5399d7c184860fea4d"
+    }
+  },
+  "dispatch_validation": "Not started: host execution approval was declined before command execution."
+}

@@ -1,0 +1,10 @@
+Rollback inventory
+
+/home/jeremy/Work/Loom/.autoscribe-install-backups/service-repair-20260905-074228-manifest.json
+
+Before restoring the binary or configuration, stop both AutoScribe user services.
+Restore /home/jeremy/Work/Loom/.autoscribe-install-backups/service-repair-20260905-074228-svc to /home/jeremy/.local/bin/svc using an atomic sibling-file replacement.
+Restore /home/jeremy/Work/Loom/.autoscribe-install-backups/service-repair-20260905-074228-dispatch.yaml to /home/jeremy/Work/Extensions/pandoc/defaults/dispatch.yaml.
+Restore the symlink object /home/jeremy/Work/Loom/.autoscribe-install-backups/service-repair-20260905-074228-pandoc-link to /home/jeremy/.local/share/pandoc (do not dereference it).
+The former symlink target was missing; restoring it recreates that previous state.
+The pre-migration SQLite backup is a recovery copy. Do not replace the live ledger with it after processing new work without reviewing that state first.

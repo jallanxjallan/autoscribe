@@ -1,0 +1,7 @@
+# Static AutoScribe dispatch configuration. Per-dispatch input and plan values
+# are supplied by the service in a second, ephemeral defaults file.
+from: markdown+yaml_metadata_block+fenced_divs
+to: native
+output-file: /dev/null
+filters:
+  - filters/emit/dispatch_calls.lua

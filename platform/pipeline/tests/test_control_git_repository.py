@@ -11,11 +11,12 @@ from asc.config.repos import ControlRepoConfig
 from asc.control import repository
 from asc.enqueue.plan import load_plan
 from asc.enqueue import runtime
-from asc.models.control.plan import instruction_scope
+from asc import extensions
+from asc.enqueue import reader, service
 
 ROLE = "rol_4Q7M2V9K8D3R6X1P"
 CONTEXT = "ctx_8J2F6R4W9P1C7T5N"
-TASK = "spc_3N6K8R2V7M4Q9D1X"
+TASK = "tsk_3N6K8R2V7M4Q9D1X"
 
 
 def _git(repo: Path, *args: str) -> str:
@@ -82,11 +83,17 @@ def control(tmp_path, monkeypatch):
         ("instructions/task.md", TASK),
     ):
         (repo / name).write_text(_instruction(identity))
-    (repo / "plans/one.json").write_text(json.dumps(_record()))
+    (repo / "plans/plan.one.json").write_text(json.dumps(_record()))
     _commit(repo)
     monkeypatch.setattr(
         repository, "CONTROL", ControlRepoConfig(repo, "master", "Tests", "tests@local")
     )
+    extension_root = tmp_path / "extensions"
+    (extension_root / "engines").mkdir(parents=True)
+    (extension_root / "engines/chatgpt.py").write_text(
+        "def make_call(value): return value\n"
+    )
+    monkeypatch.setattr(extensions, "EXTENSIONS_ROOT", extension_root)
     return repo
 
 
@@ -96,312 +103,372 @@ def test_bare_repository_reads_and_blob_version(control, tmp_path, monkeypatch):
     monkeypatch.setattr(
         repository, "CONTROL", ControlRepoConfig(bare, "master", "Tests", "tests@local")
     )
-    loaded = load_plan("plan.one")
-    instruction = repository.read_instruction(TASK, loaded.revision)
-    assert loaded.plan.identity == "plan.one"
-    assert instruction.identity == TASK
-    assert instruction.content == "Do the thing.\n"
+    revision = repository.control_revision()
+    view = repository.ControlRepository.at_revision(revision)
+    plan = view.read_plan("plan.one")
+    instruction = view.read_instruction(TASK)
+    assert plan.revision == instruction.revision == revision
+    assert plan.path == "plans/plan.one.json"
+    assert instruction.path == "instructions/task.md"
     assert instruction.fingerprint == _git(
-        bare, "rev-parse", f"{loaded.revision}:instructions/task.md"
+        bare, "rev-parse", f"{revision}:instructions/task.md"
     )
-    assert not hasattr(repository, "control_checkout")
+    assert instruction.extra["repo_commit"] == revision
+    assert view.read_instruction(TASK) is instruction
+    assert view.read_plan("plan.one") is plan
 
 
-def test_revision_pinning_through_runtime_materialization(control, monkeypatch):
-    loaded = load_plan("plan.one")
-    path = control / "instructions/task.md"
-    path.write_text(_instruction(TASK, body="Changed at B.\n"))
-    revision_b = _commit(control)
-    seen = []
+def test_one_revision_per_enqueue_with_branch_advance(control, monkeypatch):
+    from io import StringIO
+    from types import SimpleNamespace
 
-    def resolve(identity, *, control_revision):
-        source = repository.read_instruction(identity, control_revision)
-        seen.append(source)
+    original = repository.ControlRepository.read_plan
+    resolutions, sources, writes = [], [], []
+    revision = repository.control_revision()
+    resolve = repository.control_revision
+    monkeypatch.setattr(
+        repository, "control_revision", lambda: resolutions.append(True) or resolve()
+    )
+
+    def load_then_advance(view, slug):
+        plan = original(view, slug)
+        (control / "instructions/task.md").write_text(
+            _instruction(TASK, body="Changed at B.\n")
+        )
+        changed = _record()
+        changed["capabilities"]["models"].clear()
+        (control / "plans/plan.one.json").write_text(json.dumps(changed))
+        _commit(control)
+        return plan
+
+    monkeypatch.setattr(repository.ControlRepository, "read_plan", load_then_advance)
+    call = SimpleNamespace(
+        identity="call",
+        source_identity="document",
+        redis_key=SimpleNamespace(identity="call"),
+    )
+    monkeypatch.setattr(reader, "store_call", lambda raw: ("call:call:record", call))
+
+    def materialize(identity, *, control_revision, source):
+        assert control_revision == source.revision == revision
+        sources.append(source)
         return f"instruction:{identity}:record"
 
-    monkeypatch.setattr(runtime, "resolve_instruction_key", resolve)
-    monkeypatch.setattr(runtime.Runtime, "save", lambda self, **kwargs: self.raw_key)
-    runtimes = runtime.materialize_runtimes(
-        call_identity="runtime-call", plan=loaded.plan, control_revision=loaded.revision
+    monkeypatch.setattr(runtime, "resolve_instruction_key", materialize)
+    monkeypatch.setattr(runtime.Runtime, "save", lambda self, **kw: writes.append(self))
+    monkeypatch.setattr(
+        service, "create_job", lambda **kw: SimpleNamespace(raw_key="job:call:record")
     )
-    assert all(source.revision == loaded.revision for source in seen)
-    assert seen[-1].content == "Do the thing.\n"
-    assert runtimes[0].plan_identity == "plan.one"
-    assert repository.read_instruction(TASK, revision_b).content == "Changed at B.\n"
+    monkeypatch.setattr(service, "activate_job", lambda job: None)
+    report = service.enqueue_from_stream(
+        StringIO('{"identity":"document","plan":"plan.one","content":"text"}\n')
+    )
+    assert len(report.records) == 1
+    assert resolutions == [True]
+    assert sources[-1].content == "Do the thing.\n"
+    assert writes[0].model == "cheap"
+    assert repository.read_instruction(TASK, revision).content == "Do the thing.\n"
+    assert repository.read_instruction(TASK, resolve()).content == "Changed at B.\n"
 
 
 def test_filename_and_title_are_nonsemantic(control):
     old = repository.read_instruction(TASK, repository.control_revision())
-    path = control / "instructions/task.md"
-    path.rename(control / "instructions/unrelated.md")
+    (control / "instructions/task.md").rename(control / "instructions/unrelated.md")
     (control / "instructions/unrelated.md").write_text(
         _instruction(TASK, title="Renamed")
     )
-    revision = _commit(control)
-    new = repository.read_instruction(TASK, revision)
+    new = repository.read_instruction(TASK, _commit(control))
     assert new.identity == old.identity
     assert new.title == "Renamed"
     assert new.fingerprint != old.fingerprint
 
 
-@pytest.mark.parametrize("identity", [ROLE, CONTEXT, TASK])
-def test_valid_identities(identity):
-    assert instruction_scope(identity) in {"role", "context", "task"}
+@pytest.mark.parametrize(
+    "component,name", [("plan", "absent"), ("instruction", "tsk_0000000000000000")]
+)
+def test_missing_record_has_revision(control, component, name):
+    revision = repository.control_revision()
+    with pytest.raises(KeyError) as error:
+        if component == "plan":
+            repository.read_plan(name, revision)
+        else:
+            repository.read_instruction(name, revision)
+    assert (
+        error.value.args[0]
+        == f"missing {component}: {name} at Control revision {revision}"
+    )
 
 
 @pytest.mark.parametrize(
-    "identity",
+    "field,registry,label",
     [
-        "tsk_3N6K8R2V7M4Q9D1X",
-        "spc_3n6k8r2v7m4q9d1x",
-        "spc_3N6K8R2V7M4Q9D1I",
-        "ctx_123",
-        "ctx_8J2F6R4W9P1C7T5U",
-        "tsk.one",
-        "",
-        None,
+        ("engine", "engines", "engine"),
+        ("model", "models", "model"),
+        ("script", "local_scripts", "local script"),
+        ("rag_profile", "rag_profiles", "RAG profile"),
     ],
 )
-def test_invalid_identities(identity):
-    with pytest.raises(ValueError):
-        instruction_scope(identity)
-
-
-def test_duplicate_instruction_rejects_revision(control):
-    (control / "context/duplicate.md").write_text(_instruction(TASK))
-    _commit(control)
-    with pytest.raises(ValueError, match="duplicate instruction"):
-        load_plan("plan.one")
-
-
-def test_duplicate_plan_rejects_revision(control):
-    (control / "plans/duplicate.json").write_text(json.dumps(_record()))
-    _commit(control)
-    with pytest.raises(ValueError, match="duplicate plan"):
-        load_plan("plan.one")
-
-
-@pytest.mark.parametrize(
-    "mutate",
-    [
-        lambda r: r.update(record_identity=r.pop("slug")),
-        lambda r: r.update(payload={"steps": r.pop("steps")}),
-        lambda r: r["steps"]["1"].update(instruction_slugs={"task": "tsk.one"}),
-        lambda r: r["steps"]["1"].update(instruction="tsk.one"),
-        lambda r: r["steps"]["1"].update(instructions=[ROLE, CONTEXT, TASK]),
-        lambda r: r["steps"]["1"]["instructions"].update(task=TASK),
-        lambda r: r["steps"]["1"]["instructions"].update(task=[ROLE]),
-        lambda r: r["steps"]["1"]["instructions"].update(task=["tsk.one"]),
-        lambda r: r["steps"]["1"]["instructions"].update(task=["spc_0000000000000000"]),
-        lambda r: r["steps"]["1"].update(kind=r["steps"]["1"].pop("engine_kind")),
-        lambda r: r["steps"]["1"].update(engine={"key": "chatgpt"}),
-        lambda r: r["steps"]["1"].pop("engine"),
-        lambda r: r["steps"]["1"].update(args=None),
-        lambda r: r["steps"]["1"].update(args={"unexpected": True}),
-        lambda r: r["steps"]["1"].update(model="absent"),
-        lambda r: r["steps"]["1"].update(engine="absent"),
-        lambda r: r.update(steps={}),
-        lambda r: r.update(steps={"2": r["steps"]["1"]}),
-        lambda r: r.update(steps=list(r["steps"].values())),
-    ],
-)
-def test_nonconforming_plan_rejects_revision(control, mutate):
-    record = _record()
-    mutate(record)
-    (control / "plans/one.json").write_text(json.dumps(record))
-    _commit(control)
-    with pytest.raises((ValueError, TypeError)):
-        load_plan("plan.one")
-
-
-@pytest.mark.parametrize(
-    "text",
-    [
-        _instruction(TASK).replace("identity:", "slug:"),
-        _instruction(TASK).replace("title:", "label:"),
-        _instruction(TASK).replace("description:", "summary:"),
-        _instruction(TASK).replace('description: ""', "component: task"),
-        _instruction(TASK).replace(
-            'description: ""', 'description: ""\nrecord: instruction'
-        ),
-        _instruction(TASK).replace(
-            'description: ""', 'description: ""\nidentity: ' + TASK
-        ),
-        _instruction(TASK, body="  \n"),
-        _instruction(TASK).replace('description: ""', "description: [broken"),
-    ],
-)
-def test_nonconforming_instruction_rejects_whole_revision(control, text):
-    (control / "instructions/task.md").write_text(text)
-    _commit(control)
-    with pytest.raises(ValueError):
-        load_plan("plan.one")
-
-
-def test_rejects_moving_ref_for_instruction(control):
-    with pytest.raises(ValueError, match="immutable commit"):
-        repository.read_instruction(TASK, "master")
-
-
-@pytest.mark.parametrize(
-    "kind,field,registry",
-    [("script", "script", "local_scripts"), ("rag", "rag_profile", "rag_profiles")],
-)
-def test_script_and_rag_capabilities_and_missing_references(
-    control, kind, field, registry
+def test_missing_component_before_call_creation(
+    control, monkeypatch, field, registry, label
 ):
+    from io import StringIO
+
+    record = _record()
+    record["steps"]["1"][field] = "absent"
+    (control / "plans/plan.one.json").write_text(json.dumps(record))
+    revision = _commit(control)
+    monkeypatch.setattr(
+        reader,
+        "store_call",
+        lambda raw: pytest.fail("call created before availability check"),
+    )
+    with pytest.raises(KeyError) as error:
+        list(reader.iter_enqueue_records(StringIO('{"plan":"plan.one"}\n')))
+    assert (
+        error.value.args[0] == f"missing {label}: absent at Control revision {revision}"
+    )
+
+
+@pytest.mark.parametrize("missing", ["plan", "instruction"])
+def test_missing_source_before_call_creation(control, monkeypatch, missing):
+    from io import StringIO
+
+    if missing == "instruction":
+        (control / "instructions/task.md").unlink()
+        _commit(control)
+    slug = "absent" if missing == "plan" else "plan.one"
+    monkeypatch.setattr(reader, "store_call", lambda raw: pytest.fail("call created"))
+    with pytest.raises(
+        KeyError, match=f"missing {missing}: " + (slug if missing == "plan" else TASK)
+    ):
+        list(reader.iter_enqueue_records(StringIO(json.dumps({"plan": slug}) + "\n")))
+
+
+@pytest.mark.parametrize(
+    "kind,field,registry,label",
+    [
+        ("script", "script", "local_scripts", "local script"),
+        ("rag", "rag_profile", "rag_profiles", "RAG profile"),
+    ],
+)
+def test_external_artifact_availability(control, kind, field, registry, label):
     record = _record()
     step = record["steps"]["1"]
     step.pop("model")
-    step.update(engine_kind=kind, engine="runner", **{field: "one"})
-    schema = {
-        "type": "object",
-        "properties": {"count": {"type": "integer", "minimum": 1}},
-        "required": ["count"],
-        "additionalProperties": False,
+    step.update(engine_kind=kind, **{field: "one"})
+    record["capabilities"][registry]["one"] = {"path": "rag_profiles/one.txt"}
+    (control / "plans/plan.one.json").write_text(json.dumps(record))
+    _commit(control)
+    with pytest.raises(FileNotFoundError, match=f"missing {label}: one"):
+        load_plan("plan.one")
+    path = extensions.EXTENSIONS_ROOT / (
+        "scripts/one.py" if kind == "script" else "rag_profiles/one.txt"
+    )
+    path.parent.mkdir()
+    path.write_text("available")
+    assert load_plan("plan.one").plan.steps["1"][field] == "one"
+
+
+def test_engine_execution_artifact_required(control):
+    (extensions.EXTENSIONS_ROOT / "engines/chatgpt.py").unlink()
+    with pytest.raises(FileNotFoundError, match="missing engine: chatgpt"):
+        load_plan("plan.one")
+
+
+def test_unrelated_records_are_not_parsed_or_enumerated(control, monkeypatch):
+    selected = _record()
+    selected["steps"]["2"] = selected["steps"]["1"]
+    (control / "plans/plan.one.json").write_text(json.dumps(selected))
+    (control / "plans/unused.json").write_text('{"slug":"unused", broken')
+    (control / "instructions/unused.md").write_text(
+        "---\nidentity: tsk_0000000000000000\ntitle: [broken\n---\n"
+    )
+    _commit(control)
+    calls = []
+    original = repository._git
+
+    def spy(repo, *args, **kwargs):
+        calls.append(args)
+        return original(repo, *args, **kwargs)
+
+    monkeypatch.setattr(repository, "_git", spy)
+    monkeypatch.setattr(
+        repository, "list_revision", lambda *a: pytest.fail("whole listing")
+    )
+    loaded = load_plan("plan.one")
+    assert set(loaded.instructions) == {ROLE, CONTEXT, TASK}
+    assert len([args for args in calls if args[0] == "show"]) == 4
+    assert all(
+        len(args) == 5 and args[-1].endswith((".md", ".json"))
+        for args in calls
+        if args[0] == "ls-tree"
+    )
+
+
+def test_authoring_semantics_are_not_validated(control, monkeypatch):
+    record = _record()
+    step = record["steps"]["1"]
+    step.update(temperature=99, max_output_tokens=-5, args={"unexpected": True})
+    record["capabilities"]["engines"]["chatgpt"] = {
+        "kind": "different",
+        "args_schema": {"$ref": "https://example.com/schema"},
     }
-    record["capabilities"] = {
-        "engines": {
-            "runner": {"kind": kind, "step_fields": [field], "args_schema": schema}
-        },
-        "models": {},
-        "local_scripts": {},
-        "rag_profiles": {},
-    }
-    record["capabilities"][registry]["one"] = {"args_schema": schema}
-    step["args"] = {"count": 2}
-    path = control / "plans/one.json"
-    path.write_text(json.dumps(record))
-    _commit(control)
-    assert load_plan("plan.one").plan.step_args(1) == {"count": 2}
-    step["args"] = {"count": "2"}
-    path.write_text(json.dumps(record))
-    _commit(control)
-    with pytest.raises(ValueError, match="invalid capability args"):
-        load_plan("plan.one")
-    step["args"] = {"count": 2}
-    record["capabilities"][registry].clear()
-    path.write_text(json.dumps(record))
-    _commit(control)
-    with pytest.raises(ValueError, match="missing .* reference"):
-        load_plan("plan.one")
-
-
-def test_bad_unselected_plan_rejects_revision(control):
-    (control / "plans/unused.json").write_text('{"slug": "unused"}')
-    _commit(control)
-    with pytest.raises(ValueError):
-        load_plan("plan.one")
-
-
-def test_duplicate_json_fields_rejected(control):
-    path = control / "plans/one.json"
-    path.write_text(
-        path.read_text().replace(
-            '"slug": "plan.one"', '"slug": "plan.one", "slug": "other"'
+    record["capabilities"]["models"]["cheap"]["engine"] = "different"
+    (control / "plans/plan.one.json").write_text(json.dumps(record))
+    (control / "instructions/task.md").write_text(
+        _instruction(TASK, body="").replace(
+            'description: ""', 'description: ""\nextra: metadata'
         )
     )
     _commit(control)
-    with pytest.raises(ValueError, match="duplicate field"):
-        load_plan("plan.one")
-
-
-def test_external_capability_schema_rejected(control):
-    record = _record()
-    record["capabilities"]["engines"]["chatgpt"]["args_schema"]["$ref"] = (
-        "https://example.com/moving-schema"
-    )
-    (control / "plans/one.json").write_text(json.dumps(record))
-    _commit(control)
-    with pytest.raises(ValueError, match="local references"):
-        load_plan("plan.one")
-
-
-def test_snapshot_contains_one_revision_and_committed_capabilities(
-    control, monkeypatch
-):
-    from asc.control.snapshot import build_control_snapshot
-    from asc.control.list import list_control_identities
-
-    revision = repository.control_revision()
-    calls = []
-
-    def resolve():
-        calls.append(revision)
-        return revision
-
-    monkeypatch.setattr(repository, "control_revision", resolve)
-    snapshot = build_control_snapshot()
-    assert calls == [revision]
-    assert snapshot["source"]["revision"] == revision
-    assert snapshot["registries"]["engines"] == _record()["capabilities"]["engines"]
-    assert snapshot["registries"]["instructions"][TASK]["repo_commit"] == revision
-    assert list_control_identities() == sorted([TASK, ROLE, CONTEXT, "plan.one"])
-
-
-def test_conflicting_capability_metadata_rejects_revision(control):
-    other = _record()
-    other["slug"] = "other"
-    other["capabilities"]["engines"]["chatgpt"]["title"] = "Conflicting declaration"
-    (control / "plans/other.json").write_text(json.dumps(other))
-    _commit(control)
-    with pytest.raises(ValueError, match="conflicting capability"):
-        load_plan("plan.one")
-
-
-def test_instruction_symlink_is_rejected(control):
-    (control / "instructions/link.md").symlink_to("task.md")
-    _commit(control)
-    with pytest.raises(ValueError, match="ordinary files"):
-        load_plan("plan.one")
-
-
-def test_enqueue_service_forwards_loaded_revision(monkeypatch):
-    from types import SimpleNamespace
-    from asc.enqueue import service
-
-    seen = {}
-
-    def materialize(**kwargs):
-        seen.update(kwargs)
-        return ()
-
-    monkeypatch.setattr(service, "materialize_runtimes", materialize)
+    loaded = load_plan("plan.one")
     monkeypatch.setattr(
-        service,
-        "create_job",
-        lambda **kwargs: SimpleNamespace(raw_key="job:call:record"),
+        runtime, "resolve_instruction_key", lambda *a, **kw: "instruction:one:record"
     )
-    monkeypatch.setattr(service, "activate_job", lambda job: None)
-    call = SimpleNamespace(identity="call", redis_key=SimpleNamespace(identity="call"))
-    plan = SimpleNamespace(identity="plan.one")
-    record = SimpleNamespace(
-        call=call,
-        call_key="call:call:record",
-        directive=None,
-        plan=SimpleNamespace(
-            plan=plan, revision="a" * 40, step_count=1, plan_key="git-ref"
+    monkeypatch.setattr(runtime.Runtime, "save", lambda self, **kw: self.raw_key)
+    result = runtime.materialize_runtimes(
+        call_identity="call",
+        plan=loaded.plan,
+        control_revision=loaded.revision,
+        instruction_sources=loaded.instructions,
+    )
+    assert result[0].temperature == 99
+    assert result[0].max_output_tokens == -5
+    assert result[0].args == {"unexpected": True}
+
+
+@pytest.mark.parametrize(
+    "change",
+    [
+        lambda r: r.update(record_identity=r.pop("slug")),
+        lambda r: r["steps"]["1"].update(
+            instruction=r["steps"]["1"].pop("instructions")
         ),
-        source_identity="document.slug",
+        lambda r: r["steps"]["1"].update(engine={"key": "chatgpt"}),
+        lambda r: r["steps"]["1"].update(kind=r["steps"]["1"].pop("engine_kind")),
+        lambda r: r["steps"]["1"]["instructions"].update(task=TASK),
+    ],
+)
+def test_legacy_forms_are_not_normalized(control, change):
+    record = _record()
+    change(record)
+    (control / "plans/plan.one.json").write_text(json.dumps(record))
+    _commit(control)
+    with pytest.raises((KeyError, TypeError, AttributeError)):
+        load_plan("plan.one")
+
+
+@pytest.mark.parametrize(
+    "path,text,message",
+    [
+        ("plans/plan.one.json", '{"slug":"plan.one", broken', "cannot parse canonical JSON"),
+        (
+            "instructions/task.md",
+            "---\nidentity: " + TASK + "\ntitle: [broken\n---\n",
+            "cannot parse canonical YAML",
+        ),
+    ],
+)
+def test_unparseable_selected_source(control, path, text, message):
+    (control / path).write_text(text)
+    _commit(control)
+    with pytest.raises(ValueError, match=message):
+        load_plan("plan.one")
+
+
+def test_rejects_moving_or_noncommit_revision(control):
+    with pytest.raises(ValueError, match="immutable commit"):
+        repository.read_instruction(TASK, "master")
+    oid = _git(control, "rev-parse", "HEAD:instructions/task.md")
+    with pytest.raises(RuntimeError):
+        repository.read_instruction(TASK, oid)
+
+
+def test_unavailable_repository_and_ref(control, monkeypatch):
+    monkeypatch.setattr(
+        repository,
+        "CONTROL",
+        ControlRepoConfig(control, "absent", "Tests", "tests@local"),
     )
-    service.enqueue_record(record)
-    assert seen["control_revision"] == "a" * 40
-    assert seen["plan"] is plan
+    with pytest.raises(RuntimeError):
+        repository.control_revision()
+    monkeypatch.setattr(
+        repository,
+        "CONTROL",
+        ControlRepoConfig(control / "absent", "master", "Tests", "tests@local"),
+    )
+    with pytest.raises(FileNotFoundError):
+        repository.control_revision()
 
 
 def test_instruction_body_preserves_committed_line_endings(control):
-    path = control / "instructions/task.md"
     body = "  Keep spaces.\r\n\r\n"
-    path.write_bytes(_instruction(TASK, body=body).encode("utf-8"))
+    (control / "instructions/task.md").write_bytes(
+        _instruction(TASK, body=body).encode()
+    )
+    assert repository.read_instruction(TASK, _commit(control)).content == body
+
+
+def test_snapshot_and_listing_are_separate_administrative_apis(control):
+    from asc.control.snapshot import build_control_snapshot
+    from asc.control.list import list_control_identities
+
+    snapshot = build_control_snapshot()
+    assert snapshot["source"]["revision"] == repository.control_revision()
+    assert snapshot["registries"]["engines"] == _record()["capabilities"]["engines"]
+    assert list_control_identities() == sorted([TASK, ROLE, CONTEXT, "plan.one"])
+
+
+def test_wrapped_plan_and_revision_lookup(control, monkeypatch):
+    identity = "plan.hhp-pro-bono-position-paper-boxout.4h8n3d"
+    before = repository.control_revision()
+    record = {"record_type": "plan", "record_identity": identity,
+              "record_content": {"label": "Boxout", "description": "", "steps": {}}}
+    path = control / f"plans/{identity}.json"
+    path.write_text(json.dumps(record))
     revision = _commit(control)
-    assert repository.read_instruction(TASK, revision).content == body
+    def no_search(*args):
+        pytest.fail("plan lookup searched content")
+    monkeypatch.setattr(repository.ControlRepository, "_find", no_search)
+    assert repository.read_plan(identity, revision).plan.identity == identity
+    with pytest.raises(KeyError, match="missing plan"):
+        repository.read_plan(identity, before)
+    path.write_text("{broken")
+    with pytest.raises(ValueError, match="cannot parse canonical JSON"):
+        repository.read_plan(identity, _commit(control))
+    record["record_identity"] = "plan.other"
+    path.write_text(json.dumps(record))
+    with pytest.raises(ValueError, match="identity mismatch"):
+        repository.read_plan(identity, _commit(control))
+    record["record_content"].pop("steps")
+    path.write_text(json.dumps(record))
+    with pytest.raises(KeyError) as error:
+        repository.read_plan(identity, _commit(control))
+    assert "missing plan" not in str(error.value)
 
 
-def test_incompatible_extra_capability_reference_rejected(control):
-    record = _record()
-    record["steps"]["1"]["script"] = "absent"
-    record["capabilities"]["engines"]["chatgpt"]["step_fields"].append("script")
-    (control / "plans/one.json").write_text(json.dumps(record))
-    _commit(control)
-    with pytest.raises(ValueError, match="only its engine kind"):
-        load_plan("plan.one")
+def test_task_prefix_specification():
+    from asc.models.control.plan import instruction_scope
+    assert instruction_scope(TASK) == "task"
+    with pytest.raises(ValueError, match="invalid instruction identity"):
+        instruction_scope(TASK.replace("tsk_", "spc_"))
+
+
+def test_published_instruction_frontmatter(control):
+    identity = "tsk.prepare-pro-bono-position-paper-boxout.4h8n3d"
+    (control / "instructions/task.md").write_text(
+        f"---\ntitle: Boxout\nslug: {identity}\ntype: instruction\nscope: task\n---\nBody\n"
+    )
+    source = repository.read_instruction(identity, _commit(control))
+    assert source.identity == identity
+    assert source.extra["scope"] == "task"
+    assert source.content == "Body\n"
+
+
+def test_instruction_identity_mismatch(control):
+    (control / "instructions/task.md").write_text(
+        _instruction(TASK) + f"identity: {ROLE}\n"
+    )
+    (control / "instructions/role.md").unlink()
+    with pytest.raises(ValueError, match="identity mismatch"):
+        repository.read_instruction(ROLE, _commit(control))

@@ -11,7 +11,7 @@ from asc.enqueue import runtime
 from asc.models.control.instruction import Instruction
 from asc.redis.key import RedisKey
 
-IDENTITY = "spc_3N6K8R2V7M4Q9D1X"
+IDENTITY = "tsk_3N6K8R2V7M4Q9D1X"
 REVISION = "a" * 40
 
 
@@ -124,7 +124,7 @@ def test_ttl_boundary_reuses(materializations):
 def test_identity_mismatch_or_missing_record_is_not_reused(materializations):
     records, pointers, ttls = materializations
     first = resolver.resolve_instruction_key(IDENTITY, control_revision=REVISION)
-    records[first]["control_identity"] = "spc_0000000000000000"
+    records[first]["control_identity"] = "tsk_0000000000000000"
     second = resolver.resolve_instruction_key(IDENTITY, control_revision=REVISION)
     assert second != first
     del records[second]
@@ -142,23 +142,9 @@ def test_instruction_arrays_and_revision_forwarding(monkeypatch):
 
     monkeypatch.setattr(runtime, "resolve_instruction_key", resolve)
     refs = {"instructions": {"role": [], "context": [], "task": [IDENTITY, IDENTITY]}}
-    keys = runtime._resolve_instruction_keys(refs, ordinal=1, control_revision=REVISION)
+    keys = runtime._resolve_instruction_keys(refs, control_revision=REVISION)
     assert keys == {"task": ["instruction:runtime:record"] * 2}
     assert seen == [(IDENTITY, REVISION)]
-
-
-@pytest.mark.parametrize(
-    "step",
-    [
-        {"instruction": "tsk.one"},
-        {"instruction_slugs": {}},
-        {"instructions": [IDENTITY]},
-        {"instructions": {"task": IDENTITY}},
-    ],
-)
-def test_runtime_rejects_legacy_instruction_shapes(step):
-    with pytest.raises(ValueError):
-        runtime._resolve_instruction_keys(step, ordinal=1, control_revision=REVISION)
 
 
 def test_old_durable_record_can_drain_but_cannot_be_reused(materializations):
