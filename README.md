@@ -1,23 +1,30 @@
-# AutoScribe server alpha 0.7.0
+# AutoScribe server
 
-Extends the verified v0.6.1 deterministic path with a local extension worker. There is still no network/model API call and no writeback.
+Current live-tested server snapshot: 30 September 2026.
 
-Smoke flow:
+AutoScribe uses Python for the trusting execution core and Rust services for deterministic ingress/egress boundaries.
 
-1. local client pushes ordinary and dispatch commits to bare server repo;
-2. `post-receive` ignores ordinary commits and dispatches commits carrying `Plan: <label> <global-id>`;
-3. ingest reads eligible committed blobs from the bare repo and materializes `autoscribe.call.v2`;
-4. dispatcher records/activates the call; executor creates ready tasks;
-5. worker claims a ready task, resolves `entrypoint` through `/opt/autoscribe/extensions/registry.json`, and executes that exact registered file without a shell;
-6. `prepend-seen.py` receives source content on stdin and returns `I have seen this` plus the original content on stdout;
-7. stdout is stored immutably in `responses_v1`, mirrored temporarily in Redis, and the task is marked complete.
+## Repo flow
 
-The smoke fixture plan uses `executor=extension`, `entrypoint=prepend-seen`. Arbitrary filesystem paths from plans/tasks are not executable.
+1. A client pushes an eligible Markdown commit carrying `Plan: <label> <pln_...>` to `master` on a bare server repository.
+2. The repository `post-receive` hook invokes Rust `srv-input`, which reads the committed source and signs a return route.
+3. `asc enqueue` records the call and the Python executor/worker pipeline produces a response.
+4. `asc export` pokes `responsed` through its Unix datagram socket; the poke carries no work payload.
+5. `responsed` derives pending work from the ledger in call-ULID order and passes each full response to Rust `srv-output`.
+6. Rust validates the signed return baggage and emits an authenticated effect. Repo effects are applied by `srv-writeback`; direct-mode Dropbox effects are applied by `srv-export`.
+7. Repo responses are committed body-only to `autoscribe-output`, never back to server `master`.
+8. After a successful Rust receipt, `responsed` stores the forensic receipt in Redis and records the export fact in SQLite.
 
-Fresh smoke test:
+The local client is responsible for merging an `autoscribe-output` body into the corresponding clean `master` file, preserving human frontmatter and updating the human-readable AutoScribe processed date.
 
-```bash
-./reset-test-fixture.sh
-./run-smoke-dispatch.sh
-journalctl --user -u autoscribe-worker.service -n 30 -o cat --no-pager
-```
+## Services
+
+The active Python user services are:
+
+- `autoscribe-executor.service`
+- `autoscribe-worker.service`
+- `autoscribe-responses.service`
+
+The former Python dispatch daemon is retired; repo ingress is owned by the Rust service hook.
+
+Rust boundary services live in the separate `jallanxjallan/services` repository and are installed under `/opt/autoscribe/services/current/bin`.

@@ -2,49 +2,94 @@ from __future__ import annotations
 
 import json
 from dataclasses import dataclass
-from .redis_runtime import READY_KEY, RedisClient
 
-TASK_TTL = 24 * 60 * 60
+from .redis_runtime import FORENSIC_TTL, WORKER_QUEUE_KEY, RedisClient, load_json
 
-class ExecutorError(RuntimeError): pass
+
+class ExecutorError(RuntimeError):
+    pass
+
 
 @dataclass(frozen=True)
 class PreparedExecution:
-    call_identity: str
-    runtime_key: str
-    task_keys: list[str]
-    source_identities: list[str]
+    call_id: str
+    task_key: str
+    ordinal: int
+    engine_kind: str
     engine: str
-    model: str
+    entrypoint: str
 
-def _require_hash(client: RedisClient, key: str) -> dict[str, str]:
-    value = client.hgetall(key)
-    if not value: raise ExecutorError(f"missing Redis hash: {key}")
+
+def ordered_steps(content: dict) -> list[dict]:
+    plan = content.get("plan") or {}
+    steps = plan.get("steps") or []
+    if not isinstance(steps, list) or not steps:
+        raise ExecutorError("call plan has no steps")
+    try:
+        return sorted(steps, key=lambda step: int(step["position"]))
+    except (KeyError, TypeError, ValueError) as exc:
+        raise ExecutorError("call plan has invalid step positions") from exc
+
+
+def _step_entrypoint(step: dict) -> str:
+    kind = str(step.get("engine_kind") or "")
+    if kind == "llm":
+        value = step.get("model")
+    elif kind == "script":
+        value = step.get("script")
+    elif kind == "rag":
+        value = step.get("rag_profile")
+    else:
+        raise ExecutorError(f"unsupported engine_kind: {kind!r}")
+    if not isinstance(value, str) or not value:
+        raise ExecutorError(f"step {step.get('position')} has no {kind} entrypoint")
     return value
 
-def prepare_first_step(client: RedisClient, call_identity: str, call: dict) -> PreparedExecution:
-    steps = call.get("plan", {}).get("steps") or []
-    if not steps: raise ExecutorError("call plan has no steps")
-    first = min(steps, key=lambda step: int(step["position"])); ordinal = int(first["position"])
-    runtime_key = f"runtime:{call_identity}:{ordinal}"; runtime = _require_hash(client, runtime_key)
-    if runtime.get("plan_identity") != call["plan"]["id"]: raise ExecutorError("runtime plan identity does not match ledger call")
-    instruction_keys = json.loads(runtime.get("instruction_keys", "[]"))
-    if not isinstance(instruction_keys, list) or not instruction_keys: raise ExecutorError("runtime has no instruction keys")
-    for key in instruction_keys:
-        record = _require_hash(client, str(key))
-        if record.get("call_identity") != call_identity: raise ExecutorError(f"instruction belongs to another call: {key}")
-    sources = call.get("sources") or []
-    if not sources: raise ExecutorError("canonical call has no ingested sources")
-    task_keys=[]; source_identities=[]
-    for index, item in enumerate(sources, start=1):
-        task_key=f"task:{call_identity}:{ordinal}:{index}"
-        client.hset(task_key, {
-            "call_identity": call_identity, "runtime_key": runtime_key, "ordinal": ordinal,
-            "source_identity": item["identity"], "source_path": item["path"], "source_blob": item["blob"],
-            "directive": item.get("directive") or "", "input": item["content"],
-            "instruction_keys": json.dumps(instruction_keys, separators=(",", ":")),
-            "engine": runtime["engine"], "model": runtime["model"], "state": "ready",
-        })
-        client.expire(task_key, TASK_TTL); client.zadd(READY_KEY, 0, task_key)
-        task_keys.append(task_key); source_identities.append(str(item["identity"]))
-    return PreparedExecution(call_identity, runtime_key, task_keys, source_identities, runtime["engine"], runtime["model"])
+
+def prepare_step(
+    client: RedisClient,
+    call_id: str,
+    content_key: str,
+    ordinal: int,
+    *,
+    input_key: str | None = None,
+) -> PreparedExecution:
+    content = load_json(client, content_key)
+    steps = ordered_steps(content)
+    matches = [step for step in steps if int(step["position"]) == int(ordinal)]
+    if len(matches) != 1:
+        raise ExecutorError(f"call plan has no unique step {ordinal}")
+    step = matches[0]
+    engine_kind = str(step.get("engine_kind") or "")
+    engine = str(step.get("engine") or "")
+    if not engine:
+        raise ExecutorError(f"step {ordinal} has no engine")
+    entrypoint = _step_entrypoint(step)
+    task_key = f"task:{call_id}:{ordinal}"
+    fields: dict[str, object] = {
+        "call_id": call_id,
+        "content_key": content_key,
+        "ordinal": ordinal,
+        "engine_kind": engine_kind,
+        "engine": engine,
+        "entrypoint": entrypoint,
+        "args_json": json.dumps(step.get("args") or {}, ensure_ascii=False, sort_keys=True, separators=(",", ":")),
+    }
+    if input_key:
+        fields["input_key"] = input_key
+    client.hset(task_key, fields)
+    client.expire(task_key, FORENSIC_TTL)
+    client.zadd(WORKER_QUEUE_KEY, 0, task_key)
+    return PreparedExecution(call_id, task_key, int(ordinal), engine_kind, engine, entrypoint)
+
+
+def prepare_first_step(client: RedisClient, call_id: str, content_key: str) -> PreparedExecution:
+    content = load_json(client, content_key)
+    first = ordered_steps(content)[0]
+    return prepare_step(client, call_id, content_key, int(first["position"]))
+
+
+def next_step_ordinal(content: dict, ordinal: int) -> int | None:
+    positions = [int(step["position"]) for step in ordered_steps(content)]
+    later = [position for position in positions if position > int(ordinal)]
+    return min(later) if later else None

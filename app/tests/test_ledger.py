@@ -1,43 +1,56 @@
-from __future__ import annotations
-
+import sqlite3
 import tempfile
 import unittest
 from pathlib import Path
 
-from autoscribe.ledger import has_event, load_call, record_call
-
-
-def sample_call():
-    return {
-        "schema": "autoscribe.call.v2",
-        "created_at": "2026-09-27T00:00:00+00:00",
-        "sources": [{"identity":"psg.test","path":"Note.md","blob":"b1","directive":None,"content":"Body\n"}],
-        "source": {"repo": "/home/jeremy/Repos/X.git", "repo_name": "X", "commit": "abc", "ref": "refs/heads/master"},
-        "plan": {"id": "p1", "ref": "plan.one", "label": "One", "plan_type": "test", "steps": []},
-    }
+from autoscribe.ledger import (
+    LedgerError,
+    ensure_schema,
+    load_call_keys,
+    pending_exports,
+    record_call,
+    record_export,
+    record_response,
+)
 
 
 class LedgerTests(unittest.TestCase):
-    def test_record_is_idempotent_and_immutable(self):
+    def test_ledger_contains_keys_and_timestamps_not_payloads(self):
         with tempfile.TemporaryDirectory() as tmp:
-            db = Path(tmp) / "ledger.sql"
-            first, created1 = record_call(db, sample_call())
-            duplicate = sample_call()
-            duplicate["created_at"] = "2026-09-27T00:00:01+00:00"
-            second, created2 = record_call(db, duplicate)
-            self.assertTrue(created1)
-            self.assertFalse(created2)
-            self.assertEqual(first, second)
-            self.assertEqual(load_call(db, first), sample_call())
-            self.assertTrue(has_event(db, first, "recorded"))
+            path = Path(tmp) / "ledger.sql"
+            ensure_schema(path)
+            with sqlite3.connect(path) as db:
+                calls_cols = [row[1] for row in db.execute("PRAGMA table_info(calls)")]
+                key_cols = [row[1] for row in db.execute("PRAGMA table_info(call_keys)")]
+            self.assertEqual(calls_cols, ["call_id", "created_at"])
+            self.assertEqual(key_cols, ["call_id", "role", "redis_key", "created_at"])
+            for forbidden in ("content", "canonical_json", "source_repo", "plan_id", "state"):
+                self.assertNotIn(forbidden, calls_cols)
+                self.assertNotIn(forbidden, key_cols)
 
-class ResponseLedgerTests(unittest.TestCase):
-    def test_response_is_idempotent_by_task(self):
-        from autoscribe.ledger import load_response, record_response
+    def test_call_keys_are_idempotent(self):
         with tempfile.TemporaryDirectory() as tmp:
-            db = Path(tmp) / "ledger.sql"
-            call_id, _ = record_call(db, sample_call())
-            rid1, c1 = record_response(db, call_identity=call_id, runtime_key="runtime:x:1", task_key="task:x:1:1", source_identity="psg.test", executor="extension", entrypoint="prepend-seen", content="I have seen this\n\nBody\n")
-            rid2, c2 = record_response(db, call_identity=call_id, runtime_key="runtime:x:1", task_key="task:x:1:1", source_identity="psg.test", executor="extension", entrypoint="prepend-seen", content="different ignored duplicate")
-            self.assertTrue(c1); self.assertFalse(c2); self.assertEqual(rid1, rid2)
-            self.assertEqual(load_response(db, rid1)["content"], "I have seen this\n\nBody\n")
+            path = Path(tmp) / "ledger.sql"
+            keys = {"content": "call:01TEST:content", "baggage": "call:01TEST:baggage"}
+            self.assertTrue(record_call(path, "01TEST", keys))
+            self.assertFalse(record_call(path, "01TEST", keys))
+            self.assertEqual(load_call_keys(path, "01TEST"), keys)
+            with self.assertRaises(LedgerError):
+                record_call(path, "01TEST", {"content": "other", "baggage": keys["baggage"]})
+
+    def test_response_and_export_are_relational_facts(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "ledger.sql"
+            record_call(path, "01TEST", {"content": "c", "baggage": "b"})
+            self.assertTrue(record_response(path, "01TEST", "r"))
+            self.assertFalse(record_response(path, "01TEST", "r"))
+            pending = pending_exports(path)
+            self.assertEqual(len(pending), 1)
+            self.assertEqual(pending[0]["response_key"], "r")
+            self.assertEqual(pending[0]["baggage_key"], "b")
+            self.assertTrue(record_export(path, "01TEST", "e"))
+            self.assertEqual(pending_exports(path), [])
+
+
+if __name__ == "__main__":
+    unittest.main()

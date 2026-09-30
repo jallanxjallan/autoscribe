@@ -1,16 +1,137 @@
 #!/usr/bin/env python3
 from __future__ import annotations
-import os, sys
+
+import json
+import os
+import sys
 from pathlib import Path
-APP_ROOT=Path(__file__).resolve().parents[1]
-if str(APP_ROOT) not in sys.path: sys.path.insert(0,str(APP_ROOT))
+
+APP_ROOT = Path(__file__).resolve().parents[1]
+if str(APP_ROOT) not in sys.path:
+    sys.path.insert(0, str(APP_ROOT))
+
 from autoscribe.control import list_plans
+from autoscribe.enqueue import enqueue_record
+from autoscribe.exporter import iter_pending_ndjson, poke_responses, response_content
+from autoscribe.ledger import load_call_keys, load_response
+from autoscribe.redis_runtime import RedisClient, load_json
+
+
+def control_db_path() -> Path:
+    return Path(os.environ.get("AUTOSCRIBE_CONTROL_DB", "/var/lib/autoscribe/control.sqlite"))
+
+
+def ledger_path() -> Path:
+    return Path(os.environ.get("AUTOSCRIBE_LEDGER_DB", str(Path.home() / "Data/ledger.sql")))
+
+
+def redis_client() -> RedisClient:
+    host = os.environ.get("AUTOSCRIBE_REDIS_HOST", "127.0.0.1")
+    port = int(os.environ.get("AUTOSCRIBE_REDIS_PORT", "6379"))
+    return RedisClient(host, port)
+
+
+def enqueue_stdin() -> int:
+    client = redis_client()
+    count = 0
+    for line_number, raw in enumerate(sys.stdin, start=1):
+        if not raw.strip():
+            continue
+        try:
+            record = json.loads(raw)
+            result = enqueue_record(
+                record=record,
+                control_db=control_db_path(),
+                ledger_db=ledger_path(),
+                client=client,
+            )
+        except Exception as exc:
+            print(f"asc enqueue: line {line_number}: {exc}", file=sys.stderr)
+            return 1
+        print(
+            json.dumps(
+                {
+                    "schema": "autoscribe.enqueue-result.v1",
+                    "record_id": result.record_id,
+                    "call_id": result.call_id,
+                    "created": result.created,
+                },
+                sort_keys=True,
+                separators=(",", ":"),
+            )
+        )
+        count += 1
+    if count == 0:
+        print("asc enqueue: no input records", file=sys.stderr)
+        return 1
+    return 0
+
+
+def response_record(call_id: str) -> dict:
+    client = redis_client()
+    response = load_response(ledger_path(), call_id)
+    response_key = str(response["redis_key"])
+    response_hash = client.hgetall(response_key)
+    if not response_hash or "content" not in response_hash:
+        raise RuntimeError(f"missing response Redis hash: {response_key}")
+    keys = load_call_keys(ledger_path(), call_id)
+    baggage = load_json(client, keys["baggage"])
+    return {
+        "schema": "autoscribe.response.v1",
+        "call_id": call_id,
+        "content": response_hash["content"],
+        "baggage": baggage,
+    }
+
 
 def main() -> int:
-    args=sys.argv[1:]
-    if args==["control","plans"]:
-        db=Path(os.environ.get("AUTOSCRIBE_CONTROL_DB",str(Path.home()/"Data/control.sql")))
-        for row in list_plans(db): print(f"{row['label']}\t{row['id']}")
+    args = sys.argv[1:]
+    if args == ["control", "plans"]:
+        for row in list_plans(control_db_path()):
+            print(f"{row['label']}\t{row['id']}")
         return 0
-    print("usage: asc control plans",file=sys.stderr); return 2
-if __name__=="__main__": raise SystemExit(main())
+    if args == ["enqueue"]:
+        return enqueue_stdin()
+    if len(args) == 2 and args[0] == "response":
+        try:
+            print(json.dumps(response_record(args[1]), ensure_ascii=False, sort_keys=True, separators=(",", ":")))
+        except Exception as exc:
+            print(f"asc response: {exc}", file=sys.stderr)
+            return 1
+        return 0
+    if args == ["export"]:
+        socket_path = Path(
+            os.environ.get(
+                "AUTOSCRIBE_RESPONSE_SOCKET",
+                str(Path.home() / ".local/run/autoscribe/response.sock"),
+            )
+        )
+        try:
+            count = poke_responses(ledger_path(), socket_path)
+        except Exception as exc:
+            print(f"asc export: {exc}", file=sys.stderr)
+            return 1
+        print(count)
+        return 0
+    if args == ["export", "pending"]:
+        for line in iter_pending_ndjson(ledger_path(), redis_client()):
+            print(line)
+        return 0
+    if len(args) == 3 and args[:2] == ["export", "content"]:
+        try:
+            content = response_content(ledger_path(), redis_client(), args[2])
+        except Exception as exc:
+            print(f"asc export content: {exc}", file=sys.stderr)
+            return 1
+        sys.stdout.write(content)
+        return 0
+    print(
+        "usage: asc control plans | asc enqueue | asc response <call-id> | "
+        "asc export | asc export pending | asc export content <call-id>",
+        file=sys.stderr,
+    )
+    return 2
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

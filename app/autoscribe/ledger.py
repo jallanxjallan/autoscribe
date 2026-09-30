@@ -1,91 +1,42 @@
 from __future__ import annotations
 
-import json
+from contextlib import closing
 import sqlite3
 from pathlib import Path
-
-from .ids import new_ulid
 
 _SCHEMA = """
 PRAGMA journal_mode=WAL;
 PRAGMA foreign_keys=ON;
+PRAGMA busy_timeout=5000;
 
-CREATE TABLE IF NOT EXISTS calls_v1 (
-    identity TEXT PRIMARY KEY,
-    schema_name TEXT NOT NULL,
-    created_at TEXT NOT NULL,
-    source_repo TEXT NOT NULL,
-    source_repo_name TEXT NOT NULL,
-    source_commit TEXT NOT NULL,
-    source_ref TEXT,
-    plan_id TEXT NOT NULL,
-    plan_ref TEXT NOT NULL,
-    plan_label TEXT NOT NULL,
-    plan_type TEXT,
-    canonical_json TEXT NOT NULL,
-    UNIQUE(source_repo, source_commit, plan_id)
-);
-
-CREATE TABLE IF NOT EXISTS call_events_v1 (
-    seq INTEGER PRIMARY KEY AUTOINCREMENT,
-    call_identity TEXT NOT NULL REFERENCES calls_v1(identity),
-    event TEXT NOT NULL,
-    created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now')),
-    detail_json TEXT NOT NULL DEFAULT '{}'
-);
-
-CREATE INDEX IF NOT EXISTS idx_call_events_v1_call_seq
-ON call_events_v1(call_identity, seq);
-
-CREATE TABLE IF NOT EXISTS responses_v1 (
-    identity TEXT PRIMARY KEY,
-    call_identity TEXT NOT NULL REFERENCES calls_v1(identity),
-    runtime_key TEXT NOT NULL,
-    task_key TEXT NOT NULL UNIQUE,
-    source_identity TEXT NOT NULL,
-    executor TEXT NOT NULL,
-    entrypoint TEXT NOT NULL,
-    content TEXT NOT NULL,
+CREATE TABLE IF NOT EXISTS calls (
+    call_id TEXT PRIMARY KEY,
     created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now'))
 );
 
-CREATE INDEX IF NOT EXISTS idx_responses_v1_call
-ON responses_v1(call_identity, created_at);
+CREATE TABLE IF NOT EXISTS call_keys (
+    call_id TEXT NOT NULL REFERENCES calls(call_id) ON DELETE CASCADE,
+    role TEXT NOT NULL,
+    redis_key TEXT NOT NULL UNIQUE,
+    created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now')),
+    PRIMARY KEY (call_id, role)
+);
 
-CREATE VIEW IF NOT EXISTS call_state_v1 AS
-SELECT c.*,
-       (SELECT e.event FROM call_events_v1 e
-        WHERE e.call_identity = c.identity
-        ORDER BY e.seq DESC LIMIT 1) AS latest_event,
-       (SELECT e.created_at FROM call_events_v1 e
-        WHERE e.call_identity = c.identity
-        ORDER BY e.seq DESC LIMIT 1) AS latest_event_at
-FROM calls_v1 c;
+CREATE TABLE IF NOT EXISTS responses (
+    call_id TEXT PRIMARY KEY REFERENCES calls(call_id) ON DELETE CASCADE,
+    redis_key TEXT NOT NULL UNIQUE,
+    created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now'))
+);
 
-CREATE TRIGGER IF NOT EXISTS calls_v1_no_update
-BEFORE UPDATE ON calls_v1 BEGIN
-  SELECT RAISE(ABORT, 'calls_v1 is append-only');
-END;
-CREATE TRIGGER IF NOT EXISTS calls_v1_no_delete
-BEFORE DELETE ON calls_v1 BEGIN
-  SELECT RAISE(ABORT, 'calls_v1 is append-only');
-END;
-CREATE TRIGGER IF NOT EXISTS call_events_v1_no_update
-BEFORE UPDATE ON call_events_v1 BEGIN
-  SELECT RAISE(ABORT, 'call_events_v1 is append-only');
-END;
-CREATE TRIGGER IF NOT EXISTS call_events_v1_no_delete
-BEFORE DELETE ON call_events_v1 BEGIN
-  SELECT RAISE(ABORT, 'call_events_v1 is append-only');
-END;
-CREATE TRIGGER IF NOT EXISTS responses_v1_no_update
-BEFORE UPDATE ON responses_v1 BEGIN
-  SELECT RAISE(ABORT, 'responses_v1 is append-only');
-END;
-CREATE TRIGGER IF NOT EXISTS responses_v1_no_delete
-BEFORE DELETE ON responses_v1 BEGIN
-  SELECT RAISE(ABORT, 'responses_v1 is append-only');
-END;
+CREATE TABLE IF NOT EXISTS exports (
+    call_id TEXT PRIMARY KEY REFERENCES calls(call_id) ON DELETE CASCADE,
+    redis_key TEXT NOT NULL UNIQUE,
+    created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now'))
+);
+
+CREATE INDEX IF NOT EXISTS idx_call_keys_role ON call_keys(role, created_at);
+CREATE INDEX IF NOT EXISTS idx_responses_created ON responses(created_at);
+CREATE INDEX IF NOT EXISTS idx_exports_created ON exports(created_at);
 """
 
 
@@ -97,123 +48,117 @@ def connect(path: Path) -> sqlite3.Connection:
     path.parent.mkdir(parents=True, exist_ok=True)
     db = sqlite3.connect(path)
     db.row_factory = sqlite3.Row
+    db.execute("PRAGMA foreign_keys=ON")
+    db.execute("PRAGMA busy_timeout=5000")
     return db
 
 
 def ensure_schema(path: Path) -> None:
-    with connect(path) as db:
+    with closing(connect(path)) as db, db:
         db.executescript(_SCHEMA)
 
 
-def _semantic_json(call: dict) -> str:
-    semantic = dict(call)
-    semantic.pop("created_at", None)
-    return json.dumps(semantic, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+def record_call(path: Path, call_id: str, keys: dict[str, str]) -> bool:
+    """Record only call identity plus Redis key references.
 
-
-def record_call(path: Path, call: dict) -> tuple[str, bool]:
+    Content and baggage remain exclusively in Redis. Repeating the same call ID is
+    idempotent only when it resolves to exactly the same key references.
+    """
+    if not call_id:
+        raise LedgerError("call_id is required")
+    if set(keys) != {"content", "baggage"} or any(not value for value in keys.values()):
+        raise LedgerError("call requires exactly content and baggage Redis keys")
     ensure_schema(path)
-    source = call["source"]
-    plan = call["plan"]
-    canonical = json.dumps(call, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
-    identity = new_ulid()
-    with connect(path) as db:
-        cur = db.execute(
-            """
-            INSERT OR IGNORE INTO calls_v1 (
-                identity, schema_name, created_at,
-                source_repo, source_repo_name, source_commit, source_ref,
-                plan_id, plan_ref, plan_label, plan_type, canonical_json
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-            """,
-            (
-                identity, call["schema"], call["created_at"],
-                source["repo"], source["repo_name"], source["commit"], source.get("ref"),
-                plan["id"], plan["ref"], plan["label"], plan.get("plan_type"), canonical,
-            ),
-        )
+    with closing(connect(path)) as db, db:
+        cur = db.execute("INSERT OR IGNORE INTO calls(call_id) VALUES (?)", (call_id,))
         created = cur.rowcount == 1
-        if created:
+        for role, redis_key in keys.items():
             db.execute(
-                "INSERT INTO call_events_v1(call_identity, event, detail_json) VALUES (?, 'recorded', '{}')",
-                (identity,),
+                "INSERT OR IGNORE INTO call_keys(call_id, role, redis_key) VALUES (?, ?, ?)",
+                (call_id, role, redis_key),
             )
-            return identity, True
-        row = db.execute(
-            """
-            SELECT identity, canonical_json FROM calls_v1
-            WHERE source_repo = ? AND source_commit = ? AND plan_id = ?
-            """,
-            (source["repo"], source["commit"], plan["id"]),
-        ).fetchone()
-        if row is None:
-            raise LedgerError("call insert was ignored but existing call was not found")
-        existing = json.loads(row["canonical_json"])
-        if _semantic_json(existing) != _semantic_json(call):
-            raise LedgerError("same repo/commit/plan resolved to different canonical call content")
-        return str(row["identity"]), False
+        rows = db.execute(
+            "SELECT role, redis_key FROM call_keys WHERE call_id = ? ORDER BY role",
+            (call_id,),
+        ).fetchall()
+        actual = {str(row["role"]): str(row["redis_key"]) for row in rows}
+        if actual != keys:
+            raise LedgerError(f"call {call_id} already resolves to different Redis keys")
+        return created
 
 
-def append_event(path: Path, call_identity: str, event: str, detail: dict | None = None) -> None:
+def load_call_keys(path: Path, call_id: str) -> dict[str, str]:
     ensure_schema(path)
-    detail_json = json.dumps(detail or {}, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
-    with connect(path) as db:
-        db.execute(
-            "INSERT INTO call_events_v1(call_identity, event, detail_json) VALUES (?, ?, ?)",
-            (call_identity, event, detail_json),
-        )
+    with closing(connect(path)) as db, db:
+        rows = db.execute(
+            "SELECT role, redis_key FROM call_keys WHERE call_id = ?",
+            (call_id,),
+        ).fetchall()
+    if not rows:
+        raise LedgerError(f"unknown call_id: {call_id}")
+    keys = {str(row["role"]): str(row["redis_key"]) for row in rows}
+    if set(keys) != {"content", "baggage"}:
+        raise LedgerError(f"call {call_id} has incomplete Redis key references")
+    return keys
 
 
-def has_event(path: Path, call_identity: str, event: str) -> bool:
+def _record_single_key_fact(path: Path, table: str, call_id: str, redis_key: str) -> bool:
+    if table not in {"responses", "exports"}:
+        raise ValueError(f"unsupported ledger table: {table}")
+    if not redis_key:
+        raise LedgerError(f"{table} Redis key is required")
     ensure_schema(path)
-    with connect(path) as db:
-        row = db.execute(
-            "SELECT 1 FROM call_events_v1 WHERE call_identity = ? AND event = ? LIMIT 1",
-            (call_identity, event),
-        ).fetchone()
-    return row is not None
-
-
-def load_call(path: Path, call_identity: str) -> dict:
-    ensure_schema(path)
-    with connect(path) as db:
-        row = db.execute(
-            "SELECT canonical_json FROM calls_v1 WHERE identity = ?",
-            (call_identity,),
-        ).fetchone()
-    if row is None:
-        raise LedgerError(f"unknown call identity: {call_identity}")
-    return json.loads(row["canonical_json"])
-
-
-def record_response(
-    path: Path, *, call_identity: str, runtime_key: str, task_key: str,
-    source_identity: str, executor: str, entrypoint: str, content: str,
-) -> tuple[str, bool]:
-    ensure_schema(path)
-    identity = new_ulid()
-    with connect(path) as db:
+    with closing(connect(path)) as db, db:
         cur = db.execute(
-            """
-            INSERT OR IGNORE INTO responses_v1(
-                identity, call_identity, runtime_key, task_key, source_identity,
-                executor, entrypoint, content
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-            """,
-            (identity, call_identity, runtime_key, task_key, source_identity, executor, entrypoint, content),
+            f"INSERT OR IGNORE INTO {table}(call_id, redis_key) VALUES (?, ?)",
+            (call_id, redis_key),
         )
         if cur.rowcount == 1:
-            return identity, True
-        row = db.execute("SELECT identity FROM responses_v1 WHERE task_key = ?", (task_key,)).fetchone()
+            return True
+        row = db.execute(
+            f"SELECT redis_key FROM {table} WHERE call_id = ?",
+            (call_id,),
+        ).fetchone()
         if row is None:
-            raise LedgerError(f"could not record response for task: {task_key}")
-        return str(row["identity"]), False
+            raise LedgerError(f"could not record {table[:-1]} for call {call_id}")
+        if str(row["redis_key"]) != redis_key:
+            raise LedgerError(f"call {call_id} already has a different {table[:-1]} Redis key")
+        return False
 
 
-def load_response(path: Path, response_identity: str) -> dict:
+def record_response(path: Path, call_id: str, redis_key: str) -> bool:
+    return _record_single_key_fact(path, "responses", call_id, redis_key)
+
+
+def record_export(path: Path, call_id: str, redis_key: str) -> bool:
+    return _record_single_key_fact(path, "exports", call_id, redis_key)
+
+
+def load_response(path: Path, call_id: str) -> dict:
     ensure_schema(path)
-    with connect(path) as db:
-        row = db.execute("SELECT * FROM responses_v1 WHERE identity = ?", (response_identity,)).fetchone()
+    with closing(connect(path)) as db, db:
+        row = db.execute("SELECT * FROM responses WHERE call_id = ?", (call_id,)).fetchone()
     if row is None:
-        raise LedgerError(f"unknown response identity: {response_identity}")
+        raise LedgerError(f"no response for call_id: {call_id}")
     return dict(row)
+
+
+def pending_exports(path: Path) -> list[dict]:
+    """Return responses that exist as facts but have no export fact yet."""
+    ensure_schema(path)
+    with closing(connect(path)) as db, db:
+        rows = db.execute(
+            """
+            SELECT r.call_id,
+                   r.redis_key AS response_key,
+                   b.redis_key AS baggage_key,
+                   r.created_at AS response_created_at
+            FROM responses r
+            JOIN call_keys b
+              ON b.call_id = r.call_id AND b.role = 'baggage'
+            LEFT JOIN exports e ON e.call_id = r.call_id
+            WHERE e.call_id IS NULL
+            ORDER BY r.created_at, r.call_id
+            """
+        ).fetchall()
+    return [dict(row) for row in rows]

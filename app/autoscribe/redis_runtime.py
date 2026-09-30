@@ -4,11 +4,9 @@ import json
 import socket
 from dataclasses import dataclass
 
-CALL_TTL = 30 * 24 * 60 * 60
-INSTRUCTION_TTL = 3 * 24 * 60 * 60
-RUNTIME_TTL = 24 * 60 * 60
-ACTIVE_KEY = "state:active:index"
-READY_KEY = "state:ready:index"
+FORENSIC_TTL = 30 * 24 * 60 * 60
+EXECUTOR_QUEUE_KEY = "queue:executor"
+WORKER_QUEUE_KEY = "queue:worker"
 
 
 class RedisError(RuntimeError):
@@ -104,81 +102,47 @@ class RedisClient:
 
 
 @dataclass(frozen=True)
-class Activation:
-    call_key: str
-    job_key: str
-    runtime_keys: list[str]
-    instruction_keys: list[str]
+class MaterializedCall:
+    call_id: str
+    content_key: str
+    baggage_key: str
 
 
 def _json(value: object) -> str:
     return json.dumps(value, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
 
 
-def activate_call(client: RedisClient, call_identity: str, call: dict) -> Activation:
+def store_json(client: RedisClient, key: str, value: dict, ttl: int = FORENSIC_TTL) -> str:
+    client.hset(key, {"json": _json(value)})
+    client.expire(key, ttl)
+    return key
+
+
+def load_json(client: RedisClient, key: str) -> dict:
+    record = client.hgetall(key)
+    if not record:
+        raise RedisError(f"missing Redis hash: {key}")
+    raw = record.get("json")
+    if raw is None:
+        raise RedisError(f"Redis hash does not contain json: {key}")
+    try:
+        value = json.loads(raw)
+    except json.JSONDecodeError as exc:
+        raise RedisError(f"invalid JSON in Redis hash: {key}") from exc
+    if not isinstance(value, dict):
+        raise RedisError(f"Redis JSON value must be an object: {key}")
+    return value
+
+
+def materialize_call(client: RedisClient, call_id: str, content: dict, baggage: dict) -> MaterializedCall:
     client.ping()
-    call_key = f"call:{call_identity}:record"
-    source = call["source"]
-    plan = call["plan"]
-    client.hset(call_key, {
-        "identity": call_identity,
-        "schema": call["schema"],
-        "created_at": call["created_at"],
-        "source_identity": f"{source['repo_name']}:{source['commit']}",
-        "content": _json(call),
-        "extra_json": _json({"source_ref": source.get("ref"), "plan_ref": plan["ref"]}),
-    })
-    client.expire(call_key, CALL_TTL)
+    content_key = f"call:{call_id}:content"
+    baggage_key = f"call:{call_id}:baggage"
+    store_json(client, content_key, content)
+    store_json(client, baggage_key, baggage)
+    return MaterializedCall(call_id=call_id, content_key=content_key, baggage_key=baggage_key)
 
-    all_instruction_keys: list[str] = []
-    runtime_keys: list[str] = []
-    steps = plan.get("steps") or []
-    total_steps = len(steps)
-    for step in steps:
-        ordinal = int(step["position"])
-        step_instruction_keys: list[str] = []
-        for instruction in step.get("instructions") or []:
-            position = int(instruction["position"])
-            key = f"instruction:{call_identity}:{ordinal}:{position}"
-            client.hset(key, {
-                "call_identity": call_identity,
-                "step_ordinal": ordinal,
-                "position": position,
-                "id": instruction["id"],
-                "ref": instruction["ref"],
-                "label": instruction["label"],
-                "kind": instruction["kind"],
-                "body": instruction["body"],
-            })
-            client.expire(key, INSTRUCTION_TTL)
-            step_instruction_keys.append(key)
-            all_instruction_keys.append(key)
 
-        runtime_key = f"runtime:{call_identity}:{ordinal}"
-        executor = step["executor"]
-        client.hset(runtime_key, {
-            "identity": runtime_key,
-            "ordinal": ordinal,
-            "label": step["label"],
-            "plan_identity": plan["id"],
-            "engine": executor,
-            "engine_kind": "llm" if executor == "chatgpt" else executor,
-            "model": step["entrypoint"],
-            "instruction_keys": _json(step_instruction_keys),
-            "total_steps": total_steps,
-        })
-        client.expire(runtime_key, RUNTIME_TTL)
-        runtime_keys.append(runtime_key)
-
-    job_key = f"job:{call_identity}:record"
-    client.hset(job_key, {
-        "identity": call_identity,
-        "plan_identity": plan["id"],
-        "total_steps": total_steps,
-        "created_at": call["created_at"],
-        "result_ordinal_hint": "",
-        "task_ordinal_hint": "",
-        "task_created_at_hint": "",
-    })
-    client.zadd(ACTIVE_KEY, 0, job_key)
-    return Activation(call_key, job_key, runtime_keys, all_instruction_keys)
+def enqueue_call(client: RedisClient, call_id: str) -> None:
+    # Queue membership is the execution fact; there is no mutable call state flag.
+    client.zadd(EXECUTOR_QUEUE_KEY, 0, call_id)

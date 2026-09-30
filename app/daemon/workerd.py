@@ -12,9 +12,10 @@ APP_ROOT = Path(__file__).resolve().parents[1]
 if str(APP_ROOT) not in sys.path:
     sys.path.insert(0, str(APP_ROOT))
 
-from autoscribe.ledger import append_event, record_response
-from autoscribe.redis_runtime import READY_KEY, RedisClient
-from autoscribe.worker import execute_task, load_registry, persist_redis_response
+from autoscribe.executor import next_step_ordinal, prepare_step
+from autoscribe.ledger import record_response
+from autoscribe.redis_runtime import FORENSIC_TTL, WORKER_QUEUE_KEY, RedisClient, load_json
+from autoscribe.worker import execute_task, load_registry, persist_redis_response, persist_step_result
 
 HOME = Path.home()
 LEDGER_DB = Path(os.environ.get("AUTOSCRIBE_LEDGER_DB", str(HOME / "Data/ledger.sql")))
@@ -22,7 +23,8 @@ REGISTRY = Path(os.environ.get("AUTOSCRIBE_EXTENSION_REGISTRY", "/opt/autoscribe
 REDIS_HOST = os.environ.get("AUTOSCRIBE_REDIS_HOST", "127.0.0.1")
 REDIS_PORT = int(os.environ.get("AUTOSCRIBE_REDIS_PORT", "6379"))
 POLL_SECONDS = float(os.environ.get("AUTOSCRIBE_WORKER_POLL_SECONDS", "1"))
-TIMEOUT_SECONDS = float(os.environ.get("AUTOSCRIBE_EXTENSION_TIMEOUT_SECONDS", "30"))
+SCRIPT_TIMEOUT = float(os.environ.get("AUTOSCRIBE_EXTENSION_TIMEOUT_SECONDS", "30"))
+LLM_TIMEOUT = float(os.environ.get("AUTOSCRIBE_LLM_TIMEOUT_SECONDS", "120"))
 running = True
 
 
@@ -36,43 +38,71 @@ def stop(*_args) -> None:
 
 
 def process_ready(client: RedisClient, registry: dict[str, Path]) -> None:
-    for task_key in client.zrange(READY_KEY, 0, 31):
-        # One local worker in this alpha. Remove before execution so a deterministic
-        # failure is terminal instead of becoming a tight retry loop.
-        client.zrem(READY_KEY, task_key)
-        call_identity = None
+    for task_key in client.zrange(WORKER_QUEUE_KEY, 0, 31):
+        client.zrem(WORKER_QUEUE_KEY, task_key)
+        call_id = None
         try:
             task = client.hgetall(task_key)
-            call_identity = task.get("call_identity") if task else None
-            result = execute_task(client, task_key, registry, TIMEOUT_SECONDS)
-            response_identity, created = record_response(
-                LEDGER_DB,
-                call_identity=result.call_identity,
-                runtime_key=result.runtime_key,
-                task_key=result.task_key,
-                source_identity=result.source_identity,
-                executor=result.executor,
-                entrypoint=result.entrypoint,
-                content=result.content,
+            call_id = task.get("call_id") if task else None
+            result = execute_task(
+                client,
+                task_key,
+                registry,
+                script_timeout=SCRIPT_TIMEOUT,
+                llm_timeout=LLM_TIMEOUT,
             )
-            response_key = persist_redis_response(client, response_identity, result)
-            detail = {
-                "task_key": task_key,
-                "response_identity": response_identity,
-                "response_key": response_key,
-                "source_identity": result.source_identity,
-                "executor": result.executor,
-                "entrypoint": result.entrypoint,
-                "created": created,
-            }
-            append_event(LEDGER_DB, result.call_identity, "worker_completed", detail)
-            emit("worker_completed", call_identity=result.call_identity, **detail)
+            result_key = persist_step_result(client, result)
+            content_key = task.get("content_key", "")
+            call_content = load_json(client, content_key)
+            next_ordinal = next_step_ordinal(call_content, result.ordinal)
+            if next_ordinal is not None:
+                ready = prepare_step(
+                    client,
+                    result.call_id,
+                    content_key,
+                    next_ordinal,
+                    input_key=result_key,
+                )
+                emit(
+                    "worker_step_completed",
+                    call_id=result.call_id,
+                    task_key=task_key,
+                    ordinal=result.ordinal,
+                    result_key=result_key,
+                    next_task_key=ready.task_key,
+                    next_ordinal=ready.ordinal,
+                    engine=result.engine,
+                    entrypoint=result.entrypoint,
+                )
+                continue
+
+            response_key = persist_redis_response(client, result)
+            created = record_response(LEDGER_DB, result.call_id, response_key)
+            emit(
+                "worker_completed",
+                call_id=result.call_id,
+                task_key=task_key,
+                ordinal=result.ordinal,
+                result_key=result_key,
+                response_key=response_key,
+                engine=result.engine,
+                entrypoint=result.entrypoint,
+                created=created,
+            )
         except Exception as exc:
-            detail = {"task_key": task_key, "error": str(exc)}
-            if call_identity:
-                append_event(LEDGER_DB, call_identity, "worker_failed", detail)
-            client.hset(task_key, {"state": "failed", "error": str(exc)})
-            emit("worker_failed", call_identity=call_identity, **detail)
+            if call_id:
+                diagnostic_key = f"diagnostic:{call_id}:worker"
+                client.hset(diagnostic_key, {"task_key": task_key, "error": str(exc)})
+                client.expire(diagnostic_key, FORENSIC_TTL)
+            else:
+                diagnostic_key = None
+            emit(
+                "worker_failed",
+                call_id=call_id,
+                task_key=task_key,
+                diagnostic_key=diagnostic_key,
+                error=str(exc),
+            )
 
 
 def main() -> int:
@@ -81,7 +111,13 @@ def main() -> int:
     registry = load_registry(REGISTRY)
     client = RedisClient(REDIS_HOST, REDIS_PORT)
     client.ping()
-    emit("ready", registry=str(REGISTRY), extensions=sorted(registry), redis=f"{REDIS_HOST}:{REDIS_PORT}")
+    emit(
+        "ready",
+        registry=str(REGISTRY),
+        extensions=sorted(registry),
+        redis=f"{REDIS_HOST}:{REDIS_PORT}",
+        llm_timeout=LLM_TIMEOUT,
+    )
     while running:
         process_ready(client, registry)
         time.sleep(POLL_SECONDS)
