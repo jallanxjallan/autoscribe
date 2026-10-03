@@ -55,10 +55,6 @@ def validate_input_record(record: dict) -> tuple[str, str]:
         raise EnqueueError("input routing must be an object")
     if not isinstance(baggage, dict):
         raise EnqueueError("input baggage must be an object")
-    if "outputs" in baggage:
-        raise EnqueueError("baggage.outputs is not accepted")
-    if "autoscribe_return" not in baggage:
-        raise EnqueueError("input baggage missing autoscribe_return")
 
     plan_id = routing.get("plan_id")
     if not isinstance(plan_id, str) or not plan_id.startswith("pln_"):
