@@ -70,7 +70,7 @@ def response_content(path: Path, client: RedisClient, call_id: str) -> str:
 
 
 def poke_responses(path: Path, socket_path: Path) -> int:
-    """Notify Responses that unexported rows exist; send no work payload."""
+    """Notify the legacy response coordinator that unexported rows exist."""
     count = pending_count(path)
     if count == 0:
         return 0
@@ -91,7 +91,7 @@ def mark_exported(
     call_id: str,
     receipt: dict,
 ) -> tuple[str, bool]:
-    """Persist the authenticated Rust receipt and corresponding SQLite fact."""
+    """Persist a legacy authenticated Rust receipt and corresponding SQLite fact."""
     if not isinstance(receipt, dict):
         raise ExporterError("export receipt is not an object")
     if receipt.get("schema") != "autoscribe.receipt.v1":
@@ -106,6 +106,46 @@ def mark_exported(
 
     key = f"export:{call_id}:receipt"
     client.hset(key, fields)
+    client.expire(key, FORENSIC_TTL)
+    created = record_export(path, call_id, key)
+    return key, created
+
+
+def mark_transport_exported(
+    path: Path,
+    client: RedisClient,
+    *,
+    call_id: str,
+    target: str,
+    result_sha256: str,
+) -> tuple[str, bool]:
+    """Record a trusted local transport export after the Rust daemon has written it.
+
+    The transport daemon is already inside the trusted server boundary, so this path
+    does not use the old signed-effect envelope. The ledger remains lean: it stores
+    only the call -> receipt-key fact while the short-lived receipt details stay in
+    Redis.
+    """
+    if not isinstance(call_id, str) or not call_id:
+        raise ExporterError("call_id is required")
+    if not isinstance(target, str) or not target:
+        raise ExporterError("export target is required")
+    if (
+        not isinstance(result_sha256, str)
+        or len(result_sha256) != 64
+        or any(ch not in "0123456789abcdef" for ch in result_sha256)
+    ):
+        raise ExporterError("result_sha256 must be a lowercase SHA-256 hex digest")
+
+    key = f"export:{call_id}:receipt"
+    client.hset(
+        key,
+        {
+            "kind": "dropbox",
+            "target": target,
+            "result_sha256": result_sha256,
+        },
+    )
     client.expire(key, FORENSIC_TTL)
     created = record_export(path, call_id, key)
     return key, created
