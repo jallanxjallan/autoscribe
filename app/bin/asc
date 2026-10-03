@@ -12,7 +12,12 @@ if str(APP_ROOT) not in sys.path:
 
 from autoscribe.control import list_plans
 from autoscribe.enqueue import enqueue_record
-from autoscribe.exporter import iter_pending_ndjson, poke_responses, response_content
+from autoscribe.exporter import (
+    iter_pending_ndjson,
+    mark_transport_exported,
+    poke_responses,
+    response_content,
+)
 from autoscribe.ledger import load_call_keys, load_response
 from autoscribe.redis_runtime import RedisClient, load_json
 
@@ -84,6 +89,35 @@ def response_record(call_id: str) -> dict:
     }
 
 
+def complete_export(call_id: str, target: str, result_sha256: str) -> int:
+    try:
+        receipt_key, created = mark_transport_exported(
+            ledger_path(),
+            redis_client(),
+            call_id=call_id,
+            target=target,
+            result_sha256=result_sha256,
+        )
+    except Exception as exc:
+        print(f"asc export complete: {exc}", file=sys.stderr)
+        return 1
+    print(
+        json.dumps(
+            {
+                "schema": "autoscribe.export-complete.v1",
+                "call_id": call_id,
+                "target": target,
+                "result_sha256": result_sha256,
+                "receipt_key": receipt_key,
+                "created": created,
+            },
+            sort_keys=True,
+            separators=(",", ":"),
+        )
+    )
+    return 0
+
+
 def main() -> int:
     args = sys.argv[1:]
     if args == ["control", "plans"]:
@@ -125,9 +159,12 @@ def main() -> int:
             return 1
         sys.stdout.write(content)
         return 0
+    if len(args) == 5 and args[:2] == ["export", "complete"]:
+        return complete_export(args[2], args[3], args[4])
     print(
         "usage: asc control plans | asc enqueue | asc response <call-id> | "
-        "asc export | asc export pending | asc export content <call-id>",
+        "asc export | asc export pending | asc export content <call-id> | "
+        "asc export complete <call-id> <target> <result-sha256>",
         file=sys.stderr,
     )
     return 2
