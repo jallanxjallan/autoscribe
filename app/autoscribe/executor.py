@@ -53,6 +53,7 @@ def prepare_step(
     ordinal: int,
     *,
     input_key: str | None = None,
+    queue: bool = True,
 ) -> PreparedExecution:
     content = load_json(client, content_key)
     steps = ordered_steps(content)
@@ -79,7 +80,8 @@ def prepare_step(
         fields["input_key"] = input_key
     client.hset(task_key, fields)
     client.expire(task_key, FORENSIC_TTL)
-    client.zadd(WORKER_QUEUE_KEY, 0, task_key)
+    if queue:
+        client.zadd(WORKER_QUEUE_KEY, 0, task_key)
     return PreparedExecution(call_id, task_key, int(ordinal), engine_kind, engine, entrypoint)
 
 
