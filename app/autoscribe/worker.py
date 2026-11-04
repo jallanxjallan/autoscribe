@@ -26,6 +26,10 @@ class WorkerError(RuntimeError):
     pass
 
 
+class TerminalAdapterError(WorkerError):
+    """An adapter explicitly exited with failure."""
+
+
 @dataclass(frozen=True)
 class TaskResult:
     task_key: str
@@ -81,7 +85,8 @@ def run_extension(executable: Path, content: str, timeout: float = 30.0) -> str:
     if proc.returncode != 0:
         err = proc.stderr.strip()
         suffix = f": {err}" if err else ""
-        raise WorkerError(f"extension exited {proc.returncode}: {executable.name}{suffix}")
+        error = TerminalAdapterError if proc.returncode > 0 else WorkerError
+        raise error(f"extension exited {proc.returncode}: {executable.name}{suffix}")
     return proc.stdout
 
 

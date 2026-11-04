@@ -12,10 +12,11 @@ APP_ROOT = Path(__file__).resolve().parents[1]
 if str(APP_ROOT) not in sys.path:
     sys.path.insert(0, str(APP_ROOT))
 
+from autoscribe.claims import Claim
 from autoscribe.executor import next_step_ordinal, prepare_step
 from autoscribe.ledger import record_response
 from autoscribe.redis_runtime import FORENSIC_TTL, WORKER_QUEUE_KEY, RedisClient, load_json
-from autoscribe.worker import execute_task, load_registry, persist_redis_response, persist_step_result
+from autoscribe.worker import TaskResult, TerminalAdapterError, execute_task, load_registry, persist_redis_response
 
 HOME = Path.home()
 LEDGER_DB = Path(os.environ.get("AUTOSCRIBE_LEDGER_DB", str(HOME / "Data/ledger.sql")))
@@ -25,6 +26,7 @@ REDIS_PORT = int(os.environ.get("AUTOSCRIBE_REDIS_PORT", "6379"))
 POLL_SECONDS = float(os.environ.get("AUTOSCRIBE_WORKER_POLL_SECONDS", "1"))
 SCRIPT_TIMEOUT = float(os.environ.get("AUTOSCRIBE_EXTENSION_TIMEOUT_SECONDS", "30"))
 LLM_TIMEOUT = float(os.environ.get("AUTOSCRIBE_LLM_TIMEOUT_SECONDS", "120"))
+CLAIM_LEASE = int(os.environ.get("AUTOSCRIBE_WORKER_CLAIM_SECONDS", str(int(max(SCRIPT_TIMEOUT, LLM_TIMEOUT)) + 30)))
 running = True
 
 
@@ -37,72 +39,72 @@ def stop(*_args) -> None:
     running = False
 
 
-def process_ready(client: RedisClient, registry: dict[str, Path]) -> None:
-    for task_key in client.zrange(WORKER_QUEUE_KEY, 0, 31):
-        client.zrem(WORKER_QUEUE_KEY, task_key)
-        call_id = None
-        try:
-            task = client.hgetall(task_key)
-            call_id = task.get("call_id") if task else None
-            result = execute_task(
-                client,
-                task_key,
-                registry,
-                script_timeout=SCRIPT_TIMEOUT,
-                llm_timeout=LLM_TIMEOUT,
-            )
-            result_key = persist_step_result(client, result)
-            content_key = task.get("content_key", "")
-            call_content = load_json(client, content_key)
-            next_ordinal = next_step_ordinal(call_content, result.ordinal)
-            if next_ordinal is not None:
-                ready = prepare_step(
-                    client,
-                    result.call_id,
-                    content_key,
-                    next_ordinal,
-                    input_key=result_key,
-                )
-                emit(
-                    "worker_step_completed",
-                    call_id=result.call_id,
-                    task_key=task_key,
-                    ordinal=result.ordinal,
-                    result_key=result_key,
-                    next_task_key=ready.task_key,
-                    next_ordinal=ready.ordinal,
-                    engine=result.engine,
-                    entrypoint=result.entrypoint,
-                )
-                continue
+def finish_result(client: RedisClient, task_key: str, task: dict, call_id: str) -> None:
+    ordinal = int(task["ordinal"])
+    result_key = f"result:{call_id}:{ordinal}:content"
+    result = client.hgetall(result_key)
+    if "content" not in result:
+        raise RuntimeError(f"Committed step result unavailable: {result_key}")
+    content = load_json(client, task["content_key"])
+    next_ordinal = next_step_ordinal(content, ordinal)
+    if next_ordinal is not None and result.get("terminal_failure") != "1":
+        prepare_step(client, call_id, task["content_key"], next_ordinal, input_key=result_key)
+        emit("worker_step_completed", call_id=call_id, task_key=task_key, ordinal=ordinal)
+        return
+    response = TaskResult(task_key, call_id, ordinal, result["engine_kind"],
+                          result["engine"], result["entrypoint"], result["content"])
+    response_key = persist_redis_response(client, response)
+    record_response(LEDGER_DB, call_id, response_key)
+    emit("worker_completed", call_id=call_id, task_key=task_key, response_key=response_key)
 
-            response_key = persist_redis_response(client, result)
-            created = record_response(LEDGER_DB, result.call_id, response_key)
-            emit(
-                "worker_completed",
-                call_id=result.call_id,
-                task_key=task_key,
-                ordinal=result.ordinal,
-                result_key=result_key,
-                response_key=response_key,
-                engine=result.engine,
-                entrypoint=result.entrypoint,
-                created=created,
-            )
+
+def process_task(client: RedisClient, registry: dict[str, Path], task_key: str) -> None:
+    claim = Claim(client, task_key)
+    state = claim.acquire(CLAIM_LEASE)
+    if not state:
+        return
+    if state == "uncertain":
+        emit("worker_uncertain", task_key=task_key)
+        return
+    task = client.hgetall(task_key)
+    call_id = task["call_id"]
+    if state == "claimed":
+        if not claim.transition("claimed", "running"):
+            return
+        failure = ""
+        try:
+            result = execute_task(client, task_key, registry, script_timeout=SCRIPT_TIMEOUT,
+                                  llm_timeout=LLM_TIMEOUT)
+        except TerminalAdapterError as exc:
+            failure = str(exc)
+            result = TaskResult(task_key, call_id, int(task["ordinal"]), task["engine_kind"],
+                                task["engine"], task["entrypoint"], "Unreadable")
         except Exception as exc:
-            if call_id:
-                diagnostic_key = f"diagnostic:{call_id}:worker"
-                client.hset(diagnostic_key, {"task_key": task_key, "error": str(exc)})
-                client.expire(diagnostic_key, FORENSIC_TTL)
-            else:
-                diagnostic_key = None
-            emit(
-                "worker_failed",
-                call_id=call_id,
-                task_key=task_key,
-                diagnostic_key=diagnostic_key,
-                error=str(exc),
-            )
+            if claim.transition("running", "uncertain", error=str(exc)):
+                key = f"diagnostic:{call_id}:worker"
+                client.hset(key, {"task_key": task_key, "error": str(exc)})
+                client.expire(key, FORENSIC_TTL)
+                emit("worker_failed", call_id=call_id, task_key=task_key, diagnostic_key=key, error=str(exc))
+            return
+        if not claim.transition(
+            "running", "result", error=failure,
+            result_key=f"result:{call_id}:{result.ordinal}:content", ttl=FORENSIC_TTL,
+            fields={"content": result.content, "ordinal": result.ordinal, "engine_kind": result.engine_kind,
+                    "engine": result.engine, "entrypoint": result.entrypoint, "terminal_failure": int(bool(failure))},
+        ):
+            return
+    finish_result(client, task_key, task, call_id)
+    claim.transition("result", "done")
+
+
+def process_ready(client: RedisClient, registry: dict[str, Path]) -> None:
+    for task_key in client.zrange(WORKER_QUEUE_KEY, 0, -1):
+        if not running:
+            break
+        try:
+            process_task(client, registry, task_key)
+        except Exception as exc:
+            emit("worker_recovery_deferred", task_key=task_key, error=str(exc))
 
 
 def main() -> int:
