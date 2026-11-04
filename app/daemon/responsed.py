@@ -13,7 +13,7 @@ APP_ROOT = Path(__file__).resolve().parents[1]
 if str(APP_ROOT) not in sys.path:
     sys.path.insert(0, str(APP_ROOT))
 
-from autoscribe.exporter import mark_exported
+from autoscribe.exporter import mark_exported, reconcile_retention
 from autoscribe.redis_runtime import RedisClient
 
 HOME = Path.home()
@@ -255,6 +255,9 @@ def process_record(redis: RedisClient, record: dict) -> None:
 
 
 def process_pending() -> None:
+    redis = RedisClient(REDIS_HOST, REDIS_PORT)
+    redis.ping()
+    reconcile_retention(LEDGER_DB, redis)
     records = load_pending()
     if not records:
         emit("responses_idle", pending=0)

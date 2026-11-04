@@ -202,9 +202,9 @@ def enqueue_record(
             return 0
         end
         redis.call('HSET', KEYS[2], 'json', ARGV[2])
-        redis.call('EXPIRE', KEYS[2], ARGV[4])
+        redis.call('PERSIST', KEYS[2])
         redis.call('HSET', KEYS[3], 'json', ARGV[3])
-        redis.call('EXPIRE', KEYS[3], ARGV[4])
+        redis.call('PERSIST', KEYS[3])
         if ARGV[6] == '1' then redis.call('ZADD', KEYS[4], 0, ARGV[5]) end
         redis.call('SET', KEYS[1], ARGV[1])
         return 1

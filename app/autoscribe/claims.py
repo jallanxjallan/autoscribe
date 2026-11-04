@@ -39,8 +39,8 @@ if redis.call('HGET', KEYS[1], 'owner') ~= ARGV[2]
     return 0
 end
 if ARGV[4] == 'result' then
-    redis.call('HSET', KEYS[3], unpack(ARGV, 7))
-    redis.call('EXPIRE', KEYS[3], ARGV[6])
+    redis.call('HSET', KEYS[3], unpack(ARGV, 6))
+    redis.call('PERSIST', KEYS[3])
 end
 redis.call('HSET', KEYS[1], 'state', ARGV[4], 'error', ARGV[5], 'updated_at', now)
 if ARGV[4] == 'done' or ARGV[4] == 'uncertain' then
@@ -62,9 +62,9 @@ class Claim:
                                    self.task_key, self.owner, lease)
 
     def transition(self, previous: str, state: str, *, error: str = "",
-                   result_key: str = "", ttl: int = 0, fields: dict | None = None) -> bool:
+                   result_key: str = "", fields: dict | None = None) -> bool:
         values = [value for pair in (fields or {}).items() for value in pair]
         return bool(self.client.command(
             "EVAL", _TRANSITION, 3, self.key, WORKER_QUEUE_KEY, result_key,
-            self.task_key, self.owner, previous, state, error, ttl, *values,
+            self.task_key, self.owner, previous, state, error, *values,
         ))

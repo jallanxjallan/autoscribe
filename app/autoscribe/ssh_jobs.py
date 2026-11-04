@@ -177,5 +177,8 @@ def command(args, control, ledger, client):
     if operation == 'execute' and len(args) == 3:
         return execute(ledger, client, dispatch, digest)
     if operation == 'cleanup' and len(args) == 4:
-        return cleanup(ledger, dispatch, digest, args[3])
+        state = cleanup(ledger, dispatch, digest, args[3])
+        from .exporter import retain_delivered
+        retain_delivered(ledger, client, state['call_id'])
+        return state
     raise ValueError('Invalid asc job operation')

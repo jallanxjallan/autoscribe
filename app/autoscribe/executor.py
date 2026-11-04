@@ -3,7 +3,7 @@ from __future__ import annotations
 import json
 from dataclasses import dataclass
 
-from .redis_runtime import FORENSIC_TTL, WORKER_QUEUE_KEY, RedisClient, load_json
+from .redis_runtime import WORKER_QUEUE_KEY, RedisClient, load_json
 
 
 class ExecutorError(RuntimeError):
@@ -79,7 +79,7 @@ def prepare_step(
     if input_key:
         fields["input_key"] = input_key
     client.hset(task_key, fields)
-    client.expire(task_key, FORENSIC_TTL)
+    client.persist(task_key)
     if queue:
         client.zadd(WORKER_QUEUE_KEY, 0, task_key)
     return PreparedExecution(call_id, task_key, int(ordinal), engine_kind, engine, entrypoint)

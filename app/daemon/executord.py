@@ -12,6 +12,7 @@ APP_ROOT = Path(__file__).resolve().parents[1]
 if str(APP_ROOT) not in sys.path:
     sys.path.insert(0, str(APP_ROOT))
 
+from autoscribe.exporter import protect_outstanding
 from autoscribe.executor import prepare_first_step
 from autoscribe.ledger import load_call_keys
 from autoscribe.redis_runtime import EXECUTOR_QUEUE_KEY, FORENSIC_TTL, RedisClient
@@ -59,6 +60,8 @@ def main() -> int:
     signal.signal(signal.SIGINT, stop)
     client = RedisClient(REDIS_HOST, REDIS_PORT)
     client.ping()
+    for key in protect_outstanding(LEDGER_DB, client):
+        emit("outstanding_payload_missing", key=key)
     emit("ready", ledger_db=str(LEDGER_DB), redis=f"{REDIS_HOST}:{REDIS_PORT}")
     while running:
         process_active(client)

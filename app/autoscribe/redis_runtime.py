@@ -86,6 +86,9 @@ class RedisClient:
             raise RedisError("malformed HGETALL reply")
         return {str(values[i]): str(values[i + 1]) for i in range(0, len(values), 2)}
 
+    def persist(self, key: str) -> None:
+        self.command("PERSIST", key)
+
     def zrange(self, key: str, start: int, stop: int) -> list[str]:
         values = self.command("ZRANGE", key, start, stop)
         if values is None:
@@ -112,9 +115,12 @@ def _json(value: object) -> str:
     return json.dumps(value, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
 
 
-def store_json(client: RedisClient, key: str, value: dict, ttl: int = FORENSIC_TTL) -> str:
+def store_json(client: RedisClient, key: str, value: dict, ttl: int | None = None) -> str:
     client.hset(key, {"json": _json(value)})
-    client.expire(key, ttl)
+    if ttl is None:
+        client.persist(key)
+    else:
+        client.expire(key, ttl)
     return key
 
 

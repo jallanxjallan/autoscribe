@@ -13,8 +13,9 @@ if str(APP_ROOT) not in sys.path:
     sys.path.insert(0, str(APP_ROOT))
 
 from autoscribe.claims import Claim
+from autoscribe.exporter import protect_outstanding, retain_delivered
 from autoscribe.executor import next_step_ordinal, prepare_step
-from autoscribe.ledger import record_response
+from autoscribe.ledger import LedgerError, load_response, record_response
 from autoscribe.redis_runtime import FORENSIC_TTL, WORKER_QUEUE_KEY, RedisClient, load_json
 from autoscribe.worker import TaskResult, TerminalAdapterError, execute_task, load_registry, persist_redis_response
 
@@ -60,6 +61,15 @@ def finish_result(client: RedisClient, task_key: str, task: dict, call_id: str) 
 
 def process_task(client: RedisClient, registry: dict[str, Path], task_key: str) -> None:
     claim = Claim(client, task_key)
+    if not client.hgetall(claim.key):
+        task = client.hgetall(task_key)
+        try:
+            load_response(LEDGER_DB, task.get("call_id", ""))
+        except LedgerError:
+            pass
+        else:
+            client.zrem(WORKER_QUEUE_KEY, task_key)
+            return
     state = claim.acquire(CLAIM_LEASE)
     if not state:
         return
@@ -88,13 +98,14 @@ def process_task(client: RedisClient, registry: dict[str, Path], task_key: str) 
             return
         if not claim.transition(
             "running", "result", error=failure,
-            result_key=f"result:{call_id}:{result.ordinal}:content", ttl=FORENSIC_TTL,
+            result_key=f"result:{call_id}:{result.ordinal}:content",
             fields={"content": result.content, "ordinal": result.ordinal, "engine_kind": result.engine_kind,
                     "engine": result.engine, "entrypoint": result.entrypoint, "terminal_failure": int(bool(failure))},
         ):
             return
     finish_result(client, task_key, task, call_id)
-    claim.transition("result", "done")
+    if claim.transition("result", "done"):
+        retain_delivered(LEDGER_DB, client, call_id)
 
 
 def process_ready(client: RedisClient, registry: dict[str, Path]) -> None:
@@ -113,6 +124,8 @@ def main() -> int:
     registry = load_registry(REGISTRY)
     client = RedisClient(REDIS_HOST, REDIS_PORT)
     client.ping()
+    for key in protect_outstanding(LEDGER_DB, client):
+        emit("outstanding_payload_missing", key=key)
     emit(
         "ready",
         registry=str(REGISTRY),

@@ -2,10 +2,11 @@ from __future__ import annotations
 
 import json
 import socket
+from contextlib import closing
 from pathlib import Path
 from typing import Iterator
 
-from .ledger import load_response, pending_exports, record_export
+from .ledger import connect, ensure_schema, load_response, pending_exports, record_export
 from .redis_runtime import FORENSIC_TTL, RedisClient, load_json
 
 
@@ -108,6 +109,7 @@ def mark_exported(
     client.hset(key, fields)
     client.expire(key, FORENSIC_TTL)
     created = record_export(path, call_id, key)
+    retain_delivered(path, client, call_id)
     return key, created
 
 
@@ -148,4 +150,76 @@ def mark_transport_exported(
     )
     client.expire(key, FORENSIC_TTL)
     created = record_export(path, call_id, key)
+    retain_delivered(path, client, call_id)
     return key, created
+
+
+def retain_delivered(path: Path, client: RedisClient, call_id: str) -> bool:
+    """Bound forensic retention only after both completion and delivery facts."""
+    if not call_id or any(c not in "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789_-" for c in call_id):
+        raise ExporterError("Unsafe call identity")
+    with closing(connect(path)) as db:
+        has_direct_jobs = db.execute("SELECT 1 FROM sqlite_master WHERE name='ssh_jobs'").fetchone()
+        if has_direct_jobs:
+            direct_job = db.execute("SELECT state FROM ssh_jobs WHERE call_id=?", (call_id,)).fetchone()
+            if direct_job and direct_job["state"] != "cleaned":
+                return False
+        if db.execute("SELECT 1 FROM responses JOIN exports USING(call_id) WHERE call_id=?",
+                      (call_id,)).fetchone() is None:
+            return False
+    keys = call_keys(client, call_id)
+    return bool(client.command("EVAL", """
+        for _, key in ipairs(KEYS) do
+            if string.sub(key, 1, 11) == 'claim:task:' and redis.call('HGET',key,'state') ~= 'done' then
+                return 0
+            end
+        end
+        for _, key in ipairs(KEYS) do
+            if redis.call('TTL',key) == -1 then redis.call('EXPIRE',key,ARGV[1]) end
+        end
+        return 1
+    """, len(keys), *keys, FORENSIC_TTL))
+
+
+def reconcile_retention(path: Path, client: RedisClient) -> None:
+    """Retry cleanup interrupted after the durable delivery acknowledgment."""
+    ensure_schema(path)
+    with closing(connect(path)) as db:
+        calls = [str(row[0]) for row in db.execute("SELECT call_id FROM exports")]
+    for call_id in calls:
+        retain_delivered(path, client, call_id)
+
+
+def call_keys(client: RedisClient, call_id: str) -> list[str]:
+    if not call_id or any(c not in "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789_-" for c in call_id):
+        raise ExporterError("Unsafe call identity")
+    keys = [f"call:{call_id}:content", f"call:{call_id}:baggage",
+            f"response:{call_id}:content", f"export:{call_id}:receipt", f"enqueue:{call_id}"]
+    for pattern in (f"task:{call_id}:*", f"result:{call_id}:*", f"claim:task:{call_id}:*"):
+        cursor = "0"
+        while True:
+            cursor, batch = client.command("SCAN", cursor, "MATCH", pattern, "COUNT", 100)
+            keys.extend(batch)
+            if str(cursor) == "0":
+                break
+    return keys
+
+
+def protect_outstanding(path: Path, client: RedisClient) -> list[str]:
+    """Clear legacy TTLs at startup; report already missing call payloads."""
+    ensure_schema(path)
+    with closing(connect(path)) as db:
+        calls = {str(row[0]) for row in db.execute(
+            "SELECT calls.call_id FROM calls LEFT JOIN exports USING(call_id) WHERE exports.call_id IS NULL")}
+        if db.execute("SELECT 1 FROM sqlite_master WHERE name='ssh_jobs'").fetchone():
+            calls.update(str(row[0]) for row in db.execute(
+                "SELECT call_id FROM ssh_jobs WHERE state != 'cleaned'"))
+    missing = []
+    for call_id in sorted(calls):
+        keys = call_keys(client, call_id)
+        for key in keys:
+            client.persist(key)
+        for key in (f"call:{call_id}:content", f"call:{call_id}:baggage"):
+            if not client.hgetall(key):
+                missing.append(key)
+    return missing

@@ -6,7 +6,7 @@ import subprocess
 from dataclasses import dataclass
 from pathlib import Path
 
-from .redis_runtime import FORENSIC_TTL, RedisClient, load_json
+from .redis_runtime import RedisClient, load_json
 
 MODEL_LABELS = {
     "sol": "gpt-5.6-sol",
@@ -236,7 +236,7 @@ def persist_step_result(client: RedisClient, result: TaskResult) -> str:
             "entrypoint": result.entrypoint,
         },
     )
-    client.expire(key, FORENSIC_TTL)
+    client.persist(key)
     return key
 
 
@@ -254,5 +254,5 @@ def persist_redis_response(client: RedisClient, result: TaskResult) -> str:
             "entrypoint": result.entrypoint,
         },
     )
-    client.expire(key, FORENSIC_TTL)
+    client.persist(key)
     return key

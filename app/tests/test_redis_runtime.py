@@ -15,6 +15,7 @@ class FakeRedis:
     def hset(self, key, fields): self.hashes.setdefault(key, {}).update({str(k): str(v) for k, v in fields.items()})
     def hgetall(self, key): return dict(self.hashes.get(key, {}))
     def expire(self, key, seconds): self.expiries[key] = seconds
+    def persist(self, key): self.expiries.pop(key, None)
     def zadd(self, key, score, member): self.zsets.setdefault(key, {})[member] = score
 
 
