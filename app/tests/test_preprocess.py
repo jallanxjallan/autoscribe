@@ -11,9 +11,9 @@ from unittest.mock import patch
 from autoscribe.preprocess import prepare, reader_for
 
 
-def document(body='Body\n', *, metadata=None, source=None, submission='sub_TEST'):
+def document(body='Body\n', *, metadata=None, source=None, submission='00000000-0000-4000-8000-000000000002'):
     return {'schema':'autoscribe.document.v1','document':body,
-            'submission_id':submission,'call_source':'test_origin',
+            'submission_id':submission,
             'metadata':{'plan':'pln_TEST',**(metadata or {})},'source':source or {},
             'baggage':{'custom':{'unicode':'café 東京','nested':[1,False,None], 'markdown':'*raw* [x](y)'}}}
 
@@ -83,7 +83,7 @@ class PreprocessTests(unittest.TestCase):
         out=prepare(value)
         self.assertEqual(out['status'],'ready',out)
         self.assertEqual(out['source']['path'],'Original.md')
-        self.assertEqual(out['call_source'],'test_origin')
+        self.assertNotIn('call_source',out)
         value['metadata']['custom_sidecar']='Supplementary value'
         self.assertEqual(prepare(value)['metadata']['custom_sidecar'],'Supplementary value')
 
@@ -93,9 +93,9 @@ class PreprocessTests(unittest.TestCase):
         self.assertEqual(first['call_id'],again['call_id'])
         value['document']='Changed body'
         self.assertEqual(first['call_id'],prepare(value)['call_id'])
-        value['document']='Identical body';value['submission_id']='sub_DISTINCT'
+        value['document']='Identical body';value['submission_id']='00000000-0000-4000-8000-000000000001'
         self.assertNotEqual(first['call_id'],prepare(value)['call_id'])
-        self.assertEqual(first['call_source'],'test_origin')
+        self.assertNotIn('call_source',first)
         self.assertEqual(first['plan'],'pln_TEST')
 
     def test_one_invocation_and_defaults_order(self):

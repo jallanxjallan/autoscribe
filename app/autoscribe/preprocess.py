@@ -9,6 +9,8 @@ from pathlib import Path
 import re
 import subprocess
 
+from .ids import validate_submission_id
+
 SCHEMA = 'autoscribe.prepared.v2'
 MAX_DOCUMENT = 1048576
 MAX_RECORD = 2097152
@@ -40,19 +42,8 @@ def relative_path(value: object) -> str:
     return value
 
 
-def _identity(envelope: dict) -> tuple[str, str]:
-    baggage = envelope.get('baggage', {})
-    client = baggage.get('client', {}) if isinstance(baggage, dict) else {}
-    if not isinstance(client, dict):
-        raise ValueError('Invalid client coordination')
-    submission = envelope.get('submission_id', client.get('submission_id'))
-    origin = envelope.get('call_source', client.get('source'))
-    for label, value in (('submission_id', submission), ('call_source', origin)):
-        if not isinstance(value, str) or not re.fullmatch(r'[A-Za-z0-9_.:/-]{1,200}', value):
-            raise ValueError('Missing or invalid '+label)
-    if client.get('submission_id', submission)!=submission or client.get('source', origin)!=origin:
-        raise ValueError('Conflicting submission coordination')
-    return origin, submission
+def _identity(envelope: dict) -> str:
+    return validate_submission_id(envelope.get('submission_id'))
 
 
 def prepare(envelope: object, *, work_dir: Path | None = None) -> dict:
@@ -61,14 +52,16 @@ def prepare(envelope: object, *, work_dir: Path | None = None) -> dict:
     result = {'schema': SCHEMA, 'status': 'failed', 'content': '', 'content_sha256': digest(b''),
               'source': {}, 'baggage': {}, 'source_format': 'markdown', 'metadata': {},
               'directives': [], 'asset_references': [], 'assets': [], 'references': []}
-    origin = submission = None
+    submission = None
     def failure(code: str, message: str) -> dict:
         result.update(status='failed', failure={'code': code, 'message': (message or 'Ingest failed without a diagnostic')[:4096]})
         # Failure-only identity when Pandoc cannot run. It never enters execution.
-        if origin and submission:
-            seed = canonical([origin, submission])
+        if submission:
+            seed = submission.encode('utf-8')
             result.setdefault('call_id', 'failed_'+digest(seed))
-            result.update(call_source=origin, submission_id=submission, record_id='inp_'+digest(seed)[:32])
+            result.update(submission_id=submission, record_id='inp_'+digest(seed)[:32])
+        else:
+            result['schema'] = 'autoscribe.ingest-error.v1'
         result['diagnostic_envelope'] = ({k:v for k,v in original.items()
             if k not in ('document','raw_markdown','content','baggage','source')}
             if isinstance(original,dict) else original)
@@ -80,16 +73,18 @@ def prepare(envelope: object, *, work_dir: Path | None = None) -> dict:
             raise ValueError('Document envelope exceeds transport limit')
         if isinstance(envelope.get('source'), dict): result['source']=copy.deepcopy(envelope['source'])
         if isinstance(envelope.get('baggage'), dict): result['baggage']=copy.deepcopy(envelope['baggage'])
-        origin, submission = _identity(envelope)
-        result.update(call_source=origin, submission_id=submission,
-                      record_id='inp_'+digest(canonical([origin, submission]))[:32])
-        if envelope.get('schema') not in ('autoscribe.document.v1', 'autoscribe.input.v3', 'autoscribe.input.v1', 'autoscribe.input.v2'):
+        submission = _identity(envelope)
+        result.update(submission_id=submission, record_id='inp_'+digest(submission.encode('utf-8'))[:32])
+        if 'call_source' in envelope:
+            raise ValueError('call_source is retired; execution identity uses submission_id only')
+        if envelope.get('schema') not in ('autoscribe.document.v1', 'autoscribe.input.v3'):
             raise ValueError('Unsupported document envelope version')
         if not isinstance(envelope.get('source', {}), dict) or not isinstance(envelope.get('baggage', {}), dict):
             raise ValueError('Invalid source or baggage object')
         if 'autoscribe_ingest' in result['baggage']:
             raise ValueError('Reserved baggage namespace autoscribe_ingest already supplied')
         source = result['source']; client = result['baggage'].get('client', {})
+        if not isinstance(client,dict): raise ValueError('Invalid client coordination')
         if 'path' in source:
             relative_path(source['path'])
             if client.get('source_path', source['path'])!=source['path']:
@@ -130,7 +125,7 @@ def prepare(envelope: object, *, work_dir: Path | None = None) -> dict:
         filename = source.get('original_filename', source.get('path'))
         if filename is not None and (not isinstance(filename, str) or not filename.strip() or len(filename.encode('utf-8'))>4096):
             raise ValueError('Invalid original filename')
-        sidecar.update(call_source=origin, submission_id=submission, source_format=fmt, supplementary=external)
+        sidecar.update(submission_id=submission, source_format=fmt, supplementary=external)
         if len(canonical(sidecar))>32768: raise ValueError('External metadata exceeds sidecar limit')
         if 'path' in source: sidecar['path']=source['path']
         if filename is not None: sidecar['original_filename']=filename
@@ -157,7 +152,7 @@ def prepare(envelope: object, *, work_dir: Path | None = None) -> dict:
             parsed = json.loads(completed.stdout)
             if (parsed.get('schema')!='autoscribe.interpretation.v1'
                     or not re.fullmatch(r'call_[0-9a-f]{40}', parsed.get('call_id',''))
-                    or parsed.get('call_source')!=origin or parsed.get('submission_id')!=submission
+                    or 'call_source' in parsed or parsed.get('submission_id')!=submission
                     or not isinstance(parsed.get('source'), dict)):
                 raise ValueError('Invalid interpretation contract')
             if (not isinstance(parsed.get('metadata'),dict)
@@ -179,7 +174,7 @@ def prepare(envelope: object, *, work_dir: Path | None = None) -> dict:
         identification=copy.deepcopy(source)
         identification.update({k:v for k,v in parsed['source'].items() if k!='path'})
         result['baggage']['autoscribe_ingest']={'source':identification, 'source_format':fmt,
-            'call_source':origin, 'submission_id':submission}
+            'submission_id':submission}
         if parsed['source'].get('slug'):
             source['slug']=parsed['source']['slug']
         result['plan']=parsed.get('plan')

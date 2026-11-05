@@ -9,6 +9,7 @@ from pathlib import Path
 import re
 
 from .control import materialize_plan
+from .ids import validate_submission_id
 from .ledger import connect, ensure_schema, record_call, record_response
 from .redis_runtime import EXECUTOR_QUEUE_KEY, FORENSIC_TTL, RedisClient, load_json
 
@@ -39,13 +40,23 @@ def validate_input_record(record: object) -> tuple[str, str | None]:
         raise EnqueueError('Invalid prepared serialization') from exc
     if len(encoded)>=2097152: raise EnqueueError('Prepared record exceeds transport limit')
     patterns={'record_id':r'inp_[0-9a-f]{32}', 'call_id':r'(?:call_[0-9a-f]{40}|failed_[0-9a-f]{64})',
-              'call_source':r'[A-Za-z0-9_.:/-]{1,200}', 'submission_id':r'[A-Za-z0-9_.:/-]{1,200}'}
+              'submission_id':r'[0-9a-f-]{36}'}
     for key, pattern in patterns.items():
         if not isinstance(record.get(key), str) or not re.fullmatch(pattern,record[key]):
             raise EnqueueError('Invalid prepared '+key)
-    identity=json.dumps([record['call_source'],record['submission_id']],ensure_ascii=False,separators=(',',':')).encode()
+    try:
+        validate_submission_id(record['submission_id'])
+    except ValueError as exc:
+        raise EnqueueError(str(exc)) from exc
+    if 'call_source' in record:
+        raise EnqueueError('call_source is not part of the prepared contract')
+    identity=record['submission_id'].encode('utf-8')
     if record['record_id']!='inp_'+hashlib.sha256(identity).hexdigest()[:32]:
-        raise EnqueueError('record_id does not identify origin/submission')
+        raise EnqueueError('record_id does not identify submission')
+    expected_call='call_'+hashlib.sha1(identity).hexdigest()
+    expected_failure='failed_'+hashlib.sha256(identity).hexdigest()
+    if record['call_id'] not in (expected_call,expected_failure):
+        raise EnqueueError('call_id does not identify submission')
     if record.get('status') not in ('ready','failed'): raise EnqueueError('Invalid prepared status')
     failed=record['status']=='failed'
     if not isinstance(record.get('source'),dict) or not isinstance(record.get('baggage'),dict):
@@ -63,10 +74,6 @@ def validate_input_record(record: object) -> tuple[str, str | None]:
     elif 'source_path' in client and not failed: raise EnqueueError('Source/baggage identity mismatch')
     if client.get('source_slug',source.get('slug'))!=source.get('slug') and not failed:
         raise EnqueueError('Source/baggage slug mismatch')
-    if client.get('source',record['call_source'])!=record['call_source']:
-        raise EnqueueError('Source/baggage identity mismatch')
-    if client.get('submission_id',record['submission_id'])!=record['submission_id']:
-        raise EnqueueError('Submission/baggage identity mismatch')
     content=record.get('content')
     if not isinstance(content,str) or len(content.encode('utf-8'))>1048576:
         raise EnqueueError('Invalid prepared content')
@@ -109,7 +116,7 @@ def validate_input_record(record: object) -> tuple[str, str | None]:
 
 def build_call_content(record: dict, plan: dict) -> dict:
     result={'schema':CALL_SCHEMA,'record_id':record['record_id'],'call_id':record['call_id'],
-            'call_source':record['call_source'],'source':record['source'],
+            'submission_id':record['submission_id'],'source':record['source'],
             'routing':{'plan_id':record.get('plan')},'plan':plan,
             'input':{'content':record['content'],'content_sha256':record['content_sha256'],
                      'content_format':record['source_format'],'directive_policy':'inline.v1'}}

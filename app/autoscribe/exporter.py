@@ -23,6 +23,7 @@ def build_pending_record(client: RedisClient, *, call_id: str, baggage_key: str)
         raise ExporterError(f"invalid baggage record: {baggage_key}")
     return {
         "schema": "autoscribe.export-pending.v1",
+        "submission_id": load_json(client, f"call:{call_id}:content")["submission_id"],
         "call_id": call_id,
         "baggage": baggage,
     }

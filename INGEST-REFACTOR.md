@@ -1,147 +1,103 @@
-# Prepared-call ingest refactor — 6 November 2026
+# AutoScribe prepared ingest and submission identity
 
-Candidate development change only. No production configuration, service, release selection, or data was changed. The four repository changes are one integration unit and require separate release approval.
+Candidate implementation, amended 6 November 2026. No merge, deployment, release activation, production configuration change or production data/schema mutation is included.
 
-## Architecture and ownership
+## Current architecture
 
-`native document/envelope → AutoScribe adapter → one Pandoc process → Templates defaults → Extensions Lua filters/writer → prepared NDJSON → asc enqueue → existing Redis/ledger/executor/export/response`
+`document/envelope → ingest adapter → one native-reader Pandoc process → ordered Lua filters → prepared NDJSON → asc enqueue → Redis/ledger → execution/response/output`
 
-AutoScribe owns envelope validation, source retention, reader selection, process supervision, prepared-record assembly and enqueue. Templates owns `pandoc/autoscribe-ingest.yaml` (registered as `pandoc.autoscribe-ingest`). Extensions owns the ordered reusable filters and interpretation writer. Services invokes `asc ingest` for document transport; SSH job submission prepares its verified document envelope before enqueue.
+The adapter preserves the original UTF-8 Markdown bytes and opaque baggage. Pandoc alone interprets document metadata and AST content. Enqueue validates prepared records, resolves the explicit plan through the existing Control authority, and atomically stores/deduplicates the call. No manuscript interpretation or Pandoc invocation occurs in enqueue.
 
-The defaults order is authoritative:
+Templates owns `pandoc/autoscribe-ingest.yaml`, registered as `pandoc.autoscribe-ingest`. Its ordered Extensions filters are:
 
-1. `pandoc/filters/identity/ingest_metadata.lua`: external metadata, plan/slug validation and conflicts.
-2. `pandoc/filters/identity/ingest_hint.lua`: AST-based source hints.
-3. `pandoc/filters/identity/ingest_call.lua`: stable submission/call identity.
-4. `pandoc/filters/identity/ingest_prepare.lua`: readiness, directives and asset references.
+1. `identity/ingest_metadata.lua`: metadata precedence, plan and optional slug validation.
+2. `identity/ingest_hint.lua`: source filename, AST heading/content hints and explicit fallback.
+3. `identity/ingest_call.lua`: deterministic call identity from the submission UUID.
+4. `identity/ingest_prepare.lua`: readiness, directive and asset metadata.
 
-The custom writer `pandoc/filters/emit/ingest_interpretation.lua` emits JSON metadata. It never serializes the document back to Markdown. No filter launches another Pandoc process. Python does not duplicate the filter list.
+`emit/ingest_interpretation.lua` serializes structured interpretation only. The defaults remain unchanged by the identity amendment. Rust/Python do not duplicate the filter sequence or serialize the AST back to Markdown.
 
-## Source inventory and historical code
+## Submission identity
 
-The existing NUC AutoScribe checkout was `f84484d331afdffca5ac2be15b0bd68ab2c926ef`; canonical HEAD acquired for this candidate was `b54936e2b2b583f451d0ccf70442d2e84cfe8ede`. The original checkout was preserved. Extensions had pre-existing staged deletions, also preserved; work uses isolated checkouts under the existing `~/biznet/runtime` area.
+The sole submission identifier is a canonical lowercase RFC 4122 UUIDv4 in top-level `submission_id`. It is allocated once by the submitting operation using Python `uuid.uuid4()` or Rust `uuid::Uuid::new_v4()`. The operation durably retains that exact value and its prepared/staged request for every retry. Different submissions of identical content receive different UUIDs.
 
-The installed reference was `ingest-v3-33876de34ca6-47819f2bc327`, with a launcher pin to Templates `47819f2bc3275760cf96879b7524f4a11e318edd`. Its `preprocess.py` invoked `pandoc lua autoscribe_ingest_v1.lua` from enqueue. The versioned monolithic script was absent from acquired canonical HEAD; it was inspected from the installed release and is not restored as a parallel implementation. Deployed source files were copied read-only for inventory. The deployed asset transport helper and SSH terminal-failure response handling were recovered into the candidate where canonical HEAD lacked them.
+The execution identities are derived from the UTF-8 UUID string:
 
-Historical `document_slug.lua`, `build_hint_from_inputfile.lua`, `build_file_slug.lua` and `provenance_capture.lua` remain available for unrelated workflows. This pipeline replaces their responsibilities rather than restoring their behavior: scalar conversion uses Pandoc's utilities, source discovery uses explicit original coordination, provenance is retained outside the AST, and no create-only slug generator is invoked. There is no filename-to-canonical-slug conversion.
+- Lua: `call_id = "call_" + SHA1(submission_id)`.
+- Existing transport/ledger record key: `record_id = "inp_" + SHA256(submission_id)[0:32]`.
+- Adapter-only preprocessing diagnostic identity, if Pandoc cannot run: `"failed_" + SHA256(submission_id)`; never runnable.
 
-The superseded Python semantic Git dispatcher, its socket poke, call builder and fixture launcher are retired. Legacy hook installation/reset entry points fail explicitly instead of enabling the old semantic pipeline. Frontmatter helpers remain solely for existing-source writeback guards; that body writer now preserves CRLF frontmatter bytes as well as LF.
+The `call_` convention and digest width remain unchanged. Enqueue validates both ID bindings. No document text, slug, path, filename, heading, plan, source provenance, timestamp, hostname, counter or client identifier participates in execution identity.
 
-## Document and metadata contract
+`call_source` is removed from the incoming/prepared contract, Pandoc sidecar/interpretation, generated baggage metadata, Redis call content, CLI flags and execution consumers. A new envelope containing it is rejected. `baggage.client.source` is neither required nor interpreted for execution identity; supplied opaque provenance remains intact. There is no nested-field fallback for a missing submission UUID and no compatibility path for predictable submission names or older raw-envelope schemas. No historical compatibility implementation, fixture collection or audit snapshot is retained for this amendment.
 
-Preferred incoming envelope:
+## Input and prepared contracts
 
-```json
-{"schema":"autoscribe.document.v1","submission_id":"sub_example","call_source":"client_origin","source_format":"markdown","document":"---\nplan: pln_TEST\n---\n## Heading\nBody\n","source":{},"metadata":{},"baggage":{"custom":{"keep":"*exact opaque value*"}}}
-```
-
-For existing clients, `baggage.client.source` supplies the first-class call origin and `baggage.client.submission_id` supplies the stable submission identity. Explicit top-level values must agree with those copies. Legacy `autoscribe.input.v1/v2` envelope shapes and v3 `raw_markdown` are accepted by the adapter, subject to these stable origin/submission requirements. They are not accepted by enqueue.
-
-`source.path` is optional original coordination, validated as a safe relative path. `source.original_filename` is an optional descriptive filename and grants no writeback permission. Staging/work directories never become source paths. Supplied client coordination must agree with the retained source. `metadata.plan` and `metadata.slug`, and the existing envelope routing/source claims, supplement document fields; incompatible supplied claims fail. A supplied slug must be an ASCII identifier of 1–160 bytes matching `[A-Za-z0-9_.:/-]+`; missing slugs are valid, explicitly malformed values fail. Plans must match `pln_[A-Za-z0-9_-]+`, up to 160 bytes. The legacy `autoscribe` plan field, if supplied, must agree with the canonical plan.
-
-The adapter supplies a namespaced `autoscribe_transport` command-line metadata value containing hex-encoded UTF-8 JSON. Hex avoids Pandoc's Markdown interpretation of metadata strings, and command-line precedence prevents document content replacing transport coordination. Other supplementary metadata fills absent document metadata. Authoritative plan/slug conflicts are checked before supplementation. The untouched envelope and opaque baggage remain outside the AST.
-
-Source identity preference is existing slug, original filename, first nonempty AST heading at any level, first nonempty AST paragraph/plain text, then `Untitled document`. Hints collapse ASCII whitespace and are bounded to at most 160 Unicode code points. All available original coordination, slug, heading and content hint are retained under `baggage.autoscribe_ingest.source`; the namespace also records source format, origin and submission. This namespace is reserved and cannot overwrite incoming baggage. Other baggage is copied without semantic interpretation. Document `dispatch` metadata is descriptive only.
-
-Native-reader selection is separate from downstream representation policy: Markdown, HTML and DOCX have reader mappings. Only Markdown has an implemented downstream content policy; HTML/DOCX return an explicit unsupported-representation failure. No Word/Google Docs workflow or implicit conversion is introduced. Markdown bytes, including frontmatter, BOM, links, punctuation and line endings, are retained as received UTF-8 text, not reconstructed from the AST.
-
-## Prepared contract and runtime mapping
-
-The single enqueue contract is `autoscribe.prepared.v2`:
+Native document envelope:
 
 ```json
-{"schema":"autoscribe.prepared.v2","status":"ready","record_id":"inp_<origin/submission digest>","call_id":"call_<Lua submission digest>","call_source":"client_origin","submission_id":"sub_example","plan":"pln_TEST","content":"<untouched original Markdown>","content_sha256":"<SHA-256 of original bytes>","source_format":"markdown","source":{},"baggage":{},"metadata":{},"directives":[],"asset_references":[],"references":[],"assets":[]}
+{"schema":"autoscribe.document.v1","submission_id":"6c99b4c3-0a5b-4fe3-aaf1-561ead771d93","source_format":"markdown","document":"---\nplan: pln_TEST\n---\n## Heading\nBody\n","source":{},"metadata":{},"baggage":{"custom":{"keep":"*opaque* 東京"}}}
 ```
 
-`plan` is the sole authoritative plan ID in the prepared record. The original source payload may naturally contain editorial metadata; parsed metadata is descriptive. Enqueue validates the prepared contract and content checksum, retains the atomic duplicate safeguards, and uses the existing Control authority to resolve the explicit plan ID. It never discovers plans or interprets documents. Unknown catalogue plans produce an explicit enqueue error without entering execution.
+The Rust client produces `autoscribe.input.v3` with the same top-level UUID, full `raw_markdown`, original-byte `raw_markdown_sha256`, original source coordination, and opaque baggage. Its `record_id` uses the same UUID-derived rule as the server receipt. Content integrity is carried separately by the raw-byte, staged-request and transport-package SHA-256 checksums. No submission identifier is manufactured during a transport retry.
 
-For runtime compatibility, Redis still stores `autoscribe.call-content.v2`: the existing materialized `plan` execution object, derived `routing.plan_id`, source coordination and `input.content`. Content also records `call_id` and `call_source`. The runtime mapping is not a second prepared-call authority. Opaque baggage remains in hash `call:<call_id>:baggage`, field `json`; no source identity is moved into ledger metadata. The ledger retains calls/key references and durable enqueue fingerprints. Existing export/response envelopes reload the stored baggage intact.
+The prepared contract remains `autoscribe.prepared.v2`, corrected before release rather than introducing a parallel version:
 
-## Identity and retries
+```json
+{"schema":"autoscribe.prepared.v2","status":"ready","submission_id":"6c99b4c3-0a5b-4fe3-aaf1-561ead771d93","record_id":"inp_<UUID SHA-256 prefix>","call_id":"call_<UUID SHA-1>","plan":"pln_TEST","content":"<untouched original Markdown>","content_sha256":"<original-byte SHA-256>","source_format":"markdown","source":{},"baggage":{},"metadata":{},"directives":[],"asset_references":[],"references":[],"assets":[]}
+```
 
-Lua generates successful/preprocessed call IDs as `call_` plus `pandoc.sha1(length-prefixed origin + stable submission ID)`. This is a deterministic submission namespace; neither filename, slug, heading, manuscript content nor timestamp determines uniqueness. Different submissions of identical content use different submission IDs. Replaying an accepted submission uses the same call ID. Adapter `record_id` binds the origin/submission with SHA-256; enqueue verifies this binding and rejects a changed prepared payload for the same identity. Call IDs are opaque identifiers rather than ULIDs; existing downstream identifier checks accept them.
+`plan` is the sole authoritative prepared plan identifier. The existing materialized runtime plan object and derived `routing.plan_id` are created at the enqueue/runtime boundary. Existing SQLite reservation, exact-payload fingerprint, persistent receipt, and atomic Redis marker/content/baggage/queue safeguards remain. A changed prepared payload for an accepted UUID is rejected before overwriting or requeueing. Correcting a terminal submission requires an explicit new operation/UUID.
 
-The existing SQLite reservation and atomic Redis marker/content/baggage/queue operation remain. Completed receipts prevent requeueing after consumption or marker eviction. The crash boundary after Redis materialization is reconciled before the durable queued receipt. An accepted preprocessing failure is terminal; correcting the document or retrying with a different interpretation requires a new submission ID.
+Redis call content now carries `submission_id` and `call_id`, never `call_source`. Opaque baggage stays in `call:<call_id>:baggage`, hash field `json`. Generic responses, pending exports and SSH client responses expose top-level `submission_id`; the Rust response stager/writer reads that field directly. There is no new alias or origin registry.
 
-## Failure contract and discoverability
+## Source semantics and boundaries
 
-Failures use the same prepared version with `status: "failed"` and `failure: {"code": "...", "message": "..."}`. They retain available original content, source, baggage, submission and diagnostics. Lua interpretation failures retain their Lua call ID. When Pandoc cannot run or transport validation prevents interpretation, the adapter uses a separate `failed_<origin/submission SHA-256>` diagnostic identity; this never denotes a runnable execution call.
+Original relative `source.path` and descriptive `source.original_filename` are optional. A filepath is never fabricated for streams; staging paths do not become original source identity. Source/baggage path and slug conflicts remain hard failures. Document plan/slug fields and externally supplied authoritative claims must agree. Transport metadata has a protected namespace and command-line precedence. Its hex-encoded UTF-8 JSON avoids Pandoc metadata Markdown-string rewriting; untouched baggage remains outside the AST.
 
-Identifiable failures are stored through the existing call/response ledger and Redis response hashes, and exported through the existing response protocol with failed status. SSH submission uses its existing completed-transport/failed-document response path. There is no new persistent failure database. An envelope too malformed to establish an origin/submission returns its structured diagnostic to the caller, without inventing an origin or execution identity. Malformed JSON lines return `autoscribe.ingest-error.v1` with a line number; subsequent lines continue. Rust retains a transport with failures instead of deleting it, while valid siblings can be accepted and deduplicated on retry. Desktop notification behavior is inherited from the existing client response consumer; no desktop notification was exercised by the isolated tests.
+Missing slugs are valid. Explicit slugs must match `[A-Za-z0-9_.:/-]+`, 1–160 ASCII bytes. Plans must match `pln_[A-Za-z0-9_-]+`, at most 160 bytes, without a default. Catalogue existence remains a separate existing Control check. `dispatch` document metadata is advisory only.
 
-## CLI and compatibility
+Identification preference is slug, original filename, first meaningful AST heading at any level, paragraph/plain-text hint, then `Untitled document`. Hints are deterministic, Unicode-safe and at most 160 code points. Available original coordination and descriptive values are retained in `baggage.autoscribe_ingest.source`. No hint becomes a canonical slug. No manuscript text, assets, links, whitespace, frontmatter or line endings are rewritten by preparation.
 
-- `asc prepare`: document-envelope NDJSON to prepared NDJSON; no Redis connection.
-- `asc ingest`: document-envelope NDJSON through preparation and enqueue.
-- `asc enqueue`: strictly prepared NDJSON; never invokes Pandoc.
-- `asc prepare-file FILE|- --call-source SOURCE --submission-id ID`: original file/stream to prepared NDJSON.
-- `asc ingest-file FILE|- --call-source SOURCE --submission-id ID`: original file/stream to enqueue acknowledgement.
+Markdown files/streams are implemented. The reader-selection boundary also maps HTML/DOCX, but those formats return explicit unsupported-representation failures until a downstream representation policy is defined. No conversion or new ingestion workflow is implied.
 
-File commands accept `--format`, `--source-path` and `--original-filename`. A local filename is descriptive only; a source coordination path requires the explicit option. A pathless stream gets neither an invented filename nor a path. Reader selection uses the explicit format, recognized file extension, or Markdown for a pathless stream.
+Existing signed output permissions remain independent of source filenames. Pathless streams can create new outputs through an authorized output route; in-place source writeback is never inferred. Failed responses are rejected before creating output effects. Existing-source body writers retain their conflict/slug checks and preserve raw frontmatter, including CRLF.
 
-Existing signed return/output baggage is preserved. A filename alone never grants in-place writeback. Existing-source writers retain their identity/conflict checks; the Python body writer preserves the original raw frontmatter. Pathless streams may use an independently authorized existing output route to create a new file. The Rust smoke exercises precisely that separation.
+## Failure correlation
 
-All raw callers must move to `asc ingest` (or prepare before enqueue). Stable origin/submission IDs are required; content-derived legacy transport IDs are not substituted for submission identities. Legacy Git-push semantic dispatch is retired. Production packaging must pin these four candidate repositories together and select the new Templates resource and Extensions filters; the old approved 11B builder is pinned to its original package and must not be run to rebuild/overwrite it. The established release approval/manifest process remains the deployment route. No candidate release package or production activation was created here. Existing deployed writer binaries must remain pinned unless separately rebuilt and qualified; this work changes Rust ingress and adds a failed-response rejection at the output boundary.
+Identifiable preprocessing failures retain the submission UUID, original source/content/baggage and structured `failure: {code,message}` diagnostics. When Lua runs, its deterministic `call_` ID is retained even for a non-runnable failure. If transport validation or Pandoc execution prevents interpretation, only the separate `failed_` diagnostic identity is used. Neither case enters the normal execution queue.
 
-## Verification
+Input lacking a valid UUID returns `autoscribe.ingest-error.v1`, without an invented call or record ID. Malformed NDJSON lines produce per-line transport diagnostics; subsequent submissions continue. Rust retains failed transports and forwards valid siblings independently. Stored failures use the existing Redis response and ledger/export paths, not a new persistent database.
 
-Verified with the deployed-reference Pandoc 3.12.1 binary copied locally, isolated Redis instances with persistence disabled, temporary SQLite databases/Git repositories, fake Dropbox transport, and synthetic responses. No model API or production Redis/data was used.
+## Ledger and billing audit
 
-- Full AutoScribe suite: 33 tests passed (including contract, all seven identity cases, plan/slug conflicts, Unicode bounds, metadata precedence, retry identity, raw CRLF preservation, structured failures, Redis/ledger/export/response and SSH compatibility).
-- Rust `cargo test -p srv-input`: 5 tests passed, including raw envelope forwarding and malformed-sibling isolation.
-- Templates resource catalogue: 1 test passed.
-- Extensions resource catalogue: 2 tests passed.
-- Targeted post-review interpretation suite: 8 tests passed; isolated CLI/Redis/Rust output suite: 4 tests passed, including rejection of failed responses before any output effect.
-- Rust ingress → actual adapter/Pandoc → enqueue → isolated Redis → synthetic response → signed output → new-file Git writeback smoke passed; replay produced the same output receipt. Existing-source writeback tests passed, including a new byte-exact CRLF frontmatter check.
-- `git.py diff --check` passed in all four candidate repositories.
+The AutoScribe ledger schema and its call/key/response/export methods are unchanged. Read-only inspection of the deployed `/home/jeremy/Data/ledger.sql`, `/home/jeremy/Data/control.sql` and `/var/lib/autoscribe/effects.sqlite` table definitions found no `call_source` requirement or billing table requiring that field. No billing-specific `call_source` consumer was found in the audited application/Services sources. No billing records or manuscript records were inspected or modified.
 
-Reproduce the Python suite with `TEMPLATES_ROOT`, `EXTENSIONS_ROOT`, `AUTOSCRIBE_PANDOC`, `PYTHONPATH=<AutoScribe>/app`, and `AUTOSCRIBE_TEST_SERVICES_BIN=<Services>/target/debug`, using `/usr/bin/python3 -B -m unittest discover -s <AutoScribe>/app/tests -v`. Build the three smoke binaries with `cargo build -p srv-input -p srv-output -p srv-writeback`; run the Rust ingress tests with `cargo test -p srv-input`. Set `PYTHONDONTWRITEBYTECODE=1`. During this work all Git operations, including those performed by fixture code, were routed through the existing `/home/jeremy/biznet/ops/git.py` wrapper using a test PATH shim.
+No migration, backfill, dummy value, storage rewrite or alternate reader is required for the audited current schema. Ledger facts remain keyed by opaque `call_id` and Redis references. This conclusion covers the inspected code and database definitions; no separate billing system is claimed to have been tested.
 
-## Modified files
+## Entry points and retry use
 
-### autoscribe
+- `asc submission-id` allocates a new UUIDv4 locally, without Redis or Pandoc.
+- `asc prepare` / `asc ingest` consume native document-envelope NDJSON; callers supply the saved UUID.
+- `asc enqueue` accepts only prepared NDJSON, without allocating identities or interpreting documents.
+- `asc prepare-file FILE|- --submission-id UUID` and `asc ingest-file FILE|- --submission-id UUID` accept files or streams. Optional `--format`, `--source-path` and `--original-filename` remain.
+- Rust `autoscribe-dispatch --request ...` allocates a UUID only after checking for an existing unresolved reservation, saves it atomically in the current jobs/source-coordination state, and stages exact request bytes before sending. Status polling, retry and interrupted-upload recovery reuse the reservation and staged bytes.
+- Services ingress and SSH `job submit` consume existing UUIDs; they do not generate replacement IDs.
 
-- `M README.md`
-- `D app/autoscribe/call.py`
-- `M app/autoscribe/enqueue.py`
-- `M app/autoscribe/ingest.py`
-- `M app/autoscribe/responses.py`
-- `M app/autoscribe/ssh_jobs.py`
-- `M app/bin/asc`
-- `D app/daemon/dispatchd.py`
-- `M app/daemon/install-post-receive.sh`
-- `D app/daemon/poke_dispatch.py`
-- `D app/tests/test_call.py`
-- `M app/tests/test_enqueue.py`
-- `M app/tests/test_ingest.py`
-- `M app/tests/test_responses.py`
-- `M app/tests/test_ssh_jobs.py`
-- `M reset-test-fixture.sh`
-- `D run-smoke-dispatch.sh`
-- `D systemd/autoscribe-dispatch.service`
-- `?? INGEST-REFACTOR.md`
-- `?? app/autoscribe/assets.py`
-- `?? app/autoscribe/preprocess.py`
-- `?? app/tests/test_prepared_pipeline.py`
-- `?? app/tests/test_preprocess.py`
+For CLI use, allocate and save the UUID once before delivery, then reuse the saved value and prepared record. Do not place a fresh generator invocation inside a delivery-retry loop. The default-file/stream commands require an explicit UUID to make accidental retry regeneration impossible.
 
-### services
+## Verification and release scope
 
-- `M README.md`
-- `M bins/srv-input/src/main.rs`
-- `M bins/srv-output/src/main.rs`
+Verified locally using Pandoc 3.12.1, disposable Redis/SQLite/Git state, candidate Rust binaries, fake Dropbox and synthetic responses:
 
-### extensions
+- 40 Python regression/integration checks: UUID shape/random generation, missing/malformed IDs, origin independence, deterministic calls/failures, accepted-payload conflicts, exact Markdown/baggage preservation, Redis/ledger/export/response, SSH and writeback.
+- 3 Rust Services ingress tests: unchanged raw forwarding without origins, malformed-sibling isolation and per-record body limits.
+- 3 Rust dispatcher component tests plus 1 transport-library test passed; the live SSH transport test remained disabled.
+- 3 Rust writer integration checks passed for response staging, persistence, source conflicts, reconciliation and Git-failure recovery using top-level response submission IDs.
+- All Rust-client targets compile with the locked dependency set. Existing alias-target/dead-code warnings remain; no new release binary was installed.
+- Native Rust submitter → immutable staged v3 bytes → one Pandoc invocation → enqueue/Redis smoke passed, including source edits after staging, identical retry receipts and matching client/server `record_id`.
+- Rust ingress → prepared call → synthetic response → signed new-file output and repeat receipt checks passed. Failed output effects are rejected.
 
-- `M README.md`
-- `?? pandoc/filters/emit/ingest_interpretation.lua`
-- `?? pandoc/filters/identity/ingest_call.lua`
-- `?? pandoc/filters/identity/ingest_hint.lua`
-- `?? pandoc/filters/identity/ingest_metadata.lua`
-- `?? pandoc/filters/identity/ingest_prepare.lua`
+The initial sandbox run could not create local sockets; rerunning only those test checks with loopback access resolved the environment restriction. No model calls, production Redis tests, source-data changes, merge or deployment occurred.
 
-### templates
-
-- `M resources.json`
-- `M tests/test_resources.py`
-- `?? pandoc/autoscribe-ingest.yaml`
+Changes remain on the existing AutoScribe #2, Services #5 and Extensions #5 branches. Templates #13's defaults/order need no code change. The user-approved client fix remains on `codex/finalize-raw-dispatch-20261105` in `autoscribe-client`. These contracts must be reviewed and pinned together before any separately authorized release.

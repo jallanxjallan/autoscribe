@@ -87,8 +87,10 @@ def response_record(call_id: str) -> dict:
         raise RuntimeError(f"missing response Redis hash: {response_key}")
     keys = load_call_keys(ledger_path(), call_id)
     baggage = load_json(client, keys["baggage"])
+    content = load_json(client, keys["content"])
     return {
         "schema": "autoscribe.response.v1",
+        "submission_id": content["submission_id"],
         "call_id": call_id,
         "content": response_hash["content"],
         "baggage": baggage,
@@ -135,6 +137,10 @@ def main() -> int:
         except Exception as exc:
             print(f"asc job: {exc}", file=sys.stderr)
             return 1
+    if args == ['submission-id']:
+        from autoscribe.ids import new_submission_id
+        print(new_submission_id())
+        return 0
     if args == ["control", "plans"]:
         for row in list_plans(control_db_path()):
             print(f"{row['label']}\t{row['id']}")
@@ -144,7 +150,6 @@ def main() -> int:
         from autoscribe.preprocess import prepare
         parser = argparse.ArgumentParser(prog='asc '+args[0])
         parser.add_argument('file', help='Native document file, or - for a stream')
-        parser.add_argument('--call-source', required=True)
         parser.add_argument('--submission-id', required=True)
         parser.add_argument('--format')
         parser.add_argument('--source-path')
@@ -162,7 +167,7 @@ def main() -> int:
             source_format = options.format or ('markdown' if options.file == '-' else
                 {'.md':'markdown','.markdown':'markdown','.html':'html','.htm':'html','.docx':'docx'}.get(Path(options.file).suffix.lower(),'unknown'))
             envelope = {'schema':'autoscribe.document.v1', 'source_format':source_format,
-                        'source':source, 'call_source':options.call_source,
+                        'source':source,
                         'submission_id':options.submission_id}
             try:
                 if options.file == '-':
@@ -228,7 +233,7 @@ def main() -> int:
     if len(args) == 5 and args[:2] == ["export", "complete"]:
         return complete_export(args[2], args[3], args[4])
     print(
-        "usage: asc prepare|ingest|enqueue (NDJSON stdin) | asc prepare-file|ingest-file FILE --call-source SOURCE --submission-id ID | asc job <submit|status|execute|cleanup> <dispatch-id> <package-sha256> [response-sha256] | asc control plans | asc enqueue | asc response <call-id> | "
+        "usage: asc submission-id | asc prepare|ingest|enqueue (NDJSON stdin) | asc prepare-file|ingest-file FILE --submission-id UUID | asc job <submit|status|execute|cleanup> <dispatch-id> <package-sha256> [response-sha256] | asc control plans | asc enqueue | asc response <call-id> | "
         "asc export | asc export pending | asc export content <call-id> | "
         "asc export complete <call-id> <target> <result-sha256>",
         file=sys.stderr,

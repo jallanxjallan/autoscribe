@@ -42,13 +42,12 @@ def make_control(path: Path):
 
 
 def record(content="Hello"):
-    import json
-    origin,submission='test_origin','sub_TEST'
-    key=json.dumps([origin,submission],separators=(',',':')).encode()
+    submission='00000000-0000-4000-8000-000000000002'
+    key=submission.encode()
     return {'schema':'autoscribe.prepared.v2','status':'ready',
             'record_id':'inp_'+hashlib.sha256(key).hexdigest()[:32],
-            'call_id':'call_'+hashlib.sha1(f'{len(origin)}:{origin}:{submission}'.encode()).hexdigest(),
-            'call_source':origin,'submission_id':submission,'plan':'pln_TEST',
+            'call_id':'call_'+hashlib.sha1(submission.encode()).hexdigest(),
+            'submission_id':submission,'plan':'pln_TEST',
             'content':content,'content_sha256':hashlib.sha256(content.encode()).hexdigest(),
             'source_format':'markdown','source':{'kind':'git','path':'Note.md'},
             'baggage':{'autoscribe_return':{'schema':'autoscribe.return.v1'}}}
@@ -90,7 +89,7 @@ class EnqueueTests(unittest.TestCase):
                 enqueue_record(record=record("Changed"), control_db=control, ledger_db=ledger, client=redis)
             self.assertEqual(redis.hashes, before)
 
-    def test_legacy_raw_contract_rejected_before_storage(self):
+    def test_unprepared_input_rejected_before_storage(self):
         value=record();value['schema']='autoscribe.input.v3'
         with self.assertRaisesRegex(EnqueueError,'requires autoscribe.prepared.v2'):
             enqueue_record(record=value,control_db=Path('/unused'),ledger_db=Path('/unused'),client=FakeRedis())

@@ -16,9 +16,9 @@ class DirectJobsTests(unittest.TestCase):
             with sqlite3.connect(control) as db:
                 db.execute("UPDATE steps SET engine_kind='script',engine='extension',model=NULL,script='echo'")
             registry=root/'registry.json'; registry.write_text(json.dumps({'echo':'/usr/bin/cat'}))
-            dispatch='sub_direct_test'; package=root/dispatch; package.mkdir()
-            value={'schema':'autoscribe.document.v1','document':'Hello','metadata':{'plan':'pln_TEST'},
-                   'baggage':{'client':{'submission_id':dispatch,'source':'test_origin'}}}
+            dispatch='00000000-0000-4000-8000-000000000003'; package=root/dispatch; package.mkdir()
+            value={'schema':'autoscribe.document.v1','document':'Hello','submission_id':dispatch,'metadata':{'plan':'pln_TEST'},
+                   'baggage':{'client':{}}}
             data=json.dumps(value).encode(); (package/'request.ndjson').write_bytes(data)
             manifest=hashlib.sha256(data).hexdigest()+'  request.ndjson\n'
             (package/'SHA256SUMS').write_text(manifest)
@@ -38,6 +38,8 @@ class DirectJobsTests(unittest.TestCase):
                 self.assertFalse(client.zsets)
                 response=json.loads((package/'response.ndjson').read_text())
                 self.assertEqual(response['result'],'Hello')
+                self.assertEqual(response['submission_id'],dispatch)
+                self.assertNotIn('call_source',response)
                 self.assertEqual(response['baggage']['client'],value['baggage']['client'])
                 with sqlite3.connect(ledger) as db:
                     self.assertEqual(db.execute('SELECT count(*) FROM exports').fetchone()[0],1)

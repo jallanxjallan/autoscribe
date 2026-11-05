@@ -11,6 +11,7 @@ import tempfile
 import time
 
 from .enqueue import enqueue_record
+from .ids import validate_submission_id
 from .executor import ordered_steps, prepare_step
 from .ledger import connect, ensure_schema, load_call_keys
 from .redis_runtime import load_json, FORENSIC_TTL
@@ -31,9 +32,9 @@ def initialize(ledger):
 
 
 def check(dispatch, digest):
-    if (not re.fullmatch(r'sub_[A-Za-z0-9_-]{1,150}', dispatch)
-            or not re.fullmatch(r'[a-f0-9]{64}', digest)):
-        raise ValueError('Unsafe dispatch identity or checksum')
+    validate_submission_id(dispatch)
+    if not re.fullmatch(r'[a-f0-9]{64}', digest):
+        raise ValueError('Unsafe dispatch checksum')
 
 
 def read_job(ledger, dispatch, digest):
@@ -136,6 +137,7 @@ def complete_response(ledger, client, state):
               'status': 'failed' if response.get('failure') else 'completed',
               'result': response['content'], 'baggage': baggage}
     content = load_json(client, keys['content'])
+    record['submission_id'] = content['submission_id']
     if 'metadata' in content.get('input', {}):
         record.update(source=content['source'], routing=content['routing'],
                       metadata=content['input']['metadata'])
