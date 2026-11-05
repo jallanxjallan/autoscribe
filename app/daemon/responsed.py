@@ -189,6 +189,10 @@ def process_record(redis: RedisClient, record: dict) -> None:
             or f"asc response failed for {call_id}"
         )
 
+    response = parse_one_ndjson(response_cp.stdout, 'asc response')
+    if response.get('failure') or response.get('status') == 'failed':
+        raise ResponsesError('Terminal failure response retained; it is not writable manuscript content')
+
     output_cp = run_command(
         [str(SRV_OUTPUT), "--policy", str(POLICY)],
         input_text=response_cp.stdout,

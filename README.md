@@ -1,3 +1,7 @@
+V3 server ingest is prepared for review, not deployed. See [V3-INGEST.md](V3-INGEST.md)
+for the revised protocol, targeted checks, client compatibility gap and installation
+instructions. Both NUC client services must remain stopped pending separate approval.
+
 # AutoScribe server
 
 Current live-tested server snapshot: 30 September 2026.

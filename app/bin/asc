@@ -11,7 +11,7 @@ if str(APP_ROOT) not in sys.path:
     sys.path.insert(0, str(APP_ROOT))
 
 from autoscribe.control import list_plans
-from autoscribe.enqueue import enqueue_record
+from autoscribe.enqueue import enqueue_record, validate_input_record
 from autoscribe.exporter import (
     iter_pending_ndjson,
     mark_transport_exported,
@@ -37,13 +37,21 @@ def redis_client() -> RedisClient:
 
 
 def enqueue_stdin() -> int:
-    client = redis_client()
-    count = 0
+    records = []
     for line_number, raw in enumerate(sys.stdin, start=1):
         if not raw.strip():
             continue
         try:
             record = json.loads(raw)
+            validate_input_record(record)
+            records.append((line_number, record))
+        except Exception as exc:
+            print(f"asc enqueue: line {line_number}: {exc}", file=sys.stderr)
+            return 1
+    client = redis_client()
+    count = 0
+    for line_number, record in records:
+        try:
             result = enqueue_record(
                 record=record,
                 control_db=control_db_path(),
@@ -81,12 +89,15 @@ def response_record(call_id: str) -> dict:
         raise RuntimeError(f"missing response Redis hash: {response_key}")
     keys = load_call_keys(ledger_path(), call_id)
     baggage = load_json(client, keys["baggage"])
-    return {
+    result = {
         "schema": "autoscribe.response.v1",
         "call_id": call_id,
         "content": response_hash["content"],
         "baggage": baggage,
     }
+    if response_hash.get('failure'):
+        result.update(status='failed', failure=response_hash['failure'], error=response_hash.get('error', ''))
+    return result
 
 
 def complete_export(call_id: str, target: str, result_sha256: str) -> int:

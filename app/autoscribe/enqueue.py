@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import re
 from contextlib import closing
 from dataclasses import dataclass
 from pathlib import Path
@@ -9,7 +10,7 @@ from pathlib import Path
 from .control import materialize_plan
 from .ids import new_ulid
 import unicodedata
-from .ledger import record_call, ensure_schema, connect
+from .ledger import record_call, record_response, ensure_schema, connect
 from .redis_runtime import RedisClient, FORENSIC_TTL, EXECUTOR_QUEUE_KEY
 
 INPUT_SCHEMA = "autoscribe.input.v1"
@@ -27,6 +28,7 @@ class EnqueueResult:
     created: bool
     content_key: str
     baggage_key: str
+    failure: str | None = None
 
 
 def _required_text(record: dict, key: str) -> str:
@@ -36,14 +38,67 @@ def _required_text(record: dict, key: str) -> str:
     return value
 
 
-def validate_input_record(record: dict) -> tuple[str, str]:
+def _failure(record: dict) -> str | None:
+    if 'failure' not in record:
+        return None
+    value = record['failure']
+    if not isinstance(value, str) or not value.strip():
+        raise EnqueueError('failure must be nonempty text')
+    return value
+
+
+def validate_raw_input(record: dict) -> str:
+    if any(key in record for key in ('content', 'failure')):
+        raise EnqueueError('v3 accepts raw Markdown, not prepared content/failure')
+    raw = record.get('raw_markdown')
+    if not isinstance(raw, str):
+        raise EnqueueError('raw_markdown must be text')
+    try:
+        data = raw.encode('utf-8')
+        encoded = json.dumps(record, ensure_ascii=False, sort_keys=True, separators=(',', ':'), allow_nan=False).encode('utf-8')
+    except (UnicodeError, ValueError) as exc:
+        raise EnqueueError('invalid UTF-8 document/envelope') from exc
+    if len(data) > 1048576 or len(encoded) >= 2097152:
+        raise EnqueueError('raw document/envelope exceeds transport limits')
+    _digest(record.get('raw_markdown_sha256'))
+    if hashlib.sha256(data).hexdigest() != record['raw_markdown_sha256']:
+        raise EnqueueError('raw Markdown checksum mismatch')
+    source, baggage = record.get('source'), record.get('baggage')
+    if not isinstance(source, dict) or source.get('kind') != 'obsidian' or not isinstance(baggage, dict):
+        raise EnqueueError('v3 requires source and baggage identities')
+    _relative(source.get('path'))
+    _digest(source.get('vault_id'))
+    client = baggage.get('client')
+    if not isinstance(client, dict):
+        raise EnqueueError('missing client coordination metadata')
+    _digest(client.get('source'))
+    if (client.get('source_path') != source['path'] or client.get('vault_id') != source['vault_id']
+            or client.get('raw_markdown_sha256') != record['raw_markdown_sha256']):
+        raise EnqueueError('v3 source/client identity mismatch')
+    if not isinstance(client.get('submission_id'), str) or not re.fullmatch(r'sub_[A-Za-z0-9_-]{1,150}', client['submission_id']):
+        raise EnqueueError('invalid submission identity')
+    identity = dict(record)
+    record_id = identity.pop('record_id', None)
+    expected = 'inp_' + hashlib.sha256(json.dumps(identity, ensure_ascii=False, sort_keys=True,
+        separators=(',', ':')).encode('utf-8')).hexdigest()[:32]
+    if record_id != expected:
+        raise EnqueueError('v3 record_id does not identify the exact request payload')
+    return record_id
+
+
+def validate_input_record(record: dict) -> tuple[str, str | None]:
     if not isinstance(record, dict):
         raise EnqueueError("input record must be an object")
+    if record.get("schema") == "autoscribe.input.v3":
+        return validate_raw_input(record), None
     if record.get("schema") not in (INPUT_SCHEMA, "autoscribe.input.v2"):
         raise EnqueueError(f"unsupported input schema: {record.get('schema')!r}")
 
     record_id = _required_text(record, "record_id")
-    content = _required_text(record, "content")
+    failure = _failure(record)
+    content = record.get('content')
+    if not isinstance(content, str) or (not content and failure is None):
+        raise EnqueueError('input content must be non-empty text unless failure is present')
     content_sha256 = _required_text(record, "content_sha256")
     actual_sha256 = hashlib.sha256(content.encode("utf-8")).hexdigest()
     if content_sha256 != actual_sha256:
@@ -146,10 +201,29 @@ def build_call_content(record: dict, plan: dict) -> dict:
         "plan": plan,
     }
 
-    if record["schema"] == "autoscribe.input.v2":
+    if record["schema"] in ("autoscribe.input.v2", "autoscribe.prepared.v1"):
         for key in ("content_format", "directive_policy", "references", "assets"):
             result["input"][key] = record[key]
+    for key in ('failure', 'failure_reason'):
+        if key in record:
+            result[key] = record[key]
+    for key in ('asset_references', 'staged_assets', 'directives', 'metadata'):
+        if key in record:
+            result['input'][key] = record[key]
     return result
+
+
+def register_failure(ledger_db: Path, client: RedisClient, call_id: str, content: dict) -> str:
+    from .worker import TaskResult, persist_redis_response
+    failure = _failure(content)
+    if failure is None:
+        raise EnqueueError('terminal failure requires failure text')
+    key = persist_redis_response(client, TaskResult('', call_id, 0, 'preprocessing',
+        'pandoc', 'autoscribe-ingest-v1', failure))
+    client.hset(key, {'status': 'failed', 'failure': failure,
+                     'error': content.get('failure_reason', failure)})
+    record_response(ledger_db, call_id, key)
+    return key
 
 
 def enqueue_record(
@@ -159,6 +233,7 @@ def enqueue_record(
     ledger_db: Path,
     client: RedisClient,
     queue: bool = True,
+    work_dir: Path | None = None,
 ) -> EnqueueResult:
     record_id, plan_id = validate_input_record(record)
     # Reserve a durable identity BEFORE touching Redis. A retry after a crash
@@ -188,13 +263,40 @@ def enqueue_record(
     content_key = f"call:{call_id}:content"
     baggage_key = f"call:{call_id}:baggage"
     marker = f"enqueue:{call_id}"
-    # Persistent receipt outlives the forensic content TTL and consumed queue.
-    # Do not rewrite content or re-materialize a changed plan on completed retry.
-    if (row and row["queued"]) or client.command("GET", marker) == fingerprint:
-        return EnqueueResult(record_id, call_id, False, content_key, baggage_key)
-    plan = materialize_plan(control_db, plan_id)
+    # Completed receipts bypass preprocessing/dependency/plan changes on replay.
+    if row and row['queued']:
+        outcome = client.hgetall(f'response:{call_id}:content')
+        return EnqueueResult(record_id, call_id, False, content_key, baggage_key, outcome.get('failure'))
+    # Reconcile the crash boundary after Redis materialization, before SQL receipt.
+    from .redis_runtime import load_json
+    prior_marker = client.command('GET', marker)
+    if prior_marker is not None and prior_marker != fingerprint:
+        raise EnqueueError('enqueue marker collision')
+    if prior_marker == fingerprint:
+        content = load_json(client, content_key)
+        failure = _failure(content)
+        if failure:
+            register_failure(ledger_db, client, call_id, content)
+        with closing(connect(ledger_db)) as db, db:
+            db.execute('UPDATE enqueue_inputs SET queued = 1 WHERE record_id = ?', (record_id,))
+        return EnqueueResult(record_id, call_id, False, content_key, baggage_key, failure)
+    incoming = record
+    if incoming['schema'] == 'autoscribe.input.v3':
+        from .preprocess import prepare
+        from .control import resolve_plan
+        record = prepare(incoming)
+        if not record.get('failure'):
+            plan_id = record['routing']['plan_id']
+            if resolve_plan(control_db, plan_id) is None:
+                record.update(content='', content_sha256=hashlib.sha256(b'').hexdigest(),
+                              failure='Unreadable', failure_reason='Unknown plan identity')
+    failure = _failure(record)
+    plan = {} if failure else materialize_plan(control_db, plan_id)
+    if incoming['schema'] == 'autoscribe.input.v3' and not failure:
+        from .assets import stage_assets
+        record['staged_assets'] = stage_assets(record['asset_references'], work_dir)
     content = build_call_content(record, plan)
-    record_call(ledger_db, call_id, {"content": content_key, "baggage": baggage_key})
+    record_call(ledger_db, call_id, {'content': content_key, 'baggage': baggage_key})
     created = client.command("EVAL", """
         local prior = redis.call('GET', KEYS[1])
         if prior then
@@ -210,7 +312,14 @@ def enqueue_record(
         return 1
         """, 4, marker, content_key, baggage_key, EXECUTOR_QUEUE_KEY,
         fingerprint, json.dumps(content, ensure_ascii=False),
-        json.dumps(record["baggage"], ensure_ascii=False), FORENSIC_TTL, call_id, int(queue))
+        json.dumps(record["baggage"], ensure_ascii=False), FORENSIC_TTL, call_id, int(queue and not failure))
+    if not created:
+        # Concurrent submission uses the first materialized outcome, including
+        # its failure disposition, rather than the losing local interpretation.
+        content = load_json(client, content_key)
+        failure = _failure(content)
+    if failure:
+        register_failure(ledger_db, client, call_id, content)
     with closing(connect(ledger_db)) as db, db:
         db.execute("UPDATE enqueue_inputs SET queued = 1 WHERE record_id = ?", (record_id,))
-    return EnqueueResult(record_id, call_id, bool(created), content_key, baggage_key)
+    return EnqueueResult(record_id, call_id, bool(created), content_key, baggage_key, failure)

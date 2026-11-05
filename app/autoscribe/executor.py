@@ -21,6 +21,8 @@ class PreparedExecution:
 
 
 def ordered_steps(content: dict) -> list[dict]:
+    if content.get("failure"):
+        raise ExecutorError("terminal preprocessing failure cannot execute")
     plan = content.get("plan") or {}
     steps = plan.get("steps") or []
     if not isinstance(steps, list) or not steps:
