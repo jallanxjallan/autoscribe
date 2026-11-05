@@ -11,7 +11,7 @@ if str(APP_ROOT) not in sys.path:
     sys.path.insert(0, str(APP_ROOT))
 
 from autoscribe.control import list_plans
-from autoscribe.enqueue import enqueue_record
+from autoscribe.enqueue import enqueue_record, validate_input_record
 from autoscribe.exporter import (
     iter_pending_ndjson,
     mark_transport_exported,
@@ -36,40 +36,46 @@ def redis_client() -> RedisClient:
     return RedisClient(host, port)
 
 
-def enqueue_stdin() -> int:
-    client = redis_client()
+def ingest_stdin(*, prepare_only: bool = False, documents: bool = False) -> int:
+    from autoscribe.preprocess import prepare
+    failed = False
     count = 0
     for line_number, raw in enumerate(sys.stdin, start=1):
         if not raw.strip():
             continue
-        try:
-            record = json.loads(raw)
-            result = enqueue_record(
-                record=record,
-                control_db=control_db_path(),
-                ledger_db=ledger_path(),
-                client=client,
-            )
-        except Exception as exc:
-            print(f"asc enqueue: line {line_number}: {exc}", file=sys.stderr)
-            return 1
-        print(
-            json.dumps(
-                {
-                    "schema": "autoscribe.enqueue-result.v1",
-                    "record_id": result.record_id,
-                    "call_id": result.call_id,
-                    "created": result.created,
-                },
-                sort_keys=True,
-                separators=(",", ":"),
-            )
-        )
         count += 1
-    if count == 0:
-        print("asc enqueue: no input records", file=sys.stderr)
+        try:
+            if len(raw.encode('utf-8')) >= 2097152:
+                raise ValueError('NDJSON record exceeds transport limit')
+            record = json.loads(raw)
+            if documents:
+                record = prepare(record)
+            if documents and record.get('status')=='failed' and 'call_id' not in record:
+                print(json.dumps(record, ensure_ascii=True, separators=(',', ':')))
+                failed = True
+                continue
+            if prepare_only:
+                print(json.dumps(record, ensure_ascii=False, separators=(',', ':')))
+                failed = failed or record.get('status') == 'failed'
+                continue
+            validate_input_record(record)
+            result = enqueue_record(record=record, control_db=control_db_path(),
+                                    ledger_db=ledger_path(), client=redis_client())
+            receipt = {'schema': 'autoscribe.enqueue-result.v1', 'record_id': result.record_id,
+                       'call_id': result.call_id, 'created': result.created}
+            if result.failure:
+                receipt.update(status='failed', failure=result.failure)
+            print(json.dumps(receipt, sort_keys=True, separators=(',', ':')))
+            failed = failed or bool(result.failure)
+        except Exception as exc:
+            failed = True
+            print(json.dumps({'schema': 'autoscribe.ingest-error.v1', 'line': line_number,
+                              'failure': str(exc)}, ensure_ascii=False), flush=True)
+            print(f'asc: line {line_number}: {exc}', file=sys.stderr)
+    if not count:
+        print('asc: no input records', file=sys.stderr)
         return 1
-    return 0
+    return int(failed)
 
 
 def response_record(call_id: str) -> dict:
@@ -86,6 +92,7 @@ def response_record(call_id: str) -> dict:
         "call_id": call_id,
         "content": response_hash["content"],
         "baggage": baggage,
+        "status": response_hash.get("status", "completed"),
     }
 
 
@@ -132,8 +139,59 @@ def main() -> int:
         for row in list_plans(control_db_path()):
             print(f"{row['label']}\t{row['id']}")
         return 0
+    if args and args[0] in ('prepare-file', 'ingest-file'):
+        import argparse
+        from autoscribe.preprocess import prepare
+        parser = argparse.ArgumentParser(prog='asc '+args[0])
+        parser.add_argument('file', help='Native document file, or - for a stream')
+        parser.add_argument('--call-source', required=True)
+        parser.add_argument('--submission-id', required=True)
+        parser.add_argument('--format')
+        parser.add_argument('--source-path')
+        parser.add_argument('--original-filename')
+        options = parser.parse_args(args[1:])
+        try:
+            source = {}
+            if options.source_path is not None:
+                source['path'] = options.source_path
+            filename = options.original_filename
+            if filename is None and options.file != '-':
+                filename = Path(options.file).name
+            if filename is not None:
+                source['original_filename'] = filename
+            source_format = options.format or ('markdown' if options.file == '-' else
+                {'.md':'markdown','.markdown':'markdown','.html':'html','.htm':'html','.docx':'docx'}.get(Path(options.file).suffix.lower(),'unknown'))
+            envelope = {'schema':'autoscribe.document.v1', 'source_format':source_format,
+                        'source':source, 'call_source':options.call_source,
+                        'submission_id':options.submission_id}
+            try:
+                if options.file == '-':
+                    data = sys.stdin.buffer.read(1048577)
+                else:
+                    with Path(options.file).open('rb') as stream:
+                        data = stream.read(1048577)
+                envelope['document'] = data.decode('utf-8')
+                prepared = prepare(envelope)
+            except (OSError, UnicodeError) as exc:
+                prepared = prepare(envelope)
+                prepared['failure'] = {'code':'unreadable_document','message':str(exc)}
+            if args[0] == 'prepare-file':
+                print(json.dumps(prepared,ensure_ascii=False))
+                return int(prepared['status']=='failed')
+            result = enqueue_record(record=prepared,control_db=control_db_path(),
+                                    ledger_db=ledger_path(),client=redis_client())
+            print(json.dumps({'schema':'autoscribe.enqueue-result.v1','call_id':result.call_id,
+                              'record_id':result.record_id,'created':result.created,'failure':result.failure}))
+            return int(bool(result.failure))
+        except Exception as exc:
+            print(json.dumps({'schema':'autoscribe.ingest-error.v1','failure':str(exc)}))
+            return 1
+    if args == ['prepare']:
+        return ingest_stdin(prepare_only=True, documents=True)
+    if args == ['ingest']:
+        return ingest_stdin(documents=True)
     if args == ["enqueue"]:
-        return enqueue_stdin()
+        return ingest_stdin()
     if len(args) == 2 and args[0] == "response":
         try:
             print(json.dumps(response_record(args[1]), ensure_ascii=False, sort_keys=True, separators=(",", ":")))
@@ -170,7 +228,7 @@ def main() -> int:
     if len(args) == 5 and args[:2] == ["export", "complete"]:
         return complete_export(args[2], args[3], args[4])
     print(
-        "usage: asc job <submit|status|execute|cleanup> <dispatch-id> <package-sha256> [response-sha256] | asc control plans | asc enqueue | asc response <call-id> | "
+        "usage: asc prepare|ingest|enqueue (NDJSON stdin) | asc prepare-file|ingest-file FILE --call-source SOURCE --submission-id ID | asc job <submit|status|execute|cleanup> <dispatch-id> <package-sha256> [response-sha256] | asc control plans | asc enqueue | asc response <call-id> | "
         "asc export | asc export pending | asc export content <call-id> | "
         "asc export complete <call-id> <target> <result-sha256>",
         file=sys.stderr,

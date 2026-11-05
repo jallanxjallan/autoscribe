@@ -17,7 +17,8 @@ class DirectJobsTests(unittest.TestCase):
                 db.execute("UPDATE steps SET engine_kind='script',engine='extension',model=NULL,script='echo'")
             registry=root/'registry.json'; registry.write_text(json.dumps({'echo':'/usr/bin/cat'}))
             dispatch='sub_direct_test'; package=root/dispatch; package.mkdir()
-            value=record(); value['baggage']['client']={'submission_id':dispatch}
+            value={'schema':'autoscribe.document.v1','document':'Hello','metadata':{'plan':'pln_TEST'},
+                   'baggage':{'client':{'submission_id':dispatch,'source':'test_origin'}}}
             data=json.dumps(value).encode(); (package/'request.ndjson').write_bytes(data)
             manifest=hashlib.sha256(data).hexdigest()+'  request.ndjson\n'
             (package/'SHA256SUMS').write_text(manifest)
@@ -37,7 +38,7 @@ class DirectJobsTests(unittest.TestCase):
                 self.assertFalse(client.zsets)
                 response=json.loads((package/'response.ndjson').read_text())
                 self.assertEqual(response['result'],'Hello')
-                self.assertEqual(response['baggage'],value['baggage'])
+                self.assertEqual(response['baggage']['client'],value['baggage']['client'])
                 with sqlite3.connect(ledger) as db:
                     self.assertEqual(db.execute('SELECT count(*) FROM exports').fetchone()[0],1)
                 with self.assertRaises(ValueError): jobs.cleanup(ledger,dispatch,digest,'0'*64)

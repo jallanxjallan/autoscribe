@@ -27,6 +27,15 @@ def git(repo: Path, *args: str) -> str:
 
 
 class ResponsesTests(unittest.TestCase):
+    def test_body_writer_preserves_raw_crlf_frontmatter(self):
+        from autoscribe.responses import replace_body
+        with tempfile.TemporaryDirectory() as directory:
+            path=Path(directory)/'Note.md'
+            prefix=b'---\r\nslug: psg.test # exact\r\ntitle: Keep *raw*\r\n---\r\n'
+            path.write_bytes(prefix+b'Old body\r\n')
+            replace_body(path,'New body\n')
+            self.assertEqual(path.read_bytes(),prefix+b'New body\n')
+
     def make_repo(self, root: Path):
         repos = root / "Repos"
         repos.mkdir()
