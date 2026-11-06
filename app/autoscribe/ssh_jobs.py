@@ -7,6 +7,7 @@ from pathlib import Path
 import re
 import shutil
 import subprocess
+import sys
 import tempfile
 import time
 
@@ -18,7 +19,7 @@ from .redis_runtime import load_json, FORENSIC_TTL
 from .worker import execute_task, load_registry, persist_step_result, persist_redis_response
 
 ROOT = Path('/home/jeremy/incoming')
-ASC = Path('/home/jeremy/.local/bin/asc')
+ASC = Path(__file__).resolve().parents[1] / 'bin/asc'
 SCHEMA = '''CREATE TABLE IF NOT EXISTS ssh_jobs (
  dispatch_id TEXT PRIMARY KEY, record_id TEXT NOT NULL UNIQUE, call_id TEXT NOT NULL UNIQUE,
  package_sha256 TEXT NOT NULL, state TEXT NOT NULL, response_sha256 TEXT,
@@ -55,6 +56,37 @@ def update(ledger, dispatch, state, **values):
         db.execute('UPDATE ssh_jobs SET ' + ','.join(k + '=?' for k in fields) + ' WHERE dispatch_id=?', (*fields.values(), dispatch))
 
 
+def launch_environment():
+    """Retain the accepting process's selected paths, never a later mutable config.
+
+    Credentials remain in the established private EnvironmentFile and are never
+    copied into process arguments. These assignments contain only runtime policy
+    paths, roots and limits; env applies them after systemd's environment files.
+    """
+    keys = ('AUTOSCRIBE_CONTROL_DB', 'AUTOSCRIBE_LEDGER_DB',
+            'AUTOSCRIBE_REDIS_HOST', 'AUTOSCRIBE_REDIS_PORT',
+            'AUTOSCRIBE_EXTENSION_REGISTRY', 'AUTOSCRIBE_EXTENSION_TIMEOUT_SECONDS',
+            'AUTOSCRIBE_LLM_TIMEOUT_SECONDS', 'AUTOSCRIBE_PANDOC',
+            'TEMPLATES_ROOT', 'EXTENSIONS_ROOT', 'AUTOSCRIBE_EXTENSIONS_ROOT',
+            'DROPBOX_ASSET_ROOT', 'AUTOSCRIBE_RCLONE')
+    paths = {'AUTOSCRIBE_CONTROL_DB', 'AUTOSCRIBE_LEDGER_DB',
+             'AUTOSCRIBE_EXTENSION_REGISTRY', 'AUTOSCRIBE_PANDOC',
+             'TEMPLATES_ROOT', 'EXTENSIONS_ROOT', 'AUTOSCRIBE_EXTENSIONS_ROOT',
+             'AUTOSCRIBE_RCLONE'}
+    values = []
+    for key in keys:
+        value = os.environ.get(key)
+        if value is None:
+            continue
+        if key in paths:
+            path = Path(value)
+            if not path.is_absolute():
+                raise ValueError(f'{key} must be absolute')
+            value = str(path.resolve())
+        values.append(f'{key}={value}')
+    return values
+
+
 def launch(ledger, dispatch, digest):
     state = read_job(ledger, dispatch, digest)
     if state['state'] != 'accepted':
@@ -66,9 +98,9 @@ def launch(ledger, dispatch, digest):
     if loaded.stdout.strip() == 'not-found':
         subprocess.run(['/usr/bin/systemd-run', '--user', '--collect', '--quiet', '--unit=' + unit,
                         '--property=UMask=0077',
-                        '--property=EnvironmentFile=/home/jeremy/.config/autoscribe/autoscribe.env',
                         '--property=EnvironmentFile=-/home/jeremy/.config/autoscribe/credentials.env',
-                        '/opt/autoscribe/.venv/bin/python', str(ASC), 'job', 'execute', dispatch, digest],
+                        '/usr/bin/env', *launch_environment(), sys.executable,
+                        str(ASC), 'job', 'execute', dispatch, digest],
                        check=True, capture_output=True, text=True, timeout=30)
     return read_job(ledger, dispatch, digest)
 

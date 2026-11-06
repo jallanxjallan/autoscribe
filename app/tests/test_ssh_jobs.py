@@ -9,6 +9,28 @@ from test_enqueue import FakeRedis, make_control, record
 from autoscribe import ssh_jobs as jobs
 
 class DirectJobsTests(unittest.TestCase):
+    def test_transient_launch_pins_engine_and_selected_nonsecret_dependencies(self):
+        import os
+        import sys
+        from types import SimpleNamespace
+        state={'state':'accepted','call_id':'call_test'}
+        with tempfile.TemporaryDirectory() as td:
+            root=Path(td);one=root/'version-one';two=root/'version-two';one.mkdir();two.mkdir()
+            current=root/'current';current.symlink_to(one,target_is_directory=True)
+            env={'TEMPLATES_ROOT':str(current),'EXTENSIONS_ROOT':str(one),
+                 'AUTOSCRIBE_CONTROL_DB':str(root/'control.sqlite'),
+                 'OPENAI_API_KEY':'must-not-appear-in-argv'}
+            with patch.dict(os.environ,env),patch.object(jobs,'read_job',return_value=state),patch.object(jobs.subprocess,'run',return_value=SimpleNamespace(stdout='not-found')) as run:
+                jobs.launch(root/'ledger.sqlite','00000000-0000-4000-8000-000000000001','a'*64)
+                argv=run.call_args.args[0]
+            self.assertIn(str(Path(jobs.__file__).resolve().parents[1]/'bin/asc'),argv)
+            self.assertIn(sys.executable,argv)
+            self.assertIn('TEMPLATES_ROOT='+str(one),argv)
+            self.assertFalse(any('must-not-appear' in arg for arg in argv))
+            self.assertNotIn('--property=EnvironmentFile=/home/jeremy/.config/autoscribe/autoscribe.env',argv)
+            current.unlink();current.symlink_to(two,target_is_directory=True)
+            self.assertIn('TEMPLATES_ROOT='+str(one),argv)
+
     def test_execute_once_without_queues_and_acknowledged_cleanup(self):
         with tempfile.TemporaryDirectory() as td:
             root=Path(td); control=root/'control.sqlite'; ledger=root/'ledger.sqlite'

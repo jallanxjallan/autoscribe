@@ -19,7 +19,7 @@ from test_prepared_pipeline import IsolatedRedisCase
 
 
 class Smoke(IsolatedRedisCase):
-    def runTest(self):
+    def runTest(self, proofing_control=None):
         self.client.command('CONFIG', 'SET', 'appendonly', 'yes')
         self.client.command('CONFIG', 'SET', 'appendfsync', 'always')
         shared = self.root / '.shared'; shared.mkdir(mode=0o700)
@@ -38,8 +38,13 @@ class Smoke(IsolatedRedisCase):
         script = self.root/'process-body'
         script.write_text('#!/bin/sh\ncat > "$REVIEW_INPUT_CAPTURE"\nprintf "%s\\n" "---" "generated: body only" "Processed body"\n'); script.chmod(0o700)
         registry = self.root/'registry.json'; registry.write_text(json.dumps({'review': str(script)}))
-        with sqlite3.connect(self.control) as db:
-            db.execute("UPDATE steps SET engine_kind='script',engine='extension',model=NULL,script='review'")
+        plan_id = 'pln_TEST'
+        if proofing_control:
+            shutil.copyfile(proofing_control, self.control)
+            plan_id = 'pln_K9X7H2M4R6Q8V3TN'
+        else:
+            with sqlite3.connect(self.control) as db:
+                db.execute("UPDATE steps SET engine_kind='script',engine='extension',model=NULL,script='review'")
         counter = self.root/'pandoc-calls'
         pandoc = self.root/'pandoc'
         pandoc.write_text('#!/bin/sh\nprintf "call\\n" >> "$REVIEW_PANDOC_COUNTER"\nexec /usr/bin/pandoc "$@"\n'); pandoc.chmod(0o700)
@@ -63,6 +68,22 @@ class Smoke(IsolatedRedisCase):
             self.client.hset('autoscribe:client:jobs', {identifier: json.dumps(job, sort_keys=True, separators=(',', ':'), ensure_ascii=False)})
             return path
         raw = b'---\r\nplan: pln_TEST\r\nslug: psg_0123456789ABCDEF\r\n# exact frontmatter\r\ntags: [original]\r\n---\r\n## Source\r\nOriginal body\r\n'
+        if proofing_control:
+            raw = raw.replace(b'pln_TEST', plan_id.encode()).replace(
+                b'Original body', b'The sky---and city.\r\n\r\n1998. The year began.\r\n\r\n1. Genuine list item\r\n\r\n---')
+        expected_proof = 'The sky---and city.\r\n\r\n1998. The year began.\r\n\r\n1. Genuine list item\r\n\r\n---\r\n'
+        model_calls = []
+        def synthetic_model(step, content, timeout):
+            self.assertEqual(step['engine_kind'], 'llm')
+            self.assertEqual(step['engine'], 'chatgpt')
+            self.assertEqual(step['model'], 'terra')
+            instructions = json.dumps(step, ensure_ascii=False)
+            for identity in ('rol_B7Q3N8K4X2M9R5VH', 'ctx_M8H2V7Q5N4X9K3RC', 'tsk_Q4R8V2M7H9N5X3KC'):
+                self.assertIn(identity, instructions)
+            self.assertIn('BODY ONLY', instructions)
+            capture.write_bytes(content.encode())
+            model_calls.append(step)
+            return expected_proof
         (vault/'Note.md').write_bytes(raw)
         (vault/'CreateSource.md').write_bytes(raw)
         input_file = self.root/'input-stream'; input_file.write_bytes(raw)
@@ -75,7 +96,7 @@ class Smoke(IsolatedRedisCase):
         configured.write_text(json.dumps({'folder': '.', 'title': 'configured result', 'prefix': 'psg',
             'metadata': {'type': 'passage', 'tags': []}, 'required': ['type', 'slug', 'tags']}))
         report = {}
-        with patch.object(jobs, 'ROOT', server_jobs), patch.object(jobs, 'launch', lambda l,s,d: jobs.read_job(l,s,d)), patch.dict(os.environ, self.env):
+        with patch.object(jobs, 'ROOT', server_jobs), patch.object(jobs, 'launch', lambda l,s,d: jobs.read_job(l,s,d)), patch.dict(os.environ, self.env), patch('autoscribe.worker.run_chatgpt', side_effect=synthetic_model):
             for name, arguments in [
                 ('update', ['--request', 'Note.md']),
                 ('create_explicit', ['--request', 'CreateSource.md', '--creation-spec', str(spec)]),
@@ -104,6 +125,7 @@ class Smoke(IsolatedRedisCase):
                 self.assertEqual(capture.read_bytes(), record['raw_markdown'].encode())
                 response_bytes = (directory/'response.ndjson').read_bytes(); response = json.loads(response_bytes)
                 self.assertEqual(response['status'], 'completed')
+                if proofing_control: self.assertEqual(response['result'], expected_proof)
                 self.assertEqual(response['result_bytes'], len(response['result'].encode()))
                 self.assertEqual(response['result_sha256'], hashlib.sha256(response['result'].encode()).hexdigest())
                 runtime = load_json(self.client, f"call:{accepted['call_id']}:content")
@@ -121,7 +143,7 @@ class Smoke(IsolatedRedisCase):
                 if name == 'update':
                     front = raw[:raw.index(b'## Source')]
                     stamp=state(identifier)['application_timestamp']
-                    front=front.replace(b'plan: pln_TEST',b'plan: ""')
+                    front=front.replace(('plan: '+plan_id).encode(),b'plan: ""')
                     front=front[:-5]+f'dispatch: false\r\nprocessed: "{stamp}"\r\n---\r\n'.encode()
                     self.assertEqual(created, front+response['result'].encode())
                 else:
@@ -135,7 +157,7 @@ class Smoke(IsolatedRedisCase):
                 path.write_bytes(response_bytes); native('autoscribe-apply', '--once')
                 self.assertEqual(target.read_bytes(), created); self.assertFalse(path.exists())
                 report[name] = {'status': 'passed', 'submission_id': identifier, 'call_id': accepted['call_id'],
-                                'destination': op['path'], 'pandoc_calls': 1, 'script_executions': 1,
+                                'destination': op['path'], 'pandoc_calls': 1, 'execution': 'stubbed existing llm' if proofing_control else 'real synthetic script',
                                 'duplicate_delivery': 'idempotent', 'receipt': state(identifier)['receipt']}
             bad = vault/'Invalid.md'; bad.write_bytes(b'## Missing plan\n')
             native('autoscribe-dispatch', '--request', 'Invalid.md'); native('autoscribe-dispatch', '--local-only', '--once')
@@ -149,6 +171,9 @@ class Smoke(IsolatedRedisCase):
             self.assertEqual(bad.read_bytes(), b'## Missing plan\n')
             self.assertNotEqual(state(identifier)['state'], 'applied')
             report['terminal_failure'] = 'passed: diagnostic retained; source unchanged; no execution'
+        if proofing_control:
+            self.assertEqual(len(model_calls), 3)
+            report['proofing'] = {'plan_id': plan_id, 'model_calls': 'stubbed, no provider calls', 'behavior': 'unqualified real-model semantics; wiring only', 'control_db': str(proofing_control)}
         return report
 
 
@@ -226,8 +251,9 @@ user_email="smoke@example.invalid"
 
 def main():
     parser=argparse.ArgumentParser(description=__doc__); parser.add_argument('--report', type=Path, required=True)
+    parser.add_argument('--proofing-control', type=Path)
     args=parser.parse_args(); case=Smoke(); case.setUp()
-    try: result=case.runTest()
+    try: result=case.runTest(args.proofing_control)
     finally: case.doCleanups()
     output=SignedOutput(); output.setUp()
     try: output.runTest()
