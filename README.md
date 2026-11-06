@@ -5,3 +5,9 @@ Document ingest is now a prepared-call boundary: the transport adapter preserves
 See [INGEST-REFACTOR.md](INGEST-REFACTOR.md) for the schemas, filter order, CLI, identity/retry behavior, source inventory, compatibility changes and verification evidence.
 
 This is a candidate refactor across AutoScribe, Services, Extensions and Templates. Production continues to run its approved pinned release. No deployment or activation is included. Use the established approved release process; the historical direct installer is not the release-selection mechanism.
+
+The registered `smoke-test` extension verifies the existing Control plan's exact
+five-line sentinel/role/context/task/input protocol. It emits the original verified
+bytes on success and no stdout on failure; it never invokes a model or network.
+Release preparation validates every canonical script step against its packaged,
+relocated executable registry and records the dependency hashes in the manifest.
