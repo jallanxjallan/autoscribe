@@ -11,3 +11,9 @@ five-line sentinel/role/context/task/input protocol. It emits the original verif
 bytes on success and no stdout on failure; it never invokes a model or network.
 Release preparation validates every canonical script step against its packaged,
 relocated executable registry and records the dependency hashes in the manifest.
+
+`install-release.py` is the reviewed immutable-release installer. It retains
+private staging modes until extraction is complete, sets only each public release
+root to 0755, checks traversal as `jeremy` before atomic publication, and verifies
+the engine entry point as that runtime user before changing active links. Child,
+credential, backup and private staging modes are not recursively relaxed.
