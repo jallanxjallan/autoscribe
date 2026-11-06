@@ -84,7 +84,7 @@ def main():
             {'prepend-seen': str(installed / 'extensions/prepend-seen.py')}, indent=2)+'\n')
         (engine / 'bin').mkdir()
         cargo = Path(shutil.which('cargo') or '/home/jeremy/.cargo/bin/cargo')
-        target = temporary / 'target'
+        target = Path('/tmp/autoscribe-qualified-services-target')
         run([cargo, 'build', '--release', '--offline', '--locked', '--manifest-path',
              extracted['services'] / 'Cargo.toml', '--target-dir', target,
              *[part for name in NATIVE for part in ('--bin', name)]])
@@ -112,10 +112,13 @@ def main():
         config.mkdir()
         shutil.copy2(output / 'control-source.tar', config / 'control-source.tar')
         policy = temporary / 'control-policy.toml'
-        policy.write_text('[paths]\nrepo_roots=['+json.dumps(str(sources['control'].parent))+']\n')
+        policy.write_text('[paths]\nrepo_roots=['+json.dumps(str(sources['control'].parent))+']\neffect_key_file='+json.dumps(str(temporary/'unused-effect.key'))+'\n')
+        adapter = temporary / 'git.py'
+        adapter.write_text('#!/usr/bin/python3\nimport os, sys\nos.execv("/usr/bin/python3", ["/usr/bin/python3", '+repr(str(args.git_adapter))+', *sys.argv[1:]])\n')
+        adapter.chmod(0o755)
         run([engine / 'bin/srv-control-ingest', '--policy', policy,
              '--repo', sources['control'] / '.git', '--commit', revisions['control'],
-             '--db', config / 'control.sqlite'])
+             '--db', config / 'control.sqlite'], env=dict(os.environ, VAULT_GIT_ADAPTER=str(adapter)))
         (config / 'manifest.json').write_text(json.dumps({'source_commit': revisions['control'],
             'plan_id': 'pln_K9X7H2M4R6Q8V3TN', 'control_sha256': sha(config / 'control.sqlite'),
             'activation': 'not installed; independently versioned configuration'}, indent=2)+'\n')
