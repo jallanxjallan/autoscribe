@@ -7,17 +7,19 @@ from pathlib import Path
 import re
 import shutil
 import subprocess
+import sys
 import tempfile
 import time
 
-from .enqueue import enqueue_record
+from .enqueue import enqueue_record, register_failure
+from .ids import validate_submission_id
 from .executor import ordered_steps, prepare_step
 from .ledger import connect, ensure_schema, load_call_keys
 from .redis_runtime import load_json, FORENSIC_TTL
 from .worker import execute_task, load_registry, persist_step_result, persist_redis_response
 
 ROOT = Path('/home/jeremy/incoming')
-ASC = Path('/home/jeremy/.local/bin/asc')
+ASC = Path(__file__).resolve().parents[1] / 'bin/asc'
 SCHEMA = '''CREATE TABLE IF NOT EXISTS ssh_jobs (
  dispatch_id TEXT PRIMARY KEY, record_id TEXT NOT NULL UNIQUE, call_id TEXT NOT NULL UNIQUE,
  package_sha256 TEXT NOT NULL, state TEXT NOT NULL, response_sha256 TEXT,
@@ -31,9 +33,9 @@ def initialize(ledger):
 
 
 def check(dispatch, digest):
-    if (not re.fullmatch(r'sub_[A-Za-z0-9_-]{1,150}', dispatch)
-            or not re.fullmatch(r'[a-f0-9]{64}', digest)):
-        raise ValueError('Unsafe dispatch identity or checksum')
+    validate_submission_id(dispatch)
+    if not re.fullmatch(r'[a-f0-9]{64}', digest):
+        raise ValueError('Unsafe dispatch checksum')
 
 
 def read_job(ledger, dispatch, digest):
@@ -54,6 +56,37 @@ def update(ledger, dispatch, state, **values):
         db.execute('UPDATE ssh_jobs SET ' + ','.join(k + '=?' for k in fields) + ' WHERE dispatch_id=?', (*fields.values(), dispatch))
 
 
+def launch_environment():
+    """Retain the accepting process's selected paths, never a later mutable config.
+
+    Credentials remain in the established private EnvironmentFile and are never
+    copied into process arguments. These assignments contain only runtime policy
+    paths, roots and limits; env applies them after systemd's environment files.
+    """
+    keys = ('AUTOSCRIBE_CONTROL_DB', 'AUTOSCRIBE_LEDGER_DB',
+            'AUTOSCRIBE_REDIS_HOST', 'AUTOSCRIBE_REDIS_PORT',
+            'AUTOSCRIBE_EXTENSION_REGISTRY', 'AUTOSCRIBE_EXTENSION_TIMEOUT_SECONDS',
+            'AUTOSCRIBE_LLM_TIMEOUT_SECONDS', 'AUTOSCRIBE_PANDOC',
+            'TEMPLATES_ROOT', 'EXTENSIONS_ROOT', 'AUTOSCRIBE_EXTENSIONS_ROOT',
+            'DROPBOX_ASSET_ROOT', 'AUTOSCRIBE_RCLONE')
+    paths = {'AUTOSCRIBE_CONTROL_DB', 'AUTOSCRIBE_LEDGER_DB',
+             'AUTOSCRIBE_EXTENSION_REGISTRY', 'AUTOSCRIBE_PANDOC',
+             'TEMPLATES_ROOT', 'EXTENSIONS_ROOT', 'AUTOSCRIBE_EXTENSIONS_ROOT',
+             'AUTOSCRIBE_RCLONE'}
+    values = []
+    for key in keys:
+        value = os.environ.get(key)
+        if value is None:
+            continue
+        if key in paths:
+            path = Path(value)
+            if not path.is_absolute():
+                raise ValueError(f'{key} must be absolute')
+            value = str(path.resolve())
+        values.append(f'{key}={value}')
+    return values
+
+
 def launch(ledger, dispatch, digest):
     state = read_job(ledger, dispatch, digest)
     if state['state'] != 'accepted':
@@ -65,9 +98,9 @@ def launch(ledger, dispatch, digest):
     if loaded.stdout.strip() == 'not-found':
         subprocess.run(['/usr/bin/systemd-run', '--user', '--collect', '--quiet', '--unit=' + unit,
                         '--property=UMask=0077',
-                        '--property=EnvironmentFile=/home/jeremy/.config/autoscribe/autoscribe.env',
                         '--property=EnvironmentFile=-/home/jeremy/.config/autoscribe/credentials.env',
-                        '/opt/autoscribe/.venv/bin/python', str(ASC), 'job', 'execute', dispatch, digest],
+                        '/usr/bin/env', *launch_environment(), sys.executable,
+                        str(ASC), 'job', 'execute', dispatch, digest],
                        check=True, capture_output=True, text=True, timeout=30)
     return read_job(ledger, dispatch, digest)
 
@@ -75,6 +108,10 @@ def launch(ledger, dispatch, digest):
 def submit(control, ledger, client, dispatch, digest):
     state = read_job(ledger, dispatch, digest)
     if state['state'] != 'absent':
+        if state['state'] in ('completed', 'cleaned'):
+            return state
+        if client.hgetall(f"response:{state['call_id']}:content").get('failure'):
+            return complete_response(ledger, client, state)
         return launch(ledger, dispatch, digest)
     path = ROOT / dispatch
     if path.is_symlink() or (path / '.package-sha256').read_text() != digest:
@@ -84,18 +121,22 @@ def submit(control, ledger, client, dispatch, digest):
     subprocess.run(['/usr/bin/sha256sum', '--strict', '-c', 'SHA256SUMS'], cwd=path,
                    check=True, stdout=subprocess.DEVNULL)
     record = json.loads((path / 'request.ndjson').read_text())
-    if record['baggage']['client']['submission_id'] != dispatch:
+    from .preprocess import prepare
+    record = prepare(record, work_dir=path)
+    if record.get('submission_id') != dispatch:
         raise ValueError('Request dispatch identity mismatch')
-    # Existing plan resolution, validation, fingerprints and call reservation.
     result = enqueue_record(record=record, control_db=control, ledger_db=ledger, client=client, queue=False)
     with closing(connect(ledger)) as db, db:
-        db.execute('INSERT OR IGNORE INTO ssh_jobs (dispatch_id,record_id,call_id,package_sha256,state,accepted_at) VALUES (?,?,?,?,?,?)',
-                   (dispatch, result.record_id, result.call_id, digest, 'accepted', time.time()))
+        db.execute('INSERT OR IGNORE INTO ssh_jobs (dispatch_id,record_id,call_id,package_sha256,state,accepted_at,error) VALUES (?,?,?,?,?,?,?)',
+                   (dispatch, result.record_id, result.call_id, digest,
+                    'failed' if result.failure else 'accepted', time.time(), result.failure))
+    if result.failure:
+        return complete_response(ledger, client, read_job(ledger, dispatch, digest))
     return launch(ledger, dispatch, digest)
 
 
 def response_file(path, record):
-    with tempfile.NamedTemporaryFile(mode='w', dir=path, prefix='.response-', delete=False) as stream:
+    with tempfile.NamedTemporaryFile(mode='w', encoding='utf-8', newline='', dir=path, prefix='.response-', delete=False) as stream:
         stream.write(json.dumps(record, ensure_ascii=False, sort_keys=True, separators=(',', ':')) + '\n')
         stream.flush()
         os.fsync(stream.fileno())
@@ -109,7 +150,55 @@ def response_file(path, record):
     return hashlib.sha256((path / 'response.ndjson').read_bytes()).hexdigest()
 
 
+def complete_response(ledger, client, state):
+    """Publish the existing ledger response through the unchanged SSH receipt path.
+
+    completed means transport output is ready, not manuscript success. A terminal
+    preprocessing response carries status=failed and must not trigger writeback.
+    """
+    if state['state'] in ('completed', 'cleaned'):
+        return state
+    call_id = state['call_id']
+    key = f'response:{call_id}:content'
+    response = client.hgetall(key)
+    if 'content' not in response:
+        raise ValueError('Committed response unavailable')
+    status = 'failed' if 'failure' in response else response.get('status', 'completed')
+    if status not in ('completed', 'failed'):
+        raise ValueError('Response is not terminal')
+    keys = load_call_keys(ledger, call_id)
+    baggage = load_json(client, keys['baggage'])
+    record = {'schema': 'autoscribe.client-response.v1', 'call_id': call_id,
+              'status': status,
+              'result': response['content'], 'baggage': baggage,
+              'result_bytes': len(response['content'].encode('utf-8')),
+              'result_sha256': hashlib.sha256(response['content'].encode('utf-8')).hexdigest()}
+    content = load_json(client, keys['content'])
+    record['submission_id'] = content['submission_id']
+    if 'metadata' in content.get('input', {}):
+        record.update(source=content['source'], routing=content['routing'],
+                      metadata=content['input']['metadata'])
+    if 'failure' in response:
+        record.update(failure=response['failure'], error=response.get('error') or response['failure'] or 'terminal_response_failed')
+    path = ROOT / state['dispatch_id']
+    checksum = response_file(path, record)
+    receipt = 'export:' + call_id + ':receipt'
+    client.hset(receipt, {'kind': 'ssh', 'target': str(path / 'response.ndjson'), 'result_sha256': checksum})
+    client.expire(receipt, FORENSIC_TTL)
+    with closing(connect(ledger)) as db, db:
+        db.execute('INSERT OR IGNORE INTO responses(call_id,redis_key) VALUES (?,?)', (call_id, key))
+        db.execute('INSERT OR IGNORE INTO exports(call_id,redis_key) VALUES (?,?)', (call_id, receipt))
+        db.execute("UPDATE ssh_jobs SET state='completed',response_sha256=?,completed_at=? WHERE dispatch_id=?",
+                   (checksum, time.time(), state['dispatch_id']))
+    return read_job(ledger, state['dispatch_id'], state['package_sha256'])
+
+
 def execute(ledger, client, dispatch, digest):
+    prior = read_job(ledger, dispatch, digest)
+    if prior['state'] in ('absent', 'completed', 'cleaned'):
+        return prior
+    if client.hgetall(f"response:{prior['call_id']}:content").get('failure'):
+        return complete_response(ledger, client, prior)
     # Commit running BEFORE executing any extension/LLM. Never automatically
     # repeat a running/failed job whose remote side effects may be uncertain.
     with closing(connect(ledger)) as db, db:
@@ -118,7 +207,6 @@ def execute(ledger, client, dispatch, digest):
     if not changed:
         return read_job(ledger, dispatch, digest)
     state = read_job(ledger, dispatch, digest)
-    path = ROOT / dispatch
     try:
         keys = load_call_keys(ledger, state['call_id'])
         content = load_json(client, keys['content'])
@@ -130,23 +218,13 @@ def execute(ledger, client, dispatch, digest):
                                   script_timeout=float(os.environ.get('AUTOSCRIBE_EXTENSION_TIMEOUT_SECONDS', '30')),
                                   llm_timeout=float(os.environ.get('AUTOSCRIBE_LLM_TIMEOUT_SECONDS', '120')))
             input_key = persist_step_result(client, result)
-        key = persist_redis_response(client, result)
-        baggage = load_json(client, keys['baggage'])
-        checksum = response_file(path, {'schema': 'autoscribe.client-response.v1', 'call_id': state['call_id'],
-                                       'status': 'completed', 'result': result.content, 'baggage': baggage})
-        receipt = 'export:' + state['call_id'] + ':receipt'
-        client.hset(receipt, {'kind': 'ssh', 'target': str(path / 'response.ndjson'), 'result_sha256': checksum})
-        client.expire(receipt, FORENSIC_TTL)
-        # One transaction keeps direct results out of the old Dropbox exporter.
-        with closing(connect(ledger)) as db, db:
-            db.execute('INSERT OR IGNORE INTO responses(call_id,redis_key) VALUES (?,?)', (state['call_id'], key))
-            db.execute('INSERT OR IGNORE INTO exports(call_id,redis_key) VALUES (?,?)', (state['call_id'], receipt))
-            db.execute("UPDATE ssh_jobs SET state='completed',response_sha256=?,completed_at=? WHERE dispatch_id=?",
-                       (checksum, time.time(), dispatch))
     except Exception as exc:
         update(ledger, dispatch, 'failed', error=str(exc), completed_at=time.time())
-        raise
-    return read_job(ledger, dispatch, digest)
+        register_failure(ledger, client, state['call_id'],
+            {'failure':'execution_failed','failure_reason':str(exc)})
+        return complete_response(ledger, client, read_job(ledger,dispatch,digest))
+    persist_redis_response(client, result)
+    return complete_response(ledger, client, state)
 
 
 def cleanup(ledger, dispatch, digest, checksum):
@@ -177,5 +255,6 @@ def command(args, control, ledger, client):
     if operation == 'execute' and len(args) == 3:
         return execute(ledger, client, dispatch, digest)
     if operation == 'cleanup' and len(args) == 4:
-        return cleanup(ledger, dispatch, digest, args[3])
+        state = cleanup(ledger, dispatch, digest, args[3])
+        return state
     raise ValueError('Invalid asc job operation')

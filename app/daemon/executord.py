@@ -35,10 +35,11 @@ def stop(*_args) -> None:
 
 def process_active(client: RedisClient) -> None:
     for call_id in client.zrange(EXECUTOR_QUEUE_KEY, 0, 31):
+        if client.command('ZREM', EXECUTOR_QUEUE_KEY, call_id) != 1:
+            continue
         try:
             keys = load_call_keys(LEDGER_DB, call_id)
             ready = prepare_first_step(client, call_id, keys["content"])
-            client.zrem(EXECUTOR_QUEUE_KEY, call_id)
             emit(
                 "executor_ready",
                 call_id=call_id,
@@ -48,7 +49,6 @@ def process_active(client: RedisClient) -> None:
                 entrypoint=ready.entrypoint,
             )
         except Exception as exc:
-            client.zrem(EXECUTOR_QUEUE_KEY, call_id)
             diagnostic_key = f"diagnostic:{call_id}:executor"
             client.hset(diagnostic_key, {"error": str(exc)})
             client.expire(diagnostic_key, FORENSIC_TTL)

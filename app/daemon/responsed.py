@@ -13,7 +13,7 @@ APP_ROOT = Path(__file__).resolve().parents[1]
 if str(APP_ROOT) not in sys.path:
     sys.path.insert(0, str(APP_ROOT))
 
-from autoscribe.exporter import mark_exported
+from autoscribe.effects import mark_exported
 from autoscribe.redis_runtime import RedisClient
 
 HOME = Path.home()
@@ -42,7 +42,6 @@ SERVICES = Path(os.environ.get(
 
 SRV_OUTPUT = SERVICES / "srv-output"
 SRV_WRITEBACK = SERVICES / "srv-writeback"
-SRV_EXPORT = SERVICES / "srv-export"
 
 REDIS_HOST = os.environ.get("AUTOSCRIBE_REDIS_HOST", "127.0.0.1")
 REDIS_PORT = int(os.environ.get("AUTOSCRIBE_REDIS_PORT", "6379"))
@@ -101,10 +100,10 @@ def parse_one_ndjson(text: str, label: str) -> dict:
 
 
 def load_pending() -> list[dict]:
-    cp = run_asc("export", "pending")
+    cp = run_asc("effects", "pending")
     if cp.returncode != 0:
         raise ResponsesError(
-            cp.stderr.strip() or "asc export pending failed"
+            cp.stderr.strip() or "asc effects pending failed"
         )
 
     records: list[dict] = []
@@ -128,7 +127,7 @@ def load_pending() -> list[dict]:
 
 
 def route_info(record: dict) -> tuple[str, str, tuple[str, ...]]:
-    if record.get("schema") != "autoscribe.export-pending.v1":
+    if record.get("schema") != "autoscribe.effect-pending.v1":
         raise ResponsesError(
             record.get("error")
             or f"unsupported pending schema: {record.get('schema')!r}"
@@ -164,15 +163,6 @@ def route_info(record: dict) -> tuple[str, str, tuple[str, ...]]:
         if not isinstance(path, str) or not path:
             raise ResponsesError(f"{call_id} repo route missing path")
         return call_id, kind, ("repo", repo, path)
-
-    if kind == "dropbox":
-        batch = route.get("batch")
-        path = route.get("path")
-        if not isinstance(batch, str) or not batch:
-            raise ResponsesError(f"{call_id} Dropbox route missing batch")
-        if not isinstance(path, str) or not path:
-            raise ResponsesError(f"{call_id} Dropbox route missing path")
-        return call_id, kind, ("dropbox", batch, path)
 
     raise ResponsesError(
         f"unsupported return route for {call_id}: {kind!r}"
@@ -215,8 +205,6 @@ def process_record(redis: RedisClient, record: dict) -> None:
 
     if trusted_kind == "repo":
         handler = SRV_WRITEBACK
-    elif trusted_kind == "dropbox":
-        handler = SRV_EXPORT
     else:
         raise ResponsesError(
             f"unsupported trusted effect kind for {call_id}: "

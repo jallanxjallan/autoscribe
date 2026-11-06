@@ -13,6 +13,7 @@ if str(APP_ROOT) not in sys.path:
     sys.path.insert(0, str(APP_ROOT))
 
 from autoscribe.executor import next_step_ordinal, prepare_step
+from autoscribe.enqueue import register_failure
 from autoscribe.ledger import record_response
 from autoscribe.redis_runtime import FORENSIC_TTL, WORKER_QUEUE_KEY, RedisClient, load_json
 from autoscribe.worker import execute_task, load_registry, persist_redis_response, persist_step_result
@@ -39,7 +40,8 @@ def stop(*_args) -> None:
 
 def process_ready(client: RedisClient, registry: dict[str, Path]) -> None:
     for task_key in client.zrange(WORKER_QUEUE_KEY, 0, 31):
-        client.zrem(WORKER_QUEUE_KEY, task_key)
+        if client.command('ZREM', WORKER_QUEUE_KEY, task_key) != 1:
+            continue
         call_id = None
         try:
             task = client.hgetall(task_key)
@@ -91,6 +93,8 @@ def process_ready(client: RedisClient, registry: dict[str, Path]) -> None:
             )
         except Exception as exc:
             if call_id:
+                register_failure(LEDGER_DB, client, call_id,
+                    {'failure':'execution_failed','failure_reason':str(exc)})
                 diagnostic_key = f"diagnostic:{call_id}:worker"
                 client.hset(diagnostic_key, {"task_key": task_key, "error": str(exc)})
                 client.expire(diagnostic_key, FORENSIC_TTL)

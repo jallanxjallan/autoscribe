@@ -1,5 +1,5 @@
 [Unit]
-Description=AutoScribe response/export coordinator
+Description=AutoScribe signed repository-output coordinator
 After=redis-server.service
 
 [Service]

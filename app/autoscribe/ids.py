@@ -1,21 +1,20 @@
-from __future__ import annotations
+"""Opaque identities for new submission operations."""
 
-import os
-import time
-
-_ALPHABET = "0123456789ABCDEFGHJKMNPQRSTVWXYZ"
-
-
-def _encode(value: int, length: int) -> str:
-    chars = ["0"] * length
-    for i in range(length - 1, -1, -1):
-        chars[i] = _ALPHABET[value & 31]
-        value >>= 5
-    return "".join(chars)
+def new_submission_id() -> str:
+    """Allocate once for a new operation; transports must retain it for retries."""
+    import uuid
+    return str(uuid.uuid4())
 
 
-def new_ulid() -> str:
-    """Generate a 26-character Crockford-base32 ULID without dependencies."""
-    timestamp_ms = int(time.time_ns() // 1_000_000)
-    randomness = int.from_bytes(os.urandom(10), "big")
-    return _encode(timestamp_ms, 10) + _encode(randomness, 16)
+def validate_submission_id(value: object) -> str:
+    """Require canonical lowercase RFC 4122 UUIDv4, without semantic prefixes."""
+    import uuid
+    if not isinstance(value, str):
+        raise ValueError('submission_id must be a canonical UUIDv4')
+    try:
+        parsed = uuid.UUID(value)
+    except (ValueError, AttributeError) as exc:
+        raise ValueError('submission_id must be a canonical UUIDv4') from exc
+    if parsed.version != 4 or parsed.variant != uuid.RFC_4122 or str(parsed) != value:
+        raise ValueError('submission_id must be a canonical UUIDv4')
+    return value

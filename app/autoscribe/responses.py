@@ -112,7 +112,7 @@ def current_blob(repo: Path, path: str, ref: str = "master") -> str:
 
 def replace_body(path: Path, content: str) -> None:
     try:
-        text = path.read_text(encoding="utf-8")
+        text = path.read_bytes().decode("utf-8")
     except FileNotFoundError as exc:
         raise ResponsesError(f"target file disappeared: {path}") from exc
     try:
@@ -121,7 +121,7 @@ def replace_body(path: Path, content: str) -> None:
         raise ResponsesError(str(exc)) from exc
     if prefix is None:
         raise ResponsesError(f"target has no AutoScribe frontmatter: {path}")
-    path.write_text(prefix + content, encoding="utf-8")
+    path.write_bytes((prefix + content).encode("utf-8"))
 
 
 def call_trailer(call_id: str) -> str:
