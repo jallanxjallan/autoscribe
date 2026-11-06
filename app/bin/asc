@@ -44,6 +44,7 @@ def ingest_stdin(*, prepare_only: bool = False, documents: bool = False) -> int:
         if not raw.strip():
             continue
         count += 1
+        record = None
         try:
             if len(raw.encode('utf-8')) >= 2097152:
                 raise ValueError('NDJSON record exceeds transport limit')
@@ -69,8 +70,10 @@ def ingest_stdin(*, prepare_only: bool = False, documents: bool = False) -> int:
             failed = failed or bool(result.failure)
         except Exception as exc:
             failed = True
-            print(json.dumps({'schema': 'autoscribe.ingest-error.v1', 'line': line_number,
-                              'failure': str(exc)}, ensure_ascii=False), flush=True)
+            diagnostic={'schema':'autoscribe.ingest-error.v1','line':line_number,'failure':str(exc)}
+            if isinstance(record,dict) and 'submission_id' in record:
+                diagnostic['submission_id']=record['submission_id']
+            print(json.dumps(diagnostic,ensure_ascii=False),flush=True)
             print(f'asc: line {line_number}: {exc}', file=sys.stderr)
     if not count:
         print('asc: no input records', file=sys.stderr)
@@ -88,7 +91,7 @@ def response_record(call_id: str) -> dict:
     keys = load_call_keys(ledger_path(), call_id)
     baggage = load_json(client, keys["baggage"])
     content = load_json(client, keys["content"])
-    return {
+    result = {
         "schema": "autoscribe.response.v1",
         "submission_id": content["submission_id"],
         "call_id": call_id,
@@ -96,6 +99,9 @@ def response_record(call_id: str) -> dict:
         "baggage": baggage,
         "status": response_hash.get("status", "completed"),
     }
+    if response_hash.get("failure"):
+        result.update(failure=response_hash["failure"], error=response_hash.get("error", ""))
+    return result
 
 
 def complete_export(call_id: str, target: str, result_sha256: str) -> int:
@@ -189,7 +195,7 @@ def main() -> int:
                               'record_id':result.record_id,'created':result.created,'failure':result.failure}))
             return int(bool(result.failure))
         except Exception as exc:
-            print(json.dumps({'schema':'autoscribe.ingest-error.v1','failure':str(exc)}))
+            print(json.dumps({'schema':'autoscribe.ingest-error.v1','submission_id':options.submission_id,'failure':str(exc)}))
             return 1
     if args == ['prepare']:
         return ingest_stdin(prepare_only=True, documents=True)

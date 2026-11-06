@@ -8,7 +8,7 @@ import json
 from pathlib import Path
 import re
 
-from .control import materialize_plan
+from .control import materialize_plan, UnknownPlanError
 from .ids import validate_submission_id
 from .ledger import connect, ensure_schema, record_call, record_response
 from .redis_runtime import EXECUTOR_QUEUE_KEY, FORENSIC_TTL, RedisClient, load_json
@@ -137,7 +137,7 @@ def enqueue_record(*, record: dict, control_db: Path, ledger_db: Path, client: R
                    queue: bool = True) -> EnqueueResult:
     record_id,plan_id=validate_input_record(record)
     call_id=record['call_id'];failure=record.get('failure',{}).get('code')
-    fingerprint=hashlib.sha256(json.dumps(record,sort_keys=True,ensure_ascii=False,separators=(',',':')).encode()).hexdigest()
+    fingerprint=hashlib.sha256(json.dumps({'record':record,'execution_mode':'queued' if queue else 'direct'},sort_keys=True,ensure_ascii=False,separators=(',',':')).encode()).hexdigest()
     ensure_schema(ledger_db)
     with closing(connect(ledger_db)) as db,db:
         db.execute('CREATE TABLE IF NOT EXISTS enqueue_inputs (record_id TEXT PRIMARY KEY, fingerprint TEXT NOT NULL, call_id TEXT NOT NULL UNIQUE, queued INTEGER NOT NULL DEFAULT 0)')
@@ -150,17 +150,24 @@ def enqueue_record(*, record: dict, control_db: Path, ledger_db: Path, client: R
             db.execute('INSERT INTO enqueue_inputs(record_id,fingerprint,call_id) VALUES (?,?,?)',(record_id,fingerprint,call_id))
     content_key=f'call:{call_id}:content';baggage_key=f'call:{call_id}:baggage';marker=f'enqueue:{call_id}'
     if row and row['queued']:
+        failure=load_json(client,content_key).get('failure')
         return EnqueueResult(record_id,call_id,False,content_key,baggage_key,failure)
     prior=client.command('GET',marker)
     if prior is not None and prior!=fingerprint: raise EnqueueError('enqueue marker collision')
     if prior==fingerprint:
         content=load_json(client,content_key)
+        failure=content.get('failure')
         if failure: register_failure(ledger_db,client,call_id,content)
         with closing(connect(ledger_db)) as db,db:
             db.execute('UPDATE enqueue_inputs SET queued=1 WHERE record_id=?',(record_id,))
         return EnqueueResult(record_id,call_id,False,content_key,baggage_key,failure)
     # Existing Control authority resolves the explicit ID; no plan discovery here.
-    plan={} if failure else materialize_plan(control_db,plan_id)
+    try:
+        plan={} if failure else materialize_plan(control_db,plan_id)
+    except UnknownPlanError as exc:
+        record=dict(record,status='failed',failure={'code':'unknown_plan','message':str(exc)})
+        failure='unknown_plan'
+        plan={}
     content=build_call_content(record,plan)
     record_call(ledger_db,call_id,{'content':content_key,'baggage':baggage_key})
     created=client.command('EVAL', '''
@@ -179,6 +186,9 @@ def enqueue_record(*, record: dict, control_db: Path, ledger_db: Path, client: R
         ''',4,marker,content_key,baggage_key,EXECUTOR_QUEUE_KEY,fingerprint,
         json.dumps(content,ensure_ascii=False),json.dumps(record['baggage'],ensure_ascii=False),
         FORENSIC_TTL,call_id,int(queue and not failure))
+    if not created:
+        content=load_json(client,content_key)
+        failure=content.get('failure')
     if failure: register_failure(ledger_db,client,call_id,content)
     with closing(connect(ledger_db)) as db,db:
         db.execute('UPDATE enqueue_inputs SET queued=1 WHERE record_id=?',(record_id,))

@@ -101,3 +101,21 @@ Verified locally using Pandoc 3.12.1, disposable Redis/SQLite/Git state, candida
 The initial sandbox run could not create local sockets; rerunning only those test checks with loopback access resolved the environment restriction. No model calls, production Redis tests, source-data changes, merge or deployment occurred.
 
 Changes remain on the existing AutoScribe #2, Services #5 and Extensions #5 branches. Templates #13's defaults/order need no code change. The user-approved client fix remains on `codex/finalize-raw-dispatch-20261105` in `autoscribe-client`. These contracts must be reviewed and pinned together before any separately authorized release.
+
+## SSH/local writer correction — 6 November 2026
+
+The SSH `autoscribe.client-response.v1` exporter now supplies `result_bytes` and
+`result_sha256` for the exact UTF-8 body, alongside existing UUID/call identity,
+terminal status and retained baggage. The paired Rust candidate consumes
+`autoscribe.output-operation.v1` authorization from durable job state and the
+immutable raw request. Updates preserve raw frontmatter; creates use separately
+authorized metadata and destinations. No retired source/processing checksum or
+copied frontmatter is fabricated. The original integration-review execution
+safety corrections and their regression tests are included in this candidate.
+
+Submission, response delivery and local file effects use SSH/SCP exclusively.
+Services' legacy Dropbox response exporter is outside this implementation and
+unchanged. The direct signed repository-output smoke is separate from client
+local creation. No model calls, production manuscripts, service activation,
+release packaging or deployment are part of this correction. The final
+consolidated report records test counts, limitations and candidate commit SHAs.

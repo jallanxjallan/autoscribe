@@ -10,6 +10,10 @@ class ControlError(RuntimeError):
     pass
 
 
+class UnknownPlanError(ControlError):
+    pass
+
+
 def connect(db_path: Path) -> sqlite3.Connection:
     if not db_path.exists():
         raise ControlError(f"control database not found: {db_path}")
@@ -54,7 +58,7 @@ def materialize_plan(db_path: Path, plan_id: str) -> dict:
             (plan_id,),
         ).fetchone()
         if plan_row is None:
-            raise ControlError(f"unknown plan id: {plan_id}")
+            raise UnknownPlanError(f"unknown plan id: {plan_id}")
 
         step_rows = db.execute(
             """

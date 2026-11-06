@@ -10,7 +10,7 @@ import subprocess
 import tempfile
 import time
 
-from .enqueue import enqueue_record
+from .enqueue import enqueue_record, register_failure
 from .ids import validate_submission_id
 from .executor import ordered_steps, prepare_step
 from .ledger import connect, ensure_schema, load_call_keys
@@ -131,18 +131,23 @@ def complete_response(ledger, client, state):
     response = client.hgetall(key)
     if 'content' not in response:
         raise ValueError('Committed response unavailable')
+    status = 'failed' if 'failure' in response else response.get('status', 'completed')
+    if status not in ('completed', 'failed'):
+        raise ValueError('Response is not terminal')
     keys = load_call_keys(ledger, call_id)
     baggage = load_json(client, keys['baggage'])
     record = {'schema': 'autoscribe.client-response.v1', 'call_id': call_id,
-              'status': 'failed' if response.get('failure') else 'completed',
-              'result': response['content'], 'baggage': baggage}
+              'status': status,
+              'result': response['content'], 'baggage': baggage,
+              'result_bytes': len(response['content'].encode('utf-8')),
+              'result_sha256': hashlib.sha256(response['content'].encode('utf-8')).hexdigest()}
     content = load_json(client, keys['content'])
     record['submission_id'] = content['submission_id']
     if 'metadata' in content.get('input', {}):
         record.update(source=content['source'], routing=content['routing'],
                       metadata=content['input']['metadata'])
-    if response.get('failure'):
-        record.update(failure=response['failure'], error=response.get('error', response['failure']))
+    if 'failure' in response:
+        record.update(failure=response['failure'], error=response.get('error') or response['failure'] or 'terminal_response_failed')
     path = ROOT / state['dispatch_id']
     checksum = response_file(path, record)
     receipt = 'export:' + call_id + ':receipt'
@@ -181,11 +186,13 @@ def execute(ledger, client, dispatch, digest):
                                   script_timeout=float(os.environ.get('AUTOSCRIBE_EXTENSION_TIMEOUT_SECONDS', '30')),
                                   llm_timeout=float(os.environ.get('AUTOSCRIBE_LLM_TIMEOUT_SECONDS', '120')))
             input_key = persist_step_result(client, result)
-        persist_redis_response(client, result)
-        return complete_response(ledger, client, state)
     except Exception as exc:
         update(ledger, dispatch, 'failed', error=str(exc), completed_at=time.time())
-        raise
+        register_failure(ledger, client, state['call_id'],
+            {'failure':'execution_failed','failure_reason':str(exc)})
+        return complete_response(ledger, client, read_job(ledger,dispatch,digest))
+    persist_redis_response(client, result)
+    return complete_response(ledger, client, state)
 
 
 def cleanup(ledger, dispatch, digest, checksum):

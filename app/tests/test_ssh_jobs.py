@@ -38,11 +38,28 @@ class DirectJobsTests(unittest.TestCase):
                 self.assertFalse(client.zsets)
                 response=json.loads((package/'response.ndjson').read_text())
                 self.assertEqual(response['result'],'Hello')
+                self.assertEqual(response['result_bytes'],len(response['result'].encode('utf-8')))
+                self.assertEqual(response['result_sha256'],hashlib.sha256(response['result'].encode('utf-8')).hexdigest())
                 self.assertEqual(response['submission_id'],dispatch)
                 self.assertNotIn('call_source',response)
                 self.assertEqual(response['baggage']['client'],value['baggage']['client'])
                 with sqlite3.connect(ledger) as db:
                     self.assertEqual(db.execute('SELECT count(*) FROM exports').fetchone()[0],1)
+                # A failed status without a failure detail must not become a success.
+                with sqlite3.connect(ledger) as db:
+                    db.execute("UPDATE ssh_jobs SET state='running' WHERE dispatch_id=?",(dispatch,))
+                client.hset(f"response:{accepted['call_id']}:content",{'status':'failed'})
+                completed=jobs.complete_response(ledger,client,jobs.read_job(ledger,dispatch,digest))
+                self.assertEqual(json.loads((package/'response.ndjson').read_text())['status'],'failed')
+                retained=(package/'response.ndjson').read_bytes()
+                with sqlite3.connect(ledger) as db:
+                    db.execute("UPDATE ssh_jobs SET state='running' WHERE dispatch_id=?",(dispatch,))
+                client.hset(f"response:{accepted['call_id']}:content",{'status':'running'})
+                with self.assertRaisesRegex(ValueError,'not terminal'):
+                    jobs.complete_response(ledger,client,jobs.read_job(ledger,dispatch,digest))
+                self.assertEqual((package/'response.ndjson').read_bytes(),retained)
+                with sqlite3.connect(ledger) as db:
+                    db.execute("UPDATE ssh_jobs SET state='completed' WHERE dispatch_id=?",(dispatch,))
                 with self.assertRaises(ValueError): jobs.cleanup(ledger,dispatch,digest,'0'*64)
                 jobs.cleanup(ledger,dispatch,digest,completed['response_sha256'])
                 self.assertFalse(package.exists())
