@@ -7,6 +7,7 @@ import io
 import json
 import os
 import shutil
+import sqlite3
 import subprocess
 import tarfile
 import tempfile
@@ -33,6 +34,43 @@ def archive_tree(source, destination):
             info.mtime = 0
             with path.open('rb') if path.is_file() else io.BytesIO() as data:
                 archive.addfile(info, data if path.is_file() else None)
+
+
+def relocate_registry(engine, installed):
+    path = engine / 'extensions/registry.json'
+    registry = json.loads(path.read_text())
+    if not isinstance(registry, dict):
+        raise ValueError('script registry must be an object')
+    relocated = {}
+    for name, target in registry.items():
+        if not isinstance(name, str) or not name or any(c.isspace() for c in name):
+            raise ValueError('invalid script registry name')
+        relative = Path(target).relative_to('/opt/autoscribe/extensions')
+        if '..' in relative.parts:
+            raise ValueError('script registry path escapes extensions')
+        relocated[name] = str(installed / 'extensions' / relative)
+    path.write_text(json.dumps(relocated, indent=2)+'\n')
+    return relocated
+
+
+def validate_catalogue_scripts(control, registry, installed, engine):
+    """Every canonical script step must resolve to a packaged executable."""
+    with sqlite3.connect(control.as_uri()+'?mode=ro&immutable=1', uri=True) as db:
+        steps = db.execute("SELECT id,script FROM steps WHERE engine_kind='script' ORDER BY id").fetchall()
+    dependencies = []
+    for identity, name in steps:
+        target = registry.get(name)
+        if not isinstance(target, str):
+            raise ValueError(f'Control step {identity}: unregistered script {name!r}')
+        relative = Path(target).relative_to(installed)
+        candidate = engine / relative
+        if not candidate.resolve().is_relative_to(engine.resolve()):
+            raise ValueError(f'Control step {identity}: script escapes packaged engine')
+        if not candidate.is_file() or not os.access(candidate, os.X_OK):
+            raise ValueError(f'Control step {identity}: packaged script missing or not executable: {name}')
+        dependencies.append({'step_id': identity, 'script': name,
+                             'packaged_path': str(relative), 'sha256': sha(candidate)})
+    return dependencies
 
 
 def main():
@@ -80,8 +118,7 @@ def main():
         engine.mkdir()
         shutil.copytree(extracted['autoscribe'] / 'app', engine / 'app')
         shutil.copytree(extracted['autoscribe'] / 'extensions', engine / 'extensions')
-        (engine / 'extensions/registry.json').write_text(json.dumps(
-            {'prepend-seen': str(installed / 'extensions/prepend-seen.py')}, indent=2)+'\n')
+        registry = relocate_registry(engine, installed)
         (engine / 'bin').mkdir()
         cargo = Path(shutil.which('cargo') or '/home/jeremy/.cargo/bin/cargo')
         target = Path('/tmp/autoscribe-qualified-services-target')
@@ -119,6 +156,7 @@ def main():
         run([engine / 'bin/srv-control-ingest', '--policy', policy,
              '--repo', sources['control'] / '.git', '--commit', revisions['control'],
              '--db', config / 'control.sqlite'], env=dict(os.environ, VAULT_GIT_ADAPTER=str(adapter)))
+        script_dependencies = validate_catalogue_scripts(config / 'control.sqlite', registry, installed, engine)
         (config / 'manifest.json').write_text(json.dumps({'source_commit': revisions['control'],
             'plan_id': 'pln_K9X7H2M4R6Q8V3TN', 'control_sha256': sha(config / 'control.sqlite'),
             'activation': 'not installed; independently versioned configuration'}, indent=2)+'\n')
@@ -135,7 +173,7 @@ def main():
         (output / (release_id+'.tar.sha256')).write_text(sha(output / (release_id+'.tar'))+'  '+release_id+'.tar\n')
         manifest = {'schema': 'autoscribe.qualified-release.v1', 'release_id': release_id,
                     'revisions': revisions, 'installed_engine': str(installed),
-                    'selected_environment': selection, 'native_binaries': list(NATIVE),
+                    'selected_environment': selection, 'native_binaries': list(NATIVE), 'script_dependencies': script_dependencies,
                     'runtime_dependencies': json.loads(args.runtime_inventory.read_text()),
                     'cargo': run([cargo, '--version'], capture_output=True, text=True).stdout.strip(),
                     'rustc': run(['/home/jeremy/.cargo/bin/rustc', '--version'], capture_output=True, text=True).stdout.strip(),
