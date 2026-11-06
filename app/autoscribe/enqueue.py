@@ -48,8 +48,8 @@ def validate_input_record(record: object) -> tuple[str, str | None]:
         validate_submission_id(record['submission_id'])
     except ValueError as exc:
         raise EnqueueError(str(exc)) from exc
-    if 'call_source' in record:
-        raise EnqueueError('call_source is not part of the prepared contract')
+    if set(record)-set('schema record_id call_id submission_id status plan source baggage content content_sha256 source_format metadata directives asset_references assets references staged_assets failure diagnostic_envelope'.split()):
+        raise EnqueueError('Unknown prepared field')
     identity=record['submission_id'].encode('utf-8')
     if record['record_id']!='inp_'+hashlib.sha256(identity).hexdigest()[:32]:
         raise EnqueueError('record_id does not identify submission')

@@ -64,6 +64,7 @@ class Smoke(IsolatedRedisCase):
             return path
         raw = b'---\r\nplan: pln_TEST\r\nslug: psg_0123456789ABCDEF\r\n# exact frontmatter\r\ntags: [original]\r\n---\r\n## Source\r\nOriginal body\r\n'
         (vault/'Note.md').write_bytes(raw)
+        (vault/'CreateSource.md').write_bytes(raw)
         input_file = self.root/'input-stream'; input_file.write_bytes(raw)
         # Reuse the installed canonical helpers as read-only code resources.
         helper = vault/'_tools/scripts/lib/text.js'; helper.parent.mkdir(parents=True)
@@ -77,7 +78,7 @@ class Smoke(IsolatedRedisCase):
         with patch.object(jobs, 'ROOT', server_jobs), patch.object(jobs, 'launch', lambda l,s,d: jobs.read_job(l,s,d)), patch.dict(os.environ, self.env):
             for name, arguments in [
                 ('update', ['--request', 'Note.md']),
-                ('create_explicit', ['--request', 'Note.md', '--creation-spec', str(spec)]),
+                ('create_explicit', ['--request', 'CreateSource.md', '--creation-spec', str(spec)]),
                 ('create_pathless_configured', ['--input', str(input_file), '--creation-spec', str(configured)]),
             ]:
                 before = set(self.client.hgetall('autoscribe:client:jobs'))
@@ -119,12 +120,17 @@ class Smoke(IsolatedRedisCase):
                 target = vault/op['path']; created = target.read_bytes()
                 if name == 'update':
                     front = raw[:raw.index(b'## Source')]
+                    stamp=state(identifier)['application_timestamp']
+                    front=front.replace(b'plan: pln_TEST',b'plan: ""')
+                    front=front[:-5]+f'dispatch: false\r\nprocessed: "{stamp}"\r\n---\r\n'.encode()
                     self.assertEqual(created, front+response['result'].encode())
                 else:
                     self.assertTrue(created.endswith(response['result'].encode()))
                     front = created[:-len(response['result'].encode())]
                     self.assertNotIn(b'plan:', front); self.assertNotIn(b'autoscribe:', front); self.assertNotIn(b'status:', front)
                     self.assertIn(op['metadata']['slug'].encode(), front)
+                    self.assertNotIn(b'processed:',front);self.assertNotIn(b'dispatch:',front)
+                self.assertEqual(state(identifier)['receipt']['baggage']['client'],record['baggage']['client'])
                 self.assertTrue(staged.exists())
                 path.write_bytes(response_bytes); native('autoscribe-apply', '--once')
                 self.assertEqual(target.read_bytes(), created); self.assertFalse(path.exists())
@@ -195,6 +201,26 @@ user_email="smoke@example.invalid"
         def apply():
             return subprocess.run([str(binaries/'srv-writeback'),'--policy',str(policy)],input=output.stdout,text=True,capture_output=True,env=self.env)
         first=apply(); self.assertEqual(first.returncode,0,first.stderr); self.assertEqual(apply().stdout,first.stdout)
+        self.assertEqual(json.loads(output.stdout)['baggage'],response['baggage'])
+        self.assertEqual(json.loads(first.stdout)['baggage'],response['baggage'])
+        self.assertEqual(json.loads(first.stdout)['submission_id'],value['submission_id'])
+        from autoscribe.effects import mark_exported, EffectsError
+        receipt=json.loads(first.stdout)
+        pending=self.cli('effects','pending');self.assertEqual(pending.returncode,0,pending.stderr)
+        self.assertEqual(json.loads(pending.stdout)['baggage'],response['baggage'])
+        key,created=mark_exported(self.ledger,self.client,call_id=cid,receipt=receipt)
+        self.assertTrue(created)
+        self.assertFalse(mark_exported(self.ledger,self.client,call_id=cid,receipt=receipt)[1])
+        self.assertEqual(json.loads(self.client.hgetall(key)['baggage']),response['baggage'])
+        self.assertEqual(self.cli('effects','pending').stdout,'')
+        with self.assertRaises(EffectsError):
+            mark_exported(self.ledger,self.client,call_id=cid,receipt={**receipt,'submission_id':'different'})
+        # A correctly signed obsolete transport route still has no supported handler.
+        legacy={**signed,'route':{'kind':'dropbox','batch':'unused','path':'unused.md'}}
+        signature='eff_'+hmac.new(secret,json.dumps(legacy,sort_keys=True,separators=(',',':')).encode(),hashlib.sha256).hexdigest()
+        rejected=json.loads(json.dumps(response));rejected['baggage']['autoscribe_return']={**legacy,'signature':signature}
+        self.assertNotEqual(effect(rejected).returncode,0)
+
         actual=subprocess.run([str(adapter),'-C',str(repo),'show','refs/heads/autoscribe-output:Results/new.md'],capture_output=True,text=True,check=True)
         self.assertEqual(actual.stdout,'# New output\nSynthetic body\n')
 

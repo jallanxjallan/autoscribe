@@ -12,11 +12,9 @@ if str(APP_ROOT) not in sys.path:
 
 from autoscribe.control import list_plans
 from autoscribe.enqueue import enqueue_record, validate_input_record
-from autoscribe.exporter import (
+from autoscribe.effects import (
     iter_pending_ndjson,
-    mark_transport_exported,
     poke_responses,
-    response_content,
 )
 from autoscribe.ledger import load_call_keys, load_response
 from autoscribe.redis_runtime import RedisClient, load_json
@@ -104,35 +102,6 @@ def response_record(call_id: str) -> dict:
     return result
 
 
-def complete_export(call_id: str, target: str, result_sha256: str) -> int:
-    try:
-        receipt_key, created = mark_transport_exported(
-            ledger_path(),
-            redis_client(),
-            call_id=call_id,
-            target=target,
-            result_sha256=result_sha256,
-        )
-    except Exception as exc:
-        print(f"asc export complete: {exc}", file=sys.stderr)
-        return 1
-    print(
-        json.dumps(
-            {
-                "schema": "autoscribe.export-complete.v1",
-                "call_id": call_id,
-                "target": target,
-                "result_sha256": result_sha256,
-                "receipt_key": receipt_key,
-                "created": created,
-            },
-            sort_keys=True,
-            separators=(",", ":"),
-        )
-    )
-    return 0
-
-
 def main() -> int:
     args = sys.argv[1:]
     if args and args[0] == "job":
@@ -210,38 +179,17 @@ def main() -> int:
             print(f"asc response: {exc}", file=sys.stderr)
             return 1
         return 0
-    if args == ["export"]:
-        socket_path = Path(
-            os.environ.get(
-                "AUTOSCRIBE_RESPONSE_SOCKET",
-                str(Path.home() / ".local/run/autoscribe/response.sock"),
-            )
-        )
-        try:
-            count = poke_responses(ledger_path(), socket_path)
-        except Exception as exc:
-            print(f"asc export: {exc}", file=sys.stderr)
-            return 1
-        print(count)
+    if args == ["effects", "notify"]:
+        socket_path=Path(os.environ.get("AUTOSCRIBE_RESPONSE_SOCKET",str(Path.home()/".local/run/autoscribe/response.sock")))
+        print(poke_responses(ledger_path(),socket_path))
         return 0
-    if args == ["export", "pending"]:
-        for line in iter_pending_ndjson(ledger_path(), redis_client()):
-            print(line)
+    if args == ["effects", "pending"]:
+        for line in iter_pending_ndjson(ledger_path(),redis_client()):print(line)
         return 0
-    if len(args) == 3 and args[:2] == ["export", "content"]:
-        try:
-            content = response_content(ledger_path(), redis_client(), args[2])
-        except Exception as exc:
-            print(f"asc export content: {exc}", file=sys.stderr)
-            return 1
-        sys.stdout.write(content)
-        return 0
-    if len(args) == 5 and args[:2] == ["export", "complete"]:
-        return complete_export(args[2], args[3], args[4])
     print(
         "usage: asc submission-id | asc prepare|ingest|enqueue (NDJSON stdin) | asc prepare-file|ingest-file FILE --submission-id UUID | asc job <submit|status|execute|cleanup> <dispatch-id> <package-sha256> [response-sha256] | asc control plans | asc enqueue | asc response <call-id> | "
-        "asc export | asc export pending | asc export content <call-id> | "
-        "asc export complete <call-id> <target> <result-sha256>",
+        "asc effects notify | asc effects pending"
+        "",
         file=sys.stderr,
     )
     return 2

@@ -16,7 +16,7 @@ fail(){ printf 'INSTALL FAILED: %s\n' "$*" >&2; exit 1; }
 
 for f in \
     app/autoscribe/enqueue.py \
-    app/autoscribe/exporter.py \
+    app/autoscribe/effects.py \
     app/autoscribe/executor.py \
     app/autoscribe/worker.py \
     app/daemon/executord.py \
@@ -70,5 +70,5 @@ systemctl --user enable --now autoscribe-worker.service
 systemctl --user enable --now autoscribe-responses.service
 
 printf '\nInstalled AutoScribe server snapshot 2026-09-30.\n'
-printf 'Repo ingress: Rust srv-input from master. Repo output: Rust srv-writeback to autoscribe-output.\n'
+printf 'Job transport: SSH/SCP only. Independently signed repository effects use srv-writeback.\n'
 printf 'Python responsed only coordinates pending responses and records successful Rust receipts.\n'

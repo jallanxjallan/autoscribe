@@ -79,11 +79,10 @@ class PreprocessTests(unittest.TestCase):
         self.assertEqual(out,prepare(document('```md\n# Not a heading\n```\n\n### '+('東京🙂'*100))))
 
     def test_document_cannot_replace_transport_coordination(self):
-        value=document('---\nplan: pln_TEST\nautoscribe_transport: malicious\nsource: invented/path.md\ncall_source: invented\n---\nBody',source={'path':'Original.md'})
+        value=document('---\nplan: pln_TEST\nautoscribe_transport: malicious\nsource: invented/path.md\nuntrusted_field: invented\n---\nBody',source={'path':'Original.md'})
         out=prepare(value)
         self.assertEqual(out['status'],'ready',out)
         self.assertEqual(out['source']['path'],'Original.md')
-        self.assertNotIn('call_source',out)
         value['metadata']['custom_sidecar']='Supplementary value'
         self.assertEqual(prepare(value)['metadata']['custom_sidecar'],'Supplementary value')
 
@@ -95,8 +94,27 @@ class PreprocessTests(unittest.TestCase):
         self.assertEqual(first['call_id'],prepare(value)['call_id'])
         value['document']='Identical body';value['submission_id']='00000000-0000-4000-8000-000000000001'
         self.assertNotEqual(first['call_id'],prepare(value)['call_id'])
-        self.assertNotIn('call_source',first)
         self.assertEqual(first['plan'],'pln_TEST')
+
+    def test_external_asset_links_and_resolution_remain_unchanged(self):
+        import tempfile
+        from types import SimpleNamespace
+        captured=[]
+        class Handler:
+            def __init__(self,*args,**kwargs):pass
+            def stage(self,refs,work):
+                captured.extend(refs)
+                return [SimpleNamespace(to_dict=lambda ref=ref:{'source_ref':ref,'path':'assets/image.png'}) for ref in refs]
+        catalog=SimpleNamespace(ResourceCatalog=SimpleNamespace(extensions=lambda root:SimpleNamespace(resolve=lambda *args:Path('/tmp/handler.py'))))
+        references=['/home/jeremy/Dropbox/Art/a.png','dropbox:Art/b.png']
+        raw='---\nplan: pln_TEST\nassets: '+json.dumps(references)+'\n---\nBody ![image](external-link.png)\n'
+        with tempfile.TemporaryDirectory() as directory,patch('autoscribe.assets._module',side_effect=[catalog,SimpleNamespace(DropboxAssetHandler=Handler)]),patch.dict(os.environ,{'AUTOSCRIBE_RCLONE':'/usr/bin/true'}):
+            out=prepare(document(raw),work_dir=Path(directory))
+        self.assertEqual(out['status'],'ready',out)
+        self.assertEqual(out['content'],raw)
+        self.assertEqual(out['asset_references'],references)
+        self.assertEqual([item['requested_ref'] for item in out['staged_assets']],references)
+        self.assertEqual(captured,['dropbox:Art/a.png','dropbox:Art/b.png'])
 
     def test_one_invocation_and_defaults_order(self):
         real_run=subprocess.run

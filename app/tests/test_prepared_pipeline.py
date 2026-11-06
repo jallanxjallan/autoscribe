@@ -15,7 +15,7 @@ import unittest
 from unittest.mock import patch
 
 from autoscribe.enqueue import enqueue_record, EnqueueError
-from autoscribe.exporter import build_pending_record, iter_pending_ndjson
+from autoscribe.effects import build_pending_record, iter_pending_ndjson
 from autoscribe.ledger import record_response
 from autoscribe.preprocess import prepare
 from autoscribe.redis_runtime import RedisClient, load_json, EXECUTOR_QUEUE_KEY
@@ -76,7 +76,6 @@ class PreparedPipelineTests(IsolatedRedisCase):
         content=load_json(self.client,f'call:{cid}:content');baggage=load_json(self.client,f'call:{cid}:baggage')
         self.assertEqual(content['input']['content'].encode(),raw.encode())
         self.assertEqual(baggage['custom'],value['baggage']['custom'])
-        self.assertNotIn('call_source',content)
         self.assertEqual(content['routing']['plan_id'],'pln_TEST')
         self.assertEqual(content['submission_id'],value['submission_id'])
         replay=self.cli('ingest',payload=json.dumps(value)+'\n')
@@ -89,11 +88,9 @@ class PreparedPipelineTests(IsolatedRedisCase):
         response=self.cli('response',cid)
         self.assertEqual(json.loads(response.stdout)['baggage'],baggage)
         self.assertEqual(json.loads(response.stdout)['submission_id'],value['submission_id'])
-        self.assertNotIn('call_source',json.loads(response.stdout))
         exported=[json.loads(x) for x in iter_pending_ndjson(self.ledger,self.client)]
         self.assertEqual(exported[0]['baggage'],baggage)
         self.assertEqual(exported[0]['submission_id'],value['submission_id'])
-        self.assertNotIn('call_source',exported[0])
         with sqlite3.connect(self.ledger) as db:
             self.assertEqual(db.execute('SELECT count(*) FROM calls').fetchone()[0],1)
             self.assertEqual(db.execute('SELECT role FROM call_keys ORDER BY role').fetchall(),[('baggage',),('content',)])
@@ -143,74 +140,6 @@ class PreparedPipelineTests(IsolatedRedisCase):
 
 
 
-class ServicesPipelineTests(IsolatedRedisCase):
-    @unittest.skipUnless(os.environ.get('AUTOSCRIBE_TEST_SERVICES_BIN'),'set AUTOSCRIBE_TEST_SERVICES_BIN for Rust transport smoke')
-    def test_rust_ingress_and_new_file_output_from_pathless_stream(self):
-        import hmac
-        binaries=Path(os.environ['AUTOSCRIBE_TEST_SERVICES_BIN']).resolve()
-        repos=self.root/'Repos';repos.mkdir();repo=repos/'output.git'
-        subprocess.run(['git','init','--bare','-q',str(repo)],check=True)
-        secret=bytes.fromhex('11'*32);key=self.root/'effect.key';key.write_text(secret.hex());key.chmod(0o600)
-        policy=self.root/'services.toml'
-        policy.write_text(f'''[paths]
-repo_roots=["{repos}"]
-file_roots=[]
-effect_key_file="{key}"
-effects_db="{self.root/'effects.sqlite'}"
-control_db="{self.control}"
-[limits]
-max_record_bytes=2097152
-max_body_bytes=1048576
-max_outputs=1
-max_control_file_bytes=262144
-max_control_records=10000
-[git]
-default_branch="main"
-user_name="Synthetic Smoke"
-user_email="smoke@example.invalid"
-''')
-        value=document('---\nplan: pln_TEST\n---\n## Stream heading\nOriginal body\n',submission='00000000-0000-4000-8000-000000000008')
-        signed={'schema':'autoscribe.return.v1','record_id':'inp_ROUTE',
-                'route':{'kind':'repo','repo':str(repo),'path':'Results/new.md'}}
-        signature='eff_'+hmac.new(secret,json.dumps(signed,sort_keys=True,separators=(',',':')).encode(),hashlib.sha256).hexdigest()
-        value['baggage']['autoscribe_return']={**signed,'signature':signature}
-        incoming=self.root/'submission.ndjson';incoming.write_text(json.dumps(value)+'\n')
-        rclone=self.root/'rclone'
-        rclone.write_text('''#!/usr/bin/python3
-import os,sys
-from pathlib import Path
-p=Path(os.environ['SMOKE_INCOMING'])
-if sys.argv[1]=='lsf':print(p.name if p.exists() else '')
-elif sys.argv[1]=='cat':sys.stdout.buffer.write(p.read_bytes())
-elif sys.argv[1]=='deletefile':p.unlink()
-else:raise SystemExit(2)
-''');rclone.chmod(0o700)
-        asc=self.root/'asc';asc.write_text('#!/bin/sh\nexec '+sys.executable+' -B '+str(self.asc)+' "$@"\n');asc.chmod(0o700)
-        env={**self.env,'AUTOSCRIBE_RCLONE':str(rclone),'AUTOSCRIBE_ASC':str(asc),'SMOKE_INCOMING':str(incoming)}
-        result=subprocess.run([str(binaries/'srv-input'),'--once','--policy',str(policy)],capture_output=True,text=True,env=env)
-        self.assertEqual(result.returncode,0,result.stderr)
-        self.assertFalse(incoming.exists())
-        cid=self.client.zrange(EXECUTOR_QUEUE_KEY,0,-1)[0]
-        content=load_json(self.client,f'call:{cid}:content')
-        self.assertEqual(content['input']['content'],value['document'])
-        self.assertNotIn('path',content['source'])
-        response_key=f'response:{cid}:content';self.client.hset(response_key,{'content':'# New output\nSynthetic body\n'})
-        record_response(self.ledger,cid,response_key)
-        response=self.cli('response',cid)
-        effect=subprocess.run([str(binaries/'srv-output'),'--policy',str(policy)],input=response.stdout,text=True,capture_output=True,env=env)
-        self.assertEqual(effect.returncode,0,effect.stderr)
-        failed_response=json.loads(response.stdout);failed_response.update(status='failed',failure='synthetic_failure')
-        rejected=subprocess.run([str(binaries/'srv-output'),'--policy',str(policy)],input=json.dumps(failed_response)+'\n',text=True,capture_output=True,env=env)
-        self.assertNotEqual(rejected.returncode,0)
-        self.assertEqual(rejected.stdout,'')
-        applied=subprocess.run([str(binaries/'srv-writeback'),'--policy',str(policy)],input=effect.stdout,text=True,capture_output=True,env=env)
-        self.assertEqual(applied.returncode,0,applied.stderr)
-        output=subprocess.run(['git','-C',str(repo),'show','refs/heads/autoscribe-output:Results/new.md'],check=True,capture_output=True,text=True)
-        self.assertEqual(output.stdout,'# New output\nSynthetic body\n')
-        again=subprocess.run([str(binaries/'srv-writeback'),'--policy',str(policy)],input=effect.stdout,text=True,capture_output=True,env=env)
-        self.assertEqual(again.stdout,applied.stdout)
-
-
 class ClientAdapterPipelineTests(IsolatedRedisCase):
     @unittest.skipUnless(os.environ.get('AUTOSCRIBE_TEST_CLIENT_BIN'),'set AUTOSCRIBE_TEST_CLIENT_BIN for native-client smoke')
     def test_native_client_uuid_and_staged_retry_match_server_contract(self):
@@ -238,7 +167,6 @@ class ClientAdapterPipelineTests(IsolatedRedisCase):
         self.assertEqual(request['submission_id'],identifier)
         self.assertEqual(request['raw_markdown'].encode(),raw)
         self.assertEqual(request['record_id'],'inp_'+hashlib.sha256(identifier.encode()).hexdigest()[:32])
-        self.assertNotIn('call_source',request)
         self.assertNotIn('submission_id',request['baggage']['client'])
         accepted=self.cli('ingest',payload=frozen.decode())
         self.assertEqual(accepted.returncode,0,accepted.stderr)

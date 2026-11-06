@@ -41,7 +41,6 @@ class DirectJobsTests(unittest.TestCase):
                 self.assertEqual(response['result_bytes'],len(response['result'].encode('utf-8')))
                 self.assertEqual(response['result_sha256'],hashlib.sha256(response['result'].encode('utf-8')).hexdigest())
                 self.assertEqual(response['submission_id'],dispatch)
-                self.assertNotIn('call_source',response)
                 self.assertEqual(response['baggage']['client'],value['baggage']['client'])
                 with sqlite3.connect(ledger) as db:
                     self.assertEqual(db.execute('SELECT count(*) FROM exports').fetchone()[0],1)

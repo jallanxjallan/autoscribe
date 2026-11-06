@@ -44,8 +44,6 @@ class SubmissionIdentityTests(unittest.TestCase):
         self.assertEqual(first['call_id'],second['call_id'])
         self.assertEqual(first['record_id'],second['record_id'])
         self.assertEqual(second['baggage']['client'],value['baggage']['client'])
-        self.assertNotIn('call_source',second)
-        self.assertNotIn('call_source',second['baggage']['autoscribe_ingest'])
         with patch('autoscribe.preprocess.subprocess.run',side_effect=OSError('unavailable')):
             failed=prepare(value)
             value['baggage']['client']['source']='another-client'
@@ -59,11 +57,11 @@ class SubmissionIdentityTests(unittest.TestCase):
         with self.assertRaisesRegex(EnqueueError,'call_id does not identify submission'):
             validate_input_record(value)
 
-    def test_prepared_contract_rejects_retired_origin_field(self):
+    def test_prepared_contract_rejects_unknown_field(self):
         value=prepare(document())
         validate_input_record(value)
-        value['call_source']='obsolete'
-        with self.assertRaisesRegex(EnqueueError,'call_source'):
+        value['unexpected_field']='obsolete'
+        with self.assertRaisesRegex(EnqueueError,'Unknown prepared field'):
             validate_input_record(value)
 
 

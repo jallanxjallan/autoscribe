@@ -75,8 +75,8 @@ def prepare(envelope: object, *, work_dir: Path | None = None) -> dict:
         if isinstance(envelope.get('baggage'), dict): result['baggage']=copy.deepcopy(envelope['baggage'])
         submission = _identity(envelope)
         result.update(submission_id=submission, record_id='inp_'+digest(submission.encode('utf-8'))[:32])
-        if 'call_source' in envelope:
-            raise ValueError('call_source is retired; execution identity uses submission_id only')
+        if set(envelope)-set('schema record_id submission_id source_format source baggage document raw_markdown raw_markdown_sha256 content content_sha256 metadata routing assets references'.split()):
+            raise ValueError('Unknown document envelope field')
         if envelope.get('schema') not in ('autoscribe.document.v1', 'autoscribe.input.v3'):
             raise ValueError('Unsupported document envelope version')
         if not isinstance(envelope.get('source', {}), dict) or not isinstance(envelope.get('baggage', {}), dict):
@@ -152,7 +152,8 @@ def prepare(envelope: object, *, work_dir: Path | None = None) -> dict:
             parsed = json.loads(completed.stdout)
             if (parsed.get('schema')!='autoscribe.interpretation.v1'
                     or not re.fullmatch(r'call_[0-9a-f]{40}', parsed.get('call_id',''))
-                    or 'call_source' in parsed or parsed.get('submission_id')!=submission
+                    or set(parsed)-set('schema submission_id call_id source metadata directives asset_references plan failure trace'.split())
+                    or parsed.get('submission_id')!=submission
                     or not isinstance(parsed.get('source'), dict)):
                 raise ValueError('Invalid interpretation contract')
             if (not isinstance(parsed.get('metadata'),dict)

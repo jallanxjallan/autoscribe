@@ -11,7 +11,7 @@ from unittest.mock import patch
 
 from autoscribe import ssh_jobs as jobs
 from autoscribe.enqueue import EnqueueError, enqueue_record
-from autoscribe.exporter import iter_pending_records
+from autoscribe.effects import iter_pending_records
 from autoscribe.preprocess import prepare
 from autoscribe.redis_runtime import EXECUTOR_QUEUE_KEY, WORKER_QUEUE_KEY, load_json
 from test_prepared_pipeline import IsolatedRedisCase
@@ -27,6 +27,21 @@ def daemon(name, environment):
 
 
 class ReviewBoundaryTests(IsolatedRedisCase):
+    def test_only_current_transport_and_identity_contracts_are_exposed(self):
+        self.assertEqual(self.cli('export').returncode,2)
+        self.assertEqual(self.cli('effects','pending').returncode,0)
+        receipt=self.enqueue(prepare(document()))
+        content=load_json(self.client,receipt.content_key)
+        self.assertEqual(set(content),{'schema','record_id','call_id','submission_id','source','routing','plan','input'})
+        with sqlite3.connect(self.ledger) as db:
+            self.assertEqual([row[1] for row in db.execute('PRAGMA table_info(calls)')],['call_id','created_at'])
+            self.assertEqual([row[1] for row in db.execute('PRAGMA table_info(call_keys)')],['call_id','role','redis_key','created_at'])
+        if os.environ.get('AUTOSCRIBE_TEST_SERVICES_BIN'):
+            import re
+            root=Path(os.environ['AUTOSCRIBE_TEST_SERVICES_BIN']).parents[1]
+            members=set(re.findall(r'"((?:bins|crates)/[^" ]+)"',(root/'Cargo.toml').read_text()))
+            self.assertEqual(members,{'crates/srv-common','bins/srv-output','bins/srv-control-ingest','bins/srv-writeback','bins/srv-plan-select','bins/vault-tools'})
+
     def script_plan(self, executable='/usr/bin/cat'):
         with sqlite3.connect(self.control) as db:
             db.execute("UPDATE steps SET engine_kind='script',engine='extension',model=NULL,script='review-script'")
