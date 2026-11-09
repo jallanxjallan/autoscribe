@@ -2,7 +2,7 @@ import unittest
 from pathlib import Path
 
 from autoscribe.executor import next_step_ordinal, prepare_first_step, prepare_step
-from autoscribe.redis_runtime import WORKER_QUEUE_KEY, materialize_call, load_json
+from autoscribe.redis_state import WORKER_QUEUE_KEY, materialize_call, load_json
 
 
 class FakeRedis:

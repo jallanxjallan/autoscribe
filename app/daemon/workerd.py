@@ -15,7 +15,8 @@ if str(APP_ROOT) not in sys.path:
 from autoscribe.executor import next_step_ordinal, prepare_step
 from autoscribe.enqueue import register_failure
 from autoscribe.ledger import record_response
-from autoscribe.redis_runtime import FORENSIC_TTL, WORKER_QUEUE_KEY, RedisClient, load_json
+from biznet_common.redis import RedisClient
+from autoscribe.redis_state import FORENSIC_TTL, WORKER_QUEUE_KEY, load_json
 from autoscribe.worker import execute_task, load_registry, persist_redis_response, persist_step_result
 
 HOME = Path.home()

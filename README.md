@@ -12,6 +12,14 @@ bytes on success and no stdout on failure; it never invokes a model or network.
 Release preparation validates every canonical script step against its packaged,
 relocated executable registry and records the dependency hashes in the manifest.
 
+`release.py --common /absolute/path/to/common ...` requires a clean, committed
+Biznet Common checkout. It archives the commit and copies `python/biznet_common`
+into the release's `app` directory alongside `autoscribe`. The manifest records
+the full Common commit, and the release identifier includes its prefix.
+For source-only development, put Common's `python` directory and AutoScribe's
+`app` directory on `PYTHONPATH`. A packaged release loads both packages from
+its own `app` directory.
+
 `install-release.py` is the reviewed immutable-release installer. It retains
 private staging modes until extraction is complete, sets only each public release
 root to 0755, checks traversal as `jeremy` before atomic publication, and verifies

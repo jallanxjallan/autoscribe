@@ -14,7 +14,8 @@ if str(APP_ROOT) not in sys.path:
 
 from autoscribe.executor import prepare_first_step
 from autoscribe.ledger import load_call_keys
-from autoscribe.redis_runtime import EXECUTOR_QUEUE_KEY, FORENSIC_TTL, RedisClient
+from biznet_common.redis import RedisClient
+from autoscribe.redis_state import EXECUTOR_QUEUE_KEY, FORENSIC_TTL
 
 HOME = Path.home()
 LEDGER_DB = Path(os.environ.get("AUTOSCRIBE_LEDGER_DB", str(HOME / "Data/ledger.sql")))

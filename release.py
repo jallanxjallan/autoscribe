@@ -77,6 +77,7 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('destination', type=Path)
     parser.add_argument('--git-adapter', type=Path, required=True)
+    parser.add_argument('--common', type=Path, required=True)
     parser.add_argument('--client', type=Path, required=True)
     parser.add_argument('--services', type=Path, required=True)
     parser.add_argument('--extensions', type=Path, required=True)
@@ -89,7 +90,7 @@ def main():
         parser.error('destination must be new, absolute and in an existing parent')
     if not args.git_adapter.is_absolute() or not args.git_adapter.is_file():
         parser.error('absolute git.py adapter required')
-    sources = dict(autoscribe=Path(__file__).resolve().parent, client=args.client,
+    sources = dict(autoscribe=Path(__file__).resolve().parent, common=args.common, client=args.client,
                    services=args.services, extensions=args.extensions,
                    templates=args.templates, control=args.control)
     def git(source, *parts):
@@ -100,7 +101,9 @@ def main():
         if not source.is_absolute() or git(source, 'status', '--porcelain'):
             parser.error(f'{name}: source must be absolute, clean and committed')
         revisions[name] = git(source, 'rev-parse', 'HEAD')
-    release_id = 'qualified-' + revisions['autoscribe'][:12] + '-' + revisions['services'][:12]
+    release_id = 'qualified-' + '-'.join(
+        revisions[name][:12] for name in ('autoscribe', 'services', 'common')
+    )
     installed = Path('/opt/autoscribe/services/releases') / release_id
     output.mkdir()
     with tempfile.TemporaryDirectory(prefix='autoscribe-release-') as temporary:
@@ -117,6 +120,7 @@ def main():
         engine = output / release_id
         engine.mkdir()
         shutil.copytree(extracted['autoscribe'] / 'app', engine / 'app')
+        shutil.copytree(extracted['common'] / 'python/biznet_common', engine / 'app/biznet_common')
         shutil.copytree(extracted['autoscribe'] / 'extensions', engine / 'extensions')
         registry = relocate_registry(engine, installed)
         (engine / 'bin').mkdir()

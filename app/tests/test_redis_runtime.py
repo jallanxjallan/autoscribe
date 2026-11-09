@@ -1,7 +1,7 @@
 import json
 import unittest
 
-from autoscribe.redis_runtime import EXECUTOR_QUEUE_KEY, enqueue_call, load_json, materialize_call
+from autoscribe.redis_state import EXECUTOR_QUEUE_KEY, enqueue_call, load_json, materialize_call
 
 
 class FakeRedis:

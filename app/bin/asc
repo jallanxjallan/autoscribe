@@ -11,17 +11,19 @@ if str(APP_ROOT) not in sys.path:
     sys.path.insert(0, str(APP_ROOT))
 
 from autoscribe.control import list_plans
-from autoscribe.enqueue import enqueue_record, validate_input_record
+from autoscribe.enqueue import enqueue_record
 from autoscribe.effects import (
     iter_pending_ndjson,
     poke_responses,
 )
 from autoscribe.ledger import load_call_keys, load_response
-from autoscribe.redis_runtime import RedisClient, load_json
+from autoscribe.redis_state import load_json
+from biznet_common.control import DEFAULT_DATABASE
+from biznet_common.redis import RedisClient
 
 
 def control_db_path() -> Path:
-    return Path(os.environ.get("AUTOSCRIBE_CONTROL_DB", "/var/lib/autoscribe/control.sqlite"))
+    return Path(os.environ.get("AUTOSCRIBE_CONTROL_DB", str(DEFAULT_DATABASE)))
 
 
 def ledger_path() -> Path:
@@ -57,7 +59,6 @@ def ingest_stdin(*, prepare_only: bool = False, documents: bool = False) -> int:
                 print(json.dumps(record, ensure_ascii=False, separators=(',', ':')))
                 failed = failed or record.get('status') == 'failed'
                 continue
-            validate_input_record(record)
             result = enqueue_record(record=record, control_db=control_db_path(),
                                     ledger_db=ledger_path(), client=redis_client())
             receipt = {'schema': 'autoscribe.enqueue-result.v1', 'record_id': result.record_id,

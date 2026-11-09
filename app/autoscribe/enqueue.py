@@ -11,7 +11,8 @@ import re
 from .control import materialize_plan, UnknownPlanError
 from .ids import validate_submission_id
 from .ledger import connect, ensure_schema, record_call, record_response
-from .redis_runtime import EXECUTOR_QUEUE_KEY, FORENSIC_TTL, RedisClient, load_json
+from biznet_common.redis import RedisClient
+from .redis_state import EXECUTOR_QUEUE_KEY, FORENSIC_TTL, load_json
 
 INPUT_SCHEMA = 'autoscribe.prepared.v2'
 CALL_SCHEMA = 'autoscribe.call-content.v2'

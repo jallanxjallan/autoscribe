@@ -13,7 +13,7 @@ from autoscribe import ssh_jobs as jobs
 from autoscribe.enqueue import EnqueueError, enqueue_record
 from autoscribe.effects import iter_pending_records
 from autoscribe.preprocess import prepare
-from autoscribe.redis_runtime import EXECUTOR_QUEUE_KEY, WORKER_QUEUE_KEY, load_json
+from autoscribe.redis_state import EXECUTOR_QUEUE_KEY, WORKER_QUEUE_KEY, load_json
 from test_prepared_pipeline import IsolatedRedisCase
 from test_preprocess import document
 

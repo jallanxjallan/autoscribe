@@ -14,7 +14,7 @@ if str(APP_ROOT) not in sys.path:
     sys.path.insert(0, str(APP_ROOT))
 
 from autoscribe.effects import mark_exported
-from autoscribe.redis_runtime import RedisClient
+from biznet_common.redis import RedisClient
 
 HOME = Path.home()
 

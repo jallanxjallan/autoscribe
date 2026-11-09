@@ -15,6 +15,8 @@ fail(){ printf 'INSTALL FAILED: %s\n' "$*" >&2; exit 1; }
 [[ -w /opt/autoscribe ]] || fail "/opt/autoscribe is not writable by $(id -un)"
 
 for f in \
+    app/biznet_common/control.py \
+    app/biznet_common/redis.py \
     app/autoscribe/enqueue.py \
     app/autoscribe/effects.py \
     app/autoscribe/executor.py \
@@ -34,8 +36,8 @@ systemctl --user stop autoscribe-executor.service 2>/dev/null || true
 systemctl --user disable --now autoscribe-dispatch.service 2>/dev/null || true
 
 mkdir -p "$app" "$cfg" "$state" "$run" "$unitdir" "$HOME/.local/bin" /opt/autoscribe/extensions
-rm -rf "$app/autoscribe" "$app/daemon" "$app/tests" "$app/bin"
-cp -a "$src/app/autoscribe" "$app/"
+rm -rf "$app/autoscribe" "$app/biznet_common" "$app/daemon" "$app/tests" "$app/bin"
+cp -a "$src/app/autoscribe" "$src/app/biznet_common" "$app/"
 cp -a "$src/app/daemon" "$app/"
 cp -a "$src/app/tests" "$app/"
 cp -a "$src/app/bin" "$app/"
@@ -53,7 +55,7 @@ install -m 644 "$src/systemd/autoscribe-worker.service" "$unitdir/autoscribe-wor
 install -m 644 "$src/systemd/autoscribe-responses.service" "$unitdir/autoscribe-responses.service"
 
 printf 'Compiling Python sources...\n'
-"$python" -m compileall -q "$app/autoscribe" "$app/daemon" "$app/bin"
+"$python" -m compileall -q "$app/autoscribe" "$app/biznet_common" "$app/daemon" "$app/bin"
 
 printf 'Running unit tests...\n'
 PYTHONPATH="$app" "$python" -m unittest discover -s "$app/tests" -v

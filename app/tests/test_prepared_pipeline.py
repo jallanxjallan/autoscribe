@@ -18,7 +18,8 @@ from autoscribe.enqueue import enqueue_record, EnqueueError
 from autoscribe.effects import build_pending_record, iter_pending_ndjson
 from autoscribe.ledger import record_response
 from autoscribe.preprocess import prepare
-from autoscribe.redis_runtime import RedisClient, load_json, EXECUTOR_QUEUE_KEY
+from biznet_common.redis import RedisClient
+from autoscribe.redis_state import load_json, EXECUTOR_QUEUE_KEY
 from test_enqueue import make_control
 from test_preprocess import document
 

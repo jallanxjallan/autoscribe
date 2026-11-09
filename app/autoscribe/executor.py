@@ -3,7 +3,8 @@ from __future__ import annotations
 import json
 from dataclasses import dataclass
 
-from .redis_runtime import FORENSIC_TTL, WORKER_QUEUE_KEY, RedisClient, load_json
+from biznet_common.redis import RedisClient
+from .redis_state import FORENSIC_TTL, WORKER_QUEUE_KEY, load_json
 
 
 class ExecutorError(RuntimeError):

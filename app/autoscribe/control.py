@@ -2,24 +2,13 @@ from __future__ import annotations
 
 from contextlib import closing
 import json
-import sqlite3
 from pathlib import Path
 
-
-class ControlError(RuntimeError):
-    pass
+from biznet_common.control import ControlError, connect, list_labels
 
 
 class UnknownPlanError(ControlError):
     pass
-
-
-def connect(db_path: Path) -> sqlite3.Connection:
-    if not db_path.exists():
-        raise ControlError(f"control database not found: {db_path}")
-    db = sqlite3.connect(db_path)
-    db.row_factory = sqlite3.Row
-    return db
 
 
 def resolve_plan(db_path: Path, plan_id: str) -> dict | None:
@@ -32,11 +21,7 @@ def resolve_plan(db_path: Path, plan_id: str) -> dict | None:
 
 
 def list_plans(db_path: Path) -> list[dict]:
-    with closing(connect(db_path)) as db, db:
-        rows = db.execute(
-            "SELECT id, label FROM plans ORDER BY label COLLATE NOCASE, id"
-        ).fetchall()
-    return [dict(row) for row in rows]
+    return list_labels(db_path, "plans")
 
 
 def _decode_args(raw: object, *, step_id: str) -> dict:

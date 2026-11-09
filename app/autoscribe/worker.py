@@ -6,7 +6,8 @@ import subprocess
 from dataclasses import dataclass
 from pathlib import Path
 
-from .redis_runtime import FORENSIC_TTL, RedisClient, load_json
+from biznet_common.redis import RedisClient
+from .redis_state import FORENSIC_TTL, load_json
 
 MODEL_LABELS = {
     "sol": "gpt-5.6-sol",

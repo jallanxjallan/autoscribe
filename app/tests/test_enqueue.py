@@ -5,7 +5,7 @@ import unittest
 from pathlib import Path
 
 from autoscribe.enqueue import EnqueueError, enqueue_record
-from autoscribe.redis_runtime import EXECUTOR_QUEUE_KEY
+from autoscribe.redis_state import EXECUTOR_QUEUE_KEY
 
 
 class FakeRedis:

@@ -14,7 +14,7 @@ import subprocess
 from unittest.mock import patch
 
 from autoscribe import ssh_jobs as jobs
-from autoscribe.redis_runtime import load_json
+from autoscribe.redis_state import load_json
 from test_prepared_pipeline import IsolatedRedisCase
 
 
