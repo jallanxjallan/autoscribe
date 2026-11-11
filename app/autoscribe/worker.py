@@ -106,6 +106,21 @@ def _task_input(client: RedisClient, task: dict[str, str], content: dict) -> str
     value = input_record.get("content")
     if not isinstance(value, str):
         raise WorkerError(f"call content has no text input: {task.get('content_key', '')}")
+    source = content.get("source") or {}
+    if source.get("kind") == "obsidian":
+        # Keep the retained transport document intact. Only the first step
+        # receives this body; chained steps receive the preceding step's output.
+        from .ingest import IngestError, frontmatter_slug, split_frontmatter
+
+        try:
+            header, body = split_frontmatter(value.removeprefix("\ufeff"))
+            if header is None or frontmatter_slug(header) != source.get("slug"):
+                raise IngestError("missing or mismatched Obsidian source slug")
+            if not body.strip():
+                raise IngestError("Obsidian source passage is empty")
+        except IngestError as exc:
+            raise WorkerError(f"Invalid Obsidian source frontmatter: {exc}") from exc
+        return body
     return value
 
 
