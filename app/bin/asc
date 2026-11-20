@@ -188,7 +188,7 @@ def main() -> int:
         for line in iter_pending_ndjson(ledger_path(),redis_client()):print(line)
         return 0
     print(
-        "usage: asc submission-id | asc prepare|ingest|enqueue (NDJSON stdin) | asc prepare-file|ingest-file FILE --submission-id UUID | asc job <submit|status|execute|cleanup> <dispatch-id> <package-sha256> [response-sha256] | asc control plans | asc enqueue | asc response <call-id> | "
+        "usage: asc submission-id | asc prepare|ingest|enqueue (NDJSON stdin) | asc prepare-file|ingest-file FILE --submission-id UUID | asc job <submit|status|execute|cleanup> <dispatch-id> <package-sha256> [dropbox-location|response-sha256] | asc control plans | asc enqueue | asc response <call-id> | "
         "asc effects notify | asc effects pending"
         "",
         file=sys.stderr,

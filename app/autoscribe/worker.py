@@ -1,27 +1,17 @@
 from __future__ import annotations
 
+import base64
+import hashlib
 import json
+import logging
 import os
 import subprocess
 from dataclasses import dataclass
 from pathlib import Path
 
+from biznet_common.llm import LLMError, respond
 from biznet_common.redis import RedisClient
 from .redis_state import FORENSIC_TTL, load_json
-
-MODEL_LABELS = {
-    "sol": "gpt-5.6-sol",
-    "terra": "gpt-5.6-terra",
-    "luna": "gpt-5.6-luna",
-    "best": "gpt-5.6-sol",
-    "frontier": "gpt-5.6-sol",
-    "pro": "gpt-5.6-sol",
-    "standard": "gpt-5.6-terra",
-    "cheap": "gpt-5.6-terra",
-    "mini": "gpt-5.6-terra",
-    "nano": "gpt-5.6-luna",
-}
-
 
 class WorkerError(RuntimeError):
     pass
@@ -106,21 +96,6 @@ def _task_input(client: RedisClient, task: dict[str, str], content: dict) -> str
     value = input_record.get("content")
     if not isinstance(value, str):
         raise WorkerError(f"call content has no text input: {task.get('content_key', '')}")
-    source = content.get("source") or {}
-    if source.get("kind") == "obsidian":
-        # Keep the retained transport document intact. Only the first step
-        # receives this body; chained steps receive the preceding step's output.
-        from .ingest import IngestError, frontmatter_slug, split_frontmatter
-
-        try:
-            header, body = split_frontmatter(value.removeprefix("\ufeff"))
-            if header is None or frontmatter_slug(header) != source.get("slug"):
-                raise IngestError("missing or mismatched Obsidian source slug")
-            if not body.strip():
-                raise IngestError("Obsidian source passage is empty")
-        except IngestError as exc:
-            raise WorkerError(f"Invalid Obsidian source frontmatter: {exc}") from exc
-        return body
     return value
 
 
@@ -133,54 +108,41 @@ def _instructions_text(step: dict) -> str:
     return "\n\n".join(values)
 
 
-def _resolve_model(label: str) -> str:
-    if label.startswith("gpt-"):
-        return label
-    try:
-        return MODEL_LABELS[label]
-    except KeyError as exc:
-        raise WorkerError(f"unknown ChatGPT model label: {label!r}") from exc
+def _input_images(input_record: dict, content: str) -> list[tuple[str, str]]:
+    mime_types = {"png": "image/png", "jpg": "image/jpeg", "jpeg": "image/jpeg",
+                  "webp": "image/webp", "gif": "image/gif"}
+    images = []
+    for asset in input_record.get("assets", []):
+        path = asset["path"]
+        if f"]({path})" not in content:
+            continue
+        extension = Path(path).suffix.lower().lstrip(".")
+        if extension not in mime_types:
+            raise WorkerError(f"Unsupported model image format: {path}")
+        try:
+            data = bytes.fromhex(asset["content_hex"])
+        except (KeyError, TypeError, ValueError):
+            raise WorkerError(f"Invalid model image bytes: {path}") from None
+        if not data or hashlib.sha256(data).hexdigest() != asset.get("sha256"):
+            raise WorkerError(f"Model image checksum mismatch: {path}")
+        encoded = base64.b64encode(data).decode("ascii")
+        images.append((f"data:{mime_types[extension]};base64,{encoded}", "auto"))
+    return images
 
 
-def run_chatgpt(step: dict, content: str, timeout: float = 120.0) -> str:
+def run_chatgpt(step: dict, content: str, timeout: float = 120.0, *, images=()) -> str:
     if step.get("engine_kind") != "llm" or step.get("engine") != "chatgpt":
         raise WorkerError("run_chatgpt requires llm/chatgpt step")
-    model_label = step.get("model")
-    if not isinstance(model_label, str) or not model_label:
-        raise WorkerError("ChatGPT step requires model")
-    api_key = os.environ.get("OPENAI_API_KEY")
-    if not api_key:
-        raise WorkerError("OPENAI_API_KEY is not set")
     try:
-        from openai import OpenAI
-    except ImportError as exc:
-        raise WorkerError("Python package 'openai' is not installed") from exc
-
-    args = step.get("args") or {}
-    if not isinstance(args, dict):
-        raise WorkerError("step args must be an object")
-    reserved = {"model", "input", "instructions"}
-    conflicts = reserved.intersection(args)
-    if conflicts:
-        raise WorkerError(f"step args may not override {', '.join(sorted(conflicts))}")
-
-    request: dict[str, object] = {
-        "model": _resolve_model(model_label),
-        "input": content,
-        **args,
-    }
-    instructions = _instructions_text(step)
-    if instructions:
-        request["instructions"] = instructions
-
-    try:
-        result = OpenAI(api_key=api_key, timeout=timeout).responses.create(**request)
-    except Exception as exc:
-        raise WorkerError(f"ChatGPT request failed: {type(exc).__name__}: {exc}") from exc
-    output = getattr(result, "output_text", None)
-    if not isinstance(output, str):
-        raise WorkerError("ChatGPT response has no output_text")
-    return output
+        result = respond("autoscribe-worker", step.get("model"), content,
+                         instructions=_instructions_text(step), images=images, timeout=timeout,
+                         parameters=step.get("args") or {})
+    except LLMError as exc:
+        raise WorkerError(str(exc)) from None
+    logging.getLogger(__name__).info(
+        "LLM response model=%s request_id=%s usage=%s", result.model, result.request_id, result.usage
+    )
+    return result.text
 
 
 def execute_task(
@@ -210,7 +172,8 @@ def execute_task(
     if engine_kind == "llm":
         if engine != "chatgpt":
             raise WorkerError(f"unsupported llm engine: {engine}")
-        output = run_chatgpt(step, input_content, llm_timeout)
+        images = () if task.get("input_key") else _input_images(call_content.get("input") or {}, input_content)
+        output = run_chatgpt(step, input_content, llm_timeout, images=images)
         entrypoint = str(step.get("model") or "")
     elif engine_kind == "script":
         entrypoint = str(step.get("script") or "")

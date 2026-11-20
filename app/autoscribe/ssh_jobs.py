@@ -1,5 +1,6 @@
 """Explicit per-job execution through asc; identity and state use its SQLite ledger."""
 from contextlib import closing
+import fcntl
 import hashlib
 import json
 import os
@@ -11,7 +12,9 @@ import sys
 import tempfile
 import time
 
-from .enqueue import enqueue_record, register_failure
+from biznet_common.llm import SYSTEMD_CREDENTIAL_PROPERTY
+
+from .enqueue import enqueue_record, register_failure, validate_input_record
 from .ids import validate_submission_id
 from .executor import ordered_steps, prepare_step
 from .ledger import connect, ensure_schema, load_call_keys
@@ -98,33 +101,104 @@ def launch(ledger, dispatch, digest):
     if loaded.stdout.strip() == 'not-found':
         subprocess.run(['/usr/bin/systemd-run', '--user', '--collect', '--quiet', '--unit=' + unit,
                         '--property=UMask=0077',
-                        '--property=EnvironmentFile=-/home/jeremy/.config/autoscribe/credentials.env',
+                        SYSTEMD_CREDENTIAL_PROPERTY,
                         '/usr/bin/env', *launch_environment(), sys.executable,
                         str(ASC), 'job', 'execute', dispatch, digest],
                        check=True, capture_output=True, text=True, timeout=30)
     return read_job(ledger, dispatch, digest)
 
 
-def submit(control, ledger, client, dispatch, digest):
-    state = read_job(ledger, dispatch, digest)
-    if state['state'] != 'absent':
-        if state['state'] in ('completed', 'cleaned'):
-            return state
-        if client.hgetall(f"response:{state['call_id']}:content").get('failure'):
-            return complete_response(ledger, client, state)
-        return launch(ledger, dispatch, digest)
-    path = ROOT / dispatch
-    if path.is_symlink() or (path / '.package-sha256').read_text() != digest:
-        raise ValueError('Incomplete or mismatched request package')
-    if hashlib.sha256((path / 'SHA256SUMS').read_bytes()).hexdigest() != digest:
-        raise ValueError('Request manifest checksum mismatch')
-    subprocess.run(['/usr/bin/sha256sum', '--strict', '-c', 'SHA256SUMS'], cwd=path,
-                   check=True, stdout=subprocess.DEVNULL)
-    record = json.loads((path / 'request.ndjson').read_text())
-    from .preprocess import prepare
-    record = prepare(record, work_dir=path)
+def source_envelope(dispatch, files):
+    files = dict(files)
+    meta = json.loads(files.pop('dispatch.json'))
+    original = files.pop('original.md')
+    resolved = files.pop('resolved.md')
+    digest = lambda data: hashlib.sha256(data).hexdigest()
+    expected = 'inp_' + digest(dispatch.encode())[:32]
+    fields = {'submission_id', 'record_id', 'source', 'vault_id', 'source_path',
+              'raw_markdown_sha256', 'output_operation'}
+    path = meta['source_path']
+    if path is not None:
+        fields.add('plan')
+    if (set(meta) != fields or meta['submission_id'] != dispatch or meta['record_id'] != expected
+            or digest(original) != meta['raw_markdown_sha256']
+            or not re.fullmatch(r'[a-f0-9]{64}', meta['vault_id'])
+            or not re.fullmatch(r'[a-f0-9]{64}', meta['source'])):
+        raise ValueError('Dropbox dispatch source identity/checksum mismatch')
+
+    def front(raw):
+        match = re.match(rb'(?:\xef\xbb\xbf)?---\r?\n.*?^---(?:\r?\n|$)', raw, re.M | re.S)
+        return match[0] if match else b''
+
+    client = {key:meta[key] for key in ('source', 'vault_id', 'raw_markdown_sha256')}
+    source = {'kind':'stdin' if path is None else 'obsidian', 'vault_id':meta['vault_id']}
+    envelope = {'schema':'autoscribe.input.v3', 'submission_id':dispatch, 'record_id':expected,
+                'raw_markdown':original.decode('utf-8'), 'raw_markdown_sha256':digest(original),
+                'content':resolved.decode('utf-8'), 'content_sha256':digest(resolved),
+                'assets':[], 'source':source, 'baggage':{'client':client}}
+    if path is not None:
+        if not front(original) or front(original) != front(resolved) or not re.fullmatch(r'pln_[A-Za-z0-9]+', meta['plan']):
+            raise ValueError('Dropbox dispatch frontmatter or plan claim mismatch')
+        source['path'] = client['source_path'] = path
+        envelope['routing'] = {'plan_id':meta['plan']}
+    operation = meta['output_operation']
+    if (not isinstance(operation, dict) or operation.get('schema') != 'autoscribe.output-operation.v1'
+            or operation.get('submission_id') != dispatch or operation.get('vault_id') != meta['vault_id']
+            or operation.get('representation') != 'markdown-body.utf8'
+            or operation.get('type') not in ('update', 'create')
+            or (operation['type'] == 'update' and (path is None or operation.get('path') != path))):
+        raise ValueError('Invalid Dropbox dispatch output operation')
+    client['output_operation'] = operation
+    for name, data in sorted(files.items(), key=lambda item: resolved.find(item[0].encode())):
+        sha = digest(data)
+        if not data or not re.fullmatch(rf'assets/{sha}\.[a-z0-9]+', name):
+            raise ValueError(f'Invalid inline dispatch asset: {name}')
+        envelope['assets'].append({'path':name, 'sha256':sha, 'content_hex':data.hex()})
+    return envelope
+
+
+def prepare_dropbox(dispatch, digest, location, path):
+    from dropbox_package import retrieve
+    from .preprocess import prepare, canonical
+    envelope = source_envelope(dispatch, retrieve('dispatch', dispatch, digest, location, 4_194_304))
+    record = prepare(envelope, work_dir=path,
+                     require_dispatch=envelope['source']['kind'] == 'obsidian')
     if record.get('submission_id') != dispatch:
         raise ValueError('Request dispatch identity mismatch')
+    line = canonical(record) + b'\n'
+    validate_input_record(json.loads(line))
+    return line
+
+
+def submit(control, ledger, client, dispatch, digest, location):
+    check(dispatch, digest)
+    # Hold the existing job directory across verification and ledger acceptance.
+    path = ROOT / dispatch
+    state = read_job(ledger, dispatch, digest)
+    if state['state'] != 'absent':
+        return resume(ledger, client, dispatch, digest, state)
+    path.mkdir(mode=0o700, exist_ok=True)
+    fd = os.open(path, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+    try:
+        fcntl.flock(fd, fcntl.LOCK_EX)
+        return accept_dropbox(control, ledger, client, dispatch, digest, location, path)
+    finally:
+        os.close(fd)
+
+
+def resume(ledger, client, dispatch, digest, state):
+    if state['state'] in ('completed', 'cleaned'):
+        return state
+    if client.hgetall(f"response:{state['call_id']}:content").get('failure'):
+        return complete_response(ledger, client, state)
+    return launch(ledger, dispatch, digest)
+
+
+def accept_dropbox(control, ledger, client, dispatch, digest, location, path):
+    state = read_job(ledger, dispatch, digest)
+    if state['state'] != 'absent':
+        return resume(ledger, client, dispatch, digest, state)
+    record = json.loads(prepare_dropbox(dispatch, digest, location, path))
     result = enqueue_record(record=record, control_db=control, ledger_db=ledger, client=client, queue=False)
     with closing(connect(ledger)) as db, db:
         db.execute('INSERT OR IGNORE INTO ssh_jobs (dispatch_id,record_id,call_id,package_sha256,state,accepted_at,error) VALUES (?,?,?,?,?,?,?)',
@@ -244,12 +318,12 @@ def cleanup(ledger, dispatch, digest, checksum):
 
 def command(args, control, ledger, client):
     if len(args) not in (3, 4):
-        raise ValueError('usage: asc job submit|status|execute|cleanup DISPATCH SHA256 [RESPONSE_SHA256]')
+        raise ValueError('usage: asc job submit|status|execute|cleanup DISPATCH SHA256 [DROPBOX_LOCATION|RESPONSE_SHA256]')
     operation, dispatch, digest = args[:3]
     check(dispatch, digest)
     initialize(ledger)
-    if operation == 'submit' and len(args) == 3:
-        return submit(control, ledger, client, dispatch, digest)
+    if operation == 'submit' and len(args) == 4:
+        return submit(control, ledger, client, dispatch, digest, args[3])
     if operation == 'status' and len(args) == 3:
         return read_job(ledger, dispatch, digest)
     if operation == 'execute' and len(args) == 3:

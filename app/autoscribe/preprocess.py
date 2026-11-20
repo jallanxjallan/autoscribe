@@ -46,7 +46,7 @@ def _identity(envelope: dict) -> str:
     return validate_submission_id(envelope.get('submission_id'))
 
 
-def prepare(envelope: object, *, work_dir: Path | None = None) -> dict:
+def prepare(envelope: object, *, work_dir: Path | None = None, require_dispatch: bool = False) -> dict:
     """Return one complete prepared success/failure. Never reconstruct Markdown."""
     original = copy.deepcopy(envelope)
     result = {'schema': SCHEMA, 'status': 'failed', 'content': '', 'content_sha256': digest(b''),
@@ -110,6 +110,20 @@ def prepare(envelope: object, *, work_dir: Path | None = None) -> dict:
             raise ValueError('Original content checksum mismatch')
         if client.get('raw_markdown_sha256', digest(data))!=digest(data):
             raise ValueError('Client content checksum mismatch')
+        if envelope['schema']=='autoscribe.input.v3' and 'content' in envelope:
+            processing = envelope['content']
+            if not isinstance(processing, str):
+                raise ValueError('Expanded Markdown must be UTF-8 text')
+            expanded = processing.encode('utf-8')
+            if len(expanded)>MAX_DOCUMENT or envelope.get('content_sha256')!=digest(expanded):
+                raise ValueError('Expanded Markdown size or checksum mismatch')
+            assets = envelope.get('assets')
+            if not isinstance(assets, list):
+                raise ValueError('Invalid processing assets')
+        else:
+            processing, assets = raw, []
+        if require_dispatch:
+            data = processing.encode('utf-8')
         external = envelope.get('metadata', {})
         if not isinstance(external, dict): raise ValueError('External metadata must be an object')
         # Coordination fields come only from the retained envelope, never AST data.
@@ -169,6 +183,11 @@ def prepare(envelope: object, *, work_dir: Path | None = None) -> dict:
                 raise ValueError('Missing prepared plan')
         except (ValueError, TypeError, AttributeError) as exc:
             return failure('serialization', str(exc))
+        if require_dispatch and not parsed.get('failure'):
+            if parsed['metadata'].get('dispatch') is not True:
+                return failure('unauthorized_dispatch', 'Source requires dispatch: true')
+            if parsed['metadata'].get('plan') != parsed.get('plan') or not parsed['source'].get('slug'):
+                return failure('invalid_dispatch_identity', 'Authored execution plan and slug are required')
         result.update(call_id=parsed['call_id'], metadata=parsed.get('metadata', {}),
                       directives=parsed.get('directives', []), asset_references=parsed.get('asset_references', []))
         # Only document-derived fields are merged; no AST value can change paths.
@@ -182,7 +201,8 @@ def prepare(envelope: object, *, work_dir: Path | None = None) -> dict:
         if parsed.get('failure'):
             result.update(failure=parsed['failure'])
         else:
-            result['status']='ready'
+            result.update(status='ready', content=processing,
+                          content_sha256=digest(processing.encode('utf-8')), assets=copy.deepcopy(assets))
         # Asset storage is transport work, outside enqueue/document semantics.
         if result['status']=='ready' and result['asset_references']:
             from .assets import stage_assets
