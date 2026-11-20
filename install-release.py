@@ -75,6 +75,19 @@ def verify_payload(stage, manifest):
   assert manifest['release_id']+'/'+retired not in manifest['files'], retired
 
 
+def bind_native(engine, previous, selection=Path('/opt/autoscribe/services/current')):
+ """Retire the selected old CLI without changing native service implementation."""
+ engine=Path(engine);previous=Path(previous);selection=Path(selection)
+ assert selection.resolve()==previous.resolve(), 'Native selection changed'
+ wanted=json.loads((engine/'manifest.json').read_text())
+ prior=json.loads((previous/'manifest.json').read_text())
+ assert wanted['revisions']['services']==prior['revisions']['services'], 'Native revision differs'
+ for name in wanted['native_binaries']:
+  assert sha(engine/'bin'/name)==sha(previous/'bin'/name), 'Native binary differs: '+name
+ quiescent(Path(wanted['selected_environment']['AUTOSCRIBE_LEDGER_DB']))
+ atomic_link(selection,engine)
+
+
 def main(stage,expected_manifest):
  stage=Path(stage).resolve()
  assert __debug__ and os.geteuid()==0 and stage.is_dir()
@@ -132,11 +145,13 @@ def main(stage,expected_manifest):
  cli=Path('/home/jeremy/.local/bin/asc')
  atomic_link(cli,Path('/opt/autoscribe/app/../bin/asc'),1000,1000)
  try:
+  bind_native(engine,native)
   atomic_link(Path('/opt/autoscribe/app'),engine/'app',1000,1000)
   assert Path('/opt/autoscribe/app').resolve()==engine/'app'
   user(cli,'control','plans')
   for path,digest in preflight['protected_hashes'].items():assert sha(Path(path))==digest,path
  except BaseException:
+  atomic_link(Path('/opt/autoscribe/services/current'),native)
   atomic_link(Path('/opt/autoscribe/app'),previous,1000,1000)
   atomic_link(cli,Path(preflight['expected_links'][str(cli)]),1000,1000)
   raise

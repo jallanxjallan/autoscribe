@@ -84,3 +84,23 @@ class AdmissionGateTests(unittest.TestCase):
                 with self.assertRaisesRegex(AssertionError,'Non-cleaned'):installer.quiescent(ledger)
                 with sqlite3.connect(ledger) as db:db.execute("UPDATE ssh_jobs SET state='cleaned'")
                 installer.quiescent(ledger)
+
+class NativeBindingTests(unittest.TestCase):
+    def test_native_alignment_requires_same_revision_and_exact_binary(self):
+        import json
+        spec=importlib.util.spec_from_file_location('installer_native',ROOT/'install-release.py')
+        installer=importlib.util.module_from_spec(spec);spec.loader.exec_module(installer)
+        with tempfile.TemporaryDirectory() as td:
+            root=Path(td);old=root/'old';new=root/'new'
+            manifest={'revisions':{'services':'a'*40},'native_binaries':['srv-control-ingest'],'selected_environment':{'AUTOSCRIBE_LEDGER_DB':str(root/'ledger')}}
+            for p in (old,new):
+                (p/'bin').mkdir(parents=True);(p/'bin/srv-control-ingest').write_text('same')
+                (p/'manifest.json').write_text(json.dumps(manifest))
+            selection=root/'current';selection.symlink_to(old)
+            with patch.object(installer,'quiescent'),patch.object(installer.os,'chown'):
+                (new/'bin/srv-control-ingest').write_text('drift')
+                with self.assertRaisesRegex(AssertionError,'Native binary differs'):installer.bind_native(new,old,selection)
+                self.assertEqual(selection.resolve(),old)
+                (new/'bin/srv-control-ingest').write_text('same')
+                installer.bind_native(new,old,selection)
+                self.assertEqual(selection.resolve(),new)
