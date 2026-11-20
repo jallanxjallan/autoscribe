@@ -163,8 +163,8 @@ def execute_task(
     call_content = load_json(client, content_key)
     step = _step(call_content, ordinal)
     input_content = _task_input(client, task, call_content)
-    engine_kind = str(step.get("engine_kind") or task.get("engine_kind") or "")
-    engine = str(step.get("engine") or task.get("engine") or "")
+    engine_kind = str(step["engine_kind"])
+    engine = str(step["engine"])
 
     if engine_kind == "llm":
         if engine != "chatgpt":

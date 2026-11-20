@@ -11,6 +11,7 @@ import sqlite3
 import subprocess
 import tarfile
 import tempfile
+import runpy
 
 NATIVE = ('srv-output', 'srv-writeback', 'srv-control-ingest', 'srv-plan-select')
 RETIRED = ('srv-export', 'srv-input')
@@ -121,9 +122,8 @@ def main():
         if not source.is_absolute() or git(source, 'status', '--porcelain'):
             parser.error(f'{name}: source must be absolute, clean and committed')
         revisions[name] = git(source, 'rev-parse', 'HEAD')
-    release_id = 'qualified-' + '-'.join(
-        revisions[name][:12] for name in ('autoscribe', 'services', 'common')
-    )
+    release_id = 'qualified-' + revisions['autoscribe'][:12] + '-' + hashlib.sha256(
+        json.dumps(revisions, sort_keys=True, separators=(',', ':')).encode()).hexdigest()[:20]
     installed = Path('/opt/autoscribe/services/releases') / release_id
     output.mkdir()
     with tempfile.TemporaryDirectory(prefix='autoscribe-release-') as temporary:
@@ -210,6 +210,11 @@ def main():
                     'resource_files': {str(Path(selection['EXTENSIONS_ROOT' if name=='extensions' else 'TEMPLATES_ROOT']) / p.relative_to(extracted[name])): sha(p)
                         for name in ('extensions','templates') for p in sorted(extracted[name].rglob('*')) if p.is_file()},
                     'protocols': {'prepared': 'autoscribe.prepared.v2', 'response': 'autoscribe.client-response.v1'},
+                    'model_catalogue': dict(runpy.run_path(str(extracted['common'] / 'python/biznet_common/llm.py'))['MODELS']),
+                    'capability_bindings': {'autoscribe': str(installed),
+                        'native_services': {'selection': '/opt/autoscribe/services/current', 'commit': revisions['services']},
+                        'control': {'database': selection['AUTOSCRIBE_CONTROL_DB'], 'source_commit': revisions['control'], 'schema_version': 3},
+                        'extensions': selection['EXTENSIONS_ROOT'], 'templates': selection['TEMPLATES_ROOT']},
                     'cargo': run([cargo, '--version'], capture_output=True, text=True).stdout.strip(),
                     'rustc': run(['/home/jeremy/.cargo/bin/rustc', '--version'], capture_output=True, text=True).stdout.strip(),
                     'files': {str(p.relative_to(output)): sha(p) for p in sorted(output.rglob('*')) if p.is_file()},

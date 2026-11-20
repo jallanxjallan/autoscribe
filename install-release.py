@@ -86,6 +86,14 @@ def main(stage,expected_manifest):
  for path,target in preflight['expected_links'].items():assert str(Path(path).readlink())==target,path
  for path,digest in preflight['protected_hashes'].items():assert sha(Path(path))==digest,path
  ledger=Path(m['selected_environment']['AUTOSCRIBE_LEDGER_DB'])
+ control=Path(m['selected_environment']['AUTOSCRIBE_CONTROL_DB'])
+ with sqlite3.connect(control.as_uri()+'?mode=ro',uri=True) as db:
+  meta=dict(db.execute('SELECT key,value FROM control_meta'))
+  assert meta['source_commit']==m['revisions']['control'] and meta['schema_version']=='3', 'Control binding changed'
+  labels={row[0] for row in db.execute('SELECT DISTINCT model FROM steps WHERE model IS NOT NULL')}
+  assert labels <= set(m['model_catalogue']) | set(m['model_catalogue'].values()), 'Retired Control model label'
+ native=Path('/opt/autoscribe/services/current').resolve()
+ assert json.loads((native/'manifest.json').read_text())['revisions']['services']==m['revisions']['services'], 'Native Services binding changed'
  quiescent(ledger)
  before={path:table_inventory(Path(path)) for path in preflight['databases']}
  engine=Path(m['installed_engine']);assert not engine.exists()
