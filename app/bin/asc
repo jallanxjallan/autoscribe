@@ -60,7 +60,7 @@ def ingest_stdin(*, prepare_only: bool = False, documents: bool = False) -> int:
                 continue
             result = enqueue_record(record=record, control_db=control_db_path(),
                                     ledger_db=ledger_path(), client=redis_client())
-            receipt = {'schema': 'asc.enqueue-result.v1', 'record_id': result.record_id,
+            receipt = {'schema': 'autoscribe.enqueue-result.v1', 'record_id': result.record_id,
                        'call_id': result.call_id, 'created': result.created}
             if result.failure:
                 receipt.update(status='failed', failure=result.failure)
@@ -141,7 +141,7 @@ def main() -> int:
                 return int(prepared['status']=='failed')
             result = enqueue_record(record=prepared,control_db=control_db_path(),
                                     ledger_db=ledger_path(),client=redis_client())
-            print(json.dumps({'schema':'asc.enqueue-result.v1','call_id':result.call_id,
+            print(json.dumps({'schema':'autoscribe.enqueue-result.v1','call_id':result.call_id,
                               'record_id':result.record_id,'created':result.created,'failure':result.failure}))
             return int(bool(result.failure))
         except Exception as exc:

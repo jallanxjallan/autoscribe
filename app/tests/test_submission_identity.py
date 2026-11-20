@@ -1,5 +1,11 @@
 """Submission-only identity regression tests; no external execution."""
 import copy
+import io
+import json
+import runpy
+from pathlib import Path
+from types import SimpleNamespace
+from contextlib import redirect_stdout
 import hashlib
 import unittest
 import uuid
@@ -12,6 +18,15 @@ from test_preprocess import document
 
 
 class SubmissionIdentityTests(unittest.TestCase):
+    def test_cli_keeps_external_receipt_schema(self):
+        namespace=runpy.run_path(str(Path(__file__).resolve().parents[1]/'bin/asc'))
+        command=namespace['ingest_stdin']
+        receipt=SimpleNamespace(record_id='record',call_id='call',created=True,failure=None)
+        output=io.StringIO()
+        with patch.dict(command.__globals__,enqueue_record=lambda **kwargs:receipt),patch('sys.stdin',io.StringIO('{}\n')),redirect_stdout(output):
+            self.assertEqual(command(),0)
+        self.assertEqual(json.loads(output.getvalue())['schema'],'autoscribe.enqueue-result.v1')
+
     def test_new_operations_generate_opaque_random_uuid4(self):
         identifiers=[new_submission_id() for _ in range(128)]
         self.assertEqual(len(set(identifiers)),128)
