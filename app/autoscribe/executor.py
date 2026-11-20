@@ -4,7 +4,7 @@ import json
 from dataclasses import dataclass
 
 from biznet_common.redis import RedisClient
-from .redis_state import FORENSIC_TTL, WORKER_QUEUE_KEY, load_json
+from .redis_state import FORENSIC_TTL, load_json
 
 
 class ExecutorError(RuntimeError):
@@ -54,7 +54,6 @@ def prepare_step(
     ordinal: int,
     *,
     input_key: str | None = None,
-    queue: bool = True,
 ) -> PreparedExecution:
     content = load_json(client, content_key)
     steps = ordered_steps(content)
@@ -81,18 +80,4 @@ def prepare_step(
         fields["input_key"] = input_key
     client.hset(task_key, fields)
     client.expire(task_key, FORENSIC_TTL)
-    if queue:
-        client.zadd(WORKER_QUEUE_KEY, 0, task_key)
     return PreparedExecution(call_id, task_key, int(ordinal), engine_kind, engine, entrypoint)
-
-
-def prepare_first_step(client: RedisClient, call_id: str, content_key: str) -> PreparedExecution:
-    content = load_json(client, content_key)
-    first = ordered_steps(content)[0]
-    return prepare_step(client, call_id, content_key, int(first["position"]))
-
-
-def next_step_ordinal(content: dict, ordinal: int) -> int | None:
-    positions = [int(step["position"]) for step in ordered_steps(content)]
-    later = [position for position in positions if position > int(ordinal)]
-    return min(later) if later else None

@@ -25,11 +25,8 @@ def stage_assets(references: list[str], work: Path | None) -> list[dict]:
         return []
     if work is None or not work.is_absolute() or not work.is_dir():
         raise PreprocessInfrastructureError('Dropbox assets require the verified SSH job directory')
-    root = Path(os.environ.get('EXTENSIONS_ROOT') or os.environ.get('AUTOSCRIBE_EXTENSIONS_ROOT')
-                or '/opt/autoscribe/extensions/current').resolve()
-    rclone = Path(os.environ.get('AUTOSCRIBE_RCLONE', '/home/jeremy/.local/bin/rclone'))
-    if 'AUTOSCRIBE_RCLONE' not in os.environ and not rclone.is_file():
-        rclone = Path('/usr/bin/rclone')
+    root = Path(os.environ['EXTENSIONS_ROOT']).resolve()
+    rclone = Path(os.environ['AUTOSCRIBE_RCLONE'])
     if not rclone.is_absolute() or not rclone.is_file() or not os.access(rclone, os.X_OK):
         raise PreprocessInfrastructureError('Dropbox rclone dependency unavailable')
     try:

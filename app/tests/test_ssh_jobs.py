@@ -1,90 +1,113 @@
-import hashlib
+"""The selected on-demand lifecycle, without paid providers or external transport."""
 import json
+from contextlib import closing
+import os
+from pathlib import Path
 import sqlite3
 import tempfile
+import threading
 import unittest
-from pathlib import Path
 from unittest.mock import patch
+from types import SimpleNamespace
 from test_enqueue import FakeRedis, make_control, record
-from autoscribe import ssh_jobs as jobs
+from autoscribe import ssh_jobs as jobs, worker
+from biznet_common.llm import LLMError, Response
+
+LAUNCH = jobs.launch
+
 
 class DirectJobsTests(unittest.TestCase):
-    def test_transient_launch_pins_engine_and_selected_nonsecret_dependencies(self):
-        import os
-        import sys
-        from types import SimpleNamespace
-        state={'state':'accepted','call_id':'call_test'}
-        with tempfile.TemporaryDirectory() as td:
-            root=Path(td);one=root/'version-one';two=root/'version-two';one.mkdir();two.mkdir()
-            current=root/'current';current.symlink_to(one,target_is_directory=True)
-            env={'TEMPLATES_ROOT':str(current),'EXTENSIONS_ROOT':str(one),
-                 'AUTOSCRIBE_CONTROL_DB':str(root/'control.sqlite'),
-                 'OPENAI_API_KEY':'must-not-appear-in-argv'}
-            with patch.dict(os.environ,env),patch.object(jobs,'read_job',return_value=state),patch.object(jobs.subprocess,'run',return_value=SimpleNamespace(stdout='not-found')) as run:
-                jobs.launch(root/'ledger.sqlite','00000000-0000-4000-8000-000000000001','a'*64)
-                argv=run.call_args.args[0]
-            self.assertIn(str(Path(jobs.__file__).resolve().parents[1]/'bin/asc'),argv)
-            self.assertIn(sys.executable,argv)
-            self.assertIn('TEMPLATES_ROOT='+str(one),argv)
-            self.assertFalse(any('must-not-appear' in arg for arg in argv))
-            self.assertNotIn('--property=EnvironmentFile=/home/jeremy/.config/autoscribe/autoscribe.env',argv)
-            current.unlink();current.symlink_to(two,target_is_directory=True)
-            self.assertIn('TEMPLATES_ROOT='+str(one),argv)
+    def setUp(self):
+        self.tmp=tempfile.TemporaryDirectory(); self.addCleanup(self.tmp.cleanup)
+        self.root=Path(self.tmp.name); self.control=self.root/'control.sqlite'; self.ledger=self.root/'ledger.sqlite'
+        make_control(self.control); jobs.initialize(self.ledger)
+        self.dispatch='00000000-0000-4000-8000-000000000002'; self.digest='a'*64
+        self.registry=self.root/'registry.json'; self.registry.write_text(json.dumps({'echo':'/usr/bin/cat'}))
+        with closing(sqlite3.connect(self.control)) as db, db:
+            db.execute("INSERT INTO steps VALUES ('stp_2','Second','script','extension',NULL,'echo',NULL,'{}')")
+            db.execute("INSERT INTO plan_steps VALUES ('pln_TEST','stp_2',2)")
+        self.client=FakeRedis()
+        for target in [patch.object(jobs,'ROOT',self.root),
+                       patch.dict(os.environ,{'AUTOSCRIBE_EXTENSION_REGISTRY':str(self.registry)}),
+                       patch.object(jobs,'prepare_dropbox',return_value=json.dumps(record())),
+                       patch.object(jobs,'launch',lambda l,d,h:jobs.read_job(l,d,h))]:
+            target.start(); self.addCleanup(target.stop)
+        self.accepted=jobs.submit(self.control,self.ledger,self.client,self.dispatch,self.digest,'fixture-only')
 
-    def test_execute_once_without_queues_and_acknowledged_cleanup(self):
-        with tempfile.TemporaryDirectory() as td:
-            root=Path(td); control=root/'control.sqlite'; ledger=root/'ledger.sqlite'
-            make_control(control)
-            with sqlite3.connect(control) as db:
-                db.execute("UPDATE steps SET engine_kind='script',engine='extension',model=NULL,script='echo'")
-            registry=root/'registry.json'; registry.write_text(json.dumps({'echo':'/usr/bin/cat'}))
-            dispatch='00000000-0000-4000-8000-000000000003'; package=root/dispatch; package.mkdir()
-            value={'schema':'autoscribe.document.v1','document':'Hello','submission_id':dispatch,'metadata':{'plan':'pln_TEST'},
-                   'baggage':{'client':{}}}
-            data=json.dumps(value).encode(); (package/'request.ndjson').write_bytes(data)
-            manifest=hashlib.sha256(data).hexdigest()+'  request.ndjson\n'
-            (package/'SHA256SUMS').write_text(manifest)
-            digest=hashlib.sha256(manifest.encode()).hexdigest()
-            (package/'.package-sha256').write_text(digest)
-            client=FakeRedis(); jobs.initialize(ledger)
-            with patch.object(jobs,'ROOT',root), patch.object(jobs,'launch',lambda l,d,h:jobs.read_job(l,d,h)), patch.dict('os.environ',{'AUTOSCRIBE_EXTENSION_REGISTRY':str(registry)}):
-                accepted=jobs.submit(control,ledger,client,dispatch,digest)
-                replay=jobs.submit(control,ledger,client,dispatch,digest)
-                self.assertEqual(accepted['call_id'],replay['call_id'])
-                self.assertFalse(client.zsets)
-                with patch.object(jobs,'execute_task',wraps=jobs.execute_task) as engine:
-                    completed=jobs.execute(ledger,client,dispatch,digest)
-                    self.assertEqual(completed['state'],'completed')
-                    jobs.execute(ledger,client,dispatch,digest)
-                    self.assertEqual(engine.call_count,1)
-                self.assertFalse(client.zsets)
-                response=json.loads((package/'response.ndjson').read_text())
-                self.assertEqual(response['result'],'Hello')
-                self.assertEqual(response['result_bytes'],len(response['result'].encode('utf-8')))
-                self.assertEqual(response['result_sha256'],hashlib.sha256(response['result'].encode('utf-8')).hexdigest())
-                self.assertEqual(response['submission_id'],dispatch)
-                self.assertEqual(response['baggage']['client'],value['baggage']['client'])
-                with sqlite3.connect(ledger) as db:
-                    self.assertEqual(db.execute('SELECT count(*) FROM exports').fetchone()[0],1)
-                # A failed status without a failure detail must not become a success.
-                with sqlite3.connect(ledger) as db:
-                    db.execute("UPDATE ssh_jobs SET state='running' WHERE dispatch_id=?",(dispatch,))
-                client.hset(f"response:{accepted['call_id']}:content",{'status':'failed'})
-                completed=jobs.complete_response(ledger,client,jobs.read_job(ledger,dispatch,digest))
-                self.assertEqual(json.loads((package/'response.ndjson').read_text())['status'],'failed')
-                retained=(package/'response.ndjson').read_bytes()
-                with sqlite3.connect(ledger) as db:
-                    db.execute("UPDATE ssh_jobs SET state='running' WHERE dispatch_id=?",(dispatch,))
-                client.hset(f"response:{accepted['call_id']}:content",{'status':'running'})
-                with self.assertRaisesRegex(ValueError,'not terminal'):
-                    jobs.complete_response(ledger,client,jobs.read_job(ledger,dispatch,digest))
-                self.assertEqual((package/'response.ndjson').read_bytes(),retained)
-                with sqlite3.connect(ledger) as db:
-                    db.execute("UPDATE ssh_jobs SET state='completed' WHERE dispatch_id=?",(dispatch,))
-                with self.assertRaises(ValueError): jobs.cleanup(ledger,dispatch,digest,'0'*64)
-                jobs.cleanup(ledger,dispatch,digest,completed['response_sha256'])
-                self.assertFalse(package.exists())
-                self.assertEqual(jobs.cleanup(ledger,dispatch,digest,completed['response_sha256'])['state'],'cleaned')
-                self.assertEqual(jobs.submit(control,ledger,client,dispatch,digest)['state'],'cleaned')
+    def execute(self): return jobs.execute(self.ledger,self.client,self.dispatch,self.digest)
+    def response(self): return json.loads((self.root/self.dispatch/'response.ndjson').read_text())
+    def provider(self): return Response('GENERATED','OpenAI','gpt-5.6-luna','completed','response','request',{'tokens':1})
 
-if __name__=='__main__': unittest.main()
+    def test_claim_chaining_delivery_replay_and_receipt(self):
+        with patch.object(worker,'respond',return_value=self.provider()) as provider:
+            self.assertEqual(self.execute()['state'],'completed')
+            self.execute()
+            jobs.submit(self.control,self.ledger,self.client,self.dispatch,self.digest,'fixture-only')
+            self.assertEqual(provider.call_count,1)
+            self.assertEqual(provider.call_args.args[2],'Hello')
+        self.assertEqual(self.response()['result'],'GENERATED')
+        self.assertEqual(self.response()['submission_id'],self.dispatch)
+        self.assertFalse(self.client.zsets)
+        state=jobs.read_job(self.ledger,self.dispatch,self.digest)
+        with self.assertRaises(ValueError): jobs.cleanup(self.ledger,self.dispatch,self.digest,'0'*64)
+        self.assertEqual(jobs.cleanup(self.ledger,self.dispatch,self.digest,state['response_sha256'])['state'],'cleaned')
+        self.assertEqual(jobs.cleanup(self.ledger,self.dispatch,self.digest,state['response_sha256'])['state'],'cleaned')
+
+    def test_provider_uncertainty_is_terminal_and_never_repeated(self):
+        with patch.object(worker,'respond',side_effect=LLMError('audit','timeout','Provider execution status is unknown')) as provider:
+            self.assertEqual(self.execute()['state'],'completed')
+            self.assertEqual(self.response()['status'],'failed')
+            self.assertIn('unknown',self.response()['error'])
+            self.execute(); self.assertEqual(provider.call_count,1)
+
+    def test_process_crash_after_claim_never_repeats_provider(self):
+        with patch.object(worker,'respond',side_effect=SystemExit('interrupted')) as provider:
+            with self.assertRaises(SystemExit):self.execute()
+            self.assertEqual(self.execute()['state'],'running')
+            self.assertEqual(provider.call_count,1)
+
+    def test_interrupted_delivery_recovers_without_execution(self):
+        with patch.object(worker,'respond',return_value=self.provider()) as provider:
+            with patch.object(jobs,'response_file',side_effect=OSError('interrupted delivery')):
+                with self.assertRaises(OSError):self.execute()
+            self.assertEqual(self.execute()['state'],'completed')
+            self.assertEqual(provider.call_count,1)
+            self.assertEqual(self.response()['result'],'GENERATED')
+
+    def test_concurrent_duplicate_claim_executes_once(self):
+        entered=threading.Event();release=threading.Event();errors=[]
+        def provider(*args,**kwargs):
+            entered.set()
+            if not release.wait(5):raise AssertionError('claim test timed out')
+            return self.provider()
+        def first():
+            try:self.execute()
+            except BaseException as exc:errors.append(exc)
+        with patch.object(worker,'respond',side_effect=provider) as invoke:
+            thread=threading.Thread(target=first);thread.start()
+            try:
+                self.assertTrue(entered.wait(5))
+                self.assertEqual(self.execute()['state'],'running')
+            finally:release.set();thread.join(5)
+            self.assertFalse(thread.is_alive());self.assertEqual(errors,[]);self.assertEqual(invoke.call_count,1)
+
+    def test_accepted_job_rejects_changed_release(self):
+        with patch.dict(os.environ,{'AUTOSCRIBE_EXTENSION_REGISTRY':str(self.root/'another.json')}):
+            with patch.object(worker,'respond') as provider:
+                with self.assertRaisesRegex(ValueError,'refuse rebind'):self.execute()
+                provider.assert_not_called()
+
+    def test_transient_launch_pins_selected_executable_without_credentials(self):
+        engine=self.root/'selected-engine';engine.mkdir()
+        binding=self.root/self.dispatch/'execution-release.json';binding.unlink()
+        with patch.dict(os.environ,{'AUTOSCRIBE_RELEASE_ROOT':str(engine),'OPENAI_API_KEY':'synthetic-secret'}):
+            jobs.bind_release(self.dispatch)
+            with patch.object(jobs.subprocess,'run',return_value=SimpleNamespace(stdout='not-found')) as run:
+                LAUNCH(self.ledger,self.dispatch,self.digest)
+            argv=run.call_args.args[0]
+        self.assertIn(str(engine/'bin/asc'),argv)
+        self.assertIn('AUTOSCRIBE_RELEASE_ROOT='+str(engine),argv)
+        self.assertFalse(any('synthetic-secret' in v for v in argv))
+        self.assertNotIn('--property=EnvironmentFile=/home/jeremy/.config/autoscribe/autoscribe.env',argv)
+
+if __name__=='__main__':unittest.main()

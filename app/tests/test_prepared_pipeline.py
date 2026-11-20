@@ -82,7 +82,7 @@ class PreparedPipelineTests(IsolatedRedisCase):
         replay=self.cli('ingest',payload=json.dumps(value)+'\n')
         self.assertEqual(replay.returncode,0,replay.stderr)
         self.assertFalse(json.loads(replay.stdout)['created'])
-        self.assertEqual(self.client.zrange(EXECUTOR_QUEUE_KEY,0,-1),[cid])
+        self.assertEqual(self.client.zrange(EXECUTOR_QUEUE_KEY,0,-1),[])
         # Synthetic response verifies transport only; no model or worker runs.
         key=f'response:{cid}:content';self.client.hset(key,{'content':'Synthetic response'})
         record_response(self.ledger,cid,key)

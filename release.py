@@ -16,6 +16,26 @@ NATIVE = ('srv-output', 'srv-writeback', 'srv-control-ingest', 'srv-plan-select'
 RETIRED = ('srv-export', 'srv-input')
 
 
+def launcher(installed, selection, revisions):
+    """The selected CLI verifies its own immutable payload before importing it."""
+    return ('#!/opt/autoscribe/.venv/bin/python -I\n'
+            'import hashlib, json, os, sys\nfrom pathlib import Path\n'
+            'def require(value, message):\n    if not value: raise RuntimeError(message)\n'
+            f'root = Path({str(installed)!r})\n'
+            'manifest = json.loads((root / "manifest.json").read_text())\n'
+            f'require(manifest["revisions"] == {revisions!r}, "release revision mismatch")\n'
+            'prefix = root.name + "/"\n'
+            'for name, digest in manifest["files"].items():\n'
+            '    if name.startswith(prefix):\n'
+            '        path = root / name[len(prefix):]\n'
+            '        require(path.resolve().is_relative_to(root), "release path escape")\n'
+            '        require(hashlib.sha256(path.read_bytes()).hexdigest() == digest, str(path))\n'
+            'for path, digest in manifest["resource_files"].items():\n'
+            '    require(hashlib.sha256(Path(path).read_bytes()).hexdigest() == digest, path)\n'
+            f'os.environ.update({selection!r})\n'
+            f'os.execv(sys.executable, [sys.executable, "-I", "-B", {str(installed / "app/bin/asc")!r}, *sys.argv[1:]])\n')
+
+
 def run(command, **kwargs):
     return subprocess.run([str(x) for x in command], check=True, **kwargs)
 
@@ -121,14 +141,17 @@ def main():
         engine.mkdir()
         shutil.copytree(extracted['autoscribe'] / 'app', engine / 'app')
         shutil.copytree(extracted['common'] / 'python/biznet_common', engine / 'app/biznet_common')
-        shutil.copytree(extracted['autoscribe'] / 'extensions', engine / 'extensions')
+        (engine / 'extensions').mkdir()
+        shutil.copy2(extracted['extensions'] / 'registry.json', engine / 'extensions/registry.json')
+        shutil.copytree(extracted['extensions'] / 'scripts', engine / 'extensions/scripts')
         registry = relocate_registry(engine, installed)
         (engine / 'bin').mkdir()
         cargo = Path(shutil.which('cargo') or '/home/jeremy/.cargo/bin/cargo')
         target = Path('/tmp/autoscribe-qualified-services-target')
         run([cargo, 'build', '--release', '--offline', '--locked', '--manifest-path',
              extracted['services'] / 'Cargo.toml', '--target-dir', target,
-             *[part for name in NATIVE for part in ('--bin', name)]])
+             *[part for name in NATIVE for part in ('--bin', name)]],
+            env=dict(os.environ, RUSTFLAGS='--remap-path-prefix='+str(extracted['services'])+'=/src/autoscribe-services'))
         for name in NATIVE:
             shutil.copy2(target / 'release' / name, engine / 'bin' / name)
         selection = {
@@ -141,9 +164,8 @@ def main():
             'AUTOSCRIBE_PANDOC': '/home/jeremy/.local/bin/pandoc',
             'AUTOSCRIBE_RCLONE': '/home/jeremy/.local/bin/rclone',
         }
-        wrapper = '#!/opt/autoscribe/.venv/bin/python\nimport os, sys\n'
-        wrapper += 'os.environ.update('+repr(selection)+')\n'
-        wrapper += 'os.execv(sys.executable, [sys.executable, '+repr(str(installed / 'app/bin/asc'))+', *sys.argv[1:]])\n'
+        selection['AUTOSCRIBE_RELEASE_ROOT'] = str(installed)
+        wrapper = launcher(installed, selection, revisions)
         (engine / 'bin/asc').write_text(wrapper)
         (engine / 'bin/asc').chmod(0o755)
         client_release = output / ('client-'+revisions['client'][:12])
@@ -153,12 +175,14 @@ def main():
         config.mkdir()
         shutil.copy2(output / 'control-source.tar', config / 'control-source.tar')
         policy = temporary / 'control-policy.toml'
-        policy.write_text('[paths]\nrepo_roots=['+json.dumps(str(sources['control'].parent))+']\neffect_key_file='+json.dumps(str(temporary/'unused-effect.key'))+'\n')
+        control_repo = temporary / 'control.git'
+        git(sources['control'], 'clone', '--bare', str(sources['control']), str(control_repo))
+        policy.write_text('[paths]\nrepo_roots=['+json.dumps(str(temporary))+']\neffect_key_file='+json.dumps(str(temporary/'unused-effect.key'))+'\n')
         adapter = temporary / 'git.py'
         adapter.write_text('#!/usr/bin/python3\nimport os, sys\nos.execv("/usr/bin/python3", ["/usr/bin/python3", '+repr(str(args.git_adapter))+', *sys.argv[1:]])\n')
         adapter.chmod(0o755)
         run([engine / 'bin/srv-control-ingest', '--policy', policy,
-             '--repo', sources['control'] / '.git', '--commit', revisions['control'],
+             '--repo', control_repo, '--commit', revisions['control'],
              '--db', config / 'control.sqlite'], env=dict(os.environ, VAULT_GIT_ADAPTER=str(adapter)))
         script_dependencies = validate_catalogue_scripts(config / 'control.sqlite', registry, installed, engine)
         (config / 'manifest.json').write_text(json.dumps({'source_commit': revisions['control'],
@@ -179,6 +203,13 @@ def main():
                     'revisions': revisions, 'installed_engine': str(installed),
                     'selected_environment': selection, 'native_binaries': list(NATIVE), 'script_dependencies': script_dependencies,
                     'runtime_dependencies': json.loads(args.runtime_inventory.read_text()),
+                    'source_provenance': {name: {'commit': revisions[name],
+                        'repository': git(source, 'remote', 'get-url', 'origin'),
+                        'archive_sha256': sha(output / (name+'-source.tar'))}
+                        for name, source in sources.items()},
+                    'resource_files': {str(Path(selection['EXTENSIONS_ROOT' if name=='extensions' else 'TEMPLATES_ROOT']) / p.relative_to(extracted[name])): sha(p)
+                        for name in ('extensions','templates') for p in sorted(extracted[name].rglob('*')) if p.is_file()},
+                    'protocols': {'prepared': 'autoscribe.prepared.v2', 'response': 'autoscribe.client-response.v1'},
                     'cargo': run([cargo, '--version'], capture_output=True, text=True).stdout.strip(),
                     'rustc': run(['/home/jeremy/.cargo/bin/rustc', '--version'], capture_output=True, text=True).stdout.strip(),
                     'files': {str(p.relative_to(output)): sha(p) for p in sorted(output.rglob('*')) if p.is_file()},

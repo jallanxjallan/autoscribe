@@ -50,8 +50,3 @@ def materialize_call(client: redis.RedisClient, call_id: str, content: dict, bag
     store_json(client, content_key, content)
     store_json(client, baggage_key, baggage)
     return MaterializedCall(call_id=call_id, content_key=content_key, baggage_key=baggage_key)
-
-
-def enqueue_call(client: redis.RedisClient, call_id: str) -> None:
-    # Queue membership is the execution fact; there is no mutable call state flag.
-    client.zadd(EXECUTOR_QUEUE_KEY, 0, call_id)

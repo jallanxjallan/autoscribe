@@ -1,7 +1,7 @@
 import unittest
 from pathlib import Path
 
-from autoscribe.executor import next_step_ordinal, prepare_first_step, prepare_step
+from autoscribe.executor import prepare_step
 from autoscribe.redis_state import WORKER_QUEUE_KEY, materialize_call, load_json
 
 
@@ -41,17 +41,6 @@ class ExecutorTests(unittest.TestCase):
         self.assertEqual(result.content, preceding)
         self.assertNotEqual(result.content, original['input']['content'])
 
-    def test_first_and_next_step_are_queued_by_ordinal(self):
-        redis = FakeRedis()
-        call = materialize_call(redis, "01TEST", content(), {"autoscribe_return": {}})
-        ready = prepare_first_step(redis, "01TEST", call.content_key)
-        self.assertEqual((ready.ordinal, ready.engine_kind, ready.engine, ready.entrypoint), (1, "llm", "chatgpt", "luna"))
-        self.assertNotIn("input_key", redis.hashes[ready.task_key])
-        self.assertIn(ready.task_key, redis.zsets[WORKER_QUEUE_KEY])
-        self.assertEqual(next_step_ordinal(load_json(redis, call.content_key), 1), 2)
-        ready2 = prepare_step(redis, "01TEST", call.content_key, 2, input_key="result:01TEST:1:content")
-        self.assertEqual(redis.hashes[ready2.task_key]["input_key"], "result:01TEST:1:content")
-        self.assertIsNone(next_step_ordinal(load_json(redis, call.content_key), 2))
 
 
 if __name__ == "__main__": unittest.main()

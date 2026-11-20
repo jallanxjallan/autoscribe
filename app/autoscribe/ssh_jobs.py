@@ -66,15 +66,15 @@ def launch_environment():
     copied into process arguments. These assignments contain only runtime policy
     paths, roots and limits; env applies them after systemd's environment files.
     """
-    keys = ('AUTOSCRIBE_CONTROL_DB', 'AUTOSCRIBE_LEDGER_DB',
+    keys = ('AUTOSCRIBE_RELEASE_ROOT', 'AUTOSCRIBE_CONTROL_DB', 'AUTOSCRIBE_LEDGER_DB',
             'AUTOSCRIBE_REDIS_HOST', 'AUTOSCRIBE_REDIS_PORT',
             'AUTOSCRIBE_EXTENSION_REGISTRY', 'AUTOSCRIBE_EXTENSION_TIMEOUT_SECONDS',
             'AUTOSCRIBE_LLM_TIMEOUT_SECONDS', 'AUTOSCRIBE_PANDOC',
-            'TEMPLATES_ROOT', 'EXTENSIONS_ROOT', 'AUTOSCRIBE_EXTENSIONS_ROOT',
+            'TEMPLATES_ROOT', 'EXTENSIONS_ROOT',
             'DROPBOX_ASSET_ROOT', 'AUTOSCRIBE_RCLONE')
-    paths = {'AUTOSCRIBE_CONTROL_DB', 'AUTOSCRIBE_LEDGER_DB',
+    paths = {'AUTOSCRIBE_RELEASE_ROOT', 'AUTOSCRIBE_CONTROL_DB', 'AUTOSCRIBE_LEDGER_DB',
              'AUTOSCRIBE_EXTENSION_REGISTRY', 'AUTOSCRIBE_PANDOC',
-             'TEMPLATES_ROOT', 'EXTENSIONS_ROOT', 'AUTOSCRIBE_EXTENSIONS_ROOT',
+             'TEMPLATES_ROOT', 'EXTENSIONS_ROOT',
              'AUTOSCRIBE_RCLONE'}
     values = []
     for key in keys:
@@ -94,6 +94,7 @@ def launch(ledger, dispatch, digest):
     state = read_job(ledger, dispatch, digest)
     if state['state'] != 'accepted':
         return state
+    verify_release(dispatch)
     # Stable unit name + ledger claim protect a lost systemd/SSH acknowledgment.
     unit = 'asc-' + state['call_id']
     loaded = subprocess.run(['/usr/bin/systemctl', '--user', 'show', unit, '-p', 'LoadState', '--value'],
@@ -103,9 +104,38 @@ def launch(ledger, dispatch, digest):
                         '--property=UMask=0077',
                         SYSTEMD_CREDENTIAL_PROPERTY,
                         '/usr/bin/env', *launch_environment(), sys.executable,
-                        str(ASC), 'job', 'execute', dispatch, digest],
+                        str(Path(os.environ['AUTOSCRIBE_RELEASE_ROOT']) / 'bin/asc'), 'job', 'execute', dispatch, digest],
                        check=True, capture_output=True, text=True, timeout=30)
     return read_job(ledger, dispatch, digest)
+
+
+def release_binding():
+    """Pin executable and dependency selection; never resolve another release."""
+    return {'executable': str(ASC.resolve()), 'python': sys.executable,
+            'environment': launch_environment()}
+
+
+def bind_release(dispatch):
+    path = ROOT / dispatch / 'execution-release.json'
+    data = json.dumps(release_binding(), sort_keys=True, separators=(',', ':'))
+    try:
+        with path.open('x') as stream:
+            stream.write(data)
+            stream.flush()
+            os.fsync(stream.fileno())
+        fd = os.open(path.parent, os.O_RDONLY)
+        try:
+            os.fsync(fd)
+        finally:
+            os.close(fd)
+    except FileExistsError:
+        verify_release(dispatch)
+
+
+def verify_release(dispatch):
+    path = ROOT / dispatch / 'execution-release.json'
+    if path.is_symlink() or json.loads(path.read_text()) != release_binding():
+        raise ValueError('Job belongs to a different pinned release; refuse rebind')
 
 
 def source_envelope(dispatch, files):
@@ -189,7 +219,8 @@ def submit(control, ledger, client, dispatch, digest, location):
 def resume(ledger, client, dispatch, digest, state):
     if state['state'] in ('completed', 'cleaned'):
         return state
-    if client.hgetall(f"response:{state['call_id']}:content").get('failure'):
+    verify_release(dispatch)
+    if 'content' in client.hgetall(f"response:{state['call_id']}:content"):
         return complete_response(ledger, client, state)
     return launch(ledger, dispatch, digest)
 
@@ -199,7 +230,8 @@ def accept_dropbox(control, ledger, client, dispatch, digest, location, path):
     if state['state'] != 'absent':
         return resume(ledger, client, dispatch, digest, state)
     record = json.loads(prepare_dropbox(dispatch, digest, location, path))
-    result = enqueue_record(record=record, control_db=control, ledger_db=ledger, client=client, queue=False)
+    bind_release(dispatch)
+    result = enqueue_record(record=record, control_db=control, ledger_db=ledger, client=client)
     with closing(connect(ledger)) as db, db:
         db.execute('INSERT OR IGNORE INTO ssh_jobs (dispatch_id,record_id,call_id,package_sha256,state,accepted_at,error) VALUES (?,?,?,?,?,?,?)',
                    (dispatch, result.record_id, result.call_id, digest,
@@ -271,7 +303,8 @@ def execute(ledger, client, dispatch, digest):
     prior = read_job(ledger, dispatch, digest)
     if prior['state'] in ('absent', 'completed', 'cleaned'):
         return prior
-    if client.hgetall(f"response:{prior['call_id']}:content").get('failure'):
+    verify_release(dispatch)
+    if 'content' in client.hgetall(f"response:{prior['call_id']}:content"):
         return complete_response(ledger, client, prior)
     # Commit running BEFORE executing any extension/LLM. Never automatically
     # repeat a running/failed job whose remote side effects may be uncertain.
@@ -284,10 +317,13 @@ def execute(ledger, client, dispatch, digest):
     try:
         keys = load_call_keys(ledger, state['call_id'])
         content = load_json(client, keys['content'])
-        registry = load_registry(Path(os.environ.get('AUTOSCRIBE_EXTENSION_REGISTRY', '/opt/autoscribe/extensions/registry.json')))
+        registry_path = Path(os.environ['AUTOSCRIBE_EXTENSION_REGISTRY'])
+        if not registry_path.is_absolute():
+            raise ValueError('Pinned extension registry must be absolute')
+        registry = load_registry(registry_path)
         input_key = None
         for step in ordered_steps(content):
-            prepared = prepare_step(client, state['call_id'], keys['content'], int(step['position']), input_key=input_key, queue=False)
+            prepared = prepare_step(client, state['call_id'], keys['content'], int(step['position']), input_key=input_key)
             result = execute_task(client, prepared.task_key, registry,
                                   script_timeout=float(os.environ.get('AUTOSCRIBE_EXTENSION_TIMEOUT_SECONDS', '30')),
                                   llm_timeout=float(os.environ.get('AUTOSCRIBE_LLM_TIMEOUT_SECONDS', '120')))

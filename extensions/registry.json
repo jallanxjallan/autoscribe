@@ -1,4 +1,0 @@
-{
-  "prepend-seen": "/opt/autoscribe/extensions/prepend-seen.py",
-  "smoke-test": "/opt/autoscribe/extensions/smoke-test.py"
-}

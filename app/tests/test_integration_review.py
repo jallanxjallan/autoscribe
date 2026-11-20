@@ -18,12 +18,6 @@ from test_prepared_pipeline import IsolatedRedisCase
 from test_preprocess import document
 
 
-def daemon(name, environment):
-    path=Path(__file__).resolve().parents[1]/'daemon'/f'{name}.py'
-    spec=importlib.util.spec_from_file_location(f'review_{name}',path)
-    module=importlib.util.module_from_spec(spec)
-    with patch.dict(os.environ,environment):spec.loader.exec_module(module)
-    return module
 
 
 class ReviewBoundaryTests(IsolatedRedisCase):
@@ -64,12 +58,6 @@ class ReviewBoundaryTests(IsolatedRedisCase):
         self.assertFalse(repeated.created)
         self.assertEqual(repeated.call_id,result.call_id)
 
-    def test_uuid_cannot_switch_execution_driver_after_acceptance(self):
-        record=prepare(document())
-        direct=enqueue_record(record=record,control_db=self.control,ledger_db=self.ledger,client=self.client,queue=False)
-        with self.assertRaisesRegex(EnqueueError,'different input'):self.enqueue(record)
-        self.assertEqual(self.client.zrange(EXECUTOR_QUEUE_KEY,0,-1),[])
-        self.assertEqual(load_json(self.client,direct.content_key)['submission_id'],record['submission_id'])
 
     def test_redis_and_ledger_failure_retry_keep_one_call_and_do_not_execute(self):
         record=prepare(document())
@@ -89,39 +77,7 @@ class ReviewBoundaryTests(IsolatedRedisCase):
         with sqlite3.connect(self.ledger) as db:
             self.assertEqual(db.execute('SELECT count(*) FROM calls').fetchone()[0],1)
 
-    def test_stale_executor_and_worker_snapshots_cannot_repeat_a_step(self):
-        registry=self.script_plan()
-        receipt=self.enqueue(prepare(document()))
-        executor=daemon('executord',self.env);worker=daemon('workerd',self.env)
-        with patch.object(self.client,'zrange',return_value=[receipt.call_id]),patch.object(executor,'prepare_first_step',wraps=executor.prepare_first_step) as prepare_first:
-            executor.process_active(self.client)
-            task=f'task:{receipt.call_id}:1'
-            with patch.object(self.client,'zrange',return_value=[task]),patch.object(worker,'execute_task',wraps=worker.execute_task) as execute:
-                worker.process_ready(self.client,registry)
-                worker.process_ready(self.client,registry)
-                self.assertEqual(execute.call_count,1)
-            executor.process_active(self.client)
-            self.assertEqual(prepare_first.call_count,1)
-        self.assertEqual(self.client.zrange(WORKER_QUEUE_KEY,0,-1),[])
-        self.assertEqual(self.client.hgetall(f'response:{receipt.call_id}:content')['content'],'Body\n')
 
-    def test_queued_execution_failure_has_response_and_never_requeues(self):
-        registry=self.script_plan('/usr/bin/false')
-        receipt=self.enqueue(prepare(document()))
-        executor=daemon('executord',self.env);worker=daemon('workerd',self.env)
-        executor.process_active(self.client)
-        with patch.object(worker,'execute_task',wraps=worker.execute_task) as execute:
-            worker.process_ready(self.client,registry)
-            self.assertFalse(self.enqueue(prepare(document())).created)
-            executor.process_active(self.client);worker.process_ready(self.client,registry)
-            self.assertEqual(execute.call_count,1)
-        response=self.cli('response',receipt.call_id)
-        self.assertEqual(json.loads(response.stdout)['status'],'failed')
-        self.assertTrue(json.loads(response.stdout)['failure'])
-        self.assertTrue(json.loads(response.stdout)['error'])
-        self.assertEqual(self.client.zrange(EXECUTOR_QUEUE_KEY,0,-1),[])
-        self.assertEqual(self.client.zrange(WORKER_QUEUE_KEY,0,-1),[])
-        self.assertEqual(len(list(iter_pending_records(self.ledger,self.client))),1)
 
     def test_failed_driver_diagnostics_retain_uuid_but_not_previous_line_identity(self):
         identifier=str(uuid.uuid4());record=prepare(document(submission=identifier))

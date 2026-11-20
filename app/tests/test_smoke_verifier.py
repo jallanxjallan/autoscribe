@@ -1,13 +1,14 @@
 from pathlib import Path
 import importlib.util
 import json
+import os
 import sqlite3
 import subprocess
 import tempfile
 import unittest
 
 ROOT = Path(__file__).resolve().parents[2]
-SCRIPT = ROOT / 'extensions/smoke-test.py'
+SCRIPT = Path(os.environ['EXTENSIONS_ROOT']) / 'scripts/smoke-test.py'
 VALID = b'AUTOSCRIBE_LLM_SMOKE_V1\nROLE=PASS\nCONTEXT=PASS\nTASK=PASS\nINPUT=AUTOSCRIBE_SMOKE_INPUT_V1'
 
 

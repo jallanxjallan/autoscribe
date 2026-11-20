@@ -28,9 +28,6 @@ class TaskResult:
     content: str
 
 
-# Retain the old public name for callers that imported it directly.
-ExtensionResult = TaskResult
-
 
 def load_registry(path: Path) -> dict[str, Path]:
     try:

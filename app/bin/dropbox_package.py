@@ -1,6 +1,7 @@
 """Fetch and verify a manifest-last Dropbox source collection."""
 import hashlib
 import json
+import os
 import re
 import subprocess
 from pathlib import Path
@@ -18,8 +19,9 @@ def _hash(data):
 
 
 def _read(remote, limit):
-    local = Path.home() / ".local/bin/rclone"
-    rclone = local if local.is_file() else Path("/usr/bin/rclone")
+    rclone = Path(os.environ["AUTOSCRIBE_RCLONE"])
+    if not rclone.is_absolute() or not rclone.is_file():
+        raise ValueError("Pinned AUTOSCRIBE_RCLONE executable required")
     result = subprocess.run(
         [str(rclone), "cat", remote, "--count", str(limit + 1),
          "--retries", "1", "--low-level-retries", "1"],

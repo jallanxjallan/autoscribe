@@ -143,14 +143,14 @@ def prepare(envelope: object, *, work_dir: Path | None = None, require_dispatch:
         if len(canonical(sidecar))>32768: raise ValueError('External metadata exceeds sidecar limit')
         if 'path' in source: sidecar['path']=source['path']
         if filename is not None: sidecar['original_filename']=filename
-        templates = Path(os.environ.get('TEMPLATES_ROOT', '/opt/autoscribe/templates/current')).resolve()
+        templates = Path(os.environ['TEMPLATES_ROOT']).resolve()
         catalog = json.loads((templates/'resources.json').read_text(encoding='utf-8'))
         if catalog.get('schema')!='shared.resources.v1': raise ValueError('Unsupported resource catalogue')
         relative = Path(catalog['pandoc']['autoscribe-ingest'])
         defaults = (templates/relative).resolve(strict=True)
         defaults.relative_to(templates)
         if relative.is_absolute(): raise ValueError('Unsafe Pandoc defaults resource')
-        executable = Path(os.environ.get('AUTOSCRIBE_PANDOC', '/usr/bin/pandoc'))
+        executable = Path(os.environ['AUTOSCRIBE_PANDOC'])
         if not executable.is_absolute(): raise ValueError('Pandoc executable must be absolute')
         # Hex makes the namespaced metadata immune to Markdown string parsing.
         # Command-line metadata has precedence over untrusted document metadata.

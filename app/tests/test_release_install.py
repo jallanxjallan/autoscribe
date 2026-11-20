@@ -41,3 +41,26 @@ class ReleaseRootTests(unittest.TestCase):
             with patch.object(module.os, 'chown'), self.assertRaises(PermissionError):
                 module.extract(archive, rejected, deny_runtime)
             self.assertFalse(rejected.exists())
+
+class SelectionTests(unittest.TestCase):
+    def test_selected_launcher_checks_payload_and_resources_before_import(self):
+        import hashlib,json,sys
+        spec=importlib.util.spec_from_file_location('release',ROOT/'release.py')
+        release=importlib.util.module_from_spec(spec);spec.loader.exec_module(release)
+        with tempfile.TemporaryDirectory() as td:
+            root=Path(td)/'selected';(root/'app/bin').mkdir(parents=True);(root/'bin').mkdir()
+            app=root/'app/bin/asc';app.write_text('print("selected-only")\n')
+            resource=Path(td)/'resource';resource.write_text('pinned')
+            revisions={'autoscribe':'a'*40};selection={}
+            wrapper=root/'bin/asc';wrapper.write_text(release.launcher(root,selection,revisions))
+            sha=lambda p:hashlib.sha256(p.read_bytes()).hexdigest()
+            manifest={'revisions':revisions,'files':{root.name+'/app/bin/asc':sha(app),root.name+'/bin/asc':sha(wrapper)},'resource_files':{str(resource):sha(resource)}}
+            (root/'manifest.json').write_text(json.dumps(manifest))
+            cp=subprocess.run([sys.executable,'-I','-B',str(wrapper)],capture_output=True,text=True)
+            self.assertEqual(cp.returncode,0,cp.stderr);self.assertEqual(cp.stdout.strip(),'selected-only')
+            resource.write_text('drift')
+            cp=subprocess.run([sys.executable,'-I','-B',str(wrapper)],capture_output=True,text=True)
+            self.assertNotEqual(cp.returncode,0);self.assertEqual(cp.stdout,'')
+            resource.write_text('pinned');app.write_text('print("tampered")\n')
+            cp=subprocess.run([sys.executable,'-I','-B',str(wrapper)],capture_output=True,text=True)
+            self.assertNotEqual(cp.returncode,0);self.assertEqual(cp.stdout,'')

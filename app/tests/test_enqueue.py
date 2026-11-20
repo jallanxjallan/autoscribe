@@ -54,13 +54,13 @@ def record(content="Hello"):
 
 
 class EnqueueTests(unittest.TestCase):
-    def test_enqueue_materializes_and_queues_call(self):
+    def test_enqueue_materializes_without_resident_queue(self):
         with tempfile.TemporaryDirectory() as td:
             control = Path(td) / "control.sqlite"; ledger = Path(td) / "ledger.sqlite"; make_control(control)
             redis = FakeRedis()
             result = enqueue_record(record=record(), control_db=control, ledger_db=ledger, client=redis)
             self.assertTrue(result.created)
-            self.assertIn(result.call_id, redis.zsets[EXECUTOR_QUEUE_KEY])
+            self.assertFalse(redis.zsets)
             self.assertIn(result.content_key, redis.hashes)
             self.assertIn(result.baggage_key, redis.hashes)
 
@@ -69,14 +69,14 @@ class EnqueueTests(unittest.TestCase):
             control = Path(td) / "control.sqlite"; ledger = Path(td) / "ledger.sqlite"; make_control(control)
             redis = FakeRedis()
             first = enqueue_record(record=record(), control_db=control, ledger_db=ledger, client=redis)
-            redis.zsets[EXECUTOR_QUEUE_KEY].clear()
+            redis.zsets.clear()
             redis.hashes.pop(f"enqueue:{first.call_id}")  # durable SQLite receipt survives Redis eviction
             before = dict(redis.hashes)
             control.unlink()  # retry must not depend on a changed/deleted plan
             again = enqueue_record(record=record(), control_db=control, ledger_db=ledger, client=redis)
             self.assertEqual(first.call_id, again.call_id)
             self.assertFalse(again.created)
-            self.assertFalse(redis.zsets[EXECUTOR_QUEUE_KEY])
+            self.assertFalse(redis.zsets)
             self.assertEqual(redis.hashes, before)
 
     def test_record_id_collision_fails_before_redis_mutation(self):

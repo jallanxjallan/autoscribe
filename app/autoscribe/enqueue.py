@@ -135,10 +135,10 @@ def register_failure(ledger_db: Path, client: RedisClient, call_id: str, content
 
 
 def enqueue_record(*, record: dict, control_db: Path, ledger_db: Path, client: RedisClient,
-                   queue: bool = True) -> EnqueueResult:
+                   ) -> EnqueueResult:
     record_id,plan_id=validate_input_record(record)
     call_id=record['call_id'];failure=record.get('failure',{}).get('code')
-    fingerprint=hashlib.sha256(json.dumps({'record':record,'execution_mode':'queued' if queue else 'direct'},sort_keys=True,ensure_ascii=False,separators=(',',':')).encode()).hexdigest()
+    fingerprint=hashlib.sha256(json.dumps({'record':record,'execution_mode':'direct'},sort_keys=True,ensure_ascii=False,separators=(',',':')).encode()).hexdigest()
     ensure_schema(ledger_db)
     with closing(connect(ledger_db)) as db,db:
         db.execute('CREATE TABLE IF NOT EXISTS enqueue_inputs (record_id TEXT PRIMARY KEY, fingerprint TEXT NOT NULL, call_id TEXT NOT NULL UNIQUE, queued INTEGER NOT NULL DEFAULT 0)')
@@ -181,12 +181,12 @@ def enqueue_record(*, record: dict, control_db: Path, ledger_db: Path, client: R
         redis.call('PERSIST',KEYS[2])
         redis.call('HSET',KEYS[3],'json',ARGV[3])
         redis.call('PERSIST',KEYS[3])
-        if ARGV[6]=='1' then redis.call('ZADD',KEYS[4],0,ARGV[5]) end
+
         redis.call('SET',KEYS[1],ARGV[1])
         return 1
         ''',4,marker,content_key,baggage_key,EXECUTOR_QUEUE_KEY,fingerprint,
         json.dumps(content,ensure_ascii=False),json.dumps(record['baggage'],ensure_ascii=False),
-        FORENSIC_TTL,call_id,int(queue and not failure))
+        FORENSIC_TTL,call_id,0)
     if not created:
         content=load_json(client,content_key)
         failure=content.get('failure')
