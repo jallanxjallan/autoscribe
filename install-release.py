@@ -71,6 +71,9 @@ def verify_payload(stage, manifest):
   assert source['commit']==manifest['revisions'][name]
   assert sha(stage/(name+'-source.tar'))==source['archive_sha256']
  assert manifest['selected_environment']['AUTOSCRIBE_EXTENSION_REGISTRY']==str(Path(manifest['installed_engine'])/'extensions/registry.json')
+ assert manifest['protocols']['runtime']=='asc.call.v1' and manifest['protocols']['component']=='asc.component.v1'
+ assert manifest['release_id']+'/app/asc/models/call.py' in manifest['files']
+ assert not any(name.startswith(manifest['release_id']+'/app/autoscribe/') for name in manifest['files'])
  for retired in ('app/daemon/workerd.py','app/daemon/executord.py'):
   assert manifest['release_id']+'/'+retired not in manifest['files'], retired
 

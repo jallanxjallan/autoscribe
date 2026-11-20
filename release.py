@@ -157,6 +157,7 @@ def main():
         selection = {
             'AUTOSCRIBE_CONTROL_DB': '/var/lib/autoscribe/control.sqlite',
             'AUTOSCRIBE_LEDGER_DB': '/home/jeremy/Data/ledger.sql',
+            'AUTOSCRIBE_RUNTIME_RETENTION_SECONDS': str(runpy.run_path(str(extracted['autoscribe'] / 'app/asc/settings.py'))['retention_seconds']()),
             'AUTOSCRIBE_REDIS_HOST': '127.0.0.1', 'AUTOSCRIBE_REDIS_PORT': '6379',
             'AUTOSCRIBE_EXTENSION_REGISTRY': str(installed / 'extensions/registry.json'),
             'TEMPLATES_ROOT': '/opt/autoscribe/templates/releases/'+revisions['templates'],
@@ -208,7 +209,7 @@ def main():
                         for name, source in sources.items()},
                     'resource_files': {str(Path(selection['EXTENSIONS_ROOT' if name=='extensions' else 'TEMPLATES_ROOT']) / p.relative_to(extracted[name])): sha(p)
                         for name in ('extensions','templates') for p in sorted(extracted[name].rglob('*')) if p.is_file()},
-                    'protocols': {'prepared': 'autoscribe.prepared.v2', 'response': 'autoscribe.client-response.v1'},
+                    'protocols': {'prepared': 'autoscribe.prepared.v2', 'response': 'autoscribe.client-response.v1', 'component': 'asc.component.v1', 'step_result': 'asc.step-result.v1', 'runtime': 'asc.call.v1'},
                     'model_catalogue': dict(runpy.run_path(str(extracted['common'] / 'python/biznet_common/llm.py'))['MODELS']),
                     'capability_bindings': {'autoscribe': str(installed),
                         'native_services': {'selection': '/opt/autoscribe/services/current', 'commit': revisions['services']},

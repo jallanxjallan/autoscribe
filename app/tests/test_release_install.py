@@ -68,7 +68,7 @@ class SelectionTests(unittest.TestCase):
 class AdmissionGateTests(unittest.TestCase):
     def test_pending_or_unowned_work_blocks_activation(self):
         import sqlite3
-        from autoscribe.ssh_jobs import initialize
+        from asc.ssh_jobs import initialize
         spec=importlib.util.spec_from_file_location('installer_gate',ROOT/'install-release.py')
         installer=importlib.util.module_from_spec(spec);spec.loader.exec_module(installer)
         with tempfile.TemporaryDirectory() as td:

@@ -8,7 +8,7 @@ import subprocess
 import unittest
 from unittest.mock import patch
 
-from autoscribe.preprocess import prepare, reader_for
+from asc.preprocess import prepare, reader_for
 
 
 def document(body='Body\n', *, metadata=None, source=None, submission='00000000-0000-4000-8000-000000000002'):
@@ -108,7 +108,7 @@ class PreprocessTests(unittest.TestCase):
         catalog=SimpleNamespace(ResourceCatalog=SimpleNamespace(extensions=lambda root:SimpleNamespace(resolve=lambda *args:Path('/tmp/handler.py'))))
         references=['/home/jeremy/Dropbox/Art/a.png','dropbox:Art/b.png']
         raw='---\nplan: pln_TEST\nassets: '+json.dumps(references)+'\n---\nBody ![image](external-link.png)\n'
-        with tempfile.TemporaryDirectory() as directory,patch('autoscribe.assets._module',side_effect=[catalog,SimpleNamespace(DropboxAssetHandler=Handler)]),patch.dict(os.environ,{'AUTOSCRIBE_RCLONE':'/usr/bin/true'}):
+        with tempfile.TemporaryDirectory() as directory,patch('asc.assets._module',side_effect=[catalog,SimpleNamespace(DropboxAssetHandler=Handler)]),patch.dict(os.environ,{'AUTOSCRIBE_RCLONE':'/usr/bin/true'}):
             out=prepare(document(raw),work_dir=Path(directory))
         self.assertEqual(out['status'],'ready',out)
         self.assertEqual(out['content'],raw)
@@ -121,7 +121,7 @@ class PreprocessTests(unittest.TestCase):
         captured=[]
         def capture(*args,**kwargs):
             completed=real_run(*args,**kwargs);captured.append(completed);return completed
-        with patch('autoscribe.preprocess.subprocess.run',side_effect=capture) as run:
+        with patch('asc.preprocess.subprocess.run',side_effect=capture) as run:
             out=prepare(document())
         self.assertEqual(out['status'],'ready',out)
         self.assertEqual(run.call_count,1)
@@ -133,7 +133,7 @@ class PreprocessTests(unittest.TestCase):
 
     def test_structured_failures_retain_source_and_content(self):
         value=document('Original bytes\r\n',source={'path':'Notes/original.md'})
-        with patch('autoscribe.preprocess.subprocess.run',side_effect=OSError('Pandoc unavailable')):
+        with patch('asc.preprocess.subprocess.run',side_effect=OSError('Pandoc unavailable')):
             out=prepare(value)
         self.assertEqual(out['failure']['code'],'pandoc_execution')
         self.assertEqual(out['content'],value['document'])
@@ -145,7 +145,7 @@ class PreprocessTests(unittest.TestCase):
         self.assertEqual(prepare(value)['failure']['code'],'invalid_envelope')
         malformed=document('---\nnot: [valid\n---\nBody')
         self.assertEqual(prepare(malformed)['failure']['code'],'pandoc_execution')
-        with patch('autoscribe.preprocess.subprocess.run',return_value=subprocess.CompletedProcess([],0,b'{}',b'')):
+        with patch('asc.preprocess.subprocess.run',return_value=subprocess.CompletedProcess([],0,b'{}',b'')):
             self.assertEqual(prepare(document())['failure']['code'],'serialization')
 
 

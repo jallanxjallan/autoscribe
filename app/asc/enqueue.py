@@ -7,15 +7,17 @@ import hashlib
 import json
 from pathlib import Path
 import re
+import os
+
+from .settings import retention_seconds, release_identity
 
 from .control import materialize_plan, UnknownPlanError
 from .ids import validate_submission_id
 from .ledger import connect, ensure_schema, record_call, record_response
 from biznet_common.redis import RedisClient
-from .redis_state import EXECUTOR_QUEUE_KEY, FORENSIC_TTL, load_json
+from .models.call import Call, Source, Plan, ErrorInfo, RuntimeStore, MissingRecord, ConcurrentUpdate, digest
 
 INPUT_SCHEMA = 'autoscribe.prepared.v2'
-CALL_SCHEMA = 'autoscribe.call-content.v2'
 
 
 class EnqueueError(ValueError):
@@ -27,8 +29,7 @@ class EnqueueResult:
     record_id: str
     call_id: str
     created: bool
-    content_key: str
-    baggage_key: str
+    runtime_key: str
     failure: str | None = None
 
 
@@ -39,7 +40,7 @@ def validate_input_record(record: object) -> tuple[str, str | None]:
         encoded=json.dumps(record, ensure_ascii=False, allow_nan=False).encode('utf-8')
     except (ValueError, TypeError, UnicodeError) as exc:
         raise EnqueueError('Invalid prepared serialization') from exc
-    if len(encoded)>=2097152: raise EnqueueError('Prepared record exceeds transport limit')
+    if len(encoded)>=4194304: raise EnqueueError('Prepared record exceeds transport limit')
     patterns={'record_id':r'inp_[0-9a-f]{32}', 'call_id':r'(?:call_[0-9a-f]{40}|failed_[0-9a-f]{64})',
               'submission_id':r'[0-9a-f-]{36}'}
     for key, pattern in patterns.items():
@@ -49,7 +50,7 @@ def validate_input_record(record: object) -> tuple[str, str | None]:
         validate_submission_id(record['submission_id'])
     except ValueError as exc:
         raise EnqueueError(str(exc)) from exc
-    if set(record)-set('schema record_id call_id submission_id status plan source baggage content content_sha256 source_format metadata directives asset_references assets references staged_assets failure diagnostic_envelope'.split()):
+    if set(record)-set('schema record_id call_id submission_id status plan source baggage content content_sha256 original_text source_format metadata directives asset_references assets references staged_assets failure diagnostic_envelope'.split()):
         raise EnqueueError('Unknown prepared field')
     identity=record['submission_id'].encode('utf-8')
     if record['record_id']!='inp_'+hashlib.sha256(identity).hexdigest()[:32]:
@@ -80,6 +81,13 @@ def validate_input_record(record: object) -> tuple[str, str | None]:
         raise EnqueueError('Invalid prepared content')
     if record.get('content_sha256')!=hashlib.sha256(content.encode('utf-8')).hexdigest():
         raise EnqueueError('input content_sha256 does not match content')
+    if 'original_text' not in record or (record['original_text'] is not None and not isinstance(record['original_text'], str)):
+        raise EnqueueError('Prepared original_text is required')
+    if not failed and record['original_text'] is None:
+        raise EnqueueError('Ready call requires original source')
+    original_hash=client.get('raw_markdown_sha256')
+    if original_hash is not None and (record['original_text'] is None or digest(record['original_text'])!=original_hash):
+        raise EnqueueError('Original source checksum mismatch')
     if failed:
         failure=record.get('failure')
         if not isinstance(failure,dict) or not all(isinstance(failure.get(k),str) and failure[k] for k in ('code','message')):
@@ -115,82 +123,58 @@ def validate_input_record(record: object) -> tuple[str, str | None]:
     return record['record_id'],record.get('plan')
 
 
-def build_call_content(record: dict, plan: dict) -> dict:
-    result={'schema':CALL_SCHEMA,'record_id':record['record_id'],'call_id':record['call_id'],
-            'submission_id':record['submission_id'],'source':record['source'],
-            'routing':{'plan_id':record.get('plan')},'plan':plan,
-            'input':{'content':record['content'],'content_sha256':record['content_sha256'],
-                     'content_format':record['source_format'],'directive_policy':'inline.v1'}}
-    for key in ('metadata','directives','assets','references','asset_references','staged_assets'):
-        if key in record: result['input'][key]=record[key]
-    if record['status']=='failed':
-        result.update(failure=record['failure']['code'],failure_reason=record['failure']['message'])
-    return result
+
+def register_failure(ledger_db: Path, client: RedisClient, call_id: str, error: ErrorInfo) -> None:
+    call=Call.load(call_id,client)
+    call.evolve(error=error.model_dump()).save(client)
+    record_response(ledger_db,call_id,RuntimeStore.key(call_id))
 
 
-def register_failure(ledger_db: Path, client: RedisClient, call_id: str, content: dict) -> None:
-    key=f'response:{call_id}:content'
-    client.hset(key,{'status':'failed','content':'','failure':content['failure'],'error':content['failure_reason']})
-    record_response(ledger_db,call_id,key)
-
-
-def enqueue_record(*, record: dict, control_db: Path, ledger_db: Path, client: RedisClient,
-                   ) -> EnqueueResult:
+def enqueue_record(*, record: dict, control_db: Path, ledger_db: Path, client: RedisClient) -> EnqueueResult:
     record_id,plan_id=validate_input_record(record)
-    call_id=record['call_id'];failure=record.get('failure',{}).get('code')
-    fingerprint=hashlib.sha256(json.dumps({'record':record,'execution_mode':'direct'},sort_keys=True,ensure_ascii=False,separators=(',',':')).encode()).hexdigest()
+    call_id=record['call_id']
+    fingerprint=hashlib.sha256(json.dumps(record,sort_keys=True,ensure_ascii=False,separators=(',',':')).encode()).hexdigest()
     ensure_schema(ledger_db)
     with closing(connect(ledger_db)) as db,db:
         db.execute('CREATE TABLE IF NOT EXISTS enqueue_inputs (record_id TEXT PRIMARY KEY, fingerprint TEXT NOT NULL, call_id TEXT NOT NULL UNIQUE, queued INTEGER NOT NULL DEFAULT 0)')
         db.execute('BEGIN IMMEDIATE')
         row=db.execute('SELECT * FROM enqueue_inputs WHERE record_id=?',(record_id,)).fetchone()
-        if row:
-            if row['fingerprint']!=fingerprint or row['call_id']!=call_id:
-                raise EnqueueError('record_id already belongs to different input')
-        else:
-            db.execute('INSERT INTO enqueue_inputs(record_id,fingerprint,call_id) VALUES (?,?,?)',(record_id,fingerprint,call_id))
-    content_key=f'call:{call_id}:content';baggage_key=f'call:{call_id}:baggage';marker=f'enqueue:{call_id}'
-    if row and row['queued']:
-        failure=load_json(client,content_key).get('failure')
-        return EnqueueResult(record_id,call_id,False,content_key,baggage_key,failure)
-    prior=client.command('GET',marker)
-    if prior is not None and prior!=fingerprint: raise EnqueueError('enqueue marker collision')
-    if prior==fingerprint:
-        content=load_json(client,content_key)
-        failure=content.get('failure')
-        if failure: register_failure(ledger_db,client,call_id,content)
-        with closing(connect(ledger_db)) as db,db:
-            db.execute('UPDATE enqueue_inputs SET queued=1 WHERE record_id=?',(record_id,))
-        return EnqueueResult(record_id,call_id,False,content_key,baggage_key,failure)
-    # Existing Control authority resolves the explicit ID; no plan discovery here.
+        if row and (row['fingerprint']!=fingerprint or row['call_id']!=call_id):
+            raise EnqueueError('record_id already belongs to different input')
+        if not row:db.execute('INSERT INTO enqueue_inputs(record_id,fingerprint,call_id) VALUES (?,?,?)',(record_id,fingerprint,call_id))
+    key=RuntimeStore.key(call_id)
     try:
-        plan={} if failure else materialize_plan(control_db,plan_id)
-    except UnknownPlanError as exc:
-        record=dict(record,status='failed',failure={'code':'unknown_plan','message':str(exc)})
-        failure='unknown_plan'
-        plan={}
-    content=build_call_content(record,plan)
-    record_call(ledger_db,call_id,{'content':content_key,'baggage':baggage_key})
-    created=client.command('EVAL', '''
-        local prior=redis.call('GET',KEYS[1])
-        if prior then
-            if prior~=ARGV[1] then return redis.error_reply('enqueue collision') end
-            return 0
-        end
-        redis.call('HSET',KEYS[2],'json',ARGV[2])
-        redis.call('PERSIST',KEYS[2])
-        redis.call('HSET',KEYS[3],'json',ARGV[3])
-        redis.call('PERSIST',KEYS[3])
-
-        redis.call('SET',KEYS[1],ARGV[1])
-        return 1
-        ''',4,marker,content_key,baggage_key,EXECUTOR_QUEUE_KEY,fingerprint,
-        json.dumps(content,ensure_ascii=False),json.dumps(record['baggage'],ensure_ascii=False),
-        FORENSIC_TTL,call_id,0)
-    if not created:
-        content=load_json(client,content_key)
-        failure=content.get('failure')
-    if failure: register_failure(ledger_db,client,call_id,content)
-    with closing(connect(ledger_db)) as db,db:
-        db.execute('UPDATE enqueue_inputs SET queued=1 WHERE record_id=?',(record_id,))
-    return EnqueueResult(record_id,call_id,bool(created),content_key,baggage_key,failure)
+        previous=Call.load(call_id,client)
+    except MissingRecord:
+        # A durable intake reservation never authorizes reconstruction of lost payloads.
+        if row and row['queued']:raise
+    else:
+        if previous.fingerprint!=fingerprint:raise EnqueueError('Call already belongs to different input')
+        record_call(ledger_db,call_id,{'runtime':key})
+        if previous.error:record_response(ledger_db,call_id,key)
+        with closing(connect(ledger_db)) as db,db:db.execute('UPDATE enqueue_inputs SET queued=1 WHERE record_id=?',(record_id,))
+        return EnqueueResult(record_id,call_id,False,key,previous.error.code if previous.error else None)
+    error=ErrorInfo(code=record['failure']['code'],message=record['failure']['message'],stage='ingest') if record['status']=='failed' else None
+    plan=None
+    if error is None:
+        try:plan=materialize_plan(control_db,plan_id)
+        except UnknownPlanError as exc:error=ErrorInfo(code='unknown_plan',message=str(exc),stage='control')
+    original=record['original_text']
+    call=Call(identity=call_id,submission_id=record['submission_id'],record_id=record_id,
+        release_id=release_identity(),fingerprint=fingerprint,requested_plan_id=plan_id,retention_period_seconds=retention_seconds(),
+        source=Source(original_text=original,original_sha256=digest(original) if original is not None else None,
+            processing_text=record['content'],processing_sha256=record['content_sha256'],
+            identity=record['source'].get('slug'),format=record['source_format'],coordination=record['source'],
+            metadata=record.get('metadata',{}),assets=record.get('assets',[]),
+            resources={k:record[k] for k in ('references','directives','asset_references','staged_assets') if k in record}),
+        plan=plan,baggage=record['baggage'],error=error)
+    created=True
+    try:call.save(client)
+    except ConcurrentUpdate:
+        call=Call.load(call_id,client)
+        if call.fingerprint!=fingerprint:raise EnqueueError('Concurrent intake collision')
+        created=False
+    record_call(ledger_db,call_id,{'runtime':key})
+    if call.error:record_response(ledger_db,call_id,key)
+    with closing(connect(ledger_db)) as db,db:db.execute('UPDATE enqueue_inputs SET queued=1 WHERE record_id=?',(record_id,))
+    return EnqueueResult(record_id,call_id,created,key,call.error.code if call.error else None)

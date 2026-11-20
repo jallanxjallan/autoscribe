@@ -50,7 +50,7 @@ def prepare(envelope: object, *, work_dir: Path | None = None, require_dispatch:
     """Return one complete prepared success/failure. Never reconstruct Markdown."""
     original = copy.deepcopy(envelope)
     result = {'schema': SCHEMA, 'status': 'failed', 'content': '', 'content_sha256': digest(b''),
-              'source': {}, 'baggage': {}, 'source_format': 'markdown', 'metadata': {},
+              'original_text': None, 'source': {}, 'baggage': {}, 'source_format': 'markdown', 'metadata': {},
               'directives': [], 'asset_references': [], 'assets': [], 'references': []}
     submission = None
     def failure(code: str, message: str) -> dict:
@@ -69,6 +69,8 @@ def prepare(envelope: object, *, work_dir: Path | None = None, require_dispatch:
     try:
         if not isinstance(envelope, dict):
             raise ValueError('Document envelope must be an object')
+        submitted=envelope.get('raw_markdown') if envelope.get('schema')=='autoscribe.input.v3' else envelope.get('document',envelope.get('content'))
+        if isinstance(submitted,str):result['original_text']=submitted
         if len(canonical(envelope)) >= MAX_RECORD:
             raise ValueError('Document envelope exceeds transport limit')
         if isinstance(envelope.get('source'), dict): result['source']=copy.deepcopy(envelope['source'])
@@ -101,6 +103,7 @@ def prepare(envelope: object, *, work_dir: Path | None = None, require_dispatch:
         raw = envelope.get('raw_markdown') if envelope['schema']=='autoscribe.input.v3' else envelope.get('document', envelope.get('content'))
         if not isinstance(raw, str):
             return failure('missing_document', 'Document content must be UTF-8 text')
+        result['original_text'] = raw
         data = raw.encode('utf-8')
         if len(data)>MAX_DOCUMENT:
             raise ValueError('Document exceeds transport limit')

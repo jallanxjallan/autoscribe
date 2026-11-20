@@ -66,8 +66,8 @@ def record_call(path: Path, call_id: str, keys: dict[str, str]) -> bool:
     """
     if not call_id:
         raise LedgerError("call_id is required")
-    if set(keys) != {"content", "baggage"} or any(not value for value in keys.values()):
-        raise LedgerError("call requires exactly content and baggage Redis keys")
+    if set(keys) != {"runtime"} or any(not value for value in keys.values()):
+        raise LedgerError("call requires exactly one canonical runtime reference")
     ensure_schema(path)
     with closing(connect(path)) as db, db:
         cur = db.execute("INSERT OR IGNORE INTO calls(call_id) VALUES (?)", (call_id,))
@@ -85,21 +85,6 @@ def record_call(path: Path, call_id: str, keys: dict[str, str]) -> bool:
         if actual != keys:
             raise LedgerError(f"call {call_id} already resolves to different Redis keys")
         return created
-
-
-def load_call_keys(path: Path, call_id: str) -> dict[str, str]:
-    ensure_schema(path)
-    with closing(connect(path)) as db, db:
-        rows = db.execute(
-            "SELECT role, redis_key FROM call_keys WHERE call_id = ?",
-            (call_id,),
-        ).fetchall()
-    if not rows:
-        raise LedgerError(f"unknown call_id: {call_id}")
-    keys = {str(row["role"]): str(row["redis_key"]) for row in rows}
-    if set(keys) != {"content", "baggage"}:
-        raise LedgerError(f"call {call_id} has incomplete Redis key references")
-    return keys
 
 
 def _record_single_key_fact(path: Path, table: str, call_id: str, redis_key: str) -> bool:
@@ -151,11 +136,8 @@ def pending_exports(path: Path) -> list[dict]:
             """
             SELECT r.call_id,
                    r.redis_key AS response_key,
-                   b.redis_key AS baggage_key,
                    r.created_at AS response_created_at
             FROM responses r
-            JOIN call_keys b
-              ON b.call_id = r.call_id AND b.role = 'baggage'
             LEFT JOIN exports e ON e.call_id = r.call_id
             WHERE e.call_id IS NULL
             ORDER BY r.created_at, r.call_id

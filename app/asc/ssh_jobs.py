@@ -16,10 +16,9 @@ from biznet_common.llm import SYSTEMD_CREDENTIAL_PROPERTY
 
 from .enqueue import enqueue_record, register_failure, validate_input_record
 from .ids import validate_submission_id
-from .executor import ordered_steps, prepare_step
-from .ledger import connect, ensure_schema, load_call_keys
-from .redis_state import load_json, FORENSIC_TTL
-from .worker import execute_task, load_registry, persist_step_result, persist_redis_response
+from .ledger import connect, ensure_schema, record_response, record_export
+from .models.call import Call, ErrorInfo, Receipt, RuntimeStore, MissingRecord
+from .worker import execute as execute_component, load_registry
 
 ROOT = Path('/home/jeremy/incoming')
 ASC = Path(__file__).resolve().parents[1] / 'bin/asc'
@@ -67,7 +66,7 @@ def launch_environment():
     paths, roots and limits; env applies them after systemd's environment files.
     """
     keys = ('AUTOSCRIBE_RELEASE_ROOT', 'AUTOSCRIBE_CONTROL_DB', 'AUTOSCRIBE_LEDGER_DB',
-            'AUTOSCRIBE_REDIS_HOST', 'AUTOSCRIBE_REDIS_PORT',
+            'AUTOSCRIBE_REDIS_HOST', 'AUTOSCRIBE_REDIS_PORT', 'AUTOSCRIBE_RUNTIME_RETENTION_SECONDS',
             'AUTOSCRIBE_EXTENSION_REGISTRY', 'AUTOSCRIBE_EXTENSION_TIMEOUT_SECONDS',
             'AUTOSCRIBE_LLM_TIMEOUT_SECONDS', 'AUTOSCRIBE_PANDOC',
             'TEMPLATES_ROOT', 'EXTENSIONS_ROOT',
@@ -188,7 +187,7 @@ def source_envelope(dispatch, files):
 
 
 def prepare_dropbox(dispatch, digest, location, path):
-    from dropbox_package import retrieve
+    from .dropbox_package import retrieve
     from .preprocess import prepare, canonical
     envelope = source_envelope(dispatch, retrieve('dispatch', dispatch, digest, location, 4_194_304))
     record = prepare(envelope, work_dir=path,
@@ -220,7 +219,7 @@ def resume(ledger, client, dispatch, digest, state):
     if state['state'] in ('completed', 'cleaned'):
         return state
     verify_release(dispatch)
-    if 'content' in client.hgetall(f"response:{state['call_id']}:content"):
+    if Call.load(state['call_id'],client).terminal:
         return complete_response(ledger, client, state)
     return launch(ledger, dispatch, digest)
 
@@ -264,92 +263,70 @@ def complete_response(ledger, client, state):
     """
     if state['state'] in ('completed', 'cleaned'):
         return state
-    call_id = state['call_id']
-    key = f'response:{call_id}:content'
-    response = client.hgetall(key)
-    if 'content' not in response:
-        raise ValueError('Committed response unavailable')
-    status = 'failed' if 'failure' in response else response.get('status', 'completed')
-    if status not in ('completed', 'failed'):
-        raise ValueError('Response is not terminal')
-    keys = load_call_keys(ledger, call_id)
-    baggage = load_json(client, keys['baggage'])
-    record = {'schema': 'autoscribe.client-response.v1', 'call_id': call_id,
-              'status': status,
-              'result': response['content'], 'baggage': baggage,
-              'result_bytes': len(response['content'].encode('utf-8')),
-              'result_sha256': hashlib.sha256(response['content'].encode('utf-8')).hexdigest()}
-    content = load_json(client, keys['content'])
-    record['submission_id'] = content['submission_id']
-    if 'metadata' in content.get('input', {}):
-        record.update(source=content['source'], routing=content['routing'],
-                      metadata=content['input']['metadata'])
-    if 'failure' in response:
-        record.update(failure=response['failure'], error=response.get('error') or response['failure'] or 'terminal_response_failed')
-    path = ROOT / state['dispatch_id']
-    checksum = response_file(path, record)
-    receipt = 'export:' + call_id + ':receipt'
-    client.hset(receipt, {'kind': 'ssh', 'target': str(path / 'response.ndjson'), 'result_sha256': checksum})
-    client.expire(receipt, FORENSIC_TTL)
-    with closing(connect(ledger)) as db, db:
-        db.execute('INSERT OR IGNORE INTO responses(call_id,redis_key) VALUES (?,?)', (call_id, key))
-        db.execute('INSERT OR IGNORE INTO exports(call_id,redis_key) VALUES (?,?)', (call_id, receipt))
-        db.execute("UPDATE ssh_jobs SET state='completed',response_sha256=?,completed_at=? WHERE dispatch_id=?",
-                   (checksum, time.time(), state['dispatch_id']))
-    return read_job(ledger, state['dispatch_id'], state['package_sha256'])
+    call_id=state['call_id']
+    call=Call.load(call_id,client)
+    if not call.terminal:raise ValueError('Response is not terminal')
+    record=call.response_record(client_protocol=True)
+    path=ROOT/state['dispatch_id']
+    checksum=response_file(path,record)
+    call.evolve(receipt=Receipt(kind='ssh',target=str(path/'response.ndjson'),checksum=checksum).model_dump()).save(client)
+    key=RuntimeStore.key(call_id)
+    record_response(ledger,call_id,key)
+    record_export(ledger,call_id,key)
+    with closing(connect(ledger)) as db,db:
+        db.execute("UPDATE ssh_jobs SET state='completed',response_sha256=?,completed_at=? WHERE dispatch_id=?",(checksum,time.time(),state['dispatch_id']))
+    return read_job(ledger,state['dispatch_id'],state['package_sha256'])
 
 
 def execute(ledger, client, dispatch, digest):
-    prior = read_job(ledger, dispatch, digest)
-    if prior['state'] in ('absent', 'completed', 'cleaned'):
-        return prior
+    prior=read_job(ledger,dispatch,digest)
+    if prior['state'] in ('absent','completed','cleaned'):return prior
     verify_release(dispatch)
-    if 'content' in client.hgetall(f"response:{prior['call_id']}:content"):
-        return complete_response(ledger, client, prior)
-    # Commit running BEFORE executing any extension/LLM. Never automatically
-    # repeat a running/failed job whose remote side effects may be uncertain.
-    with closing(connect(ledger)) as db, db:
-        changed = db.execute("UPDATE ssh_jobs SET state='running',started_at=? WHERE dispatch_id=? AND package_sha256=? AND state='accepted'",
-                             (time.time(), dispatch, digest)).rowcount
-    if not changed:
-        return read_job(ledger, dispatch, digest)
-    state = read_job(ledger, dispatch, digest)
+    call=Call.load(prior['call_id'],client)
+    if call.terminal:return complete_response(ledger,client,prior)
+    with closing(connect(ledger)) as db,db:
+        changed=db.execute("UPDATE ssh_jobs SET state='running',started_at=? WHERE dispatch_id=? AND package_sha256=? AND state='accepted'",(time.time(),dispatch,digest)).rowcount
+    if not changed:return read_job(ledger,dispatch,digest)
+    state=read_job(ledger,dispatch,digest)
     try:
-        keys = load_call_keys(ledger, state['call_id'])
-        content = load_json(client, keys['content'])
-        registry_path = Path(os.environ['AUTOSCRIBE_EXTENSION_REGISTRY'])
-        if not registry_path.is_absolute():
-            raise ValueError('Pinned extension registry must be absolute')
-        registry = load_registry(registry_path)
-        input_key = None
-        for step in ordered_steps(content):
-            prepared = prepare_step(client, state['call_id'], keys['content'], int(step['position']), input_key=input_key)
-            result = execute_task(client, prepared.task_key, registry,
-                                  script_timeout=float(os.environ.get('AUTOSCRIBE_EXTENSION_TIMEOUT_SECONDS', '30')),
-                                  llm_timeout=float(os.environ.get('AUTOSCRIBE_LLM_TIMEOUT_SECONDS', '120')))
-            input_key = persist_step_result(client, result)
+        registry_path=Path(os.environ['AUTOSCRIBE_EXTENSION_REGISTRY'])
+        if not registry_path.is_absolute():raise ValueError('Pinned registry must be absolute')
+        registry=load_registry(registry_path)
+        for step in call.plan.ordered_steps:
+            current=Call.load(call.identity,client)
+            result=execute_component(current.invocation(step.position),client,registry,
+                script_timeout=float(os.environ.get('AUTOSCRIBE_EXTENSION_TIMEOUT_SECONDS','30')),
+                llm_timeout=float(os.environ.get('AUTOSCRIBE_LLM_TIMEOUT_SECONDS','120')))
+            if result.error:
+                current=Call.load(call.identity,client)
+                current.evolve(error=result.error.model_dump(),final_position=step.position).save(client)
+                break
+        else:
+            Call.load(call.identity,client).evolve(final_position=step.position).save(client)
     except Exception as exc:
-        update(ledger, dispatch, 'failed', error=str(exc), completed_at=time.time())
-        register_failure(ledger, client, state['call_id'],
-            {'failure':'execution_failed','failure_reason':str(exc)})
-        return complete_response(ledger, client, read_job(ledger,dispatch,digest))
-    persist_redis_response(client, result)
-    return complete_response(ledger, client, state)
+        update(ledger,dispatch,'failed',error=str(exc),completed_at=time.time())
+        register_failure(ledger,client,call.identity,ErrorInfo(code=type(exc).__name__,message=str(exc) or type(exc).__name__,stage='execution'))
+    return complete_response(ledger,client,state)
 
 
-def cleanup(ledger, dispatch, digest, checksum):
-    state = read_job(ledger, dispatch, digest)
-    if state['state'] == 'cleaned' and state['response_sha256'] == checksum:
-        return state
-    if state['state'] != 'completed' or state['response_sha256'] != checksum:
+def cleanup(ledger, dispatch, digest, checksum, client):
+    state=read_job(ledger,dispatch,digest)
+    if state['state'] not in ('completed','cleaned') or state['response_sha256']!=checksum:
         raise ValueError('Cleanup requires acknowledged completed response')
-    path = ROOT / dispatch
+    try:call=Call.load(state['call_id'],client)
+    except MissingRecord:
+        if state['state']!='cleaned':raise
+        return state
+    if call.receipt is None or call.receipt.checksum!=checksum:raise ValueError('Runtime receipt mismatch')
+    path=ROOT/dispatch
     if path.exists():
-        if hashlib.sha256((path / 'response.ndjson').read_bytes()).hexdigest() != checksum:
-            raise ValueError('Response changed before cleanup')
+        if hashlib.sha256((path/'response.ndjson').read_bytes()).hexdigest()!=checksum:raise ValueError('Response changed before cleanup')
         shutil.rmtree(path)
-    update(ledger, dispatch, 'cleaned')
-    return read_job(ledger, dispatch, digest)
+    # Commit the durable acknowledgement before imposing expiry. Retry finishes
+    # a Redis failure after this commit, without resetting an existing deadline.
+    update(ledger,dispatch,'cleaned')
+    call.retain_after_cleanup(client)
+    return read_job(ledger,dispatch,digest)
 
 
 def command(args, control, ledger, client):
@@ -365,6 +342,6 @@ def command(args, control, ledger, client):
     if operation == 'execute' and len(args) == 3:
         return execute(ledger, client, dispatch, digest)
     if operation == 'cleanup' and len(args) == 4:
-        state = cleanup(ledger, dispatch, digest, args[3])
+        state = cleanup(ledger, dispatch, digest, args[3], client)
         return state
     raise ValueError('Invalid asc job operation')

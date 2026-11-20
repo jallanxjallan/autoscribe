@@ -7,7 +7,7 @@ from typing import Iterator
 
 from .ledger import pending_exports, record_export
 from biznet_common.redis import RedisClient
-from .redis_state import FORENSIC_TTL, load_json
+from .models.call import Call, Receipt, RuntimeStore
 
 
 class EffectsError(RuntimeError):
@@ -18,16 +18,10 @@ def pending_count(path: Path) -> int:
     return len(pending_exports(path))
 
 
-def build_pending_record(client: RedisClient, *, call_id: str, baggage_key: str) -> dict:
-    baggage = load_json(client, baggage_key)
-    if not isinstance(baggage, dict):
-        raise EffectsError(f"invalid baggage record: {baggage_key}")
-    return {
-        "schema": "autoscribe.effect-pending.v1",
-        "submission_id": load_json(client, f"call:{call_id}:content")["submission_id"],
-        "call_id": call_id,
-        "baggage": baggage,
-    }
+def build_pending_record(client: RedisClient, *, call_id: str) -> dict:
+    call=Call.load(call_id,client)
+    return {'schema':'autoscribe.effect-pending.v1','submission_id':call.submission_id,
+            'call_id':call.identity,'baggage':call.baggage}
 
 
 def iter_pending_records(path: Path, client: RedisClient) -> Iterator[dict]:
@@ -35,7 +29,6 @@ def iter_pending_records(path: Path, client: RedisClient) -> Iterator[dict]:
         yield build_pending_record(
             client,
             call_id=str(row["call_id"]),
-            baggage_key=str(row["baggage_key"]),
         )
 
 
@@ -48,8 +41,7 @@ def iter_pending_ndjson(path: Path, client: RedisClient) -> Iterator[str]:
             record = build_pending_record(
                 client,
                 call_id=call_id,
-                baggage_key=str(row["baggage_key"]),
-            )
+                )
         except Exception as exc:
             record = {
                 "schema": "autoscribe.effect-pending-error.v1",
@@ -96,12 +88,14 @@ def mark_exported(
 
     fields.update(submission_id=receipt['submission_id'],call_id=receipt['call_id'],baggage=json.dumps(receipt['baggage'],ensure_ascii=False))
     if receipt['call_id']!=call_id:raise EffectsError('Receipt call identity mismatch')
-    if receipt['submission_id']!=load_json(client,f"call:{call_id}:content")['submission_id']:
+    if receipt['submission_id']!=Call.load(call_id,client).submission_id:
         raise EffectsError('Receipt submission identity mismatch')
-    original=load_json(client,f"call:{call_id}:baggage")
+    call=Call.load(call_id,client)
+    original=call.baggage
     if receipt['baggage']!=original:raise EffectsError('Receipt baggage mismatch')
-    key = f"export:{call_id}:receipt"
-    client.hset(key, fields)
-    client.expire(key, FORENSIC_TTL)
-    created = record_export(path, call_id, key)
+    key=RuntimeStore.key(call_id)
+    call.evolve(receipt=Receipt(kind=receipt['kind'],target=receipt['target'],checksum=receipt['effect_key'],details=receipt).model_dump()).save(client)
+    created=record_export(path,call_id,key)
+    # Signed effect acknowledgement is the terminal cleanup condition for this route.
+    Call.load(call_id,client).retain_after_cleanup(client)
     return key, created

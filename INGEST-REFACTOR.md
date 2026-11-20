@@ -59,3 +59,7 @@ launch boundary is replaced by local verified-package/receipt delivery. No paid
 models, real manuscripts, migration/cutover, release packaging, deployment or
 service activation is included. The final architecture correction report contains
 exact commits, component counts, integration evidence and remaining limits.
+
+## Package B canonical handoff
+
+The prepared v2 handoff now requires `original_text` (explicit null only for failures with no submitted source), independently of processing `content`. Native document/input and client response NDJSON schema names remain unchanged. Intake validates original bytes/checksums and creates only the `asc.call.v1` canonical Pydantic aggregate. No older prepared record lacking original source is inferred or migrated. Runtime persistence and script contracts are documented in README.md; the old split Redis content/baggage model is retired.

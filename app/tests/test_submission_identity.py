@@ -5,9 +5,9 @@ import unittest
 import uuid
 from unittest.mock import patch
 
-from autoscribe.ids import new_submission_id, validate_submission_id
-from autoscribe.preprocess import prepare
-from autoscribe.enqueue import validate_input_record, EnqueueError
+from asc.ids import new_submission_id, validate_submission_id
+from asc.preprocess import prepare
+from asc.enqueue import validate_input_record, EnqueueError
 from test_preprocess import document
 
 
@@ -44,7 +44,7 @@ class SubmissionIdentityTests(unittest.TestCase):
         self.assertEqual(first['call_id'],second['call_id'])
         self.assertEqual(first['record_id'],second['record_id'])
         self.assertEqual(second['baggage']['client'],value['baggage']['client'])
-        with patch('autoscribe.preprocess.subprocess.run',side_effect=OSError('unavailable')):
+        with patch('asc.preprocess.subprocess.run',side_effect=OSError('unavailable')):
             failed=prepare(value)
             value['baggage']['client']['source']='another-client'
             repeated=prepare(value)
