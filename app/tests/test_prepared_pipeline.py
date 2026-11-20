@@ -1,6 +1,8 @@
 """Isolated Redis + real asc/Pandoc integration. Never starts an execution worker."""
 from contextlib import closing
 import hashlib
+import importlib.util
+import uuid
 import json
 import os
 from pathlib import Path
@@ -14,6 +16,7 @@ import time
 import unittest
 from unittest.mock import patch
 
+from autoscribe import ssh_jobs as jobs
 from autoscribe.enqueue import enqueue_record, EnqueueError
 from autoscribe.effects import build_pending_record, iter_pending_ndjson
 from autoscribe.ledger import record_response
@@ -144,45 +147,42 @@ class PreparedPipelineTests(IsolatedRedisCase):
 class ClientAdapterPipelineTests(IsolatedRedisCase):
     @unittest.skipUnless(os.environ.get('AUTOSCRIBE_TEST_CLIENT_BIN'),'set AUTOSCRIBE_TEST_CLIENT_BIN for native-client smoke')
     def test_native_client_uuid_and_staged_retry_match_server_contract(self):
-        import uuid
-        binary=Path(os.environ['AUTOSCRIBE_TEST_CLIENT_BIN']).resolve()
-        # These are test-owned Redis settings and temporary AOF files only.
         self.client.command('CONFIG','SET','appendonly','yes')
         self.client.command('CONFIG','SET','appendfsync','always')
+        binary=Path(os.environ['AUTOSCRIBE_TEST_CLIENT_BIN']).resolve()
         shared=self.root/'.shared';shared.mkdir(mode=0o700)
         vault=self.root/'vault';vault.mkdir()
-        raw=b'---\r\nplan: pln_TEST\r\n---\r\n## Native client\r\nBody\r\n'
+        raw=b'---\r\nplan: pln_TEST\r\nslug: psg_0123456789ABCDEF\r\ndispatch: true\r\n---\r\n## Native client\r\nBody\r\n'
         source=vault/'Note.md';source.write_bytes(raw)
         common=['--redis',f'127.0.0.1:{self.port}','--shared',str(shared),'--vault-root',str(vault)]
-        def client(*args):
-            return subprocess.run([str(binary),*args,*common],capture_output=True,text=True,env=self.env)
-        requested=client('--request','Note.md')
-        self.assertEqual(requested.returncode,0,requested.stderr)
-        jobs=self.client.hgetall('autoscribe:client:jobs')
-        self.assertEqual(len(jobs),1)
-        identifier=next(iter(jobs));self.assertEqual(uuid.UUID(identifier).version,4)
-        prepared=client('--local-only','--once')
-        self.assertEqual(prepared.returncode,0,prepared.stderr)
-        staged=shared/f'autoscribe-{identifier}.request.ndjson';frozen=staged.read_bytes()
-        request=json.loads(frozen)
-        self.assertEqual(request['submission_id'],identifier)
-        self.assertEqual(request['raw_markdown'].encode(),raw)
-        self.assertEqual(request['record_id'],'inp_'+hashlib.sha256(identifier.encode()).hexdigest()[:32])
-        self.assertNotIn('submission_id',request['baggage']['client'])
-        accepted=self.cli('ingest',payload=frozen.decode())
-        self.assertEqual(accepted.returncode,0,accepted.stderr)
-        receipt=json.loads(accepted.stdout)
-        self.assertEqual(receipt['record_id'],request['record_id'])
-        self.assertEqual(receipt['call_id'],'call_'+hashlib.sha1(identifier.encode()).hexdigest())
+        def client(*args):return subprocess.run([str(binary),*args,*common],capture_output=True,text=True,env=self.env)
+        requested=client('--request','Note.md');self.assertEqual(requested.returncode,0,requested.stderr)
+        identifiers=self.client.hgetall('autoscribe:client:jobs');self.assertEqual(len(identifiers),1)
+        identifier=next(iter(identifiers));self.assertEqual(uuid.UUID(identifier).version,4)
+        staged=client('--local-only','--once');self.assertEqual(staged.returncode,0,staged.stderr)
+        state=json.loads(self.client.hgetall('autoscribe:client:jobs')[identifier])
+        package=shared/f'autoscribe-{identifier}.source'
+        self.assertEqual((package/'original.md').read_bytes(),raw)
+        frozen={str(p.relative_to(package)):p.read_bytes() for p in package.rglob('*') if p.is_file()}
+        digest=hashlib.sha256(frozen['SHA256SUMS.json']).hexdigest()
+        self.assertEqual(state['request_sha256'],digest)
+        remote=f'dropbox:ingest/dispatch/{identifier}-{digest}/'
+        spec=importlib.util.spec_from_file_location('package_verifier',self.asc.parent/'dropbox_package.py')
+        verifier=importlib.util.module_from_spec(spec);spec.loader.exec_module(verifier)
+        def read(location,limit):return frozen[location.removeprefix(remote)]
+        files=verifier.retrieve('dispatch',identifier,digest,remote,1048576,read=read)
+        envelope=jobs.source_envelope(identifier,dict(files))
+        prepared=prepare(envelope,work_dir=self.root,require_dispatch=True)
+        self.assertEqual(prepared['status'],'ready',prepared)
+        accepted=self.enqueue(prepared);self.assertEqual(accepted.call_id,'call_'+hashlib.sha1(identifier.encode()).hexdigest())
+        self.assertEqual(self.client.zrange('queue:executor',0,-1),[])
         source.write_bytes(b'edited after durable staging')
         self.assertEqual(client('--request','Note.md').returncode,0)
         self.assertEqual(client('--local-only','--once').returncode,0)
-        self.assertEqual(staged.read_bytes(),frozen)
-        self.assertEqual(list(self.client.hgetall('autoscribe:client:jobs')),[identifier])
-        repeated=self.cli('ingest',payload=frozen.decode())
-        self.assertEqual(repeated.returncode,0,repeated.stderr)
-        self.assertEqual(json.loads(repeated.stdout)['call_id'],receipt['call_id'])
-        self.assertFalse(json.loads(repeated.stdout)['created'])
+        self.assertEqual({str(p.relative_to(package)):p.read_bytes() for p in package.rglob('*') if p.is_file()},frozen)
+        self.assertFalse(self.enqueue(prepared).created)
+        frozen['original.md']=b'tampered'
+        with self.assertRaisesRegex(ValueError,'checksum or length'):verifier.retrieve('dispatch',identifier,digest,remote,1048576,read=read)
 
 
 if __name__=='__main__':unittest.main()

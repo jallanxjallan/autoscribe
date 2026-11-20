@@ -64,3 +64,23 @@ class SelectionTests(unittest.TestCase):
             resource.write_text('pinned');app.write_text('print("tampered")\n')
             cp=subprocess.run([sys.executable,'-I','-B',str(wrapper)],capture_output=True,text=True)
             self.assertNotEqual(cp.returncode,0);self.assertEqual(cp.stdout,'')
+
+class AdmissionGateTests(unittest.TestCase):
+    def test_pending_or_unowned_work_blocks_activation(self):
+        import sqlite3
+        from autoscribe.ssh_jobs import initialize
+        spec=importlib.util.spec_from_file_location('installer_gate',ROOT/'install-release.py')
+        installer=importlib.util.module_from_spec(spec);spec.loader.exec_module(installer)
+        with tempfile.TemporaryDirectory() as td:
+            ledger=Path(td)/'ledger.sqlite';initialize(ledger)
+            def command(args):return '0' if 'ZCARD' in args else ''
+            def user(*args):return 'inactive' if 'show' in args else ''
+            with patch.object(installer,'command',side_effect=command),patch.object(installer,'user',side_effect=user):
+                installer.quiescent(ledger)
+                with sqlite3.connect(ledger) as db:db.execute("INSERT INTO calls(call_id) VALUES ('orphan')")
+                with self.assertRaisesRegex(AssertionError,'Unowned'):installer.quiescent(ledger)
+                with sqlite3.connect(ledger) as db:
+                    db.execute("INSERT INTO ssh_jobs(dispatch_id,record_id,call_id,package_sha256,state,accepted_at) VALUES ('d','r','orphan','h','accepted',0)")
+                with self.assertRaisesRegex(AssertionError,'Non-cleaned'):installer.quiescent(ledger)
+                with sqlite3.connect(ledger) as db:db.execute("UPDATE ssh_jobs SET state='cleaned'")
+                installer.quiescent(ledger)

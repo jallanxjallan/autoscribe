@@ -104,6 +104,15 @@ def main(stage,expected_manifest):
  backup=Path('/var/backups')/('autoscribe-pre-'+m['release_id']+'.json')
  assert not backup.exists()
  atomic_text(backup,json.dumps(preflight,indent=2)+'\n',0o600)
+ allowed_retirements={'/home/jeremy/Repos/Dispatch-Test.git/hooks/post-receive',
+                      '/usr/local/bin/srv-typst','/home/jeremy/deploy-autoscribe','/home/jeremy/smoke-autoscribe'}
+ retired=preflight.get('retirements',{})
+ assert set(retired)<=allowed_retirements, 'Unreviewed retirement path'
+ for path,digest in retired.items():assert sha(Path(path))==digest,path
+ retired_backup=Path('/var/backups')/('autoscribe-retired-'+m['release_id']+'.tar')
+ with tarfile.open(retired_backup,'x') as archive:
+  for path in retired:archive.add(path,arcname=str(Path(path)).lstrip('/'),recursive=False)
+ retired_backup.chmod(0o600)
  for name in ('extensions','templates'):
   target=Path(m['selected_environment']['EXTENSIONS_ROOT' if name=='extensions' else 'TEMPLATES_ROOT'])
   if not target.exists():extract(stage/(name+'-'+m['revisions'][name]+'.tar'),target)
@@ -131,8 +140,12 @@ def main(stage,expected_manifest):
   atomic_link(Path('/opt/autoscribe/app'),previous,1000,1000)
   atomic_link(cli,Path(preflight['expected_links'][str(cli)]),1000,1000)
   raise
+ for path,digest in retired.items():
+  assert sha(Path(path))==digest,path
+  Path(path).unlink()
  event('installation_verified',release=m['release_id'],manifest_sha256=expected_manifest,
-       backup=str(backup),status='installed; existing ledger and Control preserved; no jobs submitted')
+       backup=str(backup),retired_backup=str(retired_backup),retired=list(retired),
+       status='installed; existing ledger and Control preserved; no jobs submitted')
 
 
 if __name__ == '__main__':

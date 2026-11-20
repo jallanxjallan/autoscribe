@@ -168,9 +168,8 @@ def main():
         wrapper = launcher(installed, selection, revisions)
         (engine / 'bin/asc').write_text(wrapper)
         (engine / 'bin/asc').chmod(0o755)
-        client_release = output / ('client-'+revisions['client'][:12])
-        run(['/usr/bin/python3', sources['client'] / 'release.py', 'build', client_release,
-             '--git-adapter', args.git_adapter])
+        # Client is an independently installed capability. Pin and archive its
+        # protocol source; do not rebuild or install unrelated client commands.
         config = output / ('control-'+revisions['control'][:12])
         config.mkdir()
         shutil.copy2(output / 'control-source.tar', config / 'control-source.tar')
