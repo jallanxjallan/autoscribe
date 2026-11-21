@@ -12,7 +12,8 @@ import biznet_common
 from biznet_common.llm import LLMError, respond
 from .settings import release_identity
 from .models.call import (Call, Invocation, StepExecution, StepResult, ProviderRequest,
-                          ProviderResponse, ErrorInfo, InvalidRecord, RuntimeRecordError)
+                          ProviderResponse, ErrorInfo, InvalidRecord, RuntimeRecordError,
+                          RetrievalResult, BaselineRequest, RetrievalConfiguration)
 
 
 def load_registry(path: Path) -> dict[str, Path]:
@@ -56,15 +57,36 @@ def run_llm(invocation: Invocation, timeout: float, client) -> StepResult:
         suffix=Path(asset.path).suffix.lower().lstrip('.')
         if suffix not in types:raise InvalidRecord('Unsupported provider image format')
         images.append((f'data:{types[suffix]};base64,'+base64.b64encode(bytes.fromhex(original.content_hex)).decode(),'auto'))
+    baseline=BaselineRequest(instructions='\n\n'.join(i.body.strip() for i in step.instructions if i.body.strip()),
+                             input=invocation.input)
+    retrieval_positions=[]
+    retrievals=[]
+    # Only the contiguous predecessor retrieval chain augments this request.
+    # Earlier requests and completed retrievals remain immutable call history.
+    previous=context.input_position
+    while previous is not None:
+        state=call.steps[str(previous)]
+        if state.invocation.context.engine_kind!='rag':break
+        retrieval=RetrievalResult.model_validate(state.result.data)
+        retrieval_positions.insert(0,previous)
+        retrievals.insert(0,retrieval)
+        previous=state.invocation.context.input_position
+    if retrievals:
+        baseline=baseline.model_copy(update={'input':baseline.input.model_copy(update={'data':None})})
+    instructions=baseline.instructions
+    if retrievals:
+        instructions+='\n\nRetrieved context and examples (reference material):\n'+json.dumps(
+            [r.model_dump(mode='json') for r in retrievals],ensure_ascii=False,sort_keys=True)
     def assembled(payload):
         current=Call.load(context.call_id,client)
         state=current.steps[str(context.position)]
         current.with_step(context.position,StepExecution(invocation=state.invocation,
-            request=ProviderRequest(payload=payload,timeout_seconds=timeout))).save(client)
+            request=ProviderRequest(payload=payload,timeout_seconds=timeout,baseline=baseline,
+                                    retrieval_positions=tuple(retrieval_positions)))).save(client)
     content=invocation.input.text
     if content is None:content=json.dumps(invocation.input.data,ensure_ascii=False,sort_keys=True,separators=(',',':'))
     response=respond('autoscribe-worker',context.component,content,
-        instructions='\n\n'.join(i.body.strip() for i in step.instructions if i.body.strip()),
+        instructions=instructions,
         images=images,timeout=timeout,parameters=context.configuration,on_request=assembled)
     provider=ProviderResponse(provider=response.provider,model=response.model,status=response.status,
         response_id=response.response_id,request_id=response.request_id,usage=response.usage)
@@ -82,15 +104,21 @@ def execute(invocation: Invocation, client, registry: dict[str, Path], *, script
     call.with_step(position,StepExecution(invocation=invocation)).save(client)
     try:
         if invocation.context.engine_kind=='llm':result=run_llm(invocation,llm_timeout,client)
-        elif invocation.context.engine_kind=='script':
+        else:
             executable=registry.get(invocation.context.component)
             if executable is None:raise InvalidRecord('Unregistered component')
             result=run_extension(executable,invocation,script_timeout)
-        else:raise InvalidRecord('RAG execution is not implemented')
+        if invocation.context.engine_kind=='rag' and result.status=='completed':
+            try:retrieval=RetrievalResult.model_validate(result.data)
+            except ValueError as exc:raise InvalidRecord('Malformed canonical retrieval result') from exc
+            if retrieval.selection != RetrievalConfiguration.model_validate(invocation.context.configuration):
+                raise InvalidRecord('Retrieval selection differs from accepted configuration')
+            if retrieval.query!=invocation.input.text or result.text!=invocation.input.text:
+                raise InvalidRecord('Retrieval must preserve its predecessor processing text')
         expected=invocation.context
         if (result.call_id,result.step_id,result.position,result.component,result.release_id)!=(expected.call_id,expected.step_id,expected.position,expected.component,expected.release_id):
             raise InvalidRecord('Component result ownership mismatch')
-    except (LLMError,InvalidRecord,subprocess.TimeoutExpired,OSError) as exc:
+    except (LLMError,InvalidRecord,ValueError,subprocess.TimeoutExpired,OSError) as exc:
         result=invocation.result(status='failed',error=ErrorInfo(code=exc.category if isinstance(exc,LLMError) else type(exc).__name__,
             message=str(exc) or type(exc).__name__,stage=invocation.context.engine_kind,
             uncertain=isinstance(exc,subprocess.TimeoutExpired) or isinstance(exc,LLMError) and exc.category in ('timeout','connection_failure','provider_error','provider_failure','invalid_response')))

@@ -192,10 +192,77 @@ class Invocation(Model):
                           component=c.component,release_id=c.release_id,**values)
 
 
+class RetrievalConfiguration(Model):
+    service: str
+    service_sha256: str = Field(pattern=r'^[0-9a-f]{64}$')
+    candidate_id: str = Field(pattern=r'^candidate_[0-9a-f]{32}$')
+    mode: Literal['semantic', 'tagged']
+    top: int = Field(default=5, ge=1, le=100, strict=True)
+    tags: tuple[str, ...] = ()
+
+    @model_validator(mode='after')
+    def selection(self) -> Self:
+        from pathlib import Path
+        if not Path(self.service).is_absolute() or Path(self.service).name != 'train-candidate.py':
+            raise ValueError('Expected absolute Model Management train-candidate.py interface')
+        if any(not tag.strip() for tag in self.tags) or len(set(self.tags)) != len(self.tags):
+            raise ValueError('Invalid tag filters')
+        if (self.mode == 'tagged') != bool(self.tags):
+            raise ValueError('Tagged mode requires tags; semantic mode does not accept tags')
+        return self
+
+
+class RetrievedPassage(Model):
+    chunk_id: str = Field(pattern=r'^[0-9a-f]{64}$')
+    passage: str = Field(min_length=1)
+    slug: str = Field(min_length=1)
+    receipt: str = Field(pattern=r'^[0-9a-f]{64}$')
+    uri: str = Field(min_length=1)
+    tags: tuple[str, ...]
+    ordinal: int = Field(ge=0)
+    start: int = Field(ge=0)
+    end: int = Field(gt=0)
+    content_sha256: str = Field(pattern=r'^[0-9a-f]{64}$')
+    rank: int = Field(ge=1)
+    score: float = Field(ge=-1.0000001, le=1.0000001)
+
+    @model_validator(mode='after')
+    def integrity(self) -> Self:
+        if digest(self.passage) != self.content_sha256 or self.end-self.start != len(self.passage):
+            raise ValueError('Retrieved passage checksum or range mismatch')
+        return self
+
+
+class RetrievalResult(Model):
+    schema_version: Literal['asc.retrieval.v1'] = 'asc.retrieval.v1'
+    selection: RetrievalConfiguration
+    query: str = Field(min_length=1)
+    results: tuple[RetrievedPassage, ...]
+
+    @model_validator(mode='after')
+    def integrity(self) -> Self:
+        if len(self.results)>self.selection.top or len({r.chunk_id for r in self.results})!=len(self.results):
+            raise ValueError('Duplicate or excessive retrieved passages')
+        if [r.rank for r in self.results]!=list(range(1,len(self.results)+1)):
+            raise ValueError('Invalid retrieval ranks')
+        if any(not set(self.selection.tags).issubset(r.tags) for r in self.results):
+            raise ValueError('Retrieval response violates selected tag filters')
+        if any(a.score<b.score for a,b in zip(self.results,self.results[1:])):
+            raise ValueError('Retrieval response is not score ordered')
+        return self
+
+
+class BaselineRequest(Model):
+    instructions: str
+    input: StepInput
+
+
 class ProviderRequest(Model):
     provider: Literal['OpenAI'] = 'OpenAI'
     payload: dict[str, JsonValue]
     timeout_seconds: float = Field(gt=0)
+    baseline: BaselineRequest | None = None
+    retrieval_positions: tuple[int, ...] = ()
 
 
 class ProviderResponse(Model):

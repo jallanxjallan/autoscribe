@@ -138,3 +138,39 @@ pending or unowned work. Historical releases remain explicit rollback material,
 never automatic fallback implementations. Scripts and accepted jobs remain bound
 to the accepting immutable release. Unknown provider outcomes require explicit
 reconciliation and are never automatically retried.
+
+## Registered Model Management retrieval
+
+Package C runs `rag` and `script` through the same executable registry and
+`asc.component.v1` / `asc.step-result.v1` protocol. Use engine `extension` and
+rag_profile `model-management-rag`. Step args are validated by canonical
+`RetrievalConfiguration`:
+
+- `service`: absolute, immutable Model Management `train-candidate.py` path.
+- `service_sha256`: SHA-256 of that interface; checked before every invocation.
+- `candidate_id`: explicit `candidate_<32 hex digits>`; no default candidate.
+- `mode`: `semantic` (no tags) or `tagged` (nonempty `tags`).
+- `top`: integer 1–100, defaults to 5; `tags`: list of required tags.
+
+The deployed interface is Model Management revision
+`04c12216e0d014d08a7052cd60efa491058e5ae4`, script SHA-256
+`94e27d344a4f39b6434e56bf5e8c741ecaee122e6a7bfd9c381fe3f8d9864118`.
+It implements read-only cosine ranking and requires all selected tags before
+ranking. It exposes no score/confidence threshold; unsupported parameters fail
+configuration validation. It owns all corpus/index reads and query embeddings.
+The registered component runs that interface with the selected interpreter,
+never opens its database, never selects another candidate, and never retries.
+
+Retrieval preserves predecessor text/assets and returns `asc.retrieval.v1` in
+`StepResult.data`. `RetrievalResult.model_validate(result.data)` exposes typed
+passages, tags, scores, source ranges, identities, checksums and selection.
+Empty results succeed; service, configuration, unavailable and malformed-result
+errors fail explicitly. LLM requests record a separate baseline and retrieval
+positions, append contiguous predecessor retrieval context after ordered accepted
+instructions, and retain Common's exact pre-provider request snapshot.
+
+Acceptance uses `MM_CANDIDATE_SOURCE` and `MM_CANDIDATE_SHA256` to identify the
+exact authoritative MM source; it uses a disposable candidate database and
+substitutes only query embedding vectors. Run `test_composition` with the same
+app/Common/Extensions/Templates environment as `test_runtime`. Neither suite
+submits production manuscripts or makes paid provider calls.
