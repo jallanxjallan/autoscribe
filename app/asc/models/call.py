@@ -84,6 +84,12 @@ class Source(Model):
     assets: tuple[InlineAsset, ...] = ()
     resources: dict[str, JsonValue] = Field(default_factory=dict)
 
+    @property
+    def original_body(self) -> str | None:
+        if self.original_text is None:return None
+        match=re.match(r'\A(?:\ufeff)?---\r?\n.*?^---(?:\r?\n|$)',self.original_text,re.M|re.S)
+        return self.original_text[match.end():] if match else self.original_text
+
     @model_validator(mode='after')
     def integrity(self) -> Self:
         if self.original_sha256 != (digest(self.original_text) if self.original_text is not None else None):
@@ -422,15 +428,78 @@ class Call(Model):
         return self.evolve(retention_deadline=(int(time.time()) if now is None else now)+self.retention_period_seconds).save(client)
 
     def response_record(self, *, client_protocol: bool = False) -> dict:
+        if not self.terminal:raise InvalidRecord('Cannot serialize a nonterminal response')
         text='' if self.error else self.final_result.delivery_text
-        record={'schema':'autoscribe.client-response.v1' if client_protocol else 'autoscribe.response.v1',
-                'submission_id':self.submission_id,'call_id':self.identity,'status':'failed' if self.error else 'completed',
-                'result' if client_protocol else 'content':text,'baggage':self.baggage}
-        if client_protocol:
-            record.update(result_bytes=len(text.encode('utf-8')),result_sha256=digest(text),source=self.source.coordination,
-                          routing={'plan_id':self.requested_plan_id},metadata=self.source.metadata)
-        if self.error:record.update(failure=self.error.code,error=self.error.message)
-        return record
+        if not client_protocol:
+            record={'schema':'autoscribe.response.v1','submission_id':self.submission_id,
+                    'call_id':self.identity,'status':'failed' if self.error else 'completed',
+                    'content':text,'baggage':self.baggage}
+            if self.error:record.update(failure=self.error.code,error=self.error.message)
+            return record
+        status='failed' if self.error else 'completed'
+        terminal=self.final_result if self.final_position is not None else None
+        response=ClientResponse(submission_id=self.submission_id,call_id=self.identity,record_id=self.record_id,
+            source_sha256=self.source.original_sha256,source=self.source.coordination,metadata=self.source.metadata,
+            routing={'plan_id':self.requested_plan_id},baggage=self.baggage,status=status,result=text,
+            result_bytes=len(text.encode()),result_sha256=digest(text),
+            terminal_step=TerminalStep(id=terminal.step_id,position=terminal.position,component=terminal.component) if terminal else None,
+            receipt_id=ClientResponse.receipt_identity(self.submission_id,self.identity,self.record_id,status,digest(text),self.source.original_sha256),
+            failure=self.error.code if self.error else None,error=self.error.message if self.error else None,
+            uncertain=self.error.uncertain if self.error else False)
+        return response.model_dump(mode='json',by_alias=True)
+
+
+
+class TerminalStep(Model):
+    id: str = Field(min_length=1)
+    position: int = Field(ge=1, strict=True)
+    component: str = Field(min_length=1)
+
+
+class ClientResponse(Model):
+    """Authoritative server-to-client wire schema; transport digest is external."""
+    schema_version: Literal['autoscribe.client-response.v1'] = Field(default='autoscribe.client-response.v1',alias='schema')
+    submission_id: str
+    call_id: str = Field(pattern=IDENTITY_PATTERN)
+    record_id: str
+    source_sha256: str | None
+    source: dict[str, JsonValue]
+    metadata: dict[str, JsonValue]
+    routing: dict[str, JsonValue]
+    baggage: dict[str, JsonValue]
+    status: Literal['completed','failed']
+    result: str
+    result_bytes: int = Field(ge=0,strict=True)
+    result_sha256: str = Field(pattern=r'^[0-9a-f]{64}$')
+    terminal_step: TerminalStep | None
+    receipt_id: str = Field(pattern=r'^rsp_[0-9a-f]{64}$')
+    failure: str | None
+    error: str | None
+    uncertain: bool = Field(strict=True)
+
+    @staticmethod
+    def receipt_identity(submission_id,call_id,record_id,status,result_sha256,source_sha256):
+        return 'rsp_'+digest(json.dumps([submission_id,call_id,record_id,status,result_sha256,source_sha256],ensure_ascii=False,separators=(',',':')))
+
+    @model_validator(mode='after')
+    def integrity(self) -> Self:
+        from asc.ids import validate_submission_id
+        validate_submission_id(self.submission_id)
+        expected='failed_'+digest(self.submission_id) if self.call_id.startswith('failed_') else 'call_'+hashlib.sha1(self.submission_id.encode()).hexdigest()
+        if self.call_id!=expected or self.record_id!='inp_'+digest(self.submission_id)[:32]:
+            raise ValueError('Response identity mismatch')
+        if self.result_bytes>1_048_576 or self.result_bytes!=len(self.result.encode()) or self.result_sha256!=digest(self.result):
+            raise ValueError('Response result integrity mismatch')
+        if self.receipt_id!=self.receipt_identity(self.submission_id,self.call_id,self.record_id,self.status,self.result_sha256,self.source_sha256):
+            raise ValueError('Response receipt identity mismatch')
+        if self.status=='completed':
+            if self.failure is not None or self.error is not None or self.uncertain or self.terminal_step is None or self.source_sha256 is None or not self.call_id.startswith('call_'):
+                raise ValueError('Invalid completed response')
+        elif not self.failure or not self.error or self.result:
+            raise ValueError('Invalid failed response')
+        if self.source_sha256 is not None and not re.fullmatch(r'[0-9a-f]{64}',self.source_sha256):
+            raise ValueError('Invalid original source checksum')
+        return self
 
 
 class RuntimeStore:

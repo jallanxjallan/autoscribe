@@ -174,7 +174,7 @@ def source_envelope(dispatch, files):
     if (not isinstance(operation, dict) or operation.get('schema') != 'autoscribe.output-operation.v1'
             or operation.get('submission_id') != dispatch or operation.get('vault_id') != meta['vault_id']
             or operation.get('representation') != 'markdown-body.utf8'
-            or operation.get('type') not in ('update', 'create')
+            or operation.get('type') not in ('update', 'writenew')
             or (operation['type'] == 'update' and (path is None or operation.get('path') != path))):
         raise ValueError('Invalid Dropbox dispatch output operation')
     client['output_operation'] = operation
@@ -269,7 +269,7 @@ def complete_response(ledger, client, state):
     record=call.response_record(client_protocol=True)
     path=ROOT/state['dispatch_id']
     checksum=response_file(path,record)
-    call.evolve(receipt=Receipt(kind='ssh',target=str(path/'response.ndjson'),checksum=checksum).model_dump()).save(client)
+    call.evolve(receipt=Receipt(kind='ssh',target=str(path/'response.ndjson'),checksum=checksum,details={'response_receipt_id':record['receipt_id']}).model_dump()).save(client)
     key=RuntimeStore.key(call_id)
     record_response(ledger,call_id,key)
     record_export(ledger,call_id,key)

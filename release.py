@@ -100,6 +100,7 @@ def main():
     parser.add_argument('--git-adapter', type=Path, required=True)
     parser.add_argument('--common', type=Path, required=True)
     parser.add_argument('--client', type=Path, required=True)
+    parser.add_argument('--client-release', type=Path, required=True)
     parser.add_argument('--services', type=Path, required=True)
     parser.add_argument('--extensions', type=Path, required=True)
     parser.add_argument('--templates', type=Path, required=True)
@@ -122,6 +123,13 @@ def main():
         if not source.is_absolute() or git(source, 'status', '--porcelain'):
             parser.error(f'{name}: source must be absolute, clean and committed')
         revisions[name] = git(source, 'rev-parse', 'HEAD')
+    client_metadata=json.loads((args.client_release/'dispatch-provenance.json').read_text())
+    if client_metadata['source_commit']!=revisions['client']:
+        parser.error('client binary/source revision mismatch')
+    for name,digest in client_metadata['files'].items():
+        path=args.client_release/name
+        if not path.resolve().is_relative_to(args.client_release.resolve()) or sha(path)!=digest:
+            parser.error('client release checksum mismatch: '+name)
     release_id = 'qualified-' + revisions['autoscribe'][:12] + '-' + hashlib.sha256(
         json.dumps(revisions, sort_keys=True, separators=(',', ':')).encode()).hexdigest()[:20]
     installed = Path('/opt/autoscribe/services/releases') / release_id
@@ -137,6 +145,9 @@ def main():
             with tarfile.open(archive) as files:
                 files.extractall(tree, filter='data')
             extracted[name] = tree
+        if sha(output/'client-source.tar')!=client_metadata['files']['client-source.tar']:
+            raise ValueError('Client source archive differs from release source')
+        shutil.copytree(args.client_release,output/('client-'+revisions['client'][:12]))
         engine = output / release_id
         engine.mkdir()
         shutil.copytree(extracted['autoscribe'] / 'app', engine / 'app')
@@ -211,6 +222,7 @@ def main():
                         for name in ('extensions','templates') for p in sorted(extracted[name].rglob('*')) if p.is_file()},
                     'protocols': {'prepared': 'autoscribe.prepared.v2', 'response': 'autoscribe.client-response.v1', 'component': 'asc.component.v1', 'step_result': 'asc.step-result.v1', 'runtime': 'asc.call.v1'},
                     'model_catalogue': dict(runpy.run_path(str(extracted['common'] / 'python/biznet_common/llm.py'))['MODELS']),
+                    'client_release': {'directory':'client-'+revisions['client'][:12], 'provenance_sha256':sha(args.client_release/'dispatch-provenance.json')},
                     'capability_bindings': {'autoscribe': str(installed),
                         'native_services': {'selection': '/opt/autoscribe/services/current', 'commit': revisions['services']},
                         'control': {'database': selection['AUTOSCRIBE_CONTROL_DB'], 'source_commit': revisions['control'], 'schema_version': 3},

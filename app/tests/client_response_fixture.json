@@ -1,0 +1,45 @@
+{
+  "schema": "autoscribe.client-response.v1",
+  "submission_id": "00000000-0000-4000-8000-000000000002",
+  "call_id": "call_3223f9162256d798e1a088840ac802b44623d36a",
+  "record_id": "inp_e79acd97ac88086665d85a762f43d533",
+  "source_sha256": "03040d0bc6d23c8e3cdf240601b0e41b7a7e7bd993247918046b707e34827fb7",
+  "source": {
+    "slug": "psg_0123456789ABCDEF"
+  },
+  "metadata": {
+    "narrative_mode": "first person",
+    "plan": "pln_TEST",
+    "slug": "psg_0123456789ABCDEF",
+    "tone": "dry"
+  },
+  "routing": {
+    "plan_id": "pln_TEST"
+  },
+  "baggage": {
+    "client": {},
+    "autoscribe_ingest": {
+      "source": {
+        "content_hint": "Original human prose — café 東京.",
+        "hint": "psg_0123456789ABCDEF",
+        "hint_kind": "slug",
+        "slug": "psg_0123456789ABCDEF"
+      },
+      "source_format": "markdown",
+      "submission_id": "00000000-0000-4000-8000-000000000002"
+    }
+  },
+  "status": "completed",
+  "result": "{\"generated\":\"Generic generated prose.\",\"identity\":\"psg_0123456789ABCDEF\",\"narrative_mode\":\"first person\",\"original\":\"---\\r\\nslug: psg_0123456789ABCDEF\\r\\n---\\r\\nOriginal human prose — café 東京.  \\r\\n\",\"tone\":\"dry\"}",
+  "result_bytes": 221,
+  "result_sha256": "7fb5dc2a08c464c15569173667e7a0f2c007bd7f8b81a4644aab36cfcb5737a6",
+  "terminal_step": {
+    "id": "stp_8",
+    "position": 8,
+    "component": "echo"
+  },
+  "receipt_id": "rsp_f2d4809216231df76d36322e04d8231fbed2da0254f319ecea9ba1e249c1ab24",
+  "failure": null,
+  "error": null,
+  "uncertain": false
+}

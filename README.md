@@ -64,7 +64,7 @@ Invocation {
 `input_position` is null for source input and otherwise references the preceding
 result selected by the accepted plan. The context identifies the call without
 copying it. Every component kind receives this same context and typed input.
-RAG remains explicitly unimplemented.
+RAG executes through the registered executable interface; Model Management owns retrieval.
 
 Stdout must be exactly one serialized `StepResult` with protocol
 `asc.step-result.v1`. It identifies call/step/position/component/release and
@@ -174,3 +174,26 @@ exact authoritative MM source; it uses a disposable candidate database and
 substitutes only query embedding vectors. Run `test_composition` with the same
 app/Common/Extensions/Templates environment as `test_runtime`. Neither suite
 submits production manuscripts or makes paid provider calls.
+
+## Server/client response and application
+
+`asc.models.call.ClientResponse` is the authoritative `autoscribe.client-response.v1`
+schema. It carries submission/call/record identity, source slug/checksum, accepted
+routing, terminal step identity, generated result and UTF-8 byte length/checksum,
+status/error/uncertainty, baggage and deterministic response receipt identity.
+`Call.response_record(client_protocol=True)` serializes it only after termination;
+`asc.ssh_jobs.complete_response` writes the exact NDJSON and external transport
+checksum. The external checksum cannot be embedded recursively in its own envelope.
+The single Python-generated fixture in `app/tests/client_response_fixture.json`
+is also consumed by Rust conformance tests. `identity`/`extra` aliases are rejected.
+
+Rust `autoscribe-apply` is the selected manuscript writer. Call supplies its slug;
+the current on-disk target supplies frontmatter; generated result supplies the
+replacement body. Localized edits update only processed/dispatch/plan. Accepted
+source checksum is transport provenance, not a full-document overwrite condition.
+A frozen local body checksum protects body conflicts independently of frontmatter.
+No Call metadata/frontmatter is applied to the manuscript. Application receipts
+and transport cleanup remain distinct. Writenew records terminal unsupported_mode
+without files, slugs, successful application receipts or retry. Native signed
+repository effects remain `srv-output`/`srv-writeback` capabilities; the old masked
+resident response coordinator is not a manuscript writer or selected lifecycle.

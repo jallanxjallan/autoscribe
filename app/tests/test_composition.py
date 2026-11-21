@@ -11,7 +11,7 @@ from test_runtime import RuntimeCase
 from asc.models.call import Call, InvalidRecord, RetrievalResult
 
 
-class CompositionTests(RuntimeCase):
+class CompositionFixture(RuntimeCase):
     def setUp(self):
         super().setUp()
         self.candidate='candidate_'+'1'*32
@@ -70,6 +70,8 @@ print(inv.result(text='Transformed: '+(inv.input.text or ''),data={'original':ca
     def run_plan(self,kinds):
         self.plan(kinds);self.accept();self.execute();return Call.load(self.call_id,self.client)
 
+
+class CompositionTests(CompositionFixture):
     def test_real_semantic_retrieval_and_llm_script(self):
         call=self.run_plan(['rag','llm','script'])
         self.assertIsNone(call.error,call.error)
