@@ -237,5 +237,67 @@ def main():
     print(json.dumps({'destination': str(output), 'manifest_sha256': sha(output / 'manifest.json')}))
 
 
+def extend_runtime():
+    """Package changed Extensions against an accepted runtime, reusing native/app bytes."""
+    parser=argparse.ArgumentParser(description='Extend an accepted immutable runtime without rebuilding unchanged dependencies')
+    parser.add_argument('--extend-runtime',type=Path,required=True)
+    parser.add_argument('--destination',type=Path,required=True)
+    parser.add_argument('--extensions-archive',type=Path,required=True)
+    parser.add_argument('--autoscribe-archive',type=Path,required=True)
+    parser.add_argument('--extensions-commit',required=True)
+    parser.add_argument('--autoscribe-commit',required=True)
+    args=parser.parse_args()
+    previous=args.extend_runtime.resolve(strict=True)
+    prior=json.loads((previous/'manifest.json').read_text())
+    prefix=previous.name+'/'
+    for name,digest in prior['files'].items():
+        if name.startswith(prefix) and sha(previous/name[len(prefix):])!=digest:
+            raise ValueError('Accepted runtime payload changed: '+name)
+    output=args.destination
+    if not output.is_absolute() or output.exists() or not output.parent.is_dir():
+        raise ValueError('Use a new absolute destination in an existing parent')
+    output.mkdir()
+    revisions=dict(prior['revisions'],autoscribe=args.autoscribe_commit,extensions=args.extensions_commit)
+    release_id='qualified-'+revisions['autoscribe'][:12]+'-'+hashlib.sha256(json.dumps(revisions,sort_keys=True,separators=(',',':')).encode()).hexdigest()[:20]
+    installed=previous.parent/release_id
+    engine=output/release_id
+    shutil.copytree(previous,engine)
+    (engine/'manifest.json').unlink()
+    with tempfile.TemporaryDirectory(prefix='extensions-package-') as temp:
+        extensions=Path(temp)
+        with tarfile.open(args.extensions_archive) as archive:archive.extractall(extensions,filter='data')
+        shutil.rmtree(engine/'extensions')
+        (engine/'extensions').mkdir()
+        for name in ('scripts','registry.json','capabilities.json'):
+            source=extensions/name
+            if source.is_dir():shutil.copytree(source,engine/'extensions'/name)
+            else:shutil.copy2(source,engine/'extensions'/name)
+        registry=relocate_registry(engine,installed)
+        selection=dict(prior['selected_environment'],AUTOSCRIBE_RELEASE_ROOT=str(installed),
+            AUTOSCRIBE_EXTENSION_REGISTRY=str(installed/'extensions/registry.json'),
+            EXTENSIONS_ROOT='/opt/autoscribe/extensions/releases/'+revisions['extensions'])
+        (engine/'bin/asc').chmod(0o755)
+        (engine/'bin/asc').write_text(launcher(installed,selection,revisions));(engine/'bin/asc').chmod(0o755)
+        resources={p:h for p,h in prior['resource_files'].items() if not p.startswith(prior['selected_environment']['EXTENSIONS_ROOT']+'/')}
+        resources.update({str(Path(selection['EXTENSIONS_ROOT'])/p.relative_to(extensions)):sha(p) for p in extensions.rglob('*') if p.is_file()})
+        extension_archive=output/('extensions-'+revisions['extensions']+'.tar')
+        shutil.copy2(args.extensions_archive,extension_archive)
+    shutil.copy2(args.extensions_archive,output/'extensions-source.tar')
+    shutil.copy2(args.autoscribe_archive,output/'autoscribe-source.tar')
+    archive_tree(engine,output/(release_id+'.tar'))
+    manifest=dict(prior,schema='autoscribe.qualified-release.v1',release_id=release_id,revisions=revisions,
+        installed_engine=str(installed),selected_environment=selection,resource_files=resources,
+        reused_runtime=dict(path=str(previous),manifest_sha256=sha(previous/'manifest.json'),
+                            unchanged=['app','native binaries','Common','clients','Control','Templates']),
+        source_provenance={name:dict(prior['source_provenance'][name],commit=revisions[name],archive_sha256=sha(output/(name+'-source.tar'))) for name in ('autoscribe','extensions')},
+        status='prepared; runtime extension only; existing accepted payload reused')
+    manifest['capability_bindings']=dict(prior['capability_bindings'],autoscribe=str(installed),extensions=selection['EXTENSIONS_ROOT'])
+    manifest['files']={str(p.relative_to(output)):sha(p) for p in output.rglob('*') if p.is_file()}
+    (output/'manifest.json').write_text(json.dumps(manifest,indent=2,sort_keys=True)+'\n')
+    print(json.dumps(dict(release=release_id,manifest_sha256=sha(output/'manifest.json'))))
+
+
 if __name__ == '__main__':
-    main()
+    import sys
+    if '--extend-runtime' in sys.argv:extend_runtime()
+    else:main()
