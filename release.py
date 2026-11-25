@@ -243,7 +243,7 @@ def extend_runtime():
     parser.add_argument('--extend-runtime',type=Path,required=True)
     parser.add_argument('--destination',type=Path,required=True)
     parser.add_argument('--extensions-archive',type=Path,required=True)
-    parser.add_argument('--autoscribe-archive',type=Path,required=True)
+    parser.add_argument('--autoscribe-archive',type=Path)
     parser.add_argument('--extensions-commit',required=True)
     parser.add_argument('--autoscribe-commit',required=True)
     args=parser.parse_args()
@@ -253,6 +253,8 @@ def extend_runtime():
     for name,digest in prior['files'].items():
         if name.startswith(prefix) and sha(previous/name[len(prefix):])!=digest:
             raise ValueError('Accepted runtime payload changed: '+name)
+    if args.autoscribe_commit != prior['revisions']['autoscribe']:
+        raise ValueError('Extension-only release must retain the accepted application revision')
     output=args.destination
     if not output.is_absolute() or output.exists() or not output.parent.is_dir():
         raise ValueError('Use a new absolute destination in an existing parent')
@@ -283,13 +285,14 @@ def extend_runtime():
         extension_archive=output/('extensions-'+revisions['extensions']+'.tar')
         shutil.copy2(args.extensions_archive,extension_archive)
     shutil.copy2(args.extensions_archive,output/'extensions-source.tar')
-    shutil.copy2(args.autoscribe_archive,output/'autoscribe-source.tar')
+    if args.autoscribe_archive is not None:
+        shutil.copy2(args.autoscribe_archive,output/'autoscribe-source.tar')
     archive_tree(engine,output/(release_id+'.tar'))
     manifest=dict(prior,schema='autoscribe.qualified-release.v1',release_id=release_id,revisions=revisions,
         installed_engine=str(installed),selected_environment=selection,resource_files=resources,
         reused_runtime=dict(path=str(previous),manifest_sha256=sha(previous/'manifest.json'),
                             unchanged=['app','native binaries','Common','clients','Control','Templates']),
-        source_provenance={name:dict(prior['source_provenance'][name],commit=revisions[name],archive_sha256=sha(output/(name+'-source.tar'))) for name in ('autoscribe','extensions')},
+        source_provenance={name:dict(prior['source_provenance'][name],commit=revisions[name],archive_sha256=sha(output/(name+'-source.tar'))) for name in (('autoscribe','extensions') if args.autoscribe_archive is not None else ('extensions',))},
         status='prepared; runtime extension only; existing accepted payload reused')
     manifest['capability_bindings']=dict(prior['capability_bindings'],autoscribe=str(installed),extensions=selection['EXTENSIONS_ROOT'])
     manifest['files']={str(p.relative_to(output)):sha(p) for p in output.rglob('*') if p.is_file()}
