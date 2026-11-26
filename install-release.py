@@ -66,6 +66,8 @@ def quiescent(ledger):
 
 
 def verify_payload(stage, manifest):
+ assert manifest.get('runtime_configuration',{}).get('ledger_parameter')=='paths.ledger_db', 'Runtime must resolve the configured ledger'
+ assert 'AUTOSCRIBE_LEDGER_DB' not in manifest['selected_environment'], 'Ledger path must not be embedded in a release'
  for name,digest in manifest['files'].items():
   path=stage/name
   assert path.resolve().is_relative_to(stage.resolve()), 'Payload path escape'
