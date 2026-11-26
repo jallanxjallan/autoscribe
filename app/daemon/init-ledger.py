@@ -11,6 +11,7 @@ if str(APP_ROOT) not in sys.path:
 
 from asc.ledger import ensure_schema
 
-path = Path(os.environ.get("AUTOSCRIBE_LEDGER_DB", str(Path.home() / "Data/ledger.sql")))
+from asc.settings import ledger_path
+path = ledger_path()
 ensure_schema(path)
 print(path)

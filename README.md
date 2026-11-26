@@ -197,3 +197,17 @@ and transport cleanup remain distinct. Writenew records terminal unsupported_mod
 without files, slugs, successful application receipts or retry. Native signed
 repository effects remain `srv-output`/`srv-writeback` capabilities; the old masked
 resident response coordinator is not a manuscript writer or selected lifecycle.
+
+## Runtime ledger configuration
+
+`/etc/autoscribe/services.toml` owns `[paths].ledger_db`. The selected launcher,
+CLI and installer resolve that setting and fail if it cannot be accessed. Environment
+variables do not override it. The database must already exist with suitable SQLite
+WAL directory permissions; deployment must not create a fresh replacement implicitly.
+Use the normal acknowledged job cleanup before a ledger migration.
+
+`release.py --extend-runtime ... --application-update --autoscribe-archive ARCHIVE`
+packages a reconciled application source update while reusing accepted native binaries,
+Common and other dependencies. This option is explicit; extension-only deployments
+still reject an application revision change. Use `install-release.py` with the existing
+reviewed preflight/idle guards. Never modify an installed immutable release in place.

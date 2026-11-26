@@ -215,6 +215,14 @@ def application(ledger, operation, identity, request, retire_runtime=None):
         db.execute(APPLICATIONS); db.commit()
         db.execute('BEGIN IMMEDIATE')
         row=db.execute('SELECT * FROM ssh_jobs WHERE dispatch_id=?',(identity,)).fetchone()
+        if row is not None and row['state'] == 'cleaned':
+            prior = _application(db, identity)
+            encoded = json.dumps(request['receipt'], sort_keys=True, separators=(',',':'))
+            if (prior is None or prior['applied_at'] is None
+                    or any(prior[key] != request[key] for key in ('mode','intent','target'))
+                    or prior['receipt'] != encoded or row['response_sha256'] != request['response_sha256']):
+                raise ValueError('Cleaned application acknowledgement differs')
+            return {'schema': SCHEMA, 'result_id': identity, 'application': prior}
         if row is None or row['state'] not in ('completed','applied') or row['response_sha256']!=request['response_sha256']:
             raise ValueError('Result is not completed or checksum differs')
         if _result(row)['status']!='completed': raise ValueError('Failed result cannot be applied')
@@ -254,5 +262,11 @@ def command(args, control, ledger, client):
             try: call=jobs.Call.load(call_id,client)
             except jobs.MissingRecord: return
             call.retain_after_cleanup(client)
-        return application(ledger,op,values[0],json.loads(values[1]),retire)
+        request = json.loads(values[1])
+        result = application(ledger,op,values[0],request,retire)
+        if op == 'ack':
+            with closing(connect(ledger)) as db:
+                row = db.execute('SELECT package_sha256 FROM ssh_jobs WHERE dispatch_id=?', (values[0],)).fetchone()
+            jobs.cleanup(ledger, values[0], row['package_sha256'], request['response_sha256'], client)
+        return result
     raise ValueError('Invalid manual client operation')

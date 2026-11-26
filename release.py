@@ -19,6 +19,7 @@ RETIRED = ('srv-export', 'srv-input')
 
 def launcher(installed, selection, revisions):
     """The selected CLI verifies its own immutable payload before importing it."""
+    selection = {k:v for k,v in selection.items() if k != "AUTOSCRIBE_LEDGER_DB"}
     return ('#!/opt/autoscribe/.venv/bin/python -I\n'
             'import hashlib, json, os, sys\nfrom pathlib import Path\n'
             'def require(value, message):\n    if not value: raise RuntimeError(message)\n'
@@ -34,6 +35,9 @@ def launcher(installed, selection, revisions):
             'for path, digest in manifest["resource_files"].items():\n'
             '    require(hashlib.sha256(Path(path).read_bytes()).hexdigest() == digest, path)\n'
             f'os.environ.update({selection!r})\n'
+            'import runpy\n'
+            'configured = runpy.run_path(str(root / "app/asc/settings.py"))["ledger_path"]()\n'
+            'os.environ["AUTOSCRIBE_LEDGER_DB"] = str(configured)\n'
             f'os.execv(sys.executable, [sys.executable, "-I", "-B", {str(installed / "app/bin/asc")!r}, *sys.argv[1:]])\n')
 
 
@@ -167,7 +171,6 @@ def main():
             shutil.copy2(target / 'release' / name, engine / 'bin' / name)
         selection = {
             'AUTOSCRIBE_CONTROL_DB': '/var/lib/autoscribe/control.sqlite',
-            'AUTOSCRIBE_LEDGER_DB': '/home/jeremy/Data/ledger.sql',
             'AUTOSCRIBE_RUNTIME_RETENTION_SECONDS': str(runpy.run_path(str(extracted['autoscribe'] / 'app/asc/settings.py'))['retention_seconds']()),
             'AUTOSCRIBE_REDIS_HOST': '127.0.0.1', 'AUTOSCRIBE_REDIS_PORT': '6379',
             'AUTOSCRIBE_EXTENSION_REGISTRY': str(installed / 'extensions/registry.json'),
@@ -212,6 +215,7 @@ def main():
         (output / (release_id+'.tar.sha256')).write_text(sha(output / (release_id+'.tar'))+'  '+release_id+'.tar\n')
         manifest = {'schema': 'autoscribe.qualified-release.v1', 'release_id': release_id,
                     'revisions': revisions, 'installed_engine': str(installed),
+                    'runtime_configuration': {'file':'/etc/autoscribe/services.toml','ledger_parameter':'paths.ledger_db'},
                     'selected_environment': selection, 'native_binaries': list(NATIVE), 'script_dependencies': script_dependencies,
                     'runtime_dependencies': json.loads(args.runtime_inventory.read_text()),
                     'source_provenance': {name: {'commit': revisions[name],
@@ -244,6 +248,7 @@ def extend_runtime():
     parser.add_argument('--destination',type=Path,required=True)
     parser.add_argument('--extensions-archive',type=Path,required=True)
     parser.add_argument('--autoscribe-archive',type=Path)
+    parser.add_argument('--application-update', action='store_true', help='Overlay reconciled application source; retain native binaries and Common')
     parser.add_argument('--extensions-commit',required=True)
     parser.add_argument('--autoscribe-commit',required=True)
     args=parser.parse_args()
@@ -253,18 +258,30 @@ def extend_runtime():
     for name,digest in prior['files'].items():
         if name.startswith(prefix) and sha(previous/name[len(prefix):])!=digest:
             raise ValueError('Accepted runtime payload changed: '+name)
-    if args.autoscribe_commit != prior['revisions']['autoscribe']:
+    if not args.application_update and args.autoscribe_commit != prior['revisions']['autoscribe']:
         raise ValueError('Extension-only release must retain the accepted application revision')
+    if args.application_update and args.autoscribe_archive is None:
+        raise ValueError('Application update requires exact source archive')
     output=args.destination
     if not output.is_absolute() or output.exists() or not output.parent.is_dir():
         raise ValueError('Use a new absolute destination in an existing parent')
     output.mkdir()
     revisions=dict(prior['revisions'],autoscribe=args.autoscribe_commit,extensions=args.extensions_commit)
+    if args.application_update:
+        with sqlite3.connect('file:/var/lib/autoscribe/control.sqlite?mode=ro',uri=True) as db:
+            revisions['control']=dict(db.execute('SELECT key,value FROM control_meta'))['source_commit']
     release_id='qualified-'+revisions['autoscribe'][:12]+'-'+hashlib.sha256(json.dumps(revisions,sort_keys=True,separators=(',',':')).encode()).hexdigest()[:20]
     installed=previous.parent/release_id
     engine=output/release_id
     shutil.copytree(previous,engine)
     (engine/'manifest.json').unlink()
+    if args.application_update:
+        with tempfile.TemporaryDirectory(prefix='application-source-') as temp:
+            source=Path(temp)
+            with tarfile.open(args.autoscribe_archive) as archive:archive.extractall(source,filter='data')
+            for name in ('asc','bin','daemon','tests'):
+                shutil.rmtree(engine/'app'/name)
+                shutil.copytree(source/'app'/name,engine/'app'/name)
     with tempfile.TemporaryDirectory(prefix='extensions-package-') as temp:
         extensions=Path(temp)
         with tarfile.open(args.extensions_archive) as archive:archive.extractall(extensions,filter='data')
@@ -278,6 +295,7 @@ def extend_runtime():
         selection=dict(prior['selected_environment'],AUTOSCRIBE_RELEASE_ROOT=str(installed),
             AUTOSCRIBE_EXTENSION_REGISTRY=str(installed/'extensions/registry.json'),
             EXTENSIONS_ROOT='/opt/autoscribe/extensions/releases/'+revisions['extensions'])
+        selection.pop('AUTOSCRIBE_LEDGER_DB',None)
         (engine/'bin/asc').chmod(0o755)
         (engine/'bin/asc').write_text(launcher(installed,selection,revisions));(engine/'bin/asc').chmod(0o755)
         resources={p:h for p,h in prior['resource_files'].items() if not p.startswith(prior['selected_environment']['EXTENSIONS_ROOT']+'/')}
@@ -291,10 +309,12 @@ def extend_runtime():
     manifest=dict(prior,schema='autoscribe.qualified-release.v1',release_id=release_id,revisions=revisions,
         installed_engine=str(installed),selected_environment=selection,resource_files=resources,
         reused_runtime=dict(path=str(previous),manifest_sha256=sha(previous/'manifest.json'),
-                            unchanged=['app','native binaries','Common','clients','Control','Templates']),
-        source_provenance={name:dict(prior['source_provenance'][name],commit=revisions[name],archive_sha256=sha(output/(name+'-source.tar'))) for name in (('autoscribe','extensions') if args.autoscribe_archive is not None else ('extensions',))},
-        status='prepared; runtime extension only; existing accepted payload reused')
+                            unchanged=([] if args.application_update else ['app'])+['native binaries','Common','clients','Control','Templates']),
+        source_provenance={name:dict(prior['source_provenance'].get(name,{}),commit=revisions[name],archive_sha256=sha(output/(name+'-source.tar'))) for name in (('autoscribe','extensions') if args.autoscribe_archive is not None else ('extensions',))},
+        runtime_configuration=dict(file='/etc/autoscribe/services.toml',ledger_parameter='paths.ledger_db'),
+        status='prepared; reconciled application update' if args.application_update else 'prepared; runtime extension only; existing accepted payload reused')
     manifest['capability_bindings']=dict(prior['capability_bindings'],autoscribe=str(installed),extensions=selection['EXTENSIONS_ROOT'])
+    manifest['capability_bindings']['control']=dict(prior['capability_bindings']['control'],source_commit=revisions['control'])
     manifest['files']={str(p.relative_to(output)):sha(p) for p in output.rglob('*') if p.is_file()}
     (output/'manifest.json').write_text(json.dumps(manifest,indent=2,sort_keys=True)+'\n')
     print(json.dumps(dict(release=release_id,manifest_sha256=sha(output/'manifest.json'))))

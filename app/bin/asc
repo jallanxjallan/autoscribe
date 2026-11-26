@@ -22,7 +22,8 @@ def control_db_path() -> Path:
 
 
 def ledger_path() -> Path:
-    return Path(os.environ.get("AUTOSCRIBE_LEDGER_DB", str(Path.home() / "Data/ledger.sql")))
+    from asc.settings import ledger_path as configured_ledger
+    return configured_ledger()
 
 
 def redis_client() -> RedisClient:

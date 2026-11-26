@@ -327,13 +327,27 @@ def execute(ledger, client, dispatch, digest):
 
 def cleanup(ledger, dispatch, digest, checksum, client):
     state=read_job(ledger,dispatch,digest)
-    if state['state'] not in ('completed','cleaned') or state['response_sha256']!=checksum:
+    if state['state'] not in ('completed','applied','cleaned') or state['response_sha256']!=checksum:
         raise ValueError('Cleanup requires acknowledged completed response')
+    acknowledged = False
+    if state['state'] == 'applied':
+        with closing(connect(ledger)) as db:
+            application = db.execute('SELECT applied_at,receipt FROM client_applications WHERE result_id=?', (dispatch,)).fetchone()
+        if application is None or application['applied_at'] is None:
+            raise ValueError('Applied cleanup requires durable client acknowledgement')
+        receipt = json.loads(application['receipt'])
+        if (not isinstance(receipt, dict) or set(receipt) != {'file_sha256','git_commit'}
+                or not re.fullmatch(r'[a-f0-9]{64}', receipt['file_sha256'])
+                or not re.fullmatch(r'[a-f0-9]{40,64}', receipt['git_commit'])):
+            raise ValueError('Applied cleanup requires file/Git retention receipt')
+        acknowledged = True
     try:call=Call.load(state['call_id'],client)
     except MissingRecord:
-        if state['state']!='cleaned':raise
-        return state
-    if call.receipt is None or call.receipt.checksum!=checksum:raise ValueError('Runtime receipt mismatch')
+        if state['state'] == 'cleaned':return state
+        if not acknowledged:raise
+        call = None
+    if call is not None and (call.receipt is None or call.receipt.checksum!=checksum):
+        raise ValueError('Runtime receipt mismatch')
     path=ROOT/dispatch
     if path.exists():
         if hashlib.sha256((path/'response.ndjson').read_bytes()).hexdigest()!=checksum:raise ValueError('Response changed before cleanup')
@@ -341,7 +355,7 @@ def cleanup(ledger, dispatch, digest, checksum, client):
     # Commit the durable acknowledgement before imposing expiry. Retry finishes
     # a Redis failure after this commit, without resetting an existing deadline.
     update(ledger,dispatch,'cleaned')
-    call.retain_after_cleanup(client)
+    if call is not None:call.retain_after_cleanup(client)
     return read_job(ledger,dispatch,digest)
 
 
@@ -355,6 +369,8 @@ def command(args, control, ledger, client):
         return submit(control, ledger, client, dispatch, digest, args[3])
     if operation == 'status' and len(args) == 3:
         return read_job(ledger, dispatch, digest)
+    if operation == 'cleanup' and len(args) == 4:
+        return cleanup(ledger, dispatch, digest, args[3], client)
     if operation == 'execute' and len(args) == 3:
         return execute(ledger, client, dispatch, digest)
     raise ValueError('Invalid asc job operation')

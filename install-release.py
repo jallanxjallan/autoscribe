@@ -5,7 +5,7 @@ Run only after verifying release hashes and deployment authorization. Never use
 this command to repair an installed release in place or activate real submissions.
 """
 from pathlib import Path
-import hashlib,json,os,shutil,sqlite3,subprocess,sys,tarfile,tempfile
+import hashlib,json,os,shutil,sqlite3,subprocess,sys,tarfile,tempfile,runpy
 
 if not __debug__:
  raise RuntimeError("Installation requires validation enabled")
@@ -47,6 +47,9 @@ def extract(archive,destination,runtime_check=check_runtime_tree):
  pending.chmod(0o755)
  runtime_check(pending)
  os.replace(pending,destination)
+def configured_ledger():
+ return runpy.run_path(str(Path(__file__).parent/'app/asc/settings.py'))['ledger_path']()
+
 def quiescent(ledger):
  with sqlite3.connect(ledger.as_uri()+'?mode=ro',uri=True) as db:
   db.execute('PRAGMA query_only=ON')
@@ -87,7 +90,7 @@ def bind_native(engine, previous, selection=Path('/opt/autoscribe/services/curre
  assert wanted['revisions']['services']==prior['revisions']['services'], 'Native revision differs'
  for name in wanted['native_binaries']:
   assert sha(engine/'bin'/name)==sha(previous/'bin'/name), 'Native binary differs: '+name
- quiescent(Path(wanted['selected_environment']['AUTOSCRIBE_LEDGER_DB']))
+ quiescent(configured_ledger())
  atomic_link(selection,engine)
 
 
@@ -101,7 +104,7 @@ def main(stage,expected_manifest):
  for path,entry in m['runtime_dependencies'].items():assert sha(Path(path))==entry['sha256'],path
  for path,target in preflight['expected_links'].items():assert str(Path(path).readlink())==target,path
  for path,digest in preflight['protected_hashes'].items():assert sha(Path(path))==digest,path
- ledger=Path(m['selected_environment']['AUTOSCRIBE_LEDGER_DB'])
+ ledger=configured_ledger()
  control=Path(m['selected_environment']['AUTOSCRIBE_CONTROL_DB'])
  with sqlite3.connect(control.as_uri()+'?mode=ro',uri=True) as db:
   meta=dict(db.execute('SELECT key,value FROM control_meta'))
