@@ -8,5 +8,5 @@ invocation.context.load_call()
 previous=call.result(invocation.context.input_position)
 if previous.output!=invocation.input:raise ValueError('Previous result differs from supplied input')
 print(invocation.result(data={'original':call.source.original_text,'generated':invocation.input.text,
-    'identity':call.source.identity,'tone':call.source.metadata.get('tone'),
-    'narrative_mode':call.source.metadata.get('narrative_mode')}).model_dump_json())
+    'identity':call.source.identity,'tone':call.baggage['autoscribe_ingest']['metadata'].get('tone'),
+    'narrative_mode':call.baggage['autoscribe_ingest']['metadata'].get('narrative_mode')}).model_dump_json())

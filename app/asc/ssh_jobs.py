@@ -140,8 +140,13 @@ def verify_release(dispatch):
 def source_envelope(dispatch, files):
     files = dict(files)
     meta = json.loads(files.pop('dispatch.json'))
+    manual = json.loads(files.pop('manual.json'))
     original = files.pop('original.md')
     resolved = files.pop('resolved.md')
+    from .manual_client import validate_manifest, retain_manifest
+    validate_manifest(dispatch, manual, original, resolved)
+    if any(manual[a] != meta[b] for a,b in [('plan','plan'),('source','source'),('source_path','source_path'),('vault_id','vault_id'),('original_sha256','raw_markdown_sha256')]):
+        raise ValueError('Manual manifest differs from dispatch metadata')
     digest = lambda data: hashlib.sha256(data).hexdigest()
     expected = 'inp_' + digest(dispatch.encode())[:32]
     fields = {'submission_id', 'record_id', 'source', 'vault_id', 'source_path',
@@ -183,17 +188,24 @@ def source_envelope(dispatch, files):
         if not data or not re.fullmatch(rf'assets/{sha}\.[a-z0-9]+', name):
             raise ValueError(f'Invalid inline dispatch asset: {name}')
         envelope['assets'].append({'path':name, 'sha256':sha, 'content_hex':data.hex()})
+    retain_manifest(dispatch, manual, original, resolved, files)
     return envelope
 
 
-def prepare_dropbox(dispatch, digest, location, path):
+def prepare_dropbox(dispatch, digest, location, path, control):
     from .dropbox_package import retrieve
     from .preprocess import prepare, canonical
     envelope = source_envelope(dispatch, retrieve('dispatch', dispatch, digest, location, 4_194_304))
     record = prepare(envelope, work_dir=path,
-                     require_dispatch=envelope['source']['kind'] == 'obsidian')
+                     require_plan=envelope['source']['kind'] == 'obsidian')
     if record.get('submission_id') != dispatch:
         raise ValueError('Request dispatch identity mismatch')
+    from .control import plan_index
+    manual = json.loads((path/'manual.json').read_text())
+    if record.get('status') != 'ready' or record.get('plan') not in {p['plan_id'] for p in plan_index(control)}:
+        raise ValueError('Source/registered plan is not eligible for submission')
+    if record['plan'] != manual['plan'] or record['source'].get('slug') != manual['slug']:
+        raise ValueError('Prepared source differs from manifest identity')
     line = canonical(record) + b'\n'
     validate_input_record(json.loads(line))
     return line
@@ -216,7 +228,7 @@ def submit(control, ledger, client, dispatch, digest, location):
 
 
 def resume(ledger, client, dispatch, digest, state):
-    if state['state'] in ('completed', 'cleaned'):
+    if state['state'] in ('completed', 'cleaned', 'applied') or (state['state']=='failed' and state['response_sha256'] is not None):
         return state
     verify_release(dispatch)
     if Call.load(state['call_id'],client).terminal:
@@ -228,7 +240,7 @@ def accept_dropbox(control, ledger, client, dispatch, digest, location, path):
     state = read_job(ledger, dispatch, digest)
     if state['state'] != 'absent':
         return resume(ledger, client, dispatch, digest, state)
-    record = json.loads(prepare_dropbox(dispatch, digest, location, path))
+    record = json.loads(prepare_dropbox(dispatch, digest, location, path, control))
     bind_release(dispatch)
     result = enqueue_record(record=record, control_db=control, ledger_db=ledger, client=client)
     with closing(connect(ledger)) as db, db:
@@ -261,7 +273,7 @@ def complete_response(ledger, client, state):
     completed means transport output is ready, not manuscript success. A terminal
     preprocessing response carries status=failed and must not trigger writeback.
     """
-    if state['state'] in ('completed', 'cleaned'):
+    if state['state'] in ('completed', 'cleaned', 'applied') or (state['state']=='failed' and state['response_sha256'] is not None):
         return state
     call_id=state['call_id']
     call=Call.load(call_id,client)
@@ -274,13 +286,17 @@ def complete_response(ledger, client, state):
     record_response(ledger,call_id,key)
     record_export(ledger,call_id,key)
     with closing(connect(ledger)) as db,db:
-        db.execute("UPDATE ssh_jobs SET state='completed',response_sha256=?,completed_at=? WHERE dispatch_id=?",(checksum,time.time(),state['dispatch_id']))
+        terminal_state='completed' if record['status']=='completed' else 'failed'
+        db.execute("UPDATE ssh_jobs SET state=?,response_sha256=?,completed_at=? WHERE dispatch_id=?",(terminal_state,checksum,time.time(),state['dispatch_id']))
+    if record['status']=='failed':
+        # There is no applicable output to await; retain the existing recovery TTL.
+        Call.load(call_id,client).retain_after_cleanup(client)
     return read_job(ledger,state['dispatch_id'],state['package_sha256'])
 
 
 def execute(ledger, client, dispatch, digest):
     prior=read_job(ledger,dispatch,digest)
-    if prior['state'] in ('absent','completed','cleaned'):return prior
+    if prior['state'] in ('absent','completed','cleaned','applied') or (prior['state']=='failed' and prior['response_sha256'] is not None):return prior
     verify_release(dispatch)
     call=Call.load(prior['call_id'],client)
     if call.terminal:return complete_response(ledger,client,prior)
@@ -331,7 +347,7 @@ def cleanup(ledger, dispatch, digest, checksum, client):
 
 def command(args, control, ledger, client):
     if len(args) not in (3, 4):
-        raise ValueError('usage: asc job submit|status|execute|cleanup DISPATCH SHA256 [DROPBOX_LOCATION|RESPONSE_SHA256]')
+        raise ValueError('usage: asc job submit|status|execute DISPATCH SHA256 [DROPBOX_LOCATION|RESPONSE_SHA256]')
     operation, dispatch, digest = args[:3]
     check(dispatch, digest)
     initialize(ledger)
@@ -341,7 +357,4 @@ def command(args, control, ledger, client):
         return read_job(ledger, dispatch, digest)
     if operation == 'execute' and len(args) == 3:
         return execute(ledger, client, dispatch, digest)
-    if operation == 'cleanup' and len(args) == 4:
-        state = cleanup(ledger, dispatch, digest, args[3], client)
-        return state
     raise ValueError('Invalid asc job operation')

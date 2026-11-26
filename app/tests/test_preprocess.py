@@ -31,7 +31,9 @@ class PreprocessTests(unittest.TestCase):
             with self.subTest(kind=kind,source=source):
                 incoming=document(raw,source=source);original=copy.deepcopy(incoming)
                 out=prepare(incoming)
-                self.assertEqual(out['content'].encode(),raw.encode())
+                expected = {'slug': '# **Café** — 東京!\r\nBody\r\n' if source else 'Body'}.get(kind, raw)
+                self.assertEqual(out['content'].encode(),expected.encode())
+                self.assertEqual(out['original_text'],raw)
                 self.assertEqual(incoming,original)
                 self.assertEqual(out['baggage']['custom'],incoming['baggage']['custom'])
                 identity=out['baggage']['autoscribe_ingest']['source']
@@ -111,7 +113,7 @@ class PreprocessTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as directory,patch('asc.assets._module',side_effect=[catalog,SimpleNamespace(DropboxAssetHandler=Handler)]),patch.dict(os.environ,{'AUTOSCRIBE_RCLONE':'/usr/bin/true'}):
             out=prepare(document(raw),work_dir=Path(directory))
         self.assertEqual(out['status'],'ready',out)
-        self.assertEqual(out['content'],raw)
+        self.assertEqual(out['content'],'Body ![image](external-link.png)\n')
         self.assertEqual(out['asset_references'],references)
         self.assertEqual([item['requested_ref'] for item in out['staged_assets']],references)
         self.assertEqual(captured,['dropbox:Art/a.png','dropbox:Art/b.png'])

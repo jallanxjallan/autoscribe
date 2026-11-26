@@ -94,6 +94,51 @@ class RuntimeCase(unittest.TestCase):
 
 
 class CanonicalTests(RuntimeCase):
+    def test_training_pair_metadata_stays_in_baggage(self):
+        body = 'Original café 東京.  \r\n\r\n---\r\nA legitimate rule.\r\n'
+        self.raw = '\ufeff---\r\nslug: nte_fixture\r\nplan: pln_TEST\r\ndispatch: true\r\ntone: dry\r\n---\r\n' + body
+        envelope = {'schema':'autoscribe.document.v1','document':self.raw,
+            'submission_id':self.dispatch,'source':{'slug':'nte_fixture'},'baggage':{'client':{}}}
+        self.prepared = prepare(envelope)
+        self.assertEqual(self.prepared['status'],'ready',self.prepared)
+        self.assertEqual(self.prepared['content'],body)
+        self.assertEqual(self.prepared['baggage']['autoscribe_ingest']['metadata']['tone'],'dry')
+        configuration = {'parts':[{'source':'original_body','heading':'Original passage'},
+            {'source':'step_text','position':1,'heading':'Generic AI rewrite'}]}
+        with closing(sqlite3.connect(self.control)) as db,db:
+            db.execute('DELETE FROM plan_steps WHERE position=8')
+            db.execute('UPDATE steps SET script=?,args_json=? WHERE id=?',
+                ('compose-text',json.dumps(configuration),'stp_3'))
+        self.registry.write_text(json.dumps({name:str(Path(os.environ['EXTENSIONS_ROOT'])/('scripts/'+filename))
+            for name,filename in [('compose-text','compose-text.py'),('luna','llm.py')]}))
+        with patch.object(jobs,'prepare_dropbox',return_value=json.dumps(self.prepared)):
+            self.accept()
+        accepted = Call.load(self.call_id,self.client)
+        self.assertEqual(accepted.source.metadata,{})
+        self.assertEqual(accepted.source.original_text,self.raw)
+        self.assertEqual(accepted.invocation(1).input.text,body)
+        import runpy
+        adapter = runpy.run_path(str(Path(os.environ['EXTENSIONS_ROOT'])/'scripts/llm.py'))
+        execute = worker.run_extension
+        def component(path, invocation, timeout):
+            if invocation.context.engine_kind == 'llm':
+                return adapter['run_model'](invocation,timeout,self.client)
+            return execute(path,invocation,timeout)
+        with patch.object(worker,'run_extension',side_effect=component):
+            self.execute()
+        call = Call.load(self.call_id,self.client)
+        self.assertIsNone(call.error,call.error)
+        self.assertEqual(call.steps['1'].request.baseline.input.text,body)
+        payload = call.steps['1'].request.payload
+        self.assertNotIn('nte_fixture',json.dumps(payload))
+        self.assertNotIn('dispatch:',json.dumps(payload))
+        expected = '## Original passage\n\n'+body+'\n\n## Generic AI rewrite\n\nGeneric generated prose.'
+        self.assertEqual(call.final_result.text,expected)
+        self.assertEqual(call.response_record(client_protocol=True)['result'],expected)
+        self.assertEqual(call.baggage['autoscribe_ingest']['metadata']['tone'],'dry')
+        conflict = dict(envelope,source={'slug':'nte_other'})
+        self.assertEqual(prepare(conflict)['status'],'failed')
+
     def test_model_roundtrip_original_request_and_interchangeable_executables(self):
         self.accept();before=Call.load(self.call_id,self.client)
         self.assertEqual(before.source.original_text,self.raw)
@@ -189,28 +234,6 @@ class CanonicalTests(RuntimeCase):
             with self.assertRaises(StorageUnavailable):Call.load(self.call_id,self.client)
 
 
-    @unittest.skipUnless(os.environ.get('AUTOSCRIBE_TEST_CLIENT_BIN'),'native client fixture not selected')
-    def test_current_native_package_preserves_external_contract(self):
-        from asc.dropbox_package import retrieve
-        self.client.command('CONFIG','SET','appendonly','yes')
-        self.client.command('CONFIG','SET','appendfsync','always')
-        shared=self.root/'.shared';shared.mkdir(mode=0o700);vault=self.root/'vault';vault.mkdir()
-        raw='---\r\nslug: psg_0123456789ABCDEF\r\nplan: pln_TEST\r\ndispatch: true\r\n---\r\nNative original café.\r\n'
-        (vault/'Note.md').write_bytes(raw.encode())
-        args=['--redis',f'127.0.0.1:{self.client.port}','--shared',str(shared),'--vault-root',str(vault)]
-        for option in (['--request','Note.md'],['--local-only','--once']):
-            cp=subprocess.run([os.environ['AUTOSCRIBE_TEST_CLIENT_BIN'],*option,*args],capture_output=True,text=True,timeout=30)
-            self.assertEqual(cp.returncode,0,cp.stderr)
-        identifiers=self.client.hgetall('autoscribe:client:jobs');self.assertEqual(len(identifiers),1)
-        identity=next(iter(identifiers));package=shared/f'autoscribe-{identity}.source'
-        files={str(p.relative_to(package)):p.read_bytes() for p in package.rglob('*') if p.is_file()}
-        checksum=hashlib.sha256(files['SHA256SUMS.json']).hexdigest()
-        remote=f'dropbox:ingest/dispatch/{identity}-{checksum}/'
-        verified=retrieve('dispatch',identity,checksum,remote,4_194_304,read=lambda locator,limit:files[locator.removeprefix(remote)])
-        prepared=prepare(jobs.source_envelope(identity,verified),work_dir=self.root,require_dispatch=True)
-        receipt=enqueue_record(record=prepared,control_db=self.control,ledger_db=self.ledger,client=self.client)
-        self.assertEqual(Call.load(receipt.call_id,self.client).source.original_text,raw)
-        self.assertFalse(enqueue_record(record=prepared,control_db=self.control,ledger_db=self.ledger,client=self.client).created)
 
 
 

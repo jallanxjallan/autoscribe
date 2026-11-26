@@ -72,6 +72,15 @@ class InlineAsset(Model):
         return self
 
 
+def markdown_body(text: str) -> str:
+    """Remove only the leading metadata span; preserve every body byte."""
+    match=re.match(r'\A(?:\ufeff)?---\r?\n.*?^---(?:\r?\n|$)',text,re.M|re.S)
+    if match:return text[match.end():]
+    if re.match(r'\A(?:\ufeff)?---\r?\n',text):
+        raise ValueError('Unclosed frontmatter')
+    return text
+
+
 class Source(Model):
     original_text: str | None
     original_sha256: str | None
@@ -87,8 +96,7 @@ class Source(Model):
     @property
     def original_body(self) -> str | None:
         if self.original_text is None:return None
-        match=re.match(r'\A(?:\ufeff)?---\r?\n.*?^---(?:\r?\n|$)',self.original_text,re.M|re.S)
-        return self.original_text[match.end():] if match else self.original_text
+        return markdown_body(self.original_text)
 
     @model_validator(mode='after')
     def integrity(self) -> Self:

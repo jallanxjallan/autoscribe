@@ -10,6 +10,7 @@ import re
 import subprocess
 
 from .ids import validate_submission_id
+from .models.call import markdown_body
 
 SCHEMA = 'autoscribe.prepared.v2'
 MAX_DOCUMENT = 1048576
@@ -46,7 +47,7 @@ def _identity(envelope: dict) -> str:
     return validate_submission_id(envelope.get('submission_id'))
 
 
-def prepare(envelope: object, *, work_dir: Path | None = None, require_dispatch: bool = False) -> dict:
+def prepare(envelope: object, *, work_dir: Path | None = None, require_plan: bool = False) -> dict:
     """Return one complete prepared success/failure. Never reconstruct Markdown."""
     original = copy.deepcopy(envelope)
     result = {'schema': SCHEMA, 'status': 'failed', 'content': '', 'content_sha256': digest(b''),
@@ -125,7 +126,7 @@ def prepare(envelope: object, *, work_dir: Path | None = None, require_dispatch:
                 raise ValueError('Invalid processing assets')
         else:
             processing, assets = raw, []
-        if require_dispatch:
+        if require_plan:
             data = processing.encode('utf-8')
         external = envelope.get('metadata', {})
         if not isinstance(external, dict): raise ValueError('External metadata must be an object')
@@ -186,9 +187,7 @@ def prepare(envelope: object, *, work_dir: Path | None = None, require_dispatch:
                 raise ValueError('Missing prepared plan')
         except (ValueError, TypeError, AttributeError) as exc:
             return failure('serialization', str(exc))
-        if require_dispatch and not parsed.get('failure'):
-            if parsed['metadata'].get('dispatch') is not True:
-                return failure('unauthorized_dispatch', 'Source requires dispatch: true')
+        if require_plan and not parsed.get('failure'):
             if parsed['metadata'].get('plan') != parsed.get('plan') or not parsed['source'].get('slug'):
                 return failure('invalid_dispatch_identity', 'Authored execution plan and slug are required')
         result.update(call_id=parsed['call_id'], metadata=parsed.get('metadata', {}),
@@ -197,15 +196,16 @@ def prepare(envelope: object, *, work_dir: Path | None = None, require_dispatch:
         identification=copy.deepcopy(source)
         identification.update({k:v for k,v in parsed['source'].items() if k!='path'})
         result['baggage']['autoscribe_ingest']={'source':identification, 'source_format':fmt,
-            'submission_id':submission}
+            'submission_id':submission, 'metadata':copy.deepcopy(parsed.get('metadata', {}))}
         if parsed['source'].get('slug'):
             source['slug']=parsed['source']['slug']
         result['plan']=parsed.get('plan')
         if parsed.get('failure'):
             result.update(failure=parsed['failure'])
         else:
-            result.update(status='ready', content=processing,
-                          content_sha256=digest(processing.encode('utf-8')), assets=copy.deepcopy(assets))
+            body = markdown_body(processing)
+            result.update(status='ready', content=body,
+                          content_sha256=digest(body.encode('utf-8')), assets=copy.deepcopy(assets))
         # Asset storage is transport work, outside enqueue/document semantics.
         if result['status']=='ready' and result['asset_references']:
             from .assets import stage_assets

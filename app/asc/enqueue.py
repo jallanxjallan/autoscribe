@@ -165,7 +165,7 @@ def enqueue_record(*, record: dict, control_db: Path, ledger_db: Path, client: R
         source=Source(original_text=original,original_sha256=digest(original) if original is not None else None,
             processing_text=record['content'],processing_sha256=record['content_sha256'],
             identity=record['source'].get('slug'),format=record['source_format'],coordination=record['source'],
-            metadata=record.get('metadata',{}),assets=record.get('assets',[]),
+            assets=record.get('assets',[]),
             resources={k:record[k] for k in ('references','directives','asset_references','staged_assets') if k in record}),
         plan=plan,baggage=record['baggage'],error=error)
     created=True
